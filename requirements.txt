@@ -6,7 +6,7 @@
 # em web/routes.py (agente persistente) -- necessaria apenas se voce for
 # rodar "python main.py serve". Pra usar so a CLI (ingest/perguntar/status)
 # nada precisa ser instalado.
-Flask==3.0.3
+Flask==3.1.3
 
 # Pra rodar tests/ (Fase 4 do plano do Agente), instale tambem
 # requirements-dev.txt (so pytest) -- nao e' preciso pra usar a Eyle
