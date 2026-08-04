@@ -49,12 +49,12 @@ def _llm_config(**updates):
     return {"llm": llm}
 
 
-def test_parser_rejeita_duas_decisoes_validas():
+def test_parser_usa_ultima_de_duas_decisoes_validas():
     bruto = (
         '{"tool":"list_tree","arguments":{}} '
         '{"final":"nao execute a primeira"}'
     )
-    assert agent_mod._parse_decisao_agente(bruto) is None
+    assert agent_mod._parse_decisao_agente(bruto) == {"final": "nao execute a primeira"}
 
 
 def test_cache_rejeita_envelopes_de_erro_estruturado(tmp_path):
@@ -116,19 +116,23 @@ def test_resposta_acima_do_orcamento_nao_e_publicada_no_cache(monkeypatch):
     assert definicoes == []
 
 
-def test_fingerprint_detecta_ciclo_abab():
+def test_fingerprint_exige_tres_repeticoes_do_ciclo_ab():
     estado = AgentState(config={"agent": {}})
     sucesso_a = {
         "status": "success", "ok": True, "executed": True,
         "changed": False, "error_code": None, "detail": {"valor": "A"},
     }
     sucesso_b = dict(sucesso_a, detail={"valor": "B"})
-    assert estado.registrar_fingerprint_ciclo("tool_a", sucesso_a)["detectado"] is False
-    assert estado.registrar_fingerprint_ciclo("tool_b", sucesso_b)["detectado"] is False
-    assert estado.registrar_fingerprint_ciclo("tool_a", sucesso_a)["detectado"] is False
+    for tool, resultado in (
+        ("tool_a", sucesso_a), ("tool_b", sucesso_b),
+        ("tool_a", sucesso_a), ("tool_b", sucesso_b),
+        ("tool_a", sucesso_a),
+    ):
+        assert estado.registrar_fingerprint_ciclo(tool, resultado)["detectado"] is False
     ciclo = estado.registrar_fingerprint_ciclo("tool_b", sucesso_b)
     assert ciclo["detectado"] is True
     assert ciclo["periodo"] == 2
+    assert ciclo["repeticoes"] == 3
 
 
 class _Cursor:

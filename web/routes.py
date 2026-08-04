@@ -268,6 +268,15 @@ def _job_publico(registro):
         for chave in _CHAVES_PUBLICAS_JOB
         if chave in registro
     }
+    payload = registro.get("payload")
+    if isinstance(payload, dict) and registro.get("tipo") == "pergunta":
+        mensagem_id = payload.get("mensagem_id")
+        texto = payload.get("texto")
+        if isinstance(mensagem_id, int) and mensagem_id > 0:
+            publico["mensagem_id"] = mensagem_id
+        if isinstance(texto, str) and texto.strip():
+            publico["texto_resumo"] = texto.strip()[:240]
+
     # O resultado completo pode conter detalhes internos. Para falhas, publique
     # somente a mensagem operacional e o codigo necessario para o navegador
     # deixar de falhar em silencio.

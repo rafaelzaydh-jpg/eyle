@@ -315,6 +315,22 @@ def _consumer_loop(worker_id, cfg):
             time.sleep(cfg["queue_error_backoff"])
 
 
+def _resolver_parallelismo(config):
+    """Limita consumidores ao numero de chamadas LLM realmente simultaneas.
+
+    Dois consumidores com uma unica vaga de LLM deixam um job antigo vivo
+    enquanto outro termina. Alem de disputar o mesmo prazo global, isso pode
+    publicar a falha antiga depois de uma resposta nova. O limite efetivo
+    preserva a ordem observavel da conversa no backend local serial.
+    """
+    config = config if isinstance(config, dict) else {}
+    cfg_worker = config.get("worker") or {}
+    cfg_llm = config.get("llm") or {}
+    solicitado = max(1, int(cfg_worker.get("max_parallel_jobs", 1)))
+    capacidade_llm = max(1, int(cfg_llm.get("max_concurrent_requests", 1)))
+    return solicitado, min(solicitado, capacidade_llm)
+
+
 def loop():
     config = eyle_engine.carregar_config()
     cfg_worker = config.get("worker", {})
@@ -329,13 +345,14 @@ def loop():
         "isolate_jobs": bool(cfg_worker.get("isolate_jobs", True)),
         "mp_context": str(cfg_worker.get("multiprocessing_context", "spawn")),
     }
-    parallel = max(1, int(cfg_worker.get("max_parallel_jobs", 2)))
+    parallel_configurado, parallel = _resolver_parallelismo(config)
     stale_after = max(1, int(cfg_worker.get("stale_worker_seconds", 30)))
     recovered = queue.recuperar_interrompidos(stale_after_seconds=stale_after)
     agent_recovered = queue.recuperar_tarefas_agente_interrompidas()
     root_id = f"worker-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     print(
-        f"[worker] iniciado: consumidores={parallel}, isolamento={cfg['isolate_jobs']}, "
+        f"[worker] iniciado: consumidores={parallel} "
+        f"(configurados={parallel_configurado}), isolamento={cfg['isolate_jobs']}, "
         f"deadline={cfg['job_deadline_seconds']}s, recuperados={recovered}, "
         f"agent_tasks={agent_recovered}"
     )

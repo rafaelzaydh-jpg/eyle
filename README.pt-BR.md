@@ -11,17 +11,17 @@
   <a href="docs/architecture.md">Arquitetura</a> ·
   <a href="docs/configuration.md">Configuração</a> ·
   <a href="docs/benchmark.md">Benchmark</a> ·
-  <a href="docs/releases/2.7.3-revision-55.4.md">Revisão 55.4</a> ·
+  <a href="docs/releases/2.7.3-revision-55.5.md">Revisão 55.5</a> ·
   <a href="SECURITY.md">Segurança</a>
 </p>
 
 <p align="center">
   <img alt="Python 3.8+" src="https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white">
   <img alt="Versão 2.7.3" src="https://img.shields.io/badge/versão-2.7.3-2563EB">
-  <img alt="Revisão 55.4" src="https://img.shields.io/badge/revisão-55.4-7C3AED">
+  <img alt="Revisão 55.5" src="https://img.shields.io/badge/revisão-55.5-7C3AED">
   <img alt="Execução local" src="https://img.shields.io/badge/execução-local-16A34A">
   <img alt="Retrieval BM25" src="https://img.shields.io/badge/retrieval-BM25-F59E0B">
-  <img alt="Testes" src="https://img.shields.io/badge/testes%20não--web-237%20aprovados-16A34A">
+  <img alt="Testes" src="https://img.shields.io/badge/testes%20não--web-243%20aprovados-16A34A">
 </p>
 
 ## Visão geral
@@ -30,13 +30,13 @@ A Eyle indexa um repositório local, recupera apenas as evidências relevantes e
 
 | | |
 |---|---|
-| **Versão** | 2.7.3 — revisão 55.1 |
+| **Versão** | 2.7.3 — revisão 55.5 |
 | **Rollout padrão** | `read_only` até o benchmark real ser validado localmente |
 | **Modelo-alvo recomendado** | LFM2.5-8B-A1B ou quantização compatível |
 | **Privacidade** | Código, índices, traces, fila e histórico permanecem na máquina local |
 | **Estado mutável** | `workspace/`, `memory/` e `context/` são ignorados pelo Git |
 
-**Identidade da release:** **Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.4-agent-budget-hotfix
+**Identidade da release:** **Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.5-agent-reliability
 
 ### Recursos principais
 
@@ -50,7 +50,15 @@ A Eyle indexa um repositório local, recupera apenas as evidências relevantes e
 - Detecção de ciclos curtos e reserva de fila com limite.
 - CLI, painel Flask autenticado opcional, fila SQLite, checkpoints e retenção.
 
-## Hotfix da revisão 55.4
+## Revisão 55.5
+
+A revisão 55.5 corrige três falhas que pareciam separadas, mas estavam no mesmo caminho de confiabilidade. O paralelismo do Worker agora é limitado pela concorrência real da LLM; assim uma análise antiga não continua rodando ao lado de uma conversa nova para publicar sua falha minutos depois. No navegador, o aviso de erro fica ligado à mensagem que criou o job, em vez de surgir solto no fim do chat.
+
+A proteção contra ciclos exige três repetições completas, e não apenas dois estados parecidos. As decisões estruturadas usam ramos exclusivos no JSON Schema, chamadas de tool precisam incluir `arguments` e o parser de fallback escolhe a última autocorreção válida do modelo. A correção de formato tem no máximo uma nova tentativa. O mesmo fluxo do Agente continua valendo para projetos pequenos e grandes.
+
+Detalhes: [docs/releases/2.7.3-revision-55.5.md](docs/releases/2.7.3-revision-55.5.md).
+
+## Revisão 55.4
 
 A revisão 55.4 corrige a análise de projeto que esgotava o prazo global enquanto repetia gerações lentas do agente local. A preparação obrigatória de uma análise geral agora começa deterministicamente com `list_tree` em qualquer projeto, as decisões estruturadas usam um teto próprio de 512 tokens e o pacote não repete cegamente três vezes uma geração que já atingiu o timeout de leitura.
 
@@ -58,7 +66,7 @@ O prazo compartilhado ficou maior, mas cada chamada individual continua limitada
 
 Detalhes: [docs/releases/2.7.3-revision-55.4.md](docs/releases/2.7.3-revision-55.4.md).
 
-## Hotfix da revisão 55.3
+## Revisão 55.3
 
 A revisão 55.3 corrige o cancelamento da LLM após exatamente 5 segundos. O `urllib` estava usando o timeout curto de conexão também enquanto aguardava os cabeçalhos da resposta não-streaming do llama-server. Agora a geração pode usar os 120 segundos de leitura configurados.
 
@@ -66,7 +74,7 @@ O backend padrão também passou de `localhost` para `127.0.0.1`, igual ao ender
 
 Detalhes: [docs/releases/2.7.3-revision-55.3.md](docs/releases/2.7.3-revision-55.3.md).
 
-## Hotfix da revisão 55.2
+## Revisão 55.2
 
 A revisão 55.2 corrige o caminho silencioso “job concluído, sem mensagem da assistente”. Falhas estruturadas de transporte/backend da LLM agora terminam como jobs com falha, preservam um diagnóstico seguro e aparecem no navegador sem contaminar o histórico da conversa. O polling de `/conversa` também continua mesmo se o polling de `/jobs` falhar temporariamente.
 
@@ -74,7 +82,7 @@ Na inicialização, a Eyle agora testa o endpoint local da LLM e avisa diretamen
 
 Detalhes: [docs/releases/2.7.3-revision-55.2.md](docs/releases/2.7.3-revision-55.2.md).
 
-## Hotfix da revisão 55.1
+## Revisão 55.1
 
 A revisão 55.1 corrige um encerramento silencioso no Windows: `os.kill(pid, 0)` era usado como teste de existência em `engine/queue.py` e `engine/process_limiter.py`, mas podia terminar o processo consultado. O probe agora é centralizado, usa `OpenProcess` + `WaitForSingleObject` no Windows e nunca envia sinal.
 

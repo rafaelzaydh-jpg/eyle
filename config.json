@@ -178,7 +178,7 @@
     ],
     "max_steps": 8,
     "max_no_progress_decisions": 3,
-    "max_tentativas_parse": 3,
+    "max_tentativas_parse": 2,
     "usar_json_mode_se_suportado": true,
     "max_chars_por_observacao": 500,
     "require_confirmation_for_write": true,
@@ -209,7 +209,9 @@
       "min_claim_token_overlap": 0.12,
       "min_claim_tokens": 5,
       "_comentario": "Bloqueia afirmacoes com identificadores, caminhos, numeros ou literais objetivos ausentes das evidencias. Baixa sobreposicao lexical vira aviso para nao punir parafrases validas."
-    }
+    },
+    "cycle_min_repetitions": 3,
+    "_comentario_55_5": "Revisao 55.5: tres repeticoes completas sao exigidas antes de pausar por ciclo; o parser faz no maximo uma tentativa de correcao apos formato invalido."
   },
   "version": "2.7.3",
   "updated": "2026-08-04",
@@ -217,8 +219,8 @@
     "heartbeat_interval_seconds": 5,
     "queue_error_backoff_seconds": 1,
     "max_invalid_jobs_per_reservation": 100,
-    "_comentario": "Dois consumidores evitam head-of-line blocking. Cada job roda em processo filho terminavel; o supervisor mata o filho ao exceder 915s. A LLM continua serializada por max_concurrent_requests=1 para proteger GPU local.",
-    "max_parallel_jobs": 2,
+    "_comentario": "O supervisor limita consumidores pela capacidade real de llm.max_concurrent_requests. Com backend local serial, um job termina antes do proximo para preservar ordem, prazo e diagnostico.",
+    "max_parallel_jobs": 1,
     "isolate_jobs": true,
     "job_deadline_seconds": 915,
     "stale_worker_seconds": 30,
@@ -227,7 +229,7 @@
   },
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "55.4-agent-budget-hotfix",
+  "revision": "55.5-agent-reliability",
   "telemetry": {
     "enabled": true,
     "window_seconds": 3600,

@@ -142,7 +142,7 @@ def test_job_expoe_estado_real_sem_payload_nem_resultado(monkeypatch):
     cliente = _cliente(monkeypatch)
     monkeypatch.setattr(routes.queue, "obter", lambda job_id: {
         "id": job_id, "tipo": "pergunta", "status": "processing",
-        "tentativas": 1, "payload": {"texto": "segredo"},
+        "tentativas": 1, "payload": {"texto": "segredo", "mensagem_id": 77},
         "resultado": {"resposta": "ainda privada"}, "erro": None,
         "criado_em": "2026-08-01T00:00:00Z",
     })
@@ -155,6 +155,8 @@ def test_job_expoe_estado_real_sem_payload_nem_resultado(monkeypatch):
     assert dados["status"] == "processing"
     assert "payload" not in dados
     assert "resultado" not in dados
+    assert dados["mensagem_id"] == 77
+    assert dados["texto_resumo"] == "segredo"
 
 
 def test_health_reflete_worker_e_head_of_line(monkeypatch):

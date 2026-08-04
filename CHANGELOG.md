@@ -8,7 +8,23 @@ No unreleased changes yet.
 
 ## 2.7.3 — 2026-08-04
 
-### Revision 55.4 — agent deadline and retry-budget hotfix
+### Revision 55.5 — agent reliability and ordered delivery
+
+- Capped effective Worker consumers by `llm.max_concurrent_requests`, preventing an older local-LLM job from outliving a newer chat job and surfacing its failure later.
+- Associated browser failure notices with the originating user message through safe job metadata.
+- Required three complete observable-state repetitions before cycle protection pauses an agent task.
+- Made the decision schema exclusive with `oneOf`; tool decisions must include `arguments`.
+- Selected the last structurally valid JSON decision when a non-schema backend emits a draft followed by a correction.
+- Reduced format recovery to one retry in the shipped configuration.
+
+### Validation
+
+- `python -m compileall -q .` passed.
+- 243/243 executable non-web tests passed.
+- One Flask-dependent module remained skipped because Flask was unavailable in the packaging environment.
+- `node --check web/static/app.js` passed.
+
+### Revision 55.4 — agent deadline and retry budget
 
 - General project analysis now executes the mandatory initial `list_tree` transition directly from `GoalState`, without spending an LLM call to rediscover a system-enforced action. The same rule applies to projects of every size.
 - Added `llm.agent_max_tokens` so structured agent decisions no longer inherit the larger general-response token ceiling.
@@ -22,7 +38,7 @@ No unreleased changes yet.
 - 237/237 executable non-web tests passed.
 - One Flask-dependent web module remained skipped because Flask was unavailable in the packaging environment.
 
-### Revision 55.3 — local LLM response-timeout hotfix
+### Revision 55.3 — local LLM response timeout
 
 - Fixed `urllib` using the 5-second connection timeout while waiting for non-streaming llama-server response headers.
 - The effective HTTP operation now waits for `read_timeout_seconds` during model generation, preventing the client from cancelling valid slow responses.
@@ -35,7 +51,7 @@ No unreleased changes yet.
 - 231/231 executable non-web tests passed.
 - One Flask-dependent web module remained skipped because Flask was unavailable in the packaging environment.
 
-### Revision 55.2 — web response delivery hotfix
+### Revision 55.2 — web response delivery
 
 - Fixed the Worker treating structured LLM failures as successful completed jobs.
 - Persisted safe structured failure metadata while keeping transport errors out of assistant conversation history.
@@ -53,7 +69,7 @@ No unreleased changes yet.
 - One Flask-dependent web module remained skipped because Flask was unavailable in the packaging environment.
 - `node --check web/static/app.js` passed.
 
-### Revision 55.1 — Windows PID safety hotfix
+### Revision 55.1 — Windows PID safety
 
 - Replaced direct `os.kill(pid, 0)` liveness checks in the queue and process limiter with a shared cross-platform probe.
 - Added a self-PID fast path so `/status` and limiter cleanup cannot signal the Eyle process itself.

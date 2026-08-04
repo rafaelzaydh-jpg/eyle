@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regressoes do hotfix de PID seguro no Windows."""
+"""Regressoes da correcao de PID seguro no Windows."""
 import os
 
 from engine import process_limiter, process_utils, queue

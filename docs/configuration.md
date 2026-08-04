@@ -32,7 +32,7 @@ Use `openai_compatible: true` for LM Studio, llama.cpp server, and compatible `/
 
 ## Timeouts, retries, and budgets
 
-Revision 51–55.4 separates connection, read, model-discovery, agent, and executor timeouts. Transient failures can retry with capped exponential backoff, jitter, cooldown, and `Retry-After` support. Permanent client errors do not retry.
+Revision 51–55.5 separates connection, read, model-discovery, agent, and executor timeouts. Transient failures can retry with capped exponential backoff, jitter, cooldown, and `Retry-After` support. Permanent client errors do not retry.
 
 The task-level deadline and budgets remain authoritative even when an individual operation allows more time. Structured agent decisions have a separate output ceiling, and the shipped configuration does not restart a complete generation after it already consumed the read timeout:
 
@@ -99,10 +99,12 @@ Enable it only after configuring an allowed command and an isolation backend tha
 
 ## Worker and queue
 
+For the shipped local backend, Worker and LLM concurrency are both `1`. Raising Worker concurrency above LLM concurrency is accepted but capped at runtime. Agent cycle detection uses `agent.cycle_min_repetitions=3`, and structured-format recovery uses `agent.max_tentativas_parse=2`.
+
 ```json
 {
   "worker": {
-    "max_parallel_jobs": 2,
+    "max_parallel_jobs": 1,
     "isolate_jobs": true,
     "job_deadline_seconds": 315,
     "heartbeat_interval_seconds": 5,
@@ -111,7 +113,7 @@ Enable it only after configuring an allowed command and an isolation backend tha
 }
 ```
 
-Jobs run in terminable child processes by default. Queue reservation is bounded, stale workers are recoverable, and status reports head-of-line blocking.
+Jobs run in terminable child processes by default. Effective consumers are capped by `llm.max_concurrent_requests`, so a serial local backend preserves job order. Queue reservation is bounded, stale workers are recoverable, and status reports head-of-line blocking.
 
 ## Cache and telemetry
 

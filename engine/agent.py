@@ -400,17 +400,16 @@ def _resultado_pos_testes(estado, resultado_tool, projeto):
 
 
 def _parse_decisao_agente(texto):
-    """Extrai uma unica decisao JSON reconhecivel da resposta da LLM.
+    """Extrai a decisao JSON final reconhecivel da resposta da LLM.
 
-    O regex guloso antigo pegava do primeiro ``{`` ao ultimo ``}``; bastava o
-    modelo escrever dois objetos, um exemplo ou uma chave entre chaves no
-    raciocinio para ``json.loads`` falhar. O decoder incremental testa cada
-    inicio de objeto e aceita somente o contrato interno do Agente.
+    O decoder incremental ignora objetos auxiliares invalidos e percorre toda
+    a resposta. Quando um backend sem gramatica devolve mais de uma decisao
+    valida, a ultima e escolhida: modelos locais costumam emitir um rascunho e
+    depois se autocorrigir no fim. O schema nativo usa ``oneOf`` e impede esse
+    caso quando o backend respeita JSON Schema.
 
-    Importante: duas decisoes estruturalmente validas tornam a resposta
-    ambigua. A versao anterior devolvia a primeira e podia executar um exemplo
-    em vez da decisao final do modelo. Agora, exatamente uma decisao valida e
-    exigida; objetos auxiliares invalidos continuam sendo ignorados.
+    A validacao estrutural continua exigindo exatamente um ramo por objeto;
+    portanto um unico envelope contendo ``tool`` e ``final`` segue rejeitado.
     """
     bruto = str(texto or "")
     decoder = json.JSONDecoder()
@@ -422,13 +421,12 @@ def _parse_decisao_agente(texto):
             continue
         if _decisao_estruturalmente_valida(dados):
             candidatas.append(dados)
-            if len(candidatas) > 1:
-                telemetry.record(
-                    "internal", "agent_json_parse", "ambiguous",
-                    metadata={"valid_objects": len(candidatas)},
-                )
-                return None
-    return candidatas[0] if candidatas else None
+    if len(candidatas) > 1:
+        telemetry.record(
+            "internal", "agent_json_parse", "multiple_valid_last_selected",
+            metadata={"valid_objects": len(candidatas)},
+        )
+    return candidatas[-1] if candidatas else None
 
 
 def prompt_reforco_formato(prompt, resposta_llm):
@@ -1855,7 +1853,11 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
         })
         _checkpoint_acao(None, "action_completed")
 
-        ciclo = estado.registrar_fingerprint_ciclo(tool, resultado_tool)
+        ciclo = estado.registrar_fingerprint_ciclo(
+            tool,
+            resultado_tool,
+            min_repeticoes=cfg_agente.get("cycle_min_repetitions", 3),
+        )
         if resultado_tool.get("ok") is True and ciclo.get("detectado"):
             _registrar_trace_estado(estado, {
                 "step": step,

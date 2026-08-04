@@ -2,7 +2,7 @@
   "release": "2.7.3",
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "55.4-agent-budget-hotfix",
+  "revision": "55.5-agent-reliability",
   "updated": "2026-08-04",
   "installation": "overlay_safe",
   "preserve_on_update": [
@@ -13,8 +13,8 @@
   "included_runtime_state": false,
   "validation": {
     "compileall_passed": true,
-    "tests_passed": 237,
-    "tests_total_executable": 237,
+    "tests_passed": 243,
+    "tests_total_executable": 243,
     "tests_skipped": 1,
     "web_tests_executed": false,
     "javascript_syntax_passed": true,
@@ -22,13 +22,10 @@
     "notes": [
       "Um modulo web foi ignorado porque Flask nao estava disponivel no ambiente de empacotamento.",
       "A sintaxe de web/static/app.js foi validada com Node.js.",
-      "Falhas estruturadas da LLM agora permanecem failed na fila e preservam diagnostico seguro.",
-      "O startup testa /v1/models ou /api/tags sem gerar tokens.",
-      "O benchmark real requer o endpoint LLM local, o hardware e o repositorio finais.",
-      "O backend padrao usa 127.0.0.1 para corresponder ao bind IPv4 do llama-server no Windows.",
-      "A suite executavel do pacote passou integralmente (237/237).",
-      "Analise geral inicia list_tree pelo GoalState sem gastar uma chamada LLM redundante.",
-      "Decisoes do Agente usam teto proprio de 512 tokens e timeout de leitura nao repete geracao por padrao."
+      "O Worker limita consumidores pela concorrencia real da LLM para preservar ordem e prazo.",
+      "Falhas do navegador ficam associadas a mensagem de origem por metadados seguros do job.",
+      "Ciclos exigem tres repeticoes completas e decisoes estruturadas usam ramos JSON exclusivos.",
+      "A suite executavel do pacote passou integralmente (243/243)."
     ]
   },
   "hardening_52": [
@@ -43,9 +40,9 @@
     "testes de 429 timeout connection reset watchdog cache e recovery"
   ],
   "hardening_53": [
-    "rejeicao de respostas ambiguas com mais de uma decisao JSON valida",
+    "schema exclusivo e parser de fallback escolhe a ultima autocorrecao JSON valida",
     "invalidacao de envelopes de erro estruturados no cache e publicacao somente apos validar o orcamento",
-    "detector de ciclos curtos por fingerprint de estado e resultado",
+    "detector de ciclos por fingerprint de estado e resultado com repeticao minima configuravel",
     "teto de reserva da fila mesmo sob conflito permanente",
     "cache de retrieval por ciclo e early exit para lacunas ou buscas repetidas",
     "backoff exponencial entre retries reprovados pelo Verify",
@@ -116,5 +113,15 @@
     "deadline compartilhado ampliado com timeout individual preservado",
     "fluxo integrado list_tree read_file final coberto por regressao",
     "237 testes executaveis aprovados"
+  ],
+  "hardening_55_5": [
+    "paralelismo efetivo do Worker limitado por llm.max_concurrent_requests",
+    "ordem observavel preservada para backend local serial",
+    "falha web associada a mensagem de origem sem expor payload completo",
+    "tres repeticoes completas antes de pausar por ciclo",
+    "JSON Schema com oneOf e arguments obrigatorio em tool calls",
+    "ultima decisao JSON valida usada como autocorrecao final",
+    "uma unica tentativa adicional para reparar formato invalido",
+    "243 testes executaveis aprovados"
   ]
 }

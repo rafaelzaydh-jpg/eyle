@@ -53,6 +53,7 @@ class AgentConfig(TypedDict, total=False):
     enabled_modes: List[str]
     max_steps: int
     max_no_progress_decisions: int
+    cycle_min_repetitions: int
     max_tentativas_parse: int
     require_confirmation_for_write: bool
     require_confirmation_for_exec: bool
@@ -209,7 +210,7 @@ def validar_config(config) -> ConfigEyle:
         "dicas.profundidade_dependencia", "dicas.max_chars_por_arquivo",
         "codar.testes.timeout_segundos", "confirmacoes.expiracao_segundos",
         "agent.max_steps", "agent.max_tentativas_parse",
-        "agent.max_no_progress_decisions",
+        "agent.max_no_progress_decisions", "agent.cycle_min_repetitions",
         "agent.max_chars_por_observacao", "agent.max_erros_consecutivos",
         "agent.max_fatos_importantes", "agent.max_tree_entries",
         "agent.max_tree_depth", "agent.max_read_range_lines",
@@ -234,6 +235,7 @@ def validar_config(config) -> ConfigEyle:
         "retrieval.query_cache_max_entradas", "ingest.max_workers",
         "ingest.parallel_threshold",
         "agent.max_tree_entries", "agent.max_tree_depth",
+        "agent.cycle_min_repetitions",
         "agent.max_read_range_lines", "context_engine.chars_per_token_fallback",
         "context_engine.max_recent_observations", "agent.max_no_progress_decisions",
         "llm.timeout_seconds", "llm.connect_timeout_seconds",
@@ -255,6 +257,10 @@ def validar_config(config) -> ConfigEyle:
         existe, valor = _valor(config, caminho)
         if existe and _tipo_exato(valor, int) and valor < 1:
             erros.append(f"{caminho} precisa ser >= 1")
+
+    existe, repeticoes_ciclo = _valor(config, "agent.cycle_min_repetitions")
+    if existe and _tipo_exato(repeticoes_ciclo, int) and repeticoes_ciclo < 2:
+        erros.append("agent.cycle_min_repetitions precisa ser >= 2")
 
     existe, janela = _valor(config, "llm.context_window_tokens")
     if existe and _tipo_exato(janela, int) and janela < 512:
@@ -469,11 +475,11 @@ def avisos_config(config):
     _, llm_parallel = _valor(config, "llm.max_concurrent_requests")
     if (
         _tipo_exato(parallel, int) and _tipo_exato(llm_parallel, int)
-        and parallel > 1 and llm_parallel == 1
+        and parallel > llm_parallel
     ):
         avisos.append({
-            "code": "WORKER_PARALLEL_LLM_SERIAL",
-            "detail": "jobs rodam em paralelo, mas chamadas LLM continuam serializadas por seguranca",
+            "code": "WORKER_PARALLELISM_CAPPED",
+            "detail": "worker.max_parallel_jobs sera limitado por llm.max_concurrent_requests",
         })
     _, tests_enabled = _valor(config, "codar.testes.ativado")
     if tests_enabled is False:

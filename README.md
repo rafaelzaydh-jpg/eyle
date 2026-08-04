@@ -11,17 +11,17 @@
   <a href="docs/architecture.md">Architecture</a> ·
   <a href="docs/configuration.md">Configuration</a> ·
   <a href="docs/benchmark.md">Benchmark</a> ·
-  <a href="docs/releases/2.7.3-revision-55.4.md">Revision 55.4</a> ·
+  <a href="docs/releases/2.7.3-revision-55.5.md">Revision 55.5</a> ·
   <a href="SECURITY.md">Security</a>
 </p>
 
 <p align="center">
   <img alt="Python 3.8+" src="https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white">
   <img alt="Release 2.7.3" src="https://img.shields.io/badge/release-2.7.3-2563EB">
-  <img alt="Revision 55.4" src="https://img.shields.io/badge/revision-55.4-7C3AED">
+  <img alt="Revision 55.5" src="https://img.shields.io/badge/revision-55.5-7C3AED">
   <img alt="Local execution" src="https://img.shields.io/badge/execution-local-16A34A">
   <img alt="BM25 retrieval" src="https://img.shields.io/badge/retrieval-BM25-F59E0B">
-  <img alt="Tests" src="https://img.shields.io/badge/non--web%20tests-237%20passed-16A34A">
+  <img alt="Tests" src="https://img.shields.io/badge/non--web%20tests-243%20passed-16A34A">
 </p>
 
 ## Overview
@@ -30,13 +30,13 @@ Eyle indexes a local repository, retrieves only relevant evidence, and uses a lo
 
 | | |
 |---|---|
-| **Release** | 2.7.3 — revision 55.1 |
+| **Release** | 2.7.3 — revision 55.5 |
 | **Default rollout** | `read_only` until the real-model benchmark is validated locally |
 | **Recommended model target** | LFM2.5-8B-A1B or a compatible quantization |
 | **Privacy** | Source code, indexes, traces, queue, and history remain on the local machine |
 | **Mutable state** | `workspace/`, `memory/`, and `context/` are ignored by Git |
 
-**Release identity marker:** **Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.4-agent-budget-hotfix
+**Release identity marker:** **Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.5-agent-reliability
 
 ### Main capabilities
 
@@ -50,7 +50,15 @@ Eyle indexes a local repository, retrieves only relevant evidence, and uses a lo
 - Short-cycle detection for repeated agent states and bounded queue reservation.
 - CLI, optional authenticated Flask interface, SQLite queue, checkpoints, and retention.
 
-## Revision 55.4 hotfix
+## Revision 55.5
+
+Revision 55.5 fixes three failures that looked unrelated but shared the same reliability path. Worker concurrency is now capped by the real LLM concurrency, so a stale analysis cannot keep running beside a newer chat job and publish its failure later. Browser failure notices are attached to the user message that created the job instead of appearing at the bottom without context.
+
+The cycle guard now requires three complete repetitions instead of pausing after only two similar states. Structured decisions use an exclusive JSON Schema branch, tool calls must include `arguments`, and fallback parsing selects the model's last valid self-correction. Parse recovery is limited to one retry. The same agent state machine remains active for projects of every size.
+
+See [docs/releases/2.7.3-revision-55.5.md](docs/releases/2.7.3-revision-55.5.md).
+
+## Revision 55.4
 
 Revision 55.4 fixes project analysis exhausting the global task deadline while retrying slow local-agent generations. Mandatory general-analysis setup now starts with `list_tree` deterministically for every project, structured agent decisions use a dedicated 512-token ceiling, and read timeouts are not blindly regenerated three times by the shipped configuration.
 
@@ -58,7 +66,7 @@ The shared agent deadline is longer, but every individual local-model call remai
 
 See [docs/releases/2.7.3-revision-55.4.md](docs/releases/2.7.3-revision-55.4.md).
 
-## Revision 55.3 hotfix
+## Revision 55.3
 
 Revision 55.3 fixes local LLM requests being cancelled after exactly five seconds. `urllib` was using the short connection timeout while waiting for non-streaming llama-server response headers. Generation now receives the configured 120-second read window.
 
@@ -66,7 +74,7 @@ The default backend was also changed from `localhost` to `127.0.0.1`, matching t
 
 See [docs/releases/2.7.3-revision-55.3.md](docs/releases/2.7.3-revision-55.3.md).
 
-## Revision 55.2 hotfix
+## Revision 55.2
 
 Revision 55.2 fixes the silent “job completed, no assistant message” path. Structured LLM transport/backend failures now finish as failed jobs, preserve a safe diagnostic, and are shown in the browser without contaminating assistant conversation history. Conversation polling also continues if job-status polling fails temporarily.
 
@@ -74,7 +82,7 @@ Startup now checks the configured local LLM endpoint and prints a direct warning
 
 See [docs/releases/2.7.3-revision-55.2.md](docs/releases/2.7.3-revision-55.2.md).
 
-## Revision 55.1 hotfix
+## Revision 55.1
 
 Revision 55.1 fixes a silent Windows shutdown: `os.kill(pid, 0)` was used as an existence check in `engine/queue.py` and `engine/process_limiter.py`, but could terminate the observed process. PID probing is now centralized, uses `OpenProcess` + `WaitForSingleObject` on Windows, and never sends a signal.
 

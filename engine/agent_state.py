@@ -526,13 +526,15 @@ class AgentState:
             bruto = repr(valor)
         return hashlib.sha256(bruto.encode("utf-8", errors="replace")).hexdigest()
 
-    def registrar_fingerprint_ciclo(self, tool, resultado, max_periodo=3, janela=12):
+    def registrar_fingerprint_ciclo(
+        self, tool, resultado, max_periodo=3, janela=18, min_repeticoes=3,
+    ):
         """Registra o estado observavel e detecta repeticao periodica curta.
 
         A assinatura exata de chamada continua sendo a primeira barreira. Esta
         segunda guarda olha para o *resultado* e para o estado material da
-        tarefa, então pequenas mudancas de argumentos nao burlam a deteccao se
-        a Eyle continua voltando ao mesmo lugar.
+        tarefa. Sao exigidas tres repeticoes completas por padrao; duas voltas
+        podem ser uma etapa normal de orientacao e nao devem pausar a tarefa.
         """
         resultado = resultado if isinstance(resultado, dict) else {}
         evidencias = [
@@ -570,18 +572,24 @@ class AgentState:
         }
         fingerprint = self._hash_json_estavel(payload)
         self.fingerprints_ciclo.append(fingerprint)
-        self.fingerprints_ciclo = self.fingerprints_ciclo[-max(2, int(janela or 12)):]
+        min_repeticoes = max(2, int(min_repeticoes or 3))
+        max_periodo = max(1, int(max_periodo or 1))
+        janela_minima = max(2, int(janela or 18), max_periodo * min_repeticoes)
+        self.fingerprints_ciclo = self.fingerprints_ciclo[-janela_minima:]
 
         total = len(self.fingerprints_ciclo)
-        max_periodo = max(1, int(max_periodo or 1))
-        for periodo in range(1, min(max_periodo, total // 2) + 1):
-            if (
-                self.fingerprints_ciclo[-periodo:]
-                == self.fingerprints_ciclo[-2 * periodo:-periodo]
-            ):
+        for periodo in range(1, min(max_periodo, total // min_repeticoes) + 1):
+            bloco = self.fingerprints_ciclo[-periodo:]
+            repetiu = all(
+                self.fingerprints_ciclo[-(indice + 1) * periodo:-indice * periodo]
+                == bloco
+                for indice in range(1, min_repeticoes)
+            )
+            if repetiu:
                 return {
                     "detectado": True,
                     "periodo": periodo,
+                    "repeticoes": min_repeticoes,
                     "fingerprint": fingerprint,
                 }
         return {"detectado": False, "periodo": None, "fingerprint": fingerprint}

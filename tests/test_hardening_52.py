@@ -232,7 +232,7 @@ def test_config_separa_avisos_de_erros():
     validated = validar_config(config)
     codes = {item["code"] for item in validated["_config_warnings"]}
     assert "LLM_READ_TIMEOUT_HIGH" in codes
-    assert "WORKER_PARALLEL_LLM_SERIAL" in codes
+    assert "WORKER_PARALLELISM_CAPPED" in codes
     assert avisos_config(config)
 
 

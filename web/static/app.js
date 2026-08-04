@@ -37,11 +37,18 @@
     sessionStorage.setItem(JOBS_STORAGE_KEY, JSON.stringify(trackedJobs));
   }
 
-  function acompanharJob(id, tipo) {
+  function acompanharJob(id, tipo, metadados = {}) {
     const numerico = Number(id);
     if (!Number.isInteger(numerico)) return;
+    const anterior = trackedJobs.find((job) => job.id === numerico) || {};
     trackedJobs = trackedJobs.filter((job) => job.id !== numerico);
-    trackedJobs.push({ id: numerico, tipo, status: "pending" });
+    trackedJobs.push({
+      ...anterior,
+      id: numerico,
+      tipo,
+      status: anterior.status || "pending",
+      ...metadados,
+    });
     salvarJobsAcompanhados();
     updatePendingState();
   }
@@ -165,14 +172,25 @@
 
         const bubble = document.createElement("div");
         bubble.className = "job-notice-bubble";
-        bubble.textContent = job.mensagem || job.erro || "A tarefa falhou sem diagnóstico.";
+        const detalhe = job.mensagem || job.erro || "A tarefa falhou sem diagnóstico.";
+        const origem = String(job.texto_resumo || job.texto || "").trim();
+        const trecho = origem.length > 90 ? `${origem.slice(0, 87)}...` : origem;
+        bubble.textContent = trecho
+          ? `Falha ao processar “${trecho}”. ${detalhe}`
+          : detalhe;
         wrap.appendChild(bubble);
 
         const meta = document.createElement("div");
         meta.className = "job-notice-meta";
         meta.textContent = `job #${job.id}${job.error_code ? ` · ${job.error_code}` : ""}`;
         wrap.appendChild(meta);
-        logEl.appendChild(wrap);
+
+        const mensagemId = Number(job.mensagem_id);
+        const origemEl = Number.isInteger(mensagemId)
+          ? logEl.querySelector(`.msg[data-id="${mensagemId}"]`)
+          : null;
+        if (origemEl) origemEl.insertAdjacentElement("afterend", wrap);
+        else logEl.appendChild(wrap);
       });
   }
 
@@ -344,7 +362,10 @@
       });
       if (!res.ok) throw new Error("falha ao enviar");
       const data = await res.json();
-      acompanharJob(data.job_id, "pergunta");
+      acompanharJob(data.job_id, "pergunta", {
+        mensagem_id: data.mensagem_id,
+        texto_resumo: texto,
+      });
     } catch (err) {
       // devolve o texto pro usuário tentar de novo
       inputEl.value = texto;

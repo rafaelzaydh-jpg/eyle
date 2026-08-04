@@ -120,8 +120,8 @@ _SCHEMA_DECISAO_AGENTE = {
         "fato_importante": {"type": "string"},
         "goal_update": {"type": "object"},
     },
-    "anyOf": [
-        {"required": ["tool"]},
+    "oneOf": [
+        {"required": ["tool", "arguments"]},
         {"required": ["final"]},
         {"required": ["needs_user"]},
     ],
