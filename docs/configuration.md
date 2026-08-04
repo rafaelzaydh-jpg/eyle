@@ -24,9 +24,9 @@ servers exposing `/v1/chat/completions`. With Ollama's native API, set the
 provider and compatibility flag according to the comments already included in
 `config.json`.
 
-## Minimum recommended model
+## Model baseline
 
-For supervised agent use, the supported baseline is **LiquidAI/LFM2.5-8B-A1B** or a compatible quantized derivative. Smaller models may work for read-only inspection, but editing reliability is not assumed. Always benchmark the exact checkpoint and quantization used on the target machine.
+The supported baseline for supervised editing is **LiquidAI/LFM2.5-8B-A1B** or a compatible quantization. Benchmark the exact build used on the target machine.
 
 ## Agent rollout
 

@@ -1,10 +1,9 @@
 <p align="center">
-  <img src="assets/eyle-banner.svg" alt="Eyle — local-first coding agent" width="100%">
+  <img src="assets/eyle-banner.svg" alt="Eyle — local coding agent" width="100%">
 </p>
 
 <p align="center">
-  <strong>Local-first coding agent for local LLMs.</strong><br>
-  External memory, selective BM25 retrieval, grounded evidence, safe patches, tests, and rollback.
+  <strong>A local assistant for understanding, changing, and testing code with an LLM running on your machine.</strong>
 </p>
 
 <p align="center">
@@ -17,67 +16,51 @@
 
 <p align="center">
   <img alt="Python 3.8+" src="https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white">
-  <img alt="Local first" src="https://img.shields.io/badge/local--first-yes-16A34A">
-  <img alt="Offline retrieval" src="https://img.shields.io/badge/retrieval-BM25-F59E0B">
-  <img alt="Default agent mode" src="https://img.shields.io/badge/agent-supervised%20default-7C3AED">
-  <img alt="Minimum recommended model" src="https://img.shields.io/badge/minimum%20model-LFM2.5--8B--A1B-0EA5E9">
+  <img alt="Local execution" src="https://img.shields.io/badge/execution-local-16A34A">
+  <img alt="BM25 retrieval" src="https://img.shields.io/badge/retrieval-BM25-F59E0B">
+  <img alt="Supervised agent" src="https://img.shields.io/badge/agent-supervised-7C3AED">
+  <img alt="Recommended model" src="https://img.shields.io/badge/recommended%20model-LFM2.5--8B--A1B-0EA5E9">
   <img alt="Tests" src="https://img.shields.io/badge/non--web%20tests-167%20passed-16A34A">
 </p>
 
-> [!IMPORTANT]
-> **Minimum recommended model:** [LiquidAI/LFM2.5-8B-A1B](https://huggingface.co/LiquidAI/LFM2.5-8B-A1B), or a compatible quantized derivative.
-> Eyle ships with **supervised agent mode enabled** for projects inside `workspace/`: it can read, search, propose, patch, and run isolated tests, but every real write still requires explicit user confirmation.
+## Overview
 
-## What is Eyle?
+Eyle indexes a local project, retrieves only relevant code, and uses that evidence to answer questions or prepare changes. The model drives the investigation while deterministic code validates sensitive operations.
 
-Eyle is a privacy-oriented coding assistant that runs against a **local language
-model**. Instead of sending an entire repository to the model, Eyle builds an
-external project memory and retrieves only the evidence needed for each step.
+| | |
+|---|---|
+| **Minimum recommended model** | [LFM2.5-8B-A1B](https://huggingface.co/LiquidAI/LFM2.5-8B-A1B) or a compatible quantization |
+| **Default mode** | Supervised agent for projects inside `workspace/` |
+| **Writes** | Require explicit confirmation before application |
+| **Privacy** | Project files, indexes, and history remain on the local machine |
 
-The model can inspect, explain, and propose changes. Deterministic project code
-owns the dangerous parts: path validation, fresh reads, hashes, dry runs,
-confirmation, atomic writes, tests, final rereads, and rollback.
+### Features
 
-### Highlights
+- Local models through OpenAI-compatible servers, LM Studio, llama.cpp, and Ollama-style backends.
+- Persistent external memory for repositories larger than the model context.
+- Offline BM25 search without cloud embeddings or a vector database.
+- Answers tied to files and ranges read from the project.
+- Atomic patches, isolated tests, and rollback.
+- CLI, optional Flask interface, SQLite queue, checkpoints, and retention.
 
-- **Local model support** — works with OpenAI-compatible local servers, LM
-  Studio, llama.cpp server, and Ollama-style backends.
-- **External project memory** — repositories larger than the model context can
-  be indexed and queried incrementally.
-- **Offline BM25 retrieval** — no vector database or cloud embedding service is
-  required.
-- **Evidence-grounded answers** — source ranges and hashes are kept outside the
-  model's short observation buffer.
-- **Supervised agent workflow** — enabled by default for `workspace/`; every write requires explicit confirmation, fresh hashes, a dry run, isolated tests, and rollback support.
-- **Persistent operation** — optional Flask interface, SQLite job queue,
-  checkpoints, conversation history, backups, and retention controls.
-
-## Architecture
+## How it works
 
 ```mermaid
 flowchart LR
-  A[Project] --> B[Ingest]
+  A[Project] --> B[Index]
   B --> C[External memory]
-  D[User request] --> E[Router + Agent]
-  C --> F[BM25 retrieval]
-  F --> G[Context budget]
-  G --> E
-  E --> H[Safe project tools]
-  H --> I[Fresh evidence + hashes]
-  I --> E
-  E --> J[Verification]
-  J --> K[Answer / confirmed change]
+  D[Request] --> E[Agent]
+  C --> F[BM25 search]
+  F --> E
+  E --> G[Project tools]
+  G --> H[Read and validate]
+  H --> E
+  E --> I[Answer or confirmed patch]
 ```
 
-The model sees the user's original language. Internal agent instructions, tool
-contracts, state messages, and canonical structured output are in English for
-higher tool-calling reliability. Eyle replies in the user's language.
+See [architecture](docs/architecture.md) for the full design.
 
-Read the full design in [docs/architecture.md](docs/architecture.md).
-
-## Quick start
-
-### 1. Clone and prepare Python
+## Quick installation
 
 ```bash
 git clone https://github.com/YOUR_USERNAME/eyle.git
@@ -95,26 +78,19 @@ source .venv/bin/activate
 .venv\Scripts\Activate.ps1
 ```
 
-The CLI core uses only the Python standard library. Install the locked runtime
-requirements when you want the web interface:
+Install the dependencies you need:
 
 ```bash
+# Web interface
 python -m pip install -r requirements.lock
-```
 
-For development and tests:
-
-```bash
+# Development and tests
 python -m pip install -r requirements-dev.lock
 ```
 
-### 2. Start a local model server
+## Configuration
 
-The minimum recommended model for supervised agent use is **LFM2.5-8B-A1B**. Compatible quantizations can be used, but benchmark the exact build you run. Smaller models may still work for read-only inspection, but are not the supported baseline for editing.
-
-Configure your local server in `config.json`. The checked-in default expects an
-OpenAI-compatible endpoint at `http://localhost:8080` and automatically selects
-the only loaded model when possible.
+Start a local LLM through an OpenAI-compatible endpoint. The default configuration uses `http://localhost:8080` and automatically selects the only loaded model.
 
 ```json
 {
@@ -128,24 +104,18 @@ the only loaded model when possible.
 }
 ```
 
-More options: [docs/configuration.md](docs/configuration.md).
+See [docs/configuration.md](docs/configuration.md) for all options.
 
-### 3. Add and index a project
+## Usage
 
-Copy a repository into `workspace/`:
+Copy a project into `workspace/` and index it:
 
 ```bash
-cp -r /path/to/your/project workspace/
+cp -r /path/to/project workspace/
 python main.py ingest
 ```
 
-Or index an external directory directly:
-
-```bash
-python main.py ingest /path/to/your/project --nome "MyProject"
-```
-
-### 4. Ask questions or run the agent
+Then ask questions or run the agent:
 
 ```bash
 python main.py perguntar "Where is authentication validated?"
@@ -153,92 +123,54 @@ python main.py agente "Inspect the upload limit and propose a safe fix"
 python main.py status
 ```
 
-### 5. Optional web interface
+Optional web interface:
 
 ```bash
 python main.py serve
 ```
 
-Open `http://127.0.0.1:5000`. Eyle prints the API token at startup.
+Open `http://127.0.0.1:5000`. The API token is printed at startup.
 
-## Agent rollout modes
+## Agent modes
 
-| Mode | Behavior |
+| Mode | Permissions |
 |---|---|
-| `off` | Uses the earlier non-agent pipelines. |
-| `read_only` | Reads, searches, analyzes, and suggests. Blocks writes and execution. |
-| `full` | Enables confirmed edits and isolated test execution only for configured trusted paths. **Default profile for `workspace/`.** |
+| `off` | Uses the earlier pipelines without automatic agent routing. |
+| `read_only` | Allows reading, searching, analysis, and suggestions. |
+| `full` | Allows confirmed changes and isolated tests in trusted paths. |
 
-A full edit follows this guarded cycle:
+The default configuration trusts only `workspace/`. External directories remain `read_only` until added to `trusted_project_paths`.
 
-```text
-fresh read → exact range → hashes → dry run → confirmation
-→ atomic patch → sandboxed tests → final reread or rollback
-```
-
-The checked-in configuration enables `full` only for the repository-local `workspace/` directory. External projects automatically fall back to `read_only` until their paths are explicitly trusted. Every write still pauses for confirmation.
-
-Run the real benchmark with the exact model and quantization used on the target machine before adding external trusted paths.
-
-## Benchmark
+## Validation
 
 ```bash
 python main.py benchmark
+python -m pytest -q
 ```
 
-The ten controlled scenarios evaluate reading, grounding, false success,
-unauthorized writes, confirmation, hashes, dry runs, rollback, and post-write
-rereads. See [docs/benchmark.md](docs/benchmark.md).
+The benchmark covers reading, grounding, tool use, and the edit workflow. Run it with the exact model and quantization used in the target environment. See [docs/benchmark.md](docs/benchmark.md).
 
 ## Repository structure
 
 ```text
-engine/      Agent orchestration, tools, state, patching, sandbox and queue
+engine/      Agent, tools, state, patches, sandbox, and queue
 llm/         Local model execution and prompt cache
 retrieval/   Offline BM25 search
-verify/      Grounding and answer verification
-tests/       Unit and regression tests
+verify/      Answer verification
 web/         Authenticated Flask interface
-workspace/   Local projects to inspect (Git-ignored)
-memory/      Indexed external memory (Git-ignored)
-context/     Cache, traces, queue, confirmations and backups (Git-ignored)
-docs/        Architecture, configuration, benchmark and project history
+tests/       Unit and regression tests
+workspace/   Projects under analysis — Git-ignored
+memory/      Generated index — Git-ignored
+context/     Cache, traces, and backups — Git-ignored
+docs/        Technical documentation and history
 ```
-
-## Safety notes
-
-Eyle is designed to fail closed, but a local agent is still software that can
-process untrusted text and source code. Keep external projects in `read_only`, review every proposed patch, use least-privilege operating-system accounts, and never expose the development Flask server directly to the public internet.
-
-Read [SECURITY.md](SECURITY.md) before trusting external paths or exposing the web interface.
-
-## Development
-
-```bash
-make dev
-make test
-```
-
-Or without Make:
-
-```bash
-python -m pip install -r requirements-dev.lock
-python -m pytest -q
-```
-
-Contributions are documented in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Current status
 
 - Release: **2.7.0**
-- Non-web automated tests in the release environment: **167/167**
-- Minimum recommended model: **LFM2.5-8B-A1B** or compatible quantization
-- Default rollout: **supervised agent mode for `workspace/`**
-- External paths: **read-only until explicitly trusted**
-- Real local-model benchmark: must be executed on the machine hosting the model
+- Non-web automated tests: **167/167** in the release environment
+- The real-model benchmark must be run on the machine hosting the LLM
 
 ## License
 
-No open-source license has been selected yet. The repository is currently
-**all rights reserved**. See [LICENSE.md](LICENSE.md) before redistributing or
-building a public contributor community.
+The repository is currently **all rights reserved**. Read [LICENSE.md](LICENSE.md) before copying, redistributing, or opening the project to public contributions.

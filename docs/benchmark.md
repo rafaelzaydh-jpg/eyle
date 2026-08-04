@@ -17,9 +17,7 @@ The gate checks:
 - unauthorized writes;
 - confirmation, hashes, dry run, rollback, and post-write reread.
 
-The minimum recommended model for supervised editing is **LFM2.5-8B-A1B** or a compatible quantized derivative. Run the benchmark several times with the exact local model and quantization used in production. Deterministic unit tests validate the orchestration, but they do
-not prove that a particular local model will reliably choose the correct tool
-sequence.
+Run the benchmark several times with the exact model and quantization used in production. Deterministic tests validate the orchestration, but they do not prove that a model will reliably choose the correct tool sequence.
 
 ## Automated tests
 

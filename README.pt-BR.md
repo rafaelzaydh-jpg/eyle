@@ -3,8 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Agente local para programação com LLMs locais.</strong><br>
-  Memória externa, retrieval BM25, evidência verificável, patches seguros, testes e rollback.
+  <strong>Assistente local para entender, alterar e testar código com uma LLM executada na sua máquina.</strong>
 </p>
 
 <p align="center">
@@ -17,64 +16,51 @@
 
 <p align="center">
   <img alt="Python 3.8+" src="https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white">
-  <img alt="Local first" src="https://img.shields.io/badge/local--first-sim-16A34A">
-  <img alt="Retrieval offline" src="https://img.shields.io/badge/retrieval-BM25-F59E0B">
-  <img alt="Modo padrão" src="https://img.shields.io/badge/agente-supervisionado%20por%20padrão-7C3AED">
-  <img alt="Modelo mínimo recomendado" src="https://img.shields.io/badge/modelo%20mínimo-LFM2.5--8B--A1B-0EA5E9">
+  <img alt="Execução local" src="https://img.shields.io/badge/execução-local-16A34A">
+  <img alt="Retrieval BM25" src="https://img.shields.io/badge/retrieval-BM25-F59E0B">
+  <img alt="Agente supervisionado" src="https://img.shields.io/badge/agente-supervisionado-7C3AED">
+  <img alt="Modelo recomendado" src="https://img.shields.io/badge/modelo%20recomendado-LFM2.5--8B--A1B-0EA5E9">
   <img alt="Testes" src="https://img.shields.io/badge/testes%20não--web-167%20aprovados-16A34A">
 </p>
 
-> [!IMPORTANT]
-> **Modelo mínimo recomendado:** [LiquidAI/LFM2.5-8B-A1B](https://huggingface.co/LiquidAI/LFM2.5-8B-A1B), ou uma quantização derivada compatível.
-> A Eyle vem com o **modo agente supervisionado ativado** para projetos dentro de `workspace/`: ela pode ler, buscar, propor, aplicar patches e rodar testes isolados, mas toda escrita real continua exigindo confirmação explícita do usuário.
+## Visão geral
 
-## O que é a Eyle?
+A Eyle indexa um projeto local, recupera apenas os trechos relevantes e usa essas evidências para responder perguntas ou preparar alterações. O modelo conduz a investigação; operações sensíveis são validadas por código determinístico.
 
-A Eyle é uma assistente de programação orientada à privacidade que trabalha com
-uma **LLM local**. Em vez de jogar o repositório inteiro dentro do contexto do
-modelo, ela cria uma memória externa do projeto e recupera somente as evidências
-necessárias para cada etapa.
+| | |
+|---|---|
+| **Modelo mínimo recomendado** | [LFM2.5-8B-A1B](https://huggingface.co/LiquidAI/LFM2.5-8B-A1B) ou quantização compatível |
+| **Modo padrão** | Agente supervisionado em projetos dentro de `workspace/` |
+| **Escritas** | Exigem confirmação explícita antes de serem aplicadas |
+| **Privacidade** | Projeto, índice e histórico permanecem na máquina local |
 
-O modelo decide o que investigar e propõe ações. O código determinístico da Eyle
-controla o que é perigoso: caminhos, leituras frescas, hashes, dry-run,
-confirmação, escrita atômica, testes, releitura final e rollback.
+### Recursos
 
-### Principais recursos
-
-- **LLMs locais** por servidores compatíveis com OpenAI, LM Studio, llama.cpp e
-  backends no estilo Ollama.
-- **Memória externa persistente**, permitindo consultar projetos maiores que a
-  janela de contexto.
-- **BM25 100% offline**, sem banco vetorial ou serviço de embeddings na nuvem.
-- **Respostas grounded**, baseadas em evidências frescas do projeto real.
-- **Modo agente supervisionado**, ativo por padrão em `workspace/`, com confirmação obrigatória, hashes frescos, dry-run, testes isolados e rollback.
-- **Operação persistente**, com painel Flask, fila SQLite, checkpoints,
-  histórico, backups e retenção.
+- LLMs locais por servidores compatíveis com OpenAI, LM Studio, llama.cpp e backends no estilo Ollama.
+- Memória externa persistente para projetos maiores que a janela de contexto.
+- Busca BM25 offline, sem embeddings ou banco vetorial na nuvem.
+- Respostas ligadas a arquivos e trechos lidos do projeto.
+- Patches atômicos, testes isolados e rollback.
+- CLI, painel Flask opcional, fila SQLite, checkpoints e retenção.
 
 ## Como funciona
 
 ```mermaid
 flowchart LR
-  A[Projeto] --> B[Ingestão]
+  A[Projeto] --> B[Indexação]
   B --> C[Memória externa]
-  D[Pedido do usuário] --> E[Roteador + Agente]
-  C --> F[Retrieval BM25]
-  F --> G[Orçamento de contexto]
-  G --> E
-  E --> H[Ferramentas seguras]
-  H --> I[Evidência fresca + hashes]
-  I --> E
-  E --> J[Verificação]
-  J --> K[Resposta ou alteração confirmada]
+  D[Pedido] --> E[Agente]
+  C --> F[Busca BM25]
+  F --> E
+  E --> G[Ferramentas do projeto]
+  G --> H[Leitura e validação]
+  H --> E
+  E --> I[Resposta ou patch confirmado]
 ```
 
-Você continua falando em português. O pedido original não é traduzido. Somente
-as instruções internas do agente, contratos das ferramentas, estados e JSON
-canônico ficam em inglês para melhorar a confiabilidade do modelo.
+Detalhes: [arquitetura](docs/architecture.md).
 
-## Começo rápido
-
-### 1. Clone e prepare o Python
+## Instalação rápida
 
 ```bash
 git clone https://github.com/SEU_USUARIO/eyle.git
@@ -92,25 +78,19 @@ source .venv/bin/activate
 .venv\Scripts\Activate.ps1
 ```
 
-O núcleo da CLI usa apenas a biblioteca padrão. Para o painel web:
+Instale as dependências necessárias:
 
 ```bash
+# Painel web
 python -m pip install -r requirements.lock
-```
 
-Para desenvolvimento e testes:
-
-```bash
+# Desenvolvimento e testes
 python -m pip install -r requirements-dev.lock
 ```
 
-### 2. Configure a LLM local
+## Configuração
 
-O modelo mínimo recomendado para usar o agente supervisionado é o **LFM2.5-8B-A1B**. Quantizações compatíveis podem ser usadas, mas o benchmark deve ser executado com a variante exata. Modelos menores podem funcionar para leitura, porém não são a base recomendada para edição.
-
-O `config.json` atual espera um endpoint compatível com OpenAI em
-`http://localhost:8080` e tenta selecionar automaticamente o único modelo
-carregado.
+Inicie uma LLM local em um endpoint compatível com OpenAI. A configuração padrão usa `http://localhost:8080` e seleciona automaticamente o único modelo carregado.
 
 ```json
 {
@@ -124,20 +104,18 @@ carregado.
 }
 ```
 
-### 3. Coloque e indexe um projeto
+Veja todas as opções em [docs/configuration.md](docs/configuration.md).
+
+## Uso
+
+Coloque um projeto em `workspace/` e faça a indexação:
 
 ```bash
 cp -r /caminho/do/projeto workspace/
 python main.py ingest
 ```
 
-Ou aponte diretamente para outra pasta:
-
-```bash
-python main.py ingest /caminho/do/projeto --nome "MeuProjeto"
-```
-
-### 4. Use a Eyle
+Depois, consulte ou execute o agente:
 
 ```bash
 python main.py perguntar "Onde a autenticação é validada?"
@@ -145,7 +123,7 @@ python main.py agente "Analise o limite de upload e proponha uma correção segu
 python main.py status
 ```
 
-### 5. Painel web opcional
+Painel web opcional:
 
 ```bash
 python main.py serve
@@ -155,56 +133,44 @@ Abra `http://127.0.0.1:5000`. O token da API aparece no terminal.
 
 ## Modos do agente
 
-| Modo | Comportamento |
+| Modo | Permissões |
 |---|---|
 | `off` | Usa os pipelines antigos, sem roteamento automático para o agente. |
-| `read_only` | Lê, busca, analisa e sugere. Bloqueia escrita e execução. |
-| `full` | Libera edição confirmada e testes isolados apenas em caminhos confiáveis. **Perfil padrão para `workspace/`.** |
+| `read_only` | Permite leitura, busca, análise e sugestões. |
+| `full` | Permite alterações confirmadas e testes isolados em caminhos confiáveis. |
 
-A configuração incluída confia apenas na pasta local `workspace/`. Projetos externos caem automaticamente para `read_only` até você adicioná-los conscientemente em `trusted_project_paths`. Toda escrita continua parando para confirmação.
+A configuração inicial confia apenas em `workspace/`. Pastas externas entram como `read_only` até serem adicionadas a `trusted_project_paths`.
 
-Ciclo obrigatório de edição:
-
-```text
-leitura fresca → faixa exata → hashes → dry-run → confirmação
-→ patch atômico → testes isolados → releitura final ou rollback
-```
-
-## Benchmark
+## Validação
 
 ```bash
 python main.py benchmark
+python -m pytest -q
 ```
 
-O benchmark mede leitura, grounding, falso sucesso, escrita indevida,
-confirmação, hashes, dry-run, rollback e releitura após escrita. Rode várias
-vezes usando exatamente o modelo e a quantização que serão usados de verdade.
+O benchmark exercita leitura, grounding, uso de ferramentas e o fluxo de edição. Execute-o com o modelo e a quantização que serão usados no ambiente real. Saiba mais em [docs/benchmark.md](docs/benchmark.md).
 
-## Estrutura
+## Estrutura do projeto
 
 ```text
-engine/      Agente, ferramentas, estado, patch, sandbox e fila
+engine/      Agente, ferramentas, estado, patches, sandbox e fila
 llm/         Execução da LLM local e cache de prompts
 retrieval/   Busca BM25 offline
-verify/      Verificação de grounding
+verify/      Verificação das respostas
 web/         Painel Flask autenticado
 tests/       Testes unitários e regressões
-workspace/   Projetos locais analisados — ignorado pelo Git
-memory/      Memória externa gerada — ignorada pelo Git
-context/     Cache, traces, fila e backups — ignorado pelo Git
-docs/        Documentação e histórico
+workspace/   Projetos analisados — ignorado pelo Git
+memory/      Índice gerado — ignorado pelo Git
+context/     Cache, traces e backups — ignorado pelo Git
+docs/        Documentação técnica e histórico
 ```
 
-## Situação atual
+## Estado atual
 
 - Versão: **2.7.0**
 - Testes automatizados não-web: **167/167** no ambiente da release
-- Modelo mínimo recomendado: **LFM2.5-8B-A1B** ou quantização compatível
-- Modo padrão: **agente supervisionado em `workspace/`**
-- Caminhos externos: **somente leitura até serem confiados explicitamente**
-- Benchmark real: precisa ser executado na máquina que hospeda a LLM
+- O benchmark com a LLM deve ser executado na máquina que hospeda o modelo
 
 ## Licença
 
-Ainda não foi escolhida uma licença open source. O código está protegido como
-**todos os direitos reservados**. Consulte [LICENSE.md](LICENSE.md).
+O repositório está atualmente sob **todos os direitos reservados**. Consulte [LICENSE.md](LICENSE.md) antes de copiar, redistribuir ou criar uma comunidade pública de contribuidores.

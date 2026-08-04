@@ -51,9 +51,4 @@ stateDiagram-v2
   ROLLED_BACK --> COMPLETE
 ```
 
-The model proposes actions, but deterministic project code owns path checks,
-hashes, confirmation, patch application, tests, final reread, and rollback.
-
-## Default supervised profile
-
-The checked-in release configures `rollout_mode: "full"` only for projects under the repository-local `workspace/` directory. Every write requires explicit confirmation. Paths outside that allowlist are automatically downgraded to `read_only`. The minimum recommended model for this profile is **LFM2.5-8B-A1B** or a compatible quantized derivative.
+The model proposes actions; the state machine controls the transition between them. Configuration and trust boundaries are documented in [configuration.md](configuration.md).

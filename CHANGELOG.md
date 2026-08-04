@@ -4,6 +4,11 @@ All notable changes to Eyle are documented here.
 
 ## Unreleased
 
+### Documentation
+
+- Simplified both landing-page READMEs and removed repeated explanations.
+- Moved implementation details to focused documents under `docs/`.
+
 ### Repository
 
 - Added a bilingual, GitHub-focused README.
