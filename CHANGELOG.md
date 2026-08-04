@@ -8,6 +8,19 @@ No unreleased changes yet.
 
 ## 2.7.3 — 2026-08-04
 
+### Revision 55.3 — local LLM response-timeout hotfix
+
+- Fixed `urllib` using the 5-second connection timeout while waiting for non-streaming llama-server response headers.
+- The effective HTTP operation now waits for `read_timeout_seconds` during model generation, preventing the client from cancelling valid slow responses.
+- Changed the shipped backend URL from `localhost` to `127.0.0.1` to match the IPv4 llama-server bind address and avoid loopback resolution ambiguity on Windows.
+- Added a delayed local OpenAI-compatible regression server proving generation may exceed the connection timeout without being cancelled.
+
+### Validation
+
+- `python -m compileall -q .` passed.
+- 231/231 executable non-web tests passed.
+- One Flask-dependent web module remained skipped because Flask was unavailable in the packaging environment.
+
 ### Revision 55.2 — web response delivery hotfix
 
 - Fixed the Worker treating structured LLM failures as successful completed jobs.

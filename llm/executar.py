@@ -243,10 +243,11 @@ def _erro_http(base_url, erro, corpo_erro=""):
 
 
 def _ajustar_timeout_leitura(resposta, read_timeout):
-    """urllib usa um timeout unico; apos conectar, troca o timeout do socket.
+    """Atualiza o timeout do socket depois que os cabecalhos chegaram.
 
-    A cadeia interna varia entre Python/backends. A operacao e best-effort e
-    continua compativel com respostas falsas usadas nos testes.
+    Isso continua util para leituras de corpo longas, mas nao corrige o tempo
+    de espera pelos cabecalhos: ``urlopen`` so devolve ``resposta`` depois de
+    receber a linha de status HTTP.
     """
     if read_timeout is None:
         return
@@ -265,9 +266,28 @@ def _ajustar_timeout_leitura(resposta, read_timeout):
 
 @contextmanager
 def _abrir_url(req, connect_timeout, read_timeout=None):
-    resposta = urllib.request.urlopen(req, timeout=connect_timeout)
+    """Abre HTTP sem usar o limite de conexao como limite de geracao.
+
+    ``urllib`` aplica ``timeout`` tanto ao connect quanto a espera pela linha
+    de status/cabecalhos. No llama-server sem streaming, esses cabecalhos so
+    chegam depois que o modelo termina de gerar. Passar os 5 segundos de
+    ``connect_timeout_seconds`` cancelava toda resposta mais lenta, embora o
+    ``read_timeout_seconds`` estivesse configurado para 120 segundos.
+
+    O limite de leitura vira o timeout efetivo da operacao. Para um backend
+    local, conexao recusada continua falhando imediatamente. Preflight e
+    descoberta continuam curtos porque nessas chamadas connect/read recebem o
+    mesmo valor.
+    """
+    limite_operacao = read_timeout if read_timeout is not None else connect_timeout
     try:
-        _ajustar_timeout_leitura(resposta, read_timeout)
+        limite_operacao = max(0.1, float(limite_operacao))
+    except (TypeError, ValueError):
+        limite_operacao = max(0.1, float(connect_timeout or 1.0))
+
+    resposta = urllib.request.urlopen(req, timeout=limite_operacao)
+    try:
+        _ajustar_timeout_leitura(resposta, limite_operacao)
         yield resposta
     finally:
         try:

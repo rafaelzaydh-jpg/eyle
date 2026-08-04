@@ -1,7 +1,7 @@
 {
   "llm": {
     "provider": "openai_compatible",
-    "base_url": "http://localhost:8080",
+    "base_url": "http://127.0.0.1:8080",
     "model": "auto",
     "openai_compatible": true,
     "temperature": 0.2,
@@ -224,7 +224,7 @@
   },
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "55.2-web-job-delivery-hotfix",
+  "revision": "55.3-local-llm-timeout-hotfix",
   "telemetry": {
     "enabled": true,
     "window_seconds": 3600,

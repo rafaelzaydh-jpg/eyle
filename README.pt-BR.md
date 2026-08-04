@@ -50,11 +50,19 @@ A Eyle indexa um repositório local, recupera apenas as evidências relevantes e
 - Detecção de ciclos curtos e reserva de fila com limite.
 - CLI, painel Flask autenticado opcional, fila SQLite, checkpoints e retenção.
 
+## Hotfix da revisão 55.3
+
+A revisão 55.3 corrige o cancelamento da LLM após exatamente 5 segundos. O `urllib` estava usando o timeout curto de conexão também enquanto aguardava os cabeçalhos da resposta não-streaming do llama-server. Agora a geração pode usar os 120 segundos de leitura configurados.
+
+O backend padrão também passou de `localhost` para `127.0.0.1`, igual ao endereço IPv4 em que o llama-server está escutando no Windows.
+
+Detalhes: [docs/releases/2.7.3-revision-55.3.md](docs/releases/2.7.3-revision-55.3.md).
+
 ## Hotfix da revisão 55.2
 
 A revisão 55.2 corrige o caminho silencioso “job concluído, sem mensagem da assistente”. Falhas estruturadas de transporte/backend da LLM agora terminam como jobs com falha, preservam um diagnóstico seguro e aparecem no navegador sem contaminar o histórico da conversa. O polling de `/conversa` também continua mesmo se o polling de `/jobs` falhar temporariamente.
 
-Na inicialização, a Eyle agora testa o endpoint local da LLM e avisa diretamente quando `http://localhost:8080` (ou o backend configurado) está indisponível.
+Na inicialização, a Eyle agora testa o endpoint local da LLM e avisa diretamente quando `http://127.0.0.1:8080` (ou o backend configurado) está indisponível.
 
 Detalhes: [docs/releases/2.7.3-revision-55.2.md](docs/releases/2.7.3-revision-55.2.md).
 
@@ -133,7 +141,7 @@ A release usa por padrão um endpoint local compatível com OpenAI e descoberta 
 ```json
 {
   "llm": {
-    "base_url": "http://localhost:8080",
+    "base_url": "http://127.0.0.1:8080",
     "model": "auto",
     "openai_compatible": true,
     "max_tokens": 1500,

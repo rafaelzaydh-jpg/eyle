@@ -30,6 +30,12 @@ def test_release_defaults_are_safe_and_read_only(tmp_path, monkeypatch):
     assert cause is None
 
 
+def test_release_default_backend_matches_ipv4_llama_server():
+    config = validar_config(_release_config())
+    assert config["llm"]["base_url"] == "http://127.0.0.1:8080"
+    assert config["llm"]["read_timeout_seconds"] > config["llm"]["connect_timeout_seconds"]
+
+
 def test_release_defaults_do_not_trust_external_projects(tmp_path):
     config = validar_config(_release_config())
 

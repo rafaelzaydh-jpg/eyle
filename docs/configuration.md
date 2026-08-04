@@ -10,7 +10,7 @@ The default targets an OpenAI-compatible local server:
 {
   "llm": {
     "provider": "openai_compatible",
-    "base_url": "http://localhost:8080",
+    "base_url": "http://127.0.0.1:8080",
     "model": "auto",
     "openai_compatible": true,
     "max_tokens": 1500,

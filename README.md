@@ -50,11 +50,19 @@ Eyle indexes a local repository, retrieves only relevant evidence, and uses a lo
 - Short-cycle detection for repeated agent states and bounded queue reservation.
 - CLI, optional authenticated Flask interface, SQLite queue, checkpoints, and retention.
 
+## Revision 55.3 hotfix
+
+Revision 55.3 fixes local LLM requests being cancelled after exactly five seconds. `urllib` was using the short connection timeout while waiting for non-streaming llama-server response headers. Generation now receives the configured 120-second read window.
+
+The default backend was also changed from `localhost` to `127.0.0.1`, matching the IPv4 address used by llama-server on Windows.
+
+See [docs/releases/2.7.3-revision-55.3.md](docs/releases/2.7.3-revision-55.3.md).
+
 ## Revision 55.2 hotfix
 
 Revision 55.2 fixes the silent “job completed, no assistant message” path. Structured LLM transport/backend failures now finish as failed jobs, preserve a safe diagnostic, and are shown in the browser without contaminating assistant conversation history. Conversation polling also continues if job-status polling fails temporarily.
 
-Startup now checks the configured local LLM endpoint and prints a direct warning when `http://localhost:8080` (or the configured backend) is unavailable.
+Startup now checks the configured local LLM endpoint and prints a direct warning when `http://127.0.0.1:8080` (or the configured backend) is unavailable.
 
 See [docs/releases/2.7.3-revision-55.2.md](docs/releases/2.7.3-revision-55.2.md).
 
@@ -133,7 +141,7 @@ The release defaults to a local OpenAI-compatible endpoint and automatic model d
 ```json
 {
   "llm": {
-    "base_url": "http://localhost:8080",
+    "base_url": "http://127.0.0.1:8080",
     "model": "auto",
     "openai_compatible": true,
     "max_tokens": 1500,

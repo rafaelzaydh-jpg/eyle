@@ -20,7 +20,10 @@ import io
 import json
 import os
 import sys
+import threading
+import time
 import urllib.error
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
@@ -460,3 +463,49 @@ def test_diagnosticar_backend_reporta_servidor_inacessivel(monkeypatch):
     assert resultado["reachable"] is False
     assert resultado["error_code"] == "BACKEND_UNREACHABLE"
     assert "conexao recusada" in resultado["detail"]
+
+
+class _DelayedOpenAIHandler(BaseHTTPRequestHandler):
+    response_delay = 0.25
+
+    def do_POST(self):
+        tamanho = int(self.headers.get("Content-Length", "0") or 0)
+        self.rfile.read(tamanho)
+        time.sleep(self.response_delay)
+        corpo = json.dumps({
+            "choices": [{"message": {"content": "resposta depois do connect timeout"}}],
+        }).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(corpo)))
+        self.end_headers()
+        self.wfile.write(corpo)
+
+    def log_message(self, format, *args):  # noqa: A003
+        return
+
+
+def test_connect_timeout_nao_cancela_geracao_antes_do_read_timeout():
+    """Regressao 55.3: llama-server envia cabecalhos depois da geracao.
+
+    Antes, _abrir_url passava connect_timeout=5s ao urlopen. Como urlopen
+    tambem usa esse valor para esperar a linha de status HTTP, toda resposta
+    nao-streaming acima de cinco segundos era cancelada pelo cliente.
+    """
+    servidor = ThreadingHTTPServer(("127.0.0.1", 0), _DelayedOpenAIHandler)
+    thread = threading.Thread(target=servidor.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{servidor.server_port}"
+    inicio = time.monotonic()
+    try:
+        resposta = llm_mod._chamar_openai_compatible(
+            base_url, "modelo-teste", "sistema", "usuario", 0.2,
+            timeout=0.05, read_timeout=1.0,
+        )
+    finally:
+        servidor.shutdown()
+        servidor.server_close()
+        thread.join(timeout=1.0)
+
+    assert resposta == "resposta depois do connect timeout"
+    assert time.monotonic() - inicio >= _DelayedOpenAIHandler.response_delay
