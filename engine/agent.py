@@ -75,6 +75,7 @@ import json
 import os
 import re
 import sys
+import time
 import uuid
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -89,10 +90,12 @@ from llm.executar import (  # noqa: E402
 from engine.agent_state import AgentState, GoalState  # noqa: E402
 from engine.text_hash import hash_texto, normalizar_quebras  # noqa: E402
 from engine.compiler import montar_prompt_agente  # noqa: E402
+from engine.grounding import verify_conclusion  # noqa: E402
 from engine.project_reader import ErroLeituraProjeto, ler_faixa_projeto  # noqa: E402
 from engine.retencao import rotacionar_arquivo  # noqa: E402
 from engine.roteador import classificar_modo_projeto  # noqa: E402
 from engine.seguranca import _resolver_caminho_seguro  # noqa: E402
+from engine import telemetry  # noqa: E402
 
 try:
     from engine.agent_tools import (  # noqa: E402
@@ -138,6 +141,59 @@ _RE_INTENCAO_ESCRITA = re.compile(
     r"substitu|atualiz|refator|patch|fix)\w*\b",
     re.IGNORECASE,
 )
+
+
+def _decisao_estruturalmente_valida(dados):
+    """Valida o envelope antes de escolher um objeto entre varios JSONs."""
+    if not isinstance(dados, dict):
+        return False
+    ramos = [chave for chave in ("tool", "final", "needs_user") if chave in dados]
+    if len(ramos) != 1:
+        return False
+    ramo = ramos[0]
+    if ramo == "tool":
+        return (
+            isinstance(dados.get("tool"), str)
+            and bool(dados["tool"].strip())
+            and isinstance(dados.get("arguments"), dict)
+        )
+    if ramo == "needs_user":
+        return isinstance(dados.get("needs_user"), str) and bool(dados["needs_user"].strip())
+    final = dados.get("final")
+    if isinstance(final, str):
+        return bool(final.strip())
+    if not isinstance(final, dict):
+        return False
+    resposta = final.get("answer", final.get("resposta"))
+    return isinstance(resposta, str) and bool(resposta.strip())
+
+
+def _limite_runtime(config):
+    runtime = (config or {}).get("_runtime_agent_budget") or {}
+    deadline = runtime.get("deadline_monotonic")
+    if deadline is not None and time.monotonic() >= float(deadline):
+        return "TASK_DEADLINE_EXCEEDED"
+    max_chamadas = runtime.get("max_llm_calls")
+    if max_chamadas is not None and int(runtime.get("llm_calls", 0)) >= int(max_chamadas):
+        return "MAX_LLM_CALLS_EXCEEDED"
+    max_tokens = runtime.get("max_generated_tokens")
+    if max_tokens is not None and int(runtime.get("generated_tokens", 0)) >= int(max_tokens):
+        return "MAX_GENERATED_TOKENS_EXCEEDED"
+    return None
+
+
+def _consumir_chamada_runtime(config, resposta=None):
+    runtime = (config or {}).get("_runtime_agent_budget")
+    if not isinstance(runtime, dict):
+        return
+    if resposta is None:
+        runtime["llm_calls"] = int(runtime.get("llm_calls", 0)) + 1
+        return
+    chars_por_token = max(
+        1, int((config or {}).get("context_engine", {}).get("chars_per_token_fallback", 3)),
+    )
+    estimativa = (len(str(resposta)) + chars_por_token - 1) // chars_por_token
+    runtime["generated_tokens"] = int(runtime.get("generated_tokens", 0)) + estimativa
 _RE_CITACAO_CODIGO = re.compile(
     r"(?P<arquivo>[\w./\\-]+\.(?:py|js|ts|tsx|jsx|json|html|css|md|yml|yaml))"
     r":(?P<inicio>\d+)(?:-(?P<fim>\d+))?",
@@ -344,25 +400,35 @@ def _resultado_pos_testes(estado, resultado_tool, projeto):
 
 
 def _parse_decisao_agente(texto):
-    """Extrai o primeiro objeto JSON reconhecivel da resposta da LLM.
+    """Extrai uma unica decisao JSON reconhecivel da resposta da LLM.
 
     O regex guloso antigo pegava do primeiro ``{`` ao ultimo ``}``; bastava o
     modelo escrever dois objetos, um exemplo ou uma chave entre chaves no
     raciocinio para ``json.loads`` falhar. O decoder incremental testa cada
     inicio de objeto e aceita somente o contrato interno do Agente.
+
+    Importante: duas decisoes estruturalmente validas tornam a resposta
+    ambigua. A versao anterior devolvia a primeira e podia executar um exemplo
+    em vez da decisao final do modelo. Agora, exatamente uma decisao valida e
+    exigida; objetos auxiliares invalidos continuam sendo ignorados.
     """
     bruto = str(texto or "")
     decoder = json.JSONDecoder()
+    candidatas = []
     for match in re.finditer(r"\{", bruto):
         try:
             dados, _ = decoder.raw_decode(bruto[match.start():])
         except json.JSONDecodeError:
             continue
-        if not isinstance(dados, dict):
-            continue
-        if "tool" in dados or "final" in dados or "needs_user" in dados:
-            return dados
-    return None
+        if _decisao_estruturalmente_valida(dados):
+            candidatas.append(dados)
+            if len(candidatas) > 1:
+                telemetry.record(
+                    "internal", "agent_json_parse", "ambiguous",
+                    metadata={"valid_objects": len(candidatas)},
+                )
+                return None
+    return candidatas[0] if candidatas else None
 
 
 def prompt_reforco_formato(prompt, resposta_llm):
@@ -411,6 +477,15 @@ def decidir_passo(prompt_usuario, config):
     resposta_bruta = ""
 
     while decisao is None and tentativa < max_tentativas:
+        limite_runtime = _limite_runtime(config)
+        if limite_runtime:
+            return {
+                "decisao": None,
+                "tentativas": tentativa,
+                "falhou": True,
+                "resposta_bruta": resposta_bruta,
+                "budget_exhausted": limite_runtime,
+            }
         tentativa += 1
         resposta_bruta = executar_agente_llm(prompt_atual, config)
         decisao = _parse_decisao_agente(resposta_bruta)
@@ -446,8 +521,8 @@ def _iniciar_trace(config=None):
         rotacionar_arquivo(_TRACE_PATH, max_files=max_files)
         with open(_TRACE_PATH, "w", encoding="utf-8"):
             pass
-    except OSError:
-        pass
+    except OSError as erro:
+        telemetry.record("internal", "agent_trace_init", "failed", metadata={"detail": str(erro)[:300]})
 
 
 def _continuar_trace():
@@ -457,8 +532,8 @@ def _continuar_trace():
     util pra depuracao."""
     try:
         os.makedirs(_CONTEXT_DIR, exist_ok=True)
-    except OSError:
-        pass
+    except OSError as erro:
+        telemetry.record("internal", "agent_trace_continue", "failed", metadata={"detail": str(erro)[:300]})
 
 
 def _registrar_trace(entrada):
@@ -469,8 +544,8 @@ def _registrar_trace(entrada):
         os.makedirs(_CONTEXT_DIR, exist_ok=True)
         with open(_TRACE_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(entrada, ensure_ascii=False) + "\n")
-    except OSError:
-        pass
+    except OSError as erro:
+        telemetry.record("internal", "agent_trace_write", "failed", metadata={"detail": str(erro)[:300]})
 
 
 def _registrar_trace_estado(estado, entrada):
@@ -767,7 +842,22 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
               "needs_user", com objetivo, estado, task_id, orçamento e ação
               pendente real ou marcador de resposta livre.
     """
+    # Copia apenas o envelope para anexar limites efemeros sem contaminar a
+    # configuracao global compartilhada pelo Flask/Worker.
+    config = dict(config or {})
     cfg_agente = config.get("agent", {})
+    if not isinstance(config.get("_runtime_agent_budget"), dict):
+        deadline_segundos = max(1, int(cfg_agente.get("task_deadline_seconds", 300)))
+        config["_runtime_agent_budget"] = {
+            "started_monotonic": time.monotonic(),
+            "deadline_monotonic": time.monotonic() + deadline_segundos,
+            "max_llm_calls": max(1, int(cfg_agente.get("max_llm_calls", 12))),
+            "max_generated_tokens": max(
+                1, int(cfg_agente.get("max_total_generated_tokens", 12000)),
+            ),
+            "llm_calls": 0,
+            "generated_tokens": 0,
+        }
     max_steps = cfg_agente.get("max_steps", 8)
     exigir_confirmacao_write = cfg_agente.get("require_confirmation_for_write", True)
     exigir_confirmacao_exec = cfg_agente.get("require_confirmation_for_exec", False)
@@ -1145,6 +1235,29 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
     # ferramenta adicional; formato invalido/final recusado usam a guarda
     # separada de decisoes sem progresso.
     while True:
+        limite_runtime = _limite_runtime(config)
+        if limite_runtime:
+            runtime = config.get("_runtime_agent_budget", {})
+            _registrar_trace_estado(estado, {
+                "step": estado.acoes_executadas + 1,
+                "tipo": "runtime_budget_exhausted",
+                "reason": limite_runtime,
+                "llm_calls": runtime.get("llm_calls", 0),
+                "generated_tokens": runtime.get("generated_tokens", 0),
+            })
+            return _retorno_agente(
+                "max_steps",
+                "O agente encerrou porque atingiu o limite global de tempo/chamadas da tarefa.",
+                None,
+                {
+                    "task_type": task_type, "mode": modo,
+                    "goal_state": estado.goal_state,
+                    "runtime_limit": limite_runtime,
+                    "llm_calls": runtime.get("llm_calls", 0),
+                    "generated_tokens": runtime.get("generated_tokens", 0),
+                },
+                retornar_detalhes,
+            )
         step = estado.acoes_executadas + 1
         invalidadas = _atualizar_frescor_evidencias(estado, projeto)
         if invalidadas:
@@ -1184,6 +1297,29 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
         else:
             resultado_passo = decidir_passo(prompt, config)
         decisao = resultado_passo["decisao"]
+
+        if resultado_passo.get("budget_exhausted"):
+            runtime = config.get("_runtime_agent_budget", {})
+            _registrar_trace_estado(estado, {
+                "step": step,
+                "tipo": "runtime_budget_exhausted",
+                "reason": resultado_passo["budget_exhausted"],
+                "llm_calls": runtime.get("llm_calls", 0),
+                "generated_tokens": runtime.get("generated_tokens", 0),
+            })
+            return _retorno_agente(
+                "max_steps",
+                "O agente encerrou porque atingiu o limite global de tempo/chamadas da tarefa.",
+                None,
+                {
+                    "task_type": task_type, "mode": modo,
+                    "goal_state": estado.goal_state,
+                    "runtime_limit": resultado_passo["budget_exhausted"],
+                    "llm_calls": runtime.get("llm_calls", 0),
+                    "generated_tokens": runtime.get("generated_tokens", 0),
+                },
+                retornar_detalhes,
+            )
 
         if resultado_passo["falhou"]:
             _registrar_trace_estado(estado, {
@@ -1325,6 +1461,34 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                         )
                     continue
                 conclusao["verificacao_sistema"] = motivo
+                verificacao_semantica = verify_conclusion(
+                    conclusao.get("resposta"),
+                    evidencias_usadas,
+                    config.get("agent", {}).get("semantic_grounding", {}),
+                )
+                conclusao["semantic_grounding"] = verificacao_semantica
+                if not verificacao_semantica.get("ok", False):
+                    resumo_semantico = verificacao_semantica.get("summary") or (
+                        "a conclusao contem afirmacoes objetivas sem suporte nas evidencias"
+                    )
+                    estado.observar_final_sem_grounding(resumo_semantico)
+                    if _sem_progresso(
+                        estado, max_sem_progresso, step,
+                        "final_recusado_semantica", resumo_semantico,
+                    ):
+                        return _retorno_agente(
+                            "needs_user",
+                            "A conclusao foi pausada porque ainda contem afirmacoes "
+                            "objetivas que nao aparecem nas evidencias declaradas.",
+                            None,
+                            {
+                                "task_type": task_type, "mode": modo,
+                                "goal_state": estado.goal_state,
+                                "semantic_grounding": verificacao_semantica,
+                            },
+                            retornar_detalhes,
+                        )
+                    continue
                 if task_type == "project_write":
                     edit_valido, motivo_edit = estado.validar_conclusao_edicao(
                         conclusao.get("evidence_ids") or [],
@@ -1365,6 +1529,7 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 ],
                 "verificacao": conclusao.get("verificacao"),
                 "verificacao_sistema": conclusao.get("verificacao_sistema"),
+                "semantic_grounding": conclusao.get("semantic_grounding"),
                 "limitacoes": conclusao.get("limitacoes", []),
                 "edit_state": _edit_state_publico(estado),
             }
@@ -1594,14 +1759,58 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 )
             continue
 
+        limite_runtime = _limite_runtime(config)
+        if limite_runtime:
+            runtime = config.get("_runtime_agent_budget", {})
+            _registrar_trace_estado(estado, {
+                "step": step, "tipo": "runtime_budget_before_tool",
+                "reason": limite_runtime, "tool": tool,
+            })
+            return _retorno_agente(
+                "max_steps",
+                "O agente encerrou antes da próxima ferramenta porque o prazo global acabou.",
+                None,
+                {
+                    "task_type": task_type, "mode": modo,
+                    "goal_state": estado.goal_state,
+                    "runtime_limit": limite_runtime,
+                    "llm_calls": runtime.get("llm_calls", 0),
+                    "generated_tokens": runtime.get("generated_tokens", 0),
+                },
+                retornar_detalhes,
+            )
+
         _checkpoint_acao({
             "tool": tool,
             "arguments": arguments,
             "permission": permissao,
             "idempotent": permissao == "READ",
         }, "action_started")
-        resultado_tool = executar_tool(
-            tool, arguments, {"config": config, "entendimento": entendimento, "projeto": projeto}
+        inicio_tool = time.monotonic()
+        try:
+            resultado_tool = executar_tool(
+                tool, arguments, {"config": config, "entendimento": entendimento, "projeto": projeto}
+            )
+        except Exception as erro_tool:
+            telemetry.record(
+                "tool", tool or "unknown", "exception",
+                (time.monotonic() - inicio_tool) * 1000,
+                task_id=(config.get("_runtime_agent_budget") or {}).get("task_id"),
+                job_id=(config.get("_runtime_agent_budget") or {}).get("source_job_id"),
+                metadata={"exception": type(erro_tool).__name__, "detail": str(erro_tool)[:500]},
+            )
+            raise
+        telemetry.record(
+            "tool", tool or "unknown",
+            "ok" if isinstance(resultado_tool, dict) and resultado_tool.get("ok") else "failed",
+            (time.monotonic() - inicio_tool) * 1000,
+            task_id=(config.get("_runtime_agent_budget") or {}).get("task_id"),
+            job_id=(config.get("_runtime_agent_budget") or {}).get("source_job_id"),
+            metadata={
+                "permission": permissao,
+                "error_code": resultado_tool.get("error_code") if isinstance(resultado_tool, dict) else None,
+                "changed": resultado_tool.get("changed") if isinstance(resultado_tool, dict) else None,
+            },
         )
         estado.registrar_chamada(tool, arguments)
         estado.registrar_resultado_tool(resultado_tool)  # Atualizacao 11
@@ -1630,6 +1839,28 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
             "resumo": entrada_observada["resumo"],
         })
         _checkpoint_acao(None, "action_completed")
+
+        ciclo = estado.registrar_fingerprint_ciclo(tool, resultado_tool)
+        if resultado_tool.get("ok") is True and ciclo.get("detectado"):
+            _registrar_trace_estado(estado, {
+                "step": step,
+                "tipo": "ciclo_de_estado_detectado",
+                "tool": tool,
+                "periodo": ciclo.get("periodo"),
+                "fingerprint": ciclo.get("fingerprint"),
+            })
+            return _retorno_agente(
+                "needs_user",
+                "O agente voltou ao mesmo estado observavel em um ciclo curto e foi pausado antes de gastar mais chamadas.",
+                None,
+                {
+                    "task_type": task_type,
+                    "mode": modo,
+                    "goal_state": estado.goal_state,
+                    "cycle_period": ciclo.get("periodo"),
+                },
+                retornar_detalhes,
+            )
 
         if resultado_tool.get("error_code") == "SYMBOL_NOT_FOUND":
             detalhe_simbolo = resultado_tool.get("detail")

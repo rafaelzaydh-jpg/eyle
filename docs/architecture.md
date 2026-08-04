@@ -1,9 +1,6 @@
 # Architecture
 
-Eyle is a local-first coding assistant that avoids placing an entire repository
-inside the model context. It stores a persistent external representation of the
-project, retrieves only relevant evidence, and validates answers and edits
-against fresh files on disk.
+Eyle is a local-first coding agent that avoids placing an entire repository inside the model context. It stores an external representation of the project, retrieves only relevant evidence, and validates answers and edits against fresh files on disk.
 
 ## Data flow
 
@@ -16,25 +13,35 @@ flowchart LR
   R --> A[Agent]
   B --> C[Context engine]
   C --> A
-  A --> T[Read / search / patch tools]
+  A --> T[Validated tools]
   T --> E[Fresh evidence and hashes]
-  E --> A
-  A --> V[Verification]
-  V --> O[Portuguese or user-language answer]
+  E --> G[Grounding and completion gates]
+  G --> A
+  A --> O[Answer or guarded edit workflow]
 ```
 
 ## Main components
 
-- `ingest.py` scans a project and creates small searchable chunks.
-- `retrieval/buscar.py` implements offline BM25 retrieval in Python.
-- `engine/context_engine.py` budgets the context sent to the model.
-- `engine/agent.py` runs the goal, evidence, action, and completion loop.
-- `engine/agent_tools.py` defines executable tool contracts and permissions.
-- `engine/agent_state.py` persists checkpoints and write-state transitions.
-- `engine/codar.py` performs dry runs, atomic patches, tests, and rollback.
+- `ingest.py` scans the project and creates searchable chunks.
+- `retrieval/buscar.py` implements offline BM25 retrieval and in-memory index reuse.
+- `engine/context_engine.py` budgets evidence sent to the model.
+- `engine/agent.py` runs the goal, evidence, action, cycle-detection, and completion loop.
+- `engine/agent_tools.py` defines executable contracts, schemas, limits, and permissions.
+- `engine/agent_state.py` persists checkpoints, evidence, fingerprints, and write transitions.
+- `engine/grounding.py` validates claims against evidence and blocks unsupported objective anchors.
+- `engine/codar.py` performs dry runs, atomic patches, configured tests, final reread, and rollback.
 - `engine/sandbox.py` enforces command allowlists and isolation policy.
-- `verify/validar.py` checks grounding and records warnings.
+- `engine/queue.py` and `engine/worker.py` provide persistent jobs, heartbeats, bounded reservation, child-process isolation, watchdogs, and parallel consumers.
+- `engine/process_limiter.py` limits LLM concurrency across threads and processes.
+- `engine/telemetry.py` stores duration/status metrics and computes P50/P95/P99.
+- `llm/executar.py` handles differentiated timeouts, retries, backoff, model discovery, budgets, and backend compatibility.
+- `llm/cache.py` stores validated prompt responses in SQLite and rejects poisoned entries.
+- `verify/validar.py` verifies citations, coverage, and grounding.
 - `web/routes.py` exposes the authenticated single-user web interface.
+
+## Completion and cycle protection
+
+A project answer is not accepted merely because the model emits `final`. Completion checks require relevant fresh evidence and valid references. Revision 53 also fingerprints material state and recent tool results to detect short periods such as `A-A`, `A-B-A-B`, and `A-B-C-A-B-C` before they consume the full task budget.
 
 ## Write state machine
 
@@ -51,4 +58,4 @@ stateDiagram-v2
   ROLLED_BACK --> COMPLETE
 ```
 
-The model proposes actions; the state machine controls the transition between them. Configuration and trust boundaries are documented in [configuration.md](configuration.md).
+The model proposes actions; deterministic state controls transitions. Configuration and trust boundaries are documented in [configuration.md](configuration.md).

@@ -26,10 +26,15 @@ instalar 'requests' nem nada -- funciona direto contra:
 """
 import json
 import os
+import random
 import re
+import socket
 import sys
+import threading
+import time
 import urllib.request
 import urllib.error
+from contextlib import contextmanager
 
 # garante que 'cache' (mesma pasta) e encontrado tanto quando este arquivo
 # e importado como llm.executar quanto quando rodado direto (python llm/executar.py)
@@ -43,16 +48,30 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 from engine.persistencia import salvar_texto_atomico  # noqa: E402
 from engine.config_schema import carregar_config_validada  # noqa: E402
+from engine import telemetry  # noqa: E402
+from engine import process_limiter  # noqa: E402
 
 
 class ErroLLM(RuntimeError):
     """Falha de transporte/backend; nunca representa uma resposta do modelo."""
+
+    def __init__(self, mensagem, *, transient=False, status_code=None,
+                 retry_after=None, error_code=None):
+        super().__init__(mensagem)
+        self.transient = bool(transient)
+        self.status_code = status_code
+        self.retry_after = retry_after
+        self.error_code = error_code
 
 
 # Deteccao basica, somente em memoria, do servidor OpenAI-compativel.
 # Evita gravar estado novo no projeto e reaprende a cada reinicio da Eyle.
 _CAPACIDADES_OPENAI = {}
 _MODELOS_OPENAI = {}
+_SEMAFOROS_LLM = {}
+_SEMAFOROS_LOCK = threading.Lock()
+_COOLDOWN_ATE = {}
+_COOLDOWN_LOCK = threading.Lock()
 _RE_BLOCO_RACIOCINIO = re.compile(
     r"<(?:think|analysis|reasoning)>.*?</(?:think|analysis|reasoning)>",
     re.IGNORECASE | re.DOTALL,
@@ -110,6 +129,102 @@ _SCHEMA_DECISAO_AGENTE = {
 }
 
 
+def _diagnostico(codigo, **campos):
+    """Log curto e estruturado; nunca interfere no resultado da chamada."""
+    try:
+        payload = {"code": codigo, **campos}
+        print("[llm] " + json.dumps(payload, ensure_ascii=False, default=str), file=sys.stderr)
+    except Exception:
+        pass
+
+
+def _retry_after_seconds(erro):
+    try:
+        valor = erro.headers.get("Retry-After")
+    except Exception:
+        valor = None
+    if valor is None:
+        return None
+    try:
+        return max(0.0, float(valor))
+    except (TypeError, ValueError):
+        return None
+
+
+def _erro_http(base_url, erro, corpo_erro=""):
+    codigo = getattr(erro, "code", None)
+    transitorio = codigo in (408, 425, 429, 500, 502, 503, 504)
+    return ErroLLM(
+        _mensagem_http_error(base_url, erro, corpo_erro),
+        transient=transitorio,
+        status_code=codigo,
+        retry_after=_retry_after_seconds(erro),
+        error_code="HTTP_TRANSIENT" if transitorio else "HTTP_PERMANENT",
+    )
+
+
+def _ajustar_timeout_leitura(resposta, read_timeout):
+    """urllib usa um timeout unico; apos conectar, troca o timeout do socket.
+
+    A cadeia interna varia entre Python/backends. A operacao e best-effort e
+    continua compativel com respostas falsas usadas nos testes.
+    """
+    if read_timeout is None:
+        return
+    candidatos = [
+        getattr(getattr(getattr(resposta, "fp", None), "raw", None), "_sock", None),
+        getattr(getattr(getattr(resposta, "fp", None), "raw", None), "socket", None),
+    ]
+    for sock in candidatos:
+        if sock is not None and hasattr(sock, "settimeout"):
+            try:
+                sock.settimeout(float(read_timeout))
+                return
+            except (OSError, TypeError, ValueError):
+                continue
+
+
+@contextmanager
+def _abrir_url(req, connect_timeout, read_timeout=None):
+    resposta = urllib.request.urlopen(req, timeout=connect_timeout)
+    try:
+        _ajustar_timeout_leitura(resposta, read_timeout)
+        yield resposta
+    finally:
+        try:
+            resposta.close()
+        except Exception:
+            pass
+
+
+def _semaforo_backend(chave, limite):
+    limite = max(1, int(limite or 1))
+    identidade = (chave, limite)
+    with _SEMAFOROS_LOCK:
+        return _SEMAFOROS_LLM.setdefault(
+            identidade, threading.BoundedSemaphore(limite),
+        )
+
+
+def _esperar_cooldown(chave, deadline=None):
+    with _COOLDOWN_LOCK:
+        ate = _COOLDOWN_ATE.get(chave, 0.0)
+    espera = max(0.0, ate - time.monotonic())
+    if deadline is not None:
+        espera = min(espera, max(0.0, deadline - time.monotonic()))
+    if espera > 0:
+        time.sleep(espera)
+
+
+def _ativar_cooldown(chave, segundos):
+    if segundos <= 0:
+        return
+    with _COOLDOWN_LOCK:
+        _COOLDOWN_ATE[chave] = max(
+            _COOLDOWN_ATE.get(chave, 0.0), time.monotonic() + segundos,
+        )
+
+
 def _endpoint_openai(base_url, recurso):
     """Aceita base_url com ou sem o sufixo /v1."""
     base = str(base_url or "").rstrip("/")
@@ -118,8 +233,8 @@ def _endpoint_openai(base_url, recurso):
     return base + "/v1/" + recurso.lstrip("/")
 
 
-def _detectar_modelos_openai(base_url, timeout):
-    """Consulta /v1/models quando disponivel; falha silenciosamente.
+def _detectar_modelos_openai(base_url, timeout, negative_ttl=60):
+    """Consulta /v1/models com cache positivo e negativo temporario.
 
     llama-server normalmente expoe um unico modelo/alias. A deteccao evita
     que um nome antigo em config.json derrube a comunicacao depois de trocar
@@ -128,29 +243,66 @@ def _detectar_modelos_openai(base_url, timeout):
     """
     chave = str(base_url or "").rstrip("/")
     if chave in _MODELOS_OPENAI:
-        return list(_MODELOS_OPENAI[chave])
+        cache = _MODELOS_OPENAI[chave]
+        if isinstance(cache, tuple):
+            return list(cache)
+        if isinstance(cache, dict):
+            if time.monotonic() < float(cache.get("expira", 0)):
+                return list(cache.get("modelos") or [])
+            _MODELOS_OPENAI.pop(chave, None)
 
     req = urllib.request.Request(_endpoint_openai(base_url, "models"))
     try:
-        with urllib.request.urlopen(req, timeout=min(max(float(timeout), 1.0), 5.0)) as resp:
+        limite = min(max(float(timeout), 0.1), 5.0)
+        with _abrir_url(req, limite, limite) as resp:
             corpo = json.loads(resp.read().decode("utf-8"))
-    except Exception:
+    except Exception as erro:
+        _MODELOS_OPENAI[chave] = {
+            "modelos": (),
+            "expira": time.monotonic() + max(1.0, float(negative_ttl or 60)),
+            "erro": f"{type(erro).__name__}: {erro}",
+        }
+        _diagnostico(
+            "MODEL_DISCOVERY_FAILED", base_url=chave,
+            error=f"{type(erro).__name__}: {erro}",
+        )
+        telemetry.record(
+            "internal", "model_discovery", "failed",
+            metadata={
+                "base_url": chave,
+                "exception": type(erro).__name__,
+                "detail": str(erro)[:500],
+                "fallback_strategy": "configured_model",
+            },
+        )
         return []
 
     modelos = []
     for item in corpo.get("data", []) if isinstance(corpo, dict) else []:
         if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"].strip():
             modelos.append(item["id"].strip())
+    # Resposta valida, inclusive lista vazia, tambem recebe TTL negativo para
+    # impedir nova consulta em cada decisao do agente.
     if modelos:
         _MODELOS_OPENAI[chave] = tuple(modelos)
+    else:
+        _MODELOS_OPENAI[chave] = {
+            "modelos": (),
+            "expira": time.monotonic() + max(1.0, float(negative_ttl or 60)),
+            "erro": "endpoint sem modelos",
+        }
+        telemetry.record(
+            "internal", "model_discovery", "empty",
+            metadata={"base_url": chave, "fallback_strategy": "configured_model"},
+        )
     return modelos
 
 
-def _resolver_modelo_openai(base_url, model, timeout):
+def _resolver_modelo_openai(base_url, model, timeout, negative_ttl=60):
     """Prefere o modelo configurado; corrige automaticamente o caso comum
     de llama-server com um unico modelo carregado e config desatualizada."""
     configurado = str(model or "").strip()
-    modelos = _detectar_modelos_openai(base_url, timeout)
+    modelos = _detectar_modelos_openai(base_url, timeout, negative_ttl=negative_ttl)
     if not modelos:
         return configurado
     if configurado in modelos:
@@ -269,7 +421,10 @@ Regras obrigatorias:
 5. Responda SOMENTE com o JSON pedido, sem nenhum texto antes ou depois."""
 
 
-def _chamar_ollama(base_url, model, prompt_sistema, prompt_usuario, temperature, timeout, forcar_json=False, max_tokens=None):
+def _chamar_ollama(
+    base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
+    forcar_json=False, max_tokens=None, read_timeout=None,
+):
     url = base_url.rstrip("/") + "/api/chat"
     options = {"temperature": temperature}
     if max_tokens:
@@ -290,7 +445,7 @@ def _chamar_ollama(base_url, model, prompt_sistema, prompt_usuario, temperature,
         payload["format"] = "json"
     dados = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=dados, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with _abrir_url(req, timeout, read_timeout or timeout) as resp:
         corpo = json.loads(resp.read().decode("utf-8"))
     return corpo.get("message", {}).get("content", "")
 
@@ -298,7 +453,7 @@ def _chamar_ollama(base_url, model, prompt_sistema, prompt_usuario, temperature,
 def _chamar_openai_compatible(
     base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
     forcar_json=False, max_tokens=None, usar_system_role=True,
-    desativar_raciocinio=False,
+    desativar_raciocinio=False, read_timeout=None,
 ):
     url = _endpoint_openai(base_url, "chat/completions")
     if usar_system_role:
@@ -339,7 +494,7 @@ def _chamar_openai_compatible(
             payload["chat_template_kwargs"] = {"enable_thinking": False}
     dados = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=dados, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with _abrir_url(req, timeout, read_timeout or timeout) as resp:
         corpo = json.loads(resp.read().decode("utf-8"))
     mensagem = corpo["choices"][0]["message"]
     conteudo = mensagem.get("content")
@@ -371,7 +526,7 @@ def _chamar_openai_compatible(
 
 def _chamar_openai_com_fallback(
     base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
-    forcar_json=False, max_tokens=None,
+    forcar_json=False, max_tokens=None, read_timeout=None,
 ):
     """Detecta duas incompatibilidades comuns sem perfil por familia de modelo.
 
@@ -402,6 +557,7 @@ def _chamar_openai_com_fallback(
             forcar_json=usar_json_nativo, max_tokens=max_tokens,
             usar_system_role=usar_system,
             desativar_raciocinio=usar_controles_raciocinio,
+            read_timeout=read_timeout,
         )
         if usar_json_nativo:
             capacidades["json_mode"] = True
@@ -414,7 +570,7 @@ def _chamar_openai_com_fallback(
         erro_inicial = primeiro_erro
         primeiro_corpo = _ler_corpo_http_error(primeiro_erro)
         if not _erro_pode_ser_incompatibilidade(primeiro_erro, primeiro_corpo):
-            raise ErroLLM(_mensagem_http_error(base_url, primeiro_erro, primeiro_corpo)) from primeiro_erro
+            raise _erro_http(base_url, primeiro_erro, primeiro_corpo) from primeiro_erro
 
     # Fallback 0: builds mais antigas podem aceitar schema JSON, mas rejeitar
     # apenas reasoning_effort/chat_template_kwargs. Retira so esses controles
@@ -425,6 +581,7 @@ def _chamar_openai_com_fallback(
                 base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
                 forcar_json=True, max_tokens=max_tokens,
                 usar_system_role=usar_system, desativar_raciocinio=False,
+                read_timeout=read_timeout,
             )
             capacidades["reasoning_controls"] = False
             capacidades["json_mode"] = True
@@ -436,10 +593,8 @@ def _chamar_openai_com_fallback(
             if not _erro_pode_ser_incompatibilidade(
                 erro_sem_controles, corpo_sem_controles,
             ):
-                raise ErroLLM(
-                    _mensagem_http_error(
-                        base_url, erro_sem_controles, corpo_sem_controles,
-                    )
+                raise _erro_http(
+                    base_url, erro_sem_controles, corpo_sem_controles,
                 ) from erro_sem_controles
             capacidades["reasoning_controls"] = False
 
@@ -450,6 +605,7 @@ def _chamar_openai_com_fallback(
                 base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
                 forcar_json=False, max_tokens=max_tokens,
                 usar_system_role=usar_system,
+                read_timeout=read_timeout,
             )
             capacidades["json_mode"] = False
             if usar_system:
@@ -459,9 +615,7 @@ def _chamar_openai_com_fallback(
             erro_apos_json = segundo_erro
             segundo_corpo = _ler_corpo_http_error(segundo_erro)
             if not _erro_pode_ser_incompatibilidade(segundo_erro, segundo_corpo):
-                raise ErroLLM(
-                    _mensagem_http_error(base_url, segundo_erro, segundo_corpo)
-                ) from segundo_erro
+                raise _erro_http(base_url, segundo_erro, segundo_corpo) from segundo_erro
     else:
         erro_apos_json = erro_inicial
         segundo_corpo = primeiro_corpo
@@ -472,6 +626,7 @@ def _chamar_openai_com_fallback(
             resposta = _chamar_openai_compatible(
                 base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
                 forcar_json=False, max_tokens=max_tokens, usar_system_role=False,
+                read_timeout=read_timeout,
             )
             capacidades["system_role"] = False
             if usar_json_nativo:
@@ -479,60 +634,95 @@ def _chamar_openai_com_fallback(
             return resposta
         except urllib.error.HTTPError as terceiro_erro:
             terceiro_corpo = _ler_corpo_http_error(terceiro_erro)
+            raise _erro_http(base_url, terceiro_erro, terceiro_corpo) from terceiro_erro
+
+    raise _erro_http(base_url, erro_apos_json, segundo_corpo) from erro_apos_json
+
+
+def _timeout_restante(config):
+    runtime = (config or {}).get("_runtime_agent_budget") or {}
+    deadline = runtime.get("deadline_monotonic")
+    if deadline is None:
+        return None
+    return max(0.0, float(deadline) - time.monotonic())
+
+
+def _reservar_orcamento_llm(config):
+    """Conta a chamada no ponto comum a TODOS os pipelines, apos cache miss."""
+    runtime = (config or {}).get("_runtime_agent_budget")
+    if not isinstance(runtime, dict):
+        return
+    max_calls = int(runtime.get("max_llm_calls", 0) or 0)
+    atual = int(runtime.get("llm_calls", 0) or 0)
+    if max_calls > 0 and atual >= max_calls:
+        raise ErroLLM(
+            "O limite global de chamadas LLM da tarefa foi atingido.",
+            transient=False, error_code="MAX_LLM_CALLS_EXCEEDED",
+        )
+    runtime["llm_calls"] = atual + 1
+
+
+def _registrar_tokens_gerados(config, resposta):
+    runtime = (config or {}).get("_runtime_agent_budget")
+    if not isinstance(runtime, dict):
+        return
+    chars_por_token = max(
+        1, int((config or {}).get("context_engine", {}).get("chars_per_token_fallback", 3)),
+    )
+    estimativa = (len(str(resposta or "")) + chars_por_token - 1) // chars_por_token
+    total = int(runtime.get("generated_tokens", 0) or 0) + estimativa
+    max_tokens = int(runtime.get("max_generated_tokens", 0) or 0)
+    runtime["generated_tokens"] = total
+    if max_tokens > 0 and total > max_tokens:
+        raise ErroLLM(
+            "O limite global aproximado de tokens gerados pela tarefa foi excedido.",
+            transient=False, error_code="MAX_GENERATED_TOKENS_EXCEEDED",
+        )
+
+
+def _timeouts_da_chamada(cfg_llm, perfil, config):
+    legado = float(cfg_llm.get("timeout_seconds", 180))
+    connect_timeout = float(cfg_llm.get("connect_timeout_seconds", min(legado, 10)))
+    perfil_chave = f"{perfil}_timeout_seconds" if perfil else None
+    read_timeout = float(
+        cfg_llm.get(perfil_chave, cfg_llm.get("read_timeout_seconds", legado))
+        if perfil_chave else cfg_llm.get("read_timeout_seconds", legado)
+    )
+    restante = _timeout_restante(config)
+    if restante is not None:
+        if restante <= 0:
             raise ErroLLM(
-                _mensagem_http_error(base_url, terceiro_erro, terceiro_corpo)
-            ) from terceiro_erro
+                "O prazo total da tarefa foi esgotado antes da chamada LLM.",
+                transient=False, error_code="TASK_DEADLINE_EXCEEDED",
+            )
+        connect_timeout = min(connect_timeout, restante)
+        read_timeout = min(read_timeout, restante)
+    return max(0.1, connect_timeout), max(0.1, read_timeout), restante
 
-    raise ErroLLM(
-        _mensagem_http_error(base_url, erro_apos_json, segundo_corpo)
-    ) from erro_apos_json
 
-
-def _chamar_llm(prompt_sistema, prompt_usuario, config, forcar_json=False):
-    """Funcao interna comum a todas as personalidades -- so muda o prompt de sistema.
-
-    Antes de chamar o servidor local, confere o cache por hash do prompt
-    completo (Atualizacao 2): pergunta identica, no mesmo contexto exato,
-    nao gasta uma chamada de LLM de novo.
-
-    forcar_json (Agente minimo, Atualizacao 1): quando True, tenta pedir ao
-    backend que a resposta venha em JSON puro. So faz sentido pra chamada do
-    Agente -- as demais personalidades continuam chamando sem esse parametro.
-
-    Atualizacao 15 -- teto de tokens de saida (max_tokens/num_predict):
-    nenhuma chamada aqui limitava quantos tokens o modelo podia gerar por
-    resposta. Caso real que motivou a correcao: um "oi" simples gerou uma
-    resposta de 600+ tokens (ainda incompleta) num modelo local rodando a
-    ~7 tokens/s, ate a chamada ser cancelada -- sem teto, uma resposta
-    trivial pode consumir o orcamento inteiro de timeout_seconds so' com
-    verbosidade. cfg_llm["max_tokens"] (default 700) e' passado como
-    "num_predict" pro Ollama e "max_tokens" pro backend OpenAI-compatible
-    -- 0/None desliga o teto (comportamento antigo), pra quem preferir
-    sem limite.
-
-    Atualizacao 20 -- falhas de rede/backend levantam ``ErroLLM`` em vez
-    de devolver uma string ``[erro]`` confundivel com resposta valida. Os
-    pipelines capturam essa excecao e encerram com status ``failed`` sem
-    Verify, cache ou mensagem de assistente no historico."""
+def _chamar_llm_impl(prompt_sistema, prompt_usuario, config, forcar_json=False, perfil=None):
+    """Chama o backend com cache seguro, limites separados e retry transitório."""
     cfg_llm = config.get("llm", {})
     base_url = cfg_llm.get("base_url", "http://localhost:11434")
     model = cfg_llm.get("model", "qwen2.5:7b-instruct-q4_0")
     temperature = cfg_llm.get("temperature", 0.2)
-    timeout = cfg_llm.get("timeout_seconds", 180)
     openai_compatible = cfg_llm.get("openai_compatible", False)
     max_tokens = cfg_llm.get("max_tokens", 700)
+    connect_timeout, read_timeout, deadline_restante = _timeouts_da_chamada(
+        cfg_llm, perfil, config,
+    )
 
-    # Em llama-server/OpenAI-compatible, consulta /v1/models quando existe.
-    # Se houver um unico modelo carregado, ele prevalece sobre um nome antigo
-    # deixado no config.json. Em servidores com varios modelos, preserva o nome
-    # configurado para nao escolher um modelo arbitrariamente.
     if openai_compatible:
-        model = _resolver_modelo_openai(base_url, model, timeout)
+        descoberta_timeout = min(
+            connect_timeout,
+            float(cfg_llm.get("model_discovery_timeout_seconds", 3)),
+        )
+        model = _resolver_modelo_openai(
+            base_url, model, descoberta_timeout,
+            negative_ttl=cfg_llm.get("model_discovery_negative_ttl_seconds", 60),
+        )
 
     cache_cfg = cfg_llm.get("cache", {})
-    # Decisoes do Agente nao entram no cache. Uma resposta estrutural invalida
-    # cacheada envenenava todas as repeticoes da mesma tarefa: o retry voltava
-    # a receber exatamente o mesmo texto ruim sem consultar o modelo de novo.
     cache_ativado = bool(cache_cfg.get("ativado", True)) and not forcar_json
     cfg_fingerprint = dict(cfg_llm)
     cfg_fingerprint["model"] = model
@@ -545,48 +735,154 @@ def _chamar_llm(prompt_sistema, prompt_usuario, config, forcar_json=False):
             BASE_DIR, backend_fingerprint, prompt_sistema, prompt_usuario,
             max_entradas=cache_cfg.get("max_entradas", 500),
             max_age_days=cache_cfg.get("max_age_days", 30),
+            hit_flush_interval=cache_cfg.get("hit_flush_interval", 20),
         )
         if cacheada is not None:
-            # Compatibilidade defensiva com caches produzidos por versoes
-            # antigas ou preenchidos manualmente. Erros nunca deveriam ter
-            # sido cacheados, mas tambem nao podem voltar como resposta real.
-            if cacheada.startswith("[erro]"):
+            # Compatibilidade com implementacoes externas/mocks de cache e
+            # arquivos antigos ainda nao saneados pela nova camada.
+            if cacheada.lstrip().lower().startswith("[erro]"):
                 raise ErroLLM(cacheada[len("[erro]"):].strip())
-            return cacheada
+            if not _cache.resposta_cacheavel(cacheada):
+                _cache.invalidar(
+                    BASE_DIR, backend_fingerprint, prompt_sistema, prompt_usuario,
+                )
+                _diagnostico(
+                    "POISONED_CACHE_ENTRY_REMOVED",
+                    backend=backend_fingerprint[:16],
+                )
+            else:
+                return cacheada
+
+    _reservar_orcamento_llm(config)
+
+    tentativas = max(1, int(cfg_llm.get("retry_max_attempts", 3)))
+    base_delay = max(0.0, float(cfg_llm.get("retry_base_delay_seconds", 0.5)))
+    max_delay = max(base_delay, float(cfg_llm.get("retry_max_delay_seconds", 2.0)))
+    jitter = max(0.0, float(cfg_llm.get("retry_jitter_seconds", 0.2)))
+    cooldown = max(0.0, float(cfg_llm.get("cooldown_seconds", 2.0)))
+    chave_backend = (
+        str(base_url).rstrip("/"), str(model), bool(openai_compatible),
+    )
+    semaforo = _semaforo_backend(
+        chave_backend, cfg_llm.get("max_concurrent_requests", 1),
+    )
+    restante = _timeout_restante(config)
+    espera_semaforo = read_timeout if restante is None else min(read_timeout, restante)
+    if not semaforo.acquire(timeout=max(0.1, espera_semaforo)):
+        raise ErroLLM(
+            "A fila interna de chamadas LLM excedeu o prazo disponivel.",
+            transient=True, error_code="LLM_RATE_LIMIT_WAIT_TIMEOUT",
+        )
+
+    limite_processos = max(1, int(cfg_llm.get("max_concurrent_requests", 1)))
+    lease_seconds = max(
+        30.0,
+        (connect_timeout + read_timeout + max_delay + cooldown) * tentativas + 30.0,
+    )
+    try:
+        slot_processo = process_limiter.acquire(
+            chave_backend, limit=limite_processos,
+            timeout=max(0.1, espera_semaforo), lease_seconds=lease_seconds,
+        )
+    except Exception:
+        semaforo.release()
+        raise
+    if slot_processo is None:
+        semaforo.release()
+        raise ErroLLM(
+            "A fila entre processos de chamadas LLM excedeu o prazo disponivel.",
+            transient=True, error_code="LLM_PROCESS_RATE_LIMIT_WAIT_TIMEOUT",
+        )
 
     try:
-        if openai_compatible:
-            resposta = _chamar_openai_com_fallback(
-                base_url, model, prompt_sistema, prompt_usuario, temperature,
-                timeout, forcar_json=forcar_json, max_tokens=max_tokens,
+        ultimo_erro = None
+        for tentativa in range(1, tentativas + 1):
+            _esperar_cooldown(
+                chave_backend,
+                deadline=(config.get("_runtime_agent_budget") or {}).get("deadline_monotonic"),
             )
+            connect_atual, read_atual, _ = _timeouts_da_chamada(cfg_llm, perfil, config)
+            try:
+                if openai_compatible:
+                    resposta = _chamar_openai_com_fallback(
+                        base_url, model, prompt_sistema, prompt_usuario, temperature,
+                        connect_atual, forcar_json=forcar_json, max_tokens=max_tokens,
+                        read_timeout=read_atual,
+                    )
+                else:
+                    resposta = _chamar_ollama(
+                        base_url, model, prompt_sistema, prompt_usuario, temperature,
+                        connect_atual, forcar_json=forcar_json, max_tokens=max_tokens,
+                        read_timeout=read_atual,
+                    )
+                if forcar_json:
+                    resposta = _limpar_resposta_estruturada(resposta)
+                if not isinstance(resposta, str) or not resposta.strip():
+                    raise ErroLLM(
+                        "O backend respondeu sem conteúdo utilizável.",
+                        transient=True, error_code="EMPTY_RESPONSE",
+                    )
+                ultimo_erro = None
+                break
+            except urllib.error.HTTPError as erro_http:
+                ultimo_erro = _erro_http(
+                    base_url, erro_http, _ler_corpo_http_error(erro_http),
+                )
+            except (
+                urllib.error.URLError, socket.timeout, TimeoutError,
+                ConnectionError,
+            ) as erro_rede:
+                ultimo_erro = ErroLLM(
+                    f"Nao foi possivel conectar/ler em {base_url}. Detalhe: {erro_rede}",
+                    transient=True, error_code="TRANSPORT_ERROR",
+                )
+            except ErroLLM as erro_llm:
+                ultimo_erro = erro_llm
+            except Exception as erro_inesperado:
+                ultimo_erro = ErroLLM(
+                    f"Falha ao chamar a LLM local: {erro_inesperado}",
+                    transient=False, error_code="UNEXPECTED_LLM_ERROR",
+                )
+
+            if not ultimo_erro.transient or tentativa >= tentativas:
+                raise ultimo_erro
+
+            if ultimo_erro.status_code in (429, 503):
+                _ativar_cooldown(
+                    chave_backend,
+                    ultimo_erro.retry_after if ultimo_erro.retry_after is not None else cooldown,
+                )
+            atraso = ultimo_erro.retry_after
+            if atraso is None:
+                atraso = min(max_delay, base_delay * (2 ** (tentativa - 1)))
+                if jitter:
+                    atraso += random.uniform(0, jitter)
+            restante = _timeout_restante(config)
+            if restante is not None:
+                if restante <= 0:
+                    raise ErroLLM(
+                        "O prazo total da tarefa foi esgotado durante os retries da LLM.",
+                        transient=False, error_code="TASK_DEADLINE_EXCEEDED",
+                    )
+                atraso = min(atraso, restante)
+            _diagnostico(
+                "LLM_RETRY", attempt=tentativa, max_attempts=tentativas,
+                delay_seconds=round(atraso, 3), status_code=ultimo_erro.status_code,
+                error_code=ultimo_erro.error_code,
+            )
+            if atraso > 0:
+                time.sleep(atraso)
         else:
-            resposta = _chamar_ollama(base_url, model, prompt_sistema, prompt_usuario, temperature, timeout, forcar_json=forcar_json, max_tokens=max_tokens)
-    except urllib.error.HTTPError as e:
-        # Bug: HTTPError e' subclasse de URLError -- se este except viesse
-        # DEPOIS do "except URLError" (como estava antes), um erro HTTP
-        # (400/404/500...) seria pego la e reportado como "nao foi possivel
-        # conectar", que e' enganoso: o servidor respondeu, so recusou o
-        # pedido. Le o corpo da resposta (quando o backend manda um JSON de
-        # erro, o que e' comum) porque e' exatamente o que explica O QUE
-        # esta errado no pedido -- payload no formato errado para esse
-        # backend, campo nao suportado (ex: "format"/"response_format"),
-        # nome de modelo desconhecido, etc.
-        corpo_erro = _ler_corpo_http_error(e)
-        raise ErroLLM(_mensagem_http_error(base_url, e, corpo_erro)) from e
-    except urllib.error.URLError as e:
-        raise ErroLLM(
-            f"Nao foi possivel conectar em {base_url}. "
-            f"Verifique se o servidor local (Ollama/LM Studio/llama.cpp) esta rodando. Detalhe: {e}"
-        ) from e
-    except ErroLLM:
-        raise
-    except Exception as e:
-        raise ErroLLM(f"Falha ao chamar a LLM local: {e}") from e
+            raise ultimo_erro or ErroLLM("Falha desconhecida na LLM")
+    finally:
+        process_limiter.release(slot_processo)
+        semaforo.release()
 
-    if forcar_json:
-        resposta = _limpar_resposta_estruturada(resposta)
+    _registrar_tokens_gerados(config, resposta)
 
+    # So publica no cache depois de todos os gates locais terem aceitado a
+    # resposta. Assim uma resposta que estoura o orçamento da tarefa nao vira
+    # um atalho permanente para sessoes futuras.
     if cache_ativado:
         _cache.definir(
             BASE_DIR, backend_fingerprint, prompt_sistema, prompt_usuario, resposta,
@@ -595,6 +891,44 @@ def _chamar_llm(prompt_sistema, prompt_usuario, config, forcar_json=False):
         )
 
     return resposta
+
+
+def _chamar_llm(prompt_sistema, prompt_usuario, config, forcar_json=False, perfil=None):
+    """Fronteira observavel de toda chamada LLM, inclusive pipelines legados."""
+    inicio = time.monotonic()
+    runtime = (config or {}).get("_runtime_agent_budget") or {}
+    chamadas_antes = int(runtime.get("llm_calls", 0) or 0)
+    status = "ok"
+    metadata = {"profile": perfil or "default", "structured": bool(forcar_json)}
+    try:
+        resposta = _chamar_llm_impl(
+            prompt_sistema, prompt_usuario, config,
+            forcar_json=forcar_json, perfil=perfil,
+        )
+        chamadas_depois = int(runtime.get("llm_calls", 0) or 0)
+        if chamadas_depois == chamadas_antes:
+            status = "cache_hit"
+        metadata["estimated_output_chars"] = len(str(resposta or ""))
+        return resposta
+    except ErroLLM as erro:
+        status = "error"
+        metadata.update({
+            "error_code": erro.error_code,
+            "status_code": erro.status_code,
+            "transient": erro.transient,
+        })
+        raise
+    except Exception as erro:
+        status = "exception"
+        metadata.update({"exception": type(erro).__name__, "detail": str(erro)[:500]})
+        raise
+    finally:
+        telemetry.record(
+            "llm", perfil or "default", status,
+            (time.monotonic() - inicio) * 1000,
+            task_id=runtime.get("task_id"), job_id=runtime.get("source_job_id"),
+            metadata=metadata,
+        )
 
 
 PROMPT_CHAT = """Voce e a Eyle, uma assistente de IA local que roda no computador do usuario.
@@ -664,7 +998,10 @@ def executar_agente(prompt_usuario, config):
     assim e' o retry em engine/agent.py."""
     cfg_agente = config.get("agent", {})
     forcar_json = cfg_agente.get("usar_json_mode_se_suportado", True)
-    return _chamar_llm(PROMPT_AGENTE, prompt_usuario, config, forcar_json=forcar_json)
+    return _chamar_llm(
+        PROMPT_AGENTE, prompt_usuario, config,
+        forcar_json=forcar_json, perfil="agent",
+    )
 
 
 def executar_chat(pergunta, config, historico=None):
@@ -674,24 +1011,24 @@ def executar_chat(pergunta, config, historico=None):
     if historico:
         linhas = [f"{m['role']}: {m['text']}" for m in historico]
         prompt_usuario = "HISTORICO RECENTE DA CONVERSA:\n" + "\n".join(linhas) + f"\n\nMENSAGEM ATUAL:\n{pergunta}"
-    return _chamar_llm(PROMPT_CHAT, prompt_usuario, config)
+    return _chamar_llm(PROMPT_CHAT, prompt_usuario, config, perfil="read")
 
 
 def executar_analista(prompt_usuario, config):
     """Primeira chamada da LLM: decide o que importa. Nunca gera codigo, nunca responde ao usuario."""
-    return _chamar_llm(PROMPT_ANALISTA, prompt_usuario, config)
+    return _chamar_llm(PROMPT_ANALISTA, prompt_usuario, config, perfil="read")
 
 
 def executar_executor(prompt_usuario, config):
     """Segunda chamada da LLM: resolve o objetivo com o contexto ja compilado."""
-    return _chamar_llm(PROMPT_EXECUTOR, prompt_usuario, config)
+    return _chamar_llm(PROMPT_EXECUTOR, prompt_usuario, config, perfil="executor")
 
 
 def executar_sugestor(prompt_usuario, config):
     """Quarta personalidade (Atualizacao 4): le o codigo real dos componentes
     ja escolhidos pelo Modelo Interno e devolve sugestoes fundamentadas.
     Nunca aplica nada -- so sugere."""
-    return _chamar_llm(PROMPT_SUGESTOR, prompt_usuario, config)
+    return _chamar_llm(PROMPT_SUGESTOR, prompt_usuario, config, perfil="read")
 
 
 def executar_engenheiro(prompt_usuario, config):
@@ -699,7 +1036,7 @@ def executar_engenheiro(prompt_usuario, config):
     de UM simbolo ja localizado por linha no arquivo real. Devolve o JSON
     de proposta -- quem aplica de fato (so apos confirmacao) e
     engine/codar.py:aplicar_patch, chamado por engine/engine.py."""
-    return _chamar_llm(PROMPT_ENGENHEIRO, prompt_usuario, config)
+    return _chamar_llm(PROMPT_ENGENHEIRO, prompt_usuario, config, perfil="executor")
 
 
 def executar_entendedor(prompt_usuario, config):
@@ -707,7 +1044,7 @@ def executar_entendedor(prompt_usuario, config):
     devolve o retrato estrutural dele para o Modelo Interno do Projeto
     (memory/entendimento.json). Nunca gera codigo, nunca responde ao usuario --
     so descreve o arquivo que acabou de ler."""
-    return _chamar_llm(PROMPT_ENTENDEDOR, prompt_usuario, config)
+    return _chamar_llm(PROMPT_ENTENDEDOR, prompt_usuario, config, perfil="executor")
 
 
 def main():

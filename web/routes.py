@@ -39,6 +39,7 @@ sys.path.insert(0, BASE_DIR)
 from flask import Flask, jsonify, render_template, request
 
 from engine import queue
+from engine import telemetry
 from engine import engine as eyle_engine
 from engine.config_schema import carregar_config_validada
 
@@ -112,8 +113,15 @@ def _carregar_config_web():
 def _ler_token_arquivo(caminho):
     try:
         os.chmod(caminho, 0o600)
-    except OSError:
-        pass
+    except OSError as erro:
+        telemetry.record(
+            "internal", "web_token_permissions", "failed",
+            metadata={
+                "path": os.path.basename(caminho),
+                "exception": type(erro).__name__,
+                "detail": str(erro)[:300],
+            },
+        )
     with open(caminho, "r", encoding="utf-8") as arquivo:
         token = arquivo.read().strip()
     if len(token) < 32:
@@ -312,15 +320,49 @@ def status():
     projeto = eyle_engine.carregar_projeto()
     caminho_projeto = projeto.get("caminho_origem") if isinstance(projeto, dict) else None
     caminhos_internos = (caminho_projeto, BASE_DIR)
-    fila = _redigir_caminhos_internos(queue.estatisticas(), caminhos_internos)
+    config = carregar_config_validada(CONFIG_PATH)
+    worker_cfg = config.get("worker", {})
+    telemetry_cfg = config.get("telemetry", {})
+    fila = _redigir_caminhos_internos(
+        queue.estatisticas(
+            stale_after_seconds=worker_cfg.get("stale_worker_seconds", 30),
+            blocked_after_seconds=worker_cfg.get("head_of_line_blocked_seconds", 60),
+        ),
+        caminhos_internos,
+    )
     projeto_publico = _redigir_caminhos_internos(
         _projeto_publico(projeto), caminhos_internos,
+    )
+    metricas = (
+        telemetry.summary(telemetry_cfg.get("window_seconds", 3600))
+        if telemetry_cfg.get("enabled", True) else {"enabled": False}
     )
     return jsonify({
         "projeto": projeto_publico,
         "eventos_na_fila": queue.tamanho(),
         "fila": fila,
+        "metricas": metricas,
+        "avisos_config": config.get("_config_warnings", []),
     })
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    config = carregar_config_validada(CONFIG_PATH)
+    worker_cfg = config.get("worker", {})
+    fila = queue.estatisticas(
+        stale_after_seconds=worker_cfg.get("stale_worker_seconds", 30),
+        blocked_after_seconds=worker_cfg.get("head_of_line_blocked_seconds", 60),
+    )
+    healthy = fila.get("live_workers", 0) > 0 and not fila.get("head_of_line_blocked")
+    code = 200 if healthy else 503
+    return jsonify({
+        "status": "ok" if healthy else "degraded",
+        "live_workers": fila.get("live_workers", 0),
+        "head_of_line_blocked": fila.get("head_of_line_blocked", False),
+        "oldest_pending_seconds": fila.get("oldest_pending_seconds"),
+        "oldest_processing_seconds": fila.get("oldest_processing_seconds"),
+    }), code
 
 
 @app.route("/jobs/<int:job_id>", methods=["GET"])

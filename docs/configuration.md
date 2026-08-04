@@ -1,10 +1,10 @@
 # Configuration
 
-Eyle reads `config.json` from the repository root.
+Eyle reads `config.json` from the repository root. The shipped file is intentionally conservative: agent rollout is `read_only`, trusted project paths are empty, and project test execution is disabled until the operator configures and validates the environment.
 
 ## Local model backend
 
-The default file targets an OpenAI-compatible local server:
+The default targets an OpenAI-compatible local server:
 
 ```json
 {
@@ -14,45 +14,115 @@ The default file targets an OpenAI-compatible local server:
     "model": "auto",
     "openai_compatible": true,
     "max_tokens": 1500,
-    "context_window_tokens": 8192
+    "context_window_tokens": 8192,
+    "connect_timeout_seconds": 5,
+    "read_timeout_seconds": 120,
+    "agent_timeout_seconds": 90,
+    "executor_timeout_seconds": 180,
+    "retry_max_attempts": 3
   }
 }
 ```
 
-Use `openai_compatible: true` for LM Studio, llama.cpp server, and other local
-servers exposing `/v1/chat/completions`. With Ollama's native API, set the
-provider and compatibility flag according to the comments already included in
-`config.json`.
+Use `openai_compatible: true` for LM Studio, llama.cpp server, and compatible `/v1/chat/completions` endpoints. For native Ollama mode, set the provider, URL, model, and compatibility flag according to the comments in `config.json`.
 
-## Model baseline
+`model: "auto"` selects the only model reported by `/v1/models`. If several models are loaded, configure the exact model identifier.
 
-The supported baseline for supervised editing is **LiquidAI/LFM2.5-8B-A1B** or a compatible quantization. Benchmark the exact build used on the target machine.
+## Timeouts, retries, and budgets
+
+Revision 51–53 separates connection, read, model-discovery, agent, and executor timeouts. Transient failures can retry with capped exponential backoff, jitter, cooldown, and `Retry-After` support. Permanent client errors do not retry.
+
+The task-level deadline and budgets remain authoritative even when an individual operation allows more time:
+
+```json
+{
+  "context": {
+    "task_deadline_seconds": 300,
+    "executor_retry_base_delay_seconds": 0.5,
+    "executor_retry_max_delay_seconds": 2.0
+  },
+  "agent": {
+    "task_deadline_seconds": 300,
+    "max_llm_calls": 12,
+    "max_total_generated_tokens": 12000
+  }
+}
+```
 
 ## Agent rollout
 
 ```json
 {
   "agent": {
-    "rollout_mode": "full",
-    "trusted_project_paths": ["workspace"],
-    "enabled_modes": ["analyze", "suggest", "edit"]
+    "rollout_mode": "read_only",
+    "trusted_project_paths": [],
+    "enabled_modes": ["analyze", "suggest", "edit"],
+    "require_confirmation_for_write": true
   }
 }
 ```
 
-- `off`: use the earlier non-agent pipelines.
-- `read_only`: allow inspection and suggestions, but block writes and execution.
-- `full`: enable the supervised edit cycle only for paths listed in `trusted_project_paths`. Every write still requires explicit confirmation.
+- `off`: uses the earlier non-agent pipelines.
+- `read_only`: allows inspection and suggestions; blocks `WRITE` and `EXEC`.
+- `full`: enables the guarded edit cycle only for paths explicitly listed in `trusted_project_paths`.
 
-The repository default trusts only `workspace/`. External paths automatically fall back to `read_only`; add them only after repeated real-model benchmark runs.
+Do not switch to `full` merely to remove a warning. First run the benchmark with the exact model and target repository, define the trusted path narrowly, review the sandbox, and keep explicit write confirmation enabled.
+
+Example for a project copied under the repository workspace:
+
+```json
+{
+  "agent": {
+    "rollout_mode": "full",
+    "trusted_project_paths": ["workspace"]
+  }
+}
+```
+
+## Project test execution
+
+The package ships with project test execution disabled:
+
+```json
+{
+  "codar": {
+    "testes": {
+      "ativado": false
+    }
+  }
+}
+```
+
+Enable it only after configuring an allowed command and an isolation backend that meets the intended policy. Eyle fails closed when the requested sandbox guarantees cannot be satisfied.
+
+## Worker and queue
+
+```json
+{
+  "worker": {
+    "max_parallel_jobs": 2,
+    "isolate_jobs": true,
+    "job_deadline_seconds": 315,
+    "heartbeat_interval_seconds": 5,
+    "stale_worker_seconds": 30
+  }
+}
+```
+
+Jobs run in terminable child processes by default. Queue reservation is bounded, stale workers are recoverable, and status reports head-of-line blocking.
+
+## Cache and telemetry
+
+The LLM cache, queue, process limiter, and telemetry use SQLite under `context/`. Legacy JSON cache entries are migrated automatically. Empty responses and structured failure envelopes are invalidated instead of being returned as successful answers.
+
+Telemetry can expose call/tool/job status and latency percentiles without publishing prompt contents.
 
 ## Runtime data
 
 The following directories are intentionally ignored by Git:
 
 - `workspace/`: projects being analyzed;
-- `memory/`: indexed project memory and history;
-- `context/`: model cache, queue, traces, tokens, confirmations, and backups.
+- `memory/`: generated project memory and history;
+- `context/`: cache, queue, traces, tokens, confirmations, telemetry, and backups.
 
-Never publish these folders without reviewing their contents for source code,
-credentials, private conversation data, and local paths.
+Never publish their contents without reviewing them for source code, credentials, private conversations, and local paths.

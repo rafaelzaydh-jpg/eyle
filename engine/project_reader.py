@@ -117,7 +117,7 @@ def _corresponde_filtro(caminho_relativo, filtro):
 
 
 def listar_arvore_projeto(caminho_projeto, limite=200, profundidade=6,
-                          filtro=None):
+                          filtro=None, max_secret_scan_bytes=64 * 1024):
     """Lista a arvore atual respeitando filtros de ingestao e limites.
 
     Os motivos ignorados sao contagens, nunca nomes de arquivos secretos.
@@ -208,7 +208,7 @@ def listar_arvore_projeto(caminho_projeto, limite=200, profundidade=6,
                 continue
             try:
                 with open(caminho_seguro, "r", encoding="utf-8", errors="replace") as arquivo:
-                    amostra = arquivo.read(512 * 1024)
+                    amostra = arquivo.read(max(1024, int(max_secret_scan_bytes)))
             except OSError:
                 ignorados["erro_leitura"] += 1
                 continue

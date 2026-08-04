@@ -1,6 +1,6 @@
 # Publishing on GitHub
 
-## Recommended repository metadata
+## Repository metadata
 
 **Repository name**
 
@@ -11,7 +11,7 @@ eyle
 **Description**
 
 ```text
-Local-first supervised coding agent for LFM2.5-8B-A1B with external memory, BM25 retrieval, confirmed patches, tests and rollback.
+Local-first supervised coding agent with external memory, BM25 retrieval, grounded answers, guarded patches, tests, rollback, telemetry and cycle protection.
 ```
 
 **Topics**
@@ -42,20 +42,43 @@ function-calling
 
 1. Review `config.json` for local paths, model names, and secrets.
 2. Confirm that `memory/`, `context/`, and `workspace/` contain only `.gitkeep`.
-3. Choose a license. The repository currently defaults to all rights reserved.
-4. Create the repository without an auto-generated README or `.gitignore`.
-5. Push this folder, then enable Issues and private vulnerability reporting.
+3. Confirm there are no `__pycache__`, `.pytest_cache`, `.pyc`, SQLite, trace, log, or JSONL runtime files.
+4. Run release identity, compilation, and tests.
+5. Review the license. The repository currently defaults to all rights reserved.
 6. Upload `assets/eyle-social-preview.png` under **Settings → General → Social preview**.
 7. Add the description and topics above.
-8. Pin the repository on your profile and mention “Minimum recommended model: LFM2.5-8B-A1B” in the About section if space allows.
+8. Create a GitHub release for `v2.7.3` and attach the clean ZIP if desired.
 
-## Initial Git commands
+## Updating the existing repository to 2.7.3
+
+Copy the contents of this package over the local clone, then run:
+
+```bash
+git checkout main
+git pull --ff-only origin main
+git add -A
+git commit -m "Release Eyle 2.7.3 revision 53"
+git tag -a v2.7.3 -m "Eyle 2.7.3 revision 53"
+git push origin main
+git push origin v2.7.3
+```
+
+Before committing:
+
+```bash
+python engine/release_identity.py
+python -m compileall -q .
+python -m pytest -q
+git status --short
+```
+
+## First publication only
 
 ```bash
 git init
 git add .
 git commit -m "Initial public release"
 git branch -M main
-git remote add origin https://github.com/SEU_USUARIO/eyle.git
+git remote add origin https://github.com/rafaelzaydh-jpg/eyle.git
 git push -u origin main
 ```

@@ -5,7 +5,7 @@
     "model": "auto",
     "openai_compatible": true,
     "temperature": 0.2,
-    "timeout_seconds": 600,
+    "timeout_seconds": 120,
     "max_tokens": 1500,
     "context_window_tokens": 8192,
     "_comentario_context_window_tokens": "Janela usada pela Eyle. Inicie o llama-server com --ctx-size 10240 para manter folga de tokenizacao e resposta.",
@@ -14,11 +14,24 @@
       "ativado": true,
       "max_entradas": 500,
       "max_age_days": 30,
-      "_comentario": "cacheia resposta por hash do prompt COMPLETO (modelo+temperatura+sistema+usuario), nao so da pergunta -- muda o contexto (retrieval/historico/evidencias), muda a chave, cache nunca fica desatualizado. Fica em context/cache_llm.json"
+      "_comentario": "Cache SQLite por hash do prompt completo em context/cache_llm.sqlite3; cache_llm.json legado e migrado automaticamente uma vez.",
+      "hit_flush_interval": 20
     },
     "_comentario_provider": "use 'ollama' para Ollama nativo, ou defina openai_compatible=true para LM Studio / llama.cpp server / text-generation-webui (endpoint /v1/chat/completions)",
     "_comentario_model": "nome do modelo/alias carregado. Em backend OpenAI-compatible/llama-server, a Eyle consulta /v1/models: se houver um unico modelo carregado, usa o ID reportado pelo servidor mesmo que este campo tenha ficado antigo; 'auto' tambem seleciona esse unico modelo. Com varios modelos, mantenha aqui o alias exato.",
-    "_comentario_modelo_minimo_recomendado": "Para o modo agente supervisionado, o modelo minimo recomendado e LiquidAI/LFM2.5-8B-A1B ou uma quantizacao/derivacao compativel. Modelos menores podem funcionar para leitura, mas nao sao o alvo recomendado para edicao com ferramentas."
+    "connect_timeout_seconds": 5,
+    "read_timeout_seconds": 120,
+    "agent_timeout_seconds": 90,
+    "executor_timeout_seconds": 180,
+    "model_discovery_timeout_seconds": 3,
+    "model_discovery_negative_ttl_seconds": 60,
+    "retry_max_attempts": 3,
+    "retry_base_delay_seconds": 0.5,
+    "retry_max_delay_seconds": 2.0,
+    "retry_jitter_seconds": 0.2,
+    "max_concurrent_requests": 1,
+    "cooldown_seconds": 2.0,
+    "_comentario_timeouts_retries": "Revisao 51: connect/read e perfis possuem limites separados. Falhas transitorias 429/5xx/conexao usam ate 3 tentativas com backoff+jitter; 4xx permanentes nao repetem. timeout_seconds permanece apenas como fallback legado."
   },
   "context": {
     "token_budget": 1500,
@@ -45,7 +58,13 @@
     "atalho_score_ratio": 2.5,
     "_comentario_max_iteracoes_analista": "quantas rodadas do ciclo Retrieval->Analista sao permitidas quando o Analista pede mais informacao (campo 'faltando')",
     "_comentario_max_tentativas_executor": "quantas vezes o Executor pode tentar de novo se o Verify reprovar a resposta",
-    "_comentario_atalho": "se o vencedor do retrieval tiver score >= atalho_score_minimo E for atalho_score_ratio vezes maior que o 2o colocado (ou for o unico candidato), pula a chamada do Analista e usa o retrieval direto -- desative com atalho_analista_ativado=false se quiser o Analista julgando sempre"
+    "_comentario_atalho": "se o vencedor do retrieval tiver score >= atalho_score_minimo E for atalho_score_ratio vezes maior que o 2o colocado (ou for o unico candidato), pula a chamada do Analista e usa o retrieval direto -- desative com atalho_analista_ativado=false se quiser o Analista julgando sempre",
+    "task_deadline_seconds": 300,
+    "_comentario_task_deadline": "Prazo total compartilhado por chat, retrieval, agente e executor; cada chamada LLM reduz seus timeouts ao tempo restante.",
+    "executor_retry_base_delay_seconds": 0.5,
+    "executor_retry_max_delay_seconds": 2.0,
+    "executor_retry_jitter_seconds": 0.1,
+    "_comentario_retry_executor": "Backoff exponencial entre respostas recusadas pelo Verify. Evita disparar retries pesados em rajada; o prazo global continua prevalecendo."
   },
   "servidor": {
     "host": "127.0.0.1",
@@ -75,7 +94,7 @@
     "ativado": true,
     "fazer_backup": true,
     "testes": {
-      "ativado": true,
+      "ativado": false,
       "comando_python": "pytest -q",
       "comando_node": "npm test --silent",
       "timeout_segundos": 60,
@@ -134,13 +153,11 @@
   "benchmark": {
     "primary_model": null,
     "baseline_model": null,
-    "_comentario": "Atualizacao 47: primary_model=null usa llm.model (LFM2.5-8B-A1B atual). baseline_model e opcional e deve receber o nome exato do Q4 4B carregado no servidor; ele nunca substitui o alvo principal. Rode python main.py benchmark."
+    "_comentario": "Atualizacao 47: primary_model=null usa llm.model (LFM2 8B-A1B atual). baseline_model e opcional e deve receber o nome exato do Q4 4B carregado no servidor; ele nunca substitui o alvo principal. Rode python main.py benchmark."
   },
   "agent": {
-    "rollout_mode": "full",
-    "trusted_project_paths": [
-      "workspace"
-    ],
+    "rollout_mode": "read_only",
+    "trusted_project_paths": [],
     "enabled_modes": [
       "analyze",
       "suggest",
@@ -166,8 +183,42 @@
     "_comentario_40_41": "Atualizacoes 40-41: o catalogo de tools nasce do registro executavel e argumentos passam por schema central. list_tree respeita estes tetos de entradas/profundidade; read_range e os trechos frescos de search_code nunca ultrapassam max_read_range_lines.",
     "_comentario_32_39": "Atualizacao 36 rotaciona traces. Atualizacao 39 separa EXEC: run_tests nao e READ; require_confirmation_for_exec controla seu gate sem alterar o gate WRITE.",
     "_comentario_legado_ate_43": "Historico das configuracoes do Agente minimo ate a Atualizacao 43. A partir da 44, enabled=true ativa somente os modos declarados em enabled_modes. max_steps conta ferramentas executadas; max_no_progress_decisions limita repeticoes sem acao.",
-    "_comentario_rollout_padrao": "Perfil supervisionado ativo por padrao: projetos dentro de workspace podem receber propostas de edicao, mas toda escrita exige confirmacao explicita. Projetos externos ficam read_only ate serem adicionados conscientemente a trusted_project_paths."
+    "task_deadline_seconds": 300,
+    "max_llm_calls": 12,
+    "max_total_generated_tokens": 12000,
+    "semantic_repeat_overlap": 0.95,
+    "max_secret_scan_bytes": 65536,
+    "_comentario_51_hardening": "Deadline global por execucao, teto de chamadas/tokens gerados, deteccao semantica de leituras/buscas redundantes e amostra limitada para varredura de segredos na arvore.",
+    "semantic_grounding": {
+      "enabled": true,
+      "block_unsupported_anchors": true,
+      "require_inline_citations": false,
+      "min_claim_token_overlap": 0.12,
+      "min_claim_tokens": 5,
+      "_comentario": "Bloqueia afirmacoes com identificadores, caminhos, numeros ou literais objetivos ausentes das evidencias. Baixa sobreposicao lexical vira aviso para nao punir parafrases validas."
+    }
   },
-  "version": "2.7.0",
-  "updated": "2026-08-04"
+  "version": "2.7.3",
+  "updated": "2026-08-04",
+  "worker": {
+    "heartbeat_interval_seconds": 5,
+    "queue_error_backoff_seconds": 1,
+    "max_invalid_jobs_per_reservation": 100,
+    "_comentario": "Dois consumidores evitam head-of-line blocking. Cada job roda em processo filho terminavel; o supervisor mata o filho ao exceder 315s. A LLM continua serializada por max_concurrent_requests=1 para proteger GPU local.",
+    "max_parallel_jobs": 2,
+    "isolate_jobs": true,
+    "job_deadline_seconds": 315,
+    "stale_worker_seconds": 30,
+    "head_of_line_blocked_seconds": 60,
+    "multiprocessing_context": "spawn"
+  },
+  "app_version": "2.7.3",
+  "config_schema_version": "2.7.3",
+  "revision": "53.0-speed-cycle-hardening",
+  "telemetry": {
+    "enabled": true,
+    "window_seconds": 3600,
+    "max_entries": 10000,
+    "_comentario": "Metricas persistentes de jobs, tools e LLM em context/telemetry.sqlite3, com P50/P95/P99 expostos em /status."
+  }
 }

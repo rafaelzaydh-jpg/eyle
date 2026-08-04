@@ -1,3 +1,42 @@
+# Pacote de atualização seguro — Eyle 2.7.3 / Revisão 53
+
+Extraia sobre uma instalação existente. O ZIP não inclui estado mutável de
+`memory/`, `context/` ou `workspace/`; esses dados permanecem preservados.
+
+## Implementações da revisão 53
+
+- parser exige exatamente uma decisão JSON válida;
+- cache rejeita e remove envelopes estruturados de falha;
+- respostas que excedem o orçamento não são publicadas no cache;
+- detector de ciclos A-A, A-B-A-B e A-B-C-A-B-C pelo estado observado;
+- reserva da fila termina mesmo com conflito permanente;
+- Analista reutiliza retrieval e para lacunas/buscas idênticas;
+- Executor aplica backoff exponencial após reprovação do Verify;
+- erro de permissão do token web vira telemetria.
+
+A revisão mantém todo o hardening 52: grounding, watchdog real, consumidores
+paralelos, orçamento/deadline LLM, rate limiting entre processos, cache SQLite,
+telemetria e fallbacks explícitos.
+
+## Validação
+
+- `python -m compileall -q .`: aprovado;
+- suíte disponível neste ambiente: **202/202 aprovados**;
+- teste web: **1 ignorado**, pois Flask não está instalado;
+- benchmark real com LLM: não executado, pois depende do backend local final.
+
+## Instalação
+
+```bash
+unzip -o Eyle_protocolo_interno_ingles_2.7.3_speed_cycle_hardening.zip
+cd eyle
+python -m pip install -r requirements.txt -r requirements-dev.txt
+python -m pytest -q
+python engine/release_identity.py
+```
+
+## Histórico 50.1
+
 # Pacote de atualização seguro — Atualização 50.1
 
 Este pacote contém o código completo das Atualizações 10-50.1 e pode ser extraído
@@ -12,7 +51,7 @@ antes de analisar o projeto.
 ## Revisão 50.1 — correção do agente sem resposta/formato inválido
 
 Foi corrigido o caso observado em que tarefas como “analise o projeto” demoravam
-e terminavam em “formato inválido”:
+e terminavam em “formato inválido”: 
 
 - o `config.json` do ZIP ainda estava em 4080/700/180; agora usa janela 8192,
   saída 1500 e timeout 600, com `model: auto`;

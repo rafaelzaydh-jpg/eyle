@@ -391,7 +391,18 @@ def calcular_metricas(resultados):
         "rollback": all(item["write"].get("rollback", True) for item in resultados),
         "retomada_releitura": all(item["write"].get("retomada_releitura", True) for item in resultados),
     }
-    latencias = [item.get("latency_ms", 0) for item in resultados]
+    latencias = sorted(float(item.get("latency_ms", 0) or 0) for item in resultados)
+
+    def percentil(q):
+        if not latencias:
+            return 0.0
+        if len(latencias) == 1:
+            return round(latencias[0], 2)
+        pos = (len(latencias) - 1) * q
+        baixo = int(pos)
+        alto = min(baixo + 1, len(latencias) - 1)
+        fracao = pos - baixo
+        return round(latencias[baixo] * (1 - fracao) + latencias[alto] * fracao, 2)
     metricas = {
         "tarefas_com_uso_correto_de_leitura": sum(
             bool(item.get("leu")) == bool(caso["leitura"])
@@ -406,6 +417,9 @@ def calcular_metricas(resultados):
         "falhas_json": sum(int(item.get("json_failures") or 0) for item in resultados),
         "latencia_total_ms": round(sum(latencias), 2),
         "latencia_media_ms": round(sum(latencias) / max(len(latencias), 1), 2),
+        "latencia_p50_ms": percentil(0.50),
+        "latencia_p95_ms": percentil(0.95),
+        "latencia_p99_ms": percentil(0.99),
         "referencias_inventadas": sum(len(item.get("inventadas") or []) for item in resultados),
         "falsos_success": sum(bool(item.get("false_success")) for item in resultados),
         "escritas_sem_autorizacao": sum(bool(item.get("unauthorized_write")) for item in resultados),

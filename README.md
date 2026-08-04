@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>A local assistant for understanding, changing, and testing code with an LLM running on your machine.</strong>
+  <strong>A local-first supervised coding agent with external memory, BM25 retrieval, guarded edits, tests, rollback, and cycle protection.</strong>
 </p>
 
 <p align="center">
@@ -11,51 +11,74 @@
   <a href="docs/architecture.md">Architecture</a> ·
   <a href="docs/configuration.md">Configuration</a> ·
   <a href="docs/benchmark.md">Benchmark</a> ·
+  <a href="docs/releases/2.7.3-hardening.md">Revision 53</a> ·
   <a href="SECURITY.md">Security</a>
 </p>
 
 <p align="center">
   <img alt="Python 3.8+" src="https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white">
+  <img alt="Release 2.7.3" src="https://img.shields.io/badge/release-2.7.3-2563EB">
+  <img alt="Revision 53" src="https://img.shields.io/badge/revision-53-7C3AED">
   <img alt="Local execution" src="https://img.shields.io/badge/execution-local-16A34A">
   <img alt="BM25 retrieval" src="https://img.shields.io/badge/retrieval-BM25-F59E0B">
-  <img alt="Supervised agent" src="https://img.shields.io/badge/agent-supervised-7C3AED">
-  <img alt="Recommended model" src="https://img.shields.io/badge/recommended%20model-LFM2.5--8B--A1B-0EA5E9">
-  <img alt="Tests" src="https://img.shields.io/badge/non--web%20tests-167%20passed-16A34A">
+  <img alt="Tests" src="https://img.shields.io/badge/non--web%20tests-204%20passed-16A34A">
 </p>
 
 ## Overview
 
-Eyle indexes a local project, retrieves only relevant code, and uses that evidence to answer questions or prepare changes. The model drives the investigation while deterministic code validates sensitive operations.
+Eyle indexes a local repository, retrieves only relevant evidence, and uses a local LLM to answer questions or prepare guarded changes. The model proposes actions; deterministic code controls permissions, evidence freshness, confirmation, atomic writes, tests, rollback, deadlines, and completion.
 
 | | |
 |---|---|
-| **Minimum recommended model** | [LFM2.5-8B-A1B](https://huggingface.co/LiquidAI/LFM2.5-8B-A1B) or a compatible quantization |
-| **Default mode** | Supervised agent for projects inside `workspace/` |
-| **Writes** | Require explicit confirmation before application |
-| **Privacy** | Project files, indexes, and history remain on the local machine |
+| **Release** | 2.7.3 — revision 53 |
+| **Default rollout** | `read_only` until the real-model benchmark is validated locally |
+| **Recommended model target** | LFM2.5-8B-A1B or a compatible quantization |
+| **Privacy** | Source code, indexes, traces, queue, and history remain on the local machine |
+| **Mutable state** | `workspace/`, `memory/`, and `context/` are ignored by Git |
 
-### Features
+**Release identity marker:** **Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 53.0-speed-cycle-hardening
+
+### Main capabilities
 
 - Local models through OpenAI-compatible servers, LM Studio, llama.cpp, and Ollama-style backends.
-- Persistent external memory for repositories larger than the model context.
-- Offline BM25 search without cloud embeddings or a vector database.
-- Answers tied to files and ranges read from the project.
-- Atomic patches, isolated tests, and rollback.
-- CLI, optional Flask interface, SQLite queue, checkpoints, and retention.
+- Persistent external memory for projects larger than the model context window.
+- Offline BM25 retrieval without cloud embeddings or a vector database.
+- Grounded answers tied to fresh files, ranges, hashes, and evidence IDs.
+- Schema-validated tools and explicit `READ`, `EXEC`, and `WRITE` permissions.
+- Atomic patching, explicit confirmation, isolated tests, final reread, and rollback.
+- Shared deadlines, differentiated timeouts, retry backoff, rate limiting, and telemetry.
+- Short-cycle detection for repeated agent states and bounded queue reservation.
+- CLI, optional authenticated Flask interface, SQLite queue, checkpoints, and retention.
+
+## Revision 53 highlights
+
+Revision 53 closes the remaining response-speed and repetition gaps found after revision 52:
+
+- rejects responses containing more than one valid agent decision JSON;
+- removes structured error envelopes from the LLM cache;
+- detects short cycles from material state and tool results;
+- bounds queue reservation even under permanent conflicts;
+- reuses retrieval inside the analyst loop and exits repeated gaps/searches early;
+- applies exponential backoff when executor answers fail verification;
+- records previously silent web-token permission failures in telemetry.
+
+See the complete matrix in [docs/releases/2.7.3-hardening.md](docs/releases/2.7.3-hardening.md).
 
 ## How it works
 
 ```mermaid
 flowchart LR
-  A[Project] --> B[Index]
+  A[Project in workspace] --> B[Index]
   B --> C[External memory]
-  D[Request] --> E[Agent]
-  C --> F[BM25 search]
-  F --> E
-  E --> G[Project tools]
-  G --> H[Read and validate]
-  H --> E
-  E --> I[Answer or confirmed patch]
+  D[User request] --> E[Agent]
+  C --> F[BM25 retrieval]
+  F --> G[Context engine]
+  G --> E
+  E --> H[Validated project tools]
+  H --> I[Fresh evidence and hashes]
+  I --> E
+  E --> J[Answer or confirmed patch]
+  J --> K[Verification, tests, reread, rollback]
 ```
 
 See [architecture](docs/architecture.md) for the full design.
@@ -63,7 +86,7 @@ See [architecture](docs/architecture.md) for the full design.
 ## Quick installation
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/eyle.git
+git clone https://github.com/rafaelzaydh-jpg/eyle.git
 cd eyle
 python -m venv .venv
 ```
@@ -78,19 +101,19 @@ source .venv/bin/activate
 .venv\Scripts\Activate.ps1
 ```
 
-Install the dependencies you need:
+Install dependencies:
 
 ```bash
 # Web interface
 python -m pip install -r requirements.lock
 
-# Development and tests
+# Development and complete test environment
 python -m pip install -r requirements-dev.lock
 ```
 
 ## Configuration
 
-Start a local LLM through an OpenAI-compatible endpoint. The default configuration uses `http://localhost:8080` and automatically selects the only loaded model.
+The release defaults to a local OpenAI-compatible endpoint and automatic model discovery:
 
 ```json
 {
@@ -100,11 +123,15 @@ Start a local LLM through an OpenAI-compatible endpoint. The default configurati
     "openai_compatible": true,
     "max_tokens": 1500,
     "context_window_tokens": 8192
+  },
+  "agent": {
+    "rollout_mode": "read_only",
+    "trusted_project_paths": []
   }
 }
 ```
 
-See [docs/configuration.md](docs/configuration.md) for all options.
+Keep `read_only` while validating the real model. To enable supervised editing, use `rollout_mode: "full"`, explicitly trust the intended project root, and review the write/test policy first. See [docs/configuration.md](docs/configuration.md).
 
 ## Usage
 
@@ -131,46 +158,57 @@ python main.py serve
 
 Open `http://127.0.0.1:5000`. The API token is printed at startup.
 
-## Agent modes
+## Agent rollout modes
 
 | Mode | Permissions |
 |---|---|
 | `off` | Uses the earlier pipelines without automatic agent routing. |
-| `read_only` | Allows reading, searching, analysis, and suggestions. |
-| `full` | Allows confirmed changes and isolated tests in trusted paths. |
+| `read_only` | Allows reading, retrieval, analysis, and suggestions; blocks execution and writes. |
+| `full` | Allows the guarded edit cycle only for explicitly trusted project paths. |
 
-The default configuration trusts only `workspace/`. External directories remain `read_only` until added to `trusted_project_paths`.
+A real write still requires fresh evidence, exact ranges, hashes, dry run, explicit confirmation, atomic application, configured tests, and a final reread.
 
 ## Validation
 
 ```bash
-python main.py benchmark
+python engine/release_identity.py
+python -m compileall -q .
 python -m pytest -q
+python main.py benchmark
 ```
 
-The benchmark covers reading, grounding, tool use, and the edit workflow. Run it with the exact model and quantization used in the target environment. See [docs/benchmark.md](docs/benchmark.md).
+Release validation in the packaging environment:
+
+- **204/204 executable non-web tests passed**;
+- **1 web test module was skipped** because Flask was not installed there;
+- the real-model benchmark remains environment-specific and must be run with the actual endpoint, model, quantization, hardware, and target repository.
+
+See [docs/benchmark.md](docs/benchmark.md).
 
 ## Repository structure
 
 ```text
-engine/      Agent, tools, state, patches, sandbox, and queue
-llm/         Local model execution and prompt cache
-retrieval/   Offline BM25 search
-verify/      Answer verification
+engine/      Agent, tools, grounding, state, patching, telemetry, worker, and queue
+llm/         Local model execution, retries, rate limiting, model detection, and cache
+retrieval/   Offline BM25 retrieval
+verify/      Answer and citation verification
 web/         Authenticated Flask interface
 tests/       Unit and regression tests
 workspace/   Projects under analysis — Git-ignored
-memory/      Generated index — Git-ignored
-context/     Cache, traces, and backups — Git-ignored
-docs/        Technical documentation and history
+memory/      Generated external memory — Git-ignored
+context/     Cache, queue, traces, telemetry, and backups — Git-ignored
+docs/        Architecture, configuration, benchmark, releases, and history
 ```
 
-## Current status
+## Documentation
 
-- Release: **2.7.0**
-- Non-web automated tests: **167/167** in the release environment
-- The real-model benchmark must be run on the machine hosting the LLM
+- [Architecture](docs/architecture.md)
+- [Configuration](docs/configuration.md)
+- [Benchmark and validation](docs/benchmark.md)
+- [Upgrading and publishing](docs/github-publishing.md)
+- [Detailed technical overview](docs/technical-overview.md)
+- [Revision 53 hardening report](docs/releases/2.7.3-hardening.md)
 
 ## License
 
-The repository is currently **all rights reserved**. Read [LICENSE.md](LICENSE.md) before copying, redistributing, or opening the project to public contributions.
+The repository is currently **all rights reserved**. Read [LICENSE.md](LICENSE.md) before copying, redistributing, or opening the project to unrestricted public reuse.

@@ -423,6 +423,9 @@ class AgentState:
         cfg_agente = (config or {}).get("agent", {})
         self.max_chars_por_observacao = cfg_agente.get("max_chars_por_observacao", 500)
         self.max_fatos_importantes = cfg_agente.get("max_fatos_importantes", 10)
+        self.semantic_repeat_overlap = float(
+            cfg_agente.get("semantic_repeat_overlap", 0.95)
+        )
         # Atualizacao 42: quatro blocos com papeis distintos. O alias
         # ``observacoes`` abaixo preserva consumidores anteriores.
         self.goal_state = {}
@@ -439,6 +442,10 @@ class AgentState:
         self.acoes_executadas = 0  # Atualizacao 45: max_steps conta acoes reais
         self.decisoes_sem_progresso = 0
         self.edit_state = {}
+        # Revisao 53: janela compacta de resultados/estado para reconhecer
+        # ciclos A-B-A-B ou chamadas cosmeticamente diferentes que devolvem
+        # exatamente o mesmo estado observavel.
+        self.fingerprints_ciclo = []
 
     @property
     def observacoes(self):
@@ -507,6 +514,77 @@ class AgentState:
 
     def registrar_progresso(self):
         self.decisoes_sem_progresso = 0
+
+    @staticmethod
+    def _hash_json_estavel(valor):
+        try:
+            bruto = json.dumps(
+                valor, sort_keys=True, ensure_ascii=False,
+                separators=(",", ":"), default=str,
+            )
+        except (TypeError, ValueError):
+            bruto = repr(valor)
+        return hashlib.sha256(bruto.encode("utf-8", errors="replace")).hexdigest()
+
+    def registrar_fingerprint_ciclo(self, tool, resultado, max_periodo=3, janela=12):
+        """Registra o estado observavel e detecta repeticao periodica curta.
+
+        A assinatura exata de chamada continua sendo a primeira barreira. Esta
+        segunda guarda olha para o *resultado* e para o estado material da
+        tarefa, então pequenas mudancas de argumentos nao burlam a deteccao se
+        a Eyle continua voltando ao mesmo lugar.
+        """
+        resultado = resultado if isinstance(resultado, dict) else {}
+        evidencias = [
+            (
+                item.get("arquivo"), item.get("linha_inicio"),
+                item.get("linha_fim"), item.get("content_hash"),
+                item.get("file_hash"), item.get("estado"),
+            )
+            for item in self.evidence
+            if isinstance(item, dict)
+        ]
+        edit_state = {
+            chave: self.edit_state.get(chave)
+            for chave in (
+                "status", "arquivo", "linha_inicio", "linha_fim_original",
+                "linha_fim_final", "file_hash_antes", "file_hash_depois",
+                "post_write_evidence_id",
+            )
+            if chave in self.edit_state
+        }
+        payload = {
+            "tool": tool,
+            "status": resultado.get("status"),
+            "ok": resultado.get("ok"),
+            "executed": resultado.get("executed"),
+            "changed": resultado.get("changed"),
+            "error_code": resultado.get("error_code"),
+            "detail_hash": self._hash_json_estavel(resultado.get("detail")),
+            "evidence": evidencias,
+            "edit_state": edit_state,
+            "houve_escrita": self.houve_escrita,
+            "testes_ok_apos_escrita": self.testes_ok_apos_escrita,
+            "evidence_needed": sorted(self.goal_state.get("evidence_needed") or []),
+            "blockers": sorted(self.goal_state.get("blockers") or []),
+        }
+        fingerprint = self._hash_json_estavel(payload)
+        self.fingerprints_ciclo.append(fingerprint)
+        self.fingerprints_ciclo = self.fingerprints_ciclo[-max(2, int(janela or 12)):]
+
+        total = len(self.fingerprints_ciclo)
+        max_periodo = max(1, int(max_periodo or 1))
+        for periodo in range(1, min(max_periodo, total // 2) + 1):
+            if (
+                self.fingerprints_ciclo[-periodo:]
+                == self.fingerprints_ciclo[-2 * periodo:-periodo]
+            ):
+                return {
+                    "detectado": True,
+                    "periodo": periodo,
+                    "fingerprint": fingerprint,
+                }
+        return {"detectado": False, "periodo": None, "fingerprint": fingerprint}
 
     def _novo_evidence_id(self):
         identificador = f"ev-{self._proximo_evidence_id:04d}"
@@ -895,10 +973,110 @@ class AgentState:
             args_serializados = str(arguments)
         return (tool, args_serializados)
 
+    @staticmethod
+    def _normalizar_caminho(valor):
+        if not isinstance(valor, str):
+            return ""
+        partes = []
+        for parte in valor.replace("\\", "/").split("/"):
+            if parte in ("", "."):
+                continue
+            if parte == "..":
+                if partes:
+                    partes.pop()
+                continue
+            partes.append(parte)
+        return "/".join(partes)
+
+    @staticmethod
+    def _tokens_semanticos(valor):
+        if not isinstance(valor, str):
+            return set()
+        return set(re.findall(r"[^\W_]+", valor.lower(), re.UNICODE))
+
+    def _chamada_semanticamente_redundante(self, tool, arguments):
+        args = arguments or {}
+        if not isinstance(args, dict):
+            return False
+
+        if tool in ("read_range", "read_file"):
+            if (
+                tool == "read_range"
+                and "evidencia_pos_escrita" in self.goal_state.get("evidence_needed", [])
+            ):
+                # O gate de edicao exige a faixa final exata mesmo que uma
+                # leitura ampla/read_file recente ja cubra essas linhas.
+                return False
+            caminho = self._normalizar_caminho(
+                args.get("caminho_relativo", args.get("arquivo"))
+            )
+            if not caminho:
+                return False
+            inicio = args.get("linha_inicio")
+            fim = args.get("linha_fim")
+            # Somente evidencia ainda fresca pode tornar uma releitura
+            # redundante. Depois de WRITE, marcar_evidencias_stale() libera a
+            # leitura obrigatoria da mesma faixa para verificacao pos-escrita.
+            for evidencia in self.evidence:
+                if evidencia.get("estado") != "fresh":
+                    continue
+                if self._normalizar_caminho(evidencia.get("arquivo")) != caminho:
+                    continue
+                if tool == "read_file" and evidencia.get("source_tool") == "read_file":
+                    return True
+                try:
+                    atual_i, atual_f = int(inicio), int(fim)
+                    ant_i = int(evidencia.get("linha_inicio"))
+                    ant_f = int(evidencia.get("linha_fim"))
+                except (TypeError, ValueError):
+                    continue
+                intersecao = max(0, min(atual_f, ant_f) - max(atual_i, ant_i) + 1)
+                maior = max(atual_f - atual_i + 1, ant_f - ant_i + 1)
+                if maior and intersecao / maior >= self.semantic_repeat_overlap:
+                    return True
+
+        if tool in ("search_code", "find_symbol"):
+            campos = (
+                ("pergunta", "query", "termo")
+                if tool == "search_code" else ("simbolo", "nome", "query")
+            )
+            texto = next((args.get(c) for c in campos if args.get(c)), "")
+            tokens = self._tokens_semanticos(texto)
+            if not tokens:
+                return False
+            caminho = self._normalizar_caminho(args.get("caminho_relativo"))
+            for acao in self.actions:
+                if acao.get("tool") != tool:
+                    continue
+                anteriores = acao.get("arguments") or {}
+                caminho_anterior = self._normalizar_caminho(
+                    anteriores.get("caminho_relativo")
+                )
+                if caminho and caminho_anterior and caminho != caminho_anterior:
+                    continue
+                texto_anterior = next(
+                    (anteriores.get(c) for c in campos if anteriores.get(c)), "",
+                )
+                tokens_anteriores = self._tokens_semanticos(texto_anterior)
+                if not tokens_anteriores:
+                    continue
+                uniao = tokens | tokens_anteriores
+                similaridade = len(tokens & tokens_anteriores) / max(1, len(uniao))
+                if (
+                    tokens <= tokens_anteriores
+                    or tokens_anteriores <= tokens
+                    or similaridade >= self.semantic_repeat_overlap
+                ):
+                    return True
+        return False
+
     def chamada_repetida(self, tool, arguments):
         """True se essa (tool, arguments) exata ja foi EXECUTADA antes
         nesta tarefa. So consulta -- nunca registra nada sozinha."""
-        return self._montar_assinatura(tool, arguments) in self.assinaturas_chamadas
+        return (
+            self._montar_assinatura(tool, arguments) in self.assinaturas_chamadas
+            or self._chamada_semanticamente_redundante(tool, arguments)
+        )
 
     def registrar_chamada(self, tool, arguments):
         """Marca (tool, arguments) como ja executada nesta tarefa. So deve
@@ -1090,6 +1268,7 @@ class AgentState:
             "acoes_executadas": self.acoes_executadas,
             "decisoes_sem_progresso": self.decisoes_sem_progresso,
             "edit_state": self.edit_state,
+            "fingerprints_ciclo": list(self.fingerprints_ciclo),
             "proximo_evidence_id": self._proximo_evidence_id,
             "proximo_action_id": self._proximo_action_id,
         }
@@ -1124,6 +1303,10 @@ class AgentState:
         )
         estado.decisoes_sem_progresso = int(dados.get("decisoes_sem_progresso") or 0)
         estado.edit_state = dict(dados.get("edit_state") or {})
+        estado.fingerprints_ciclo = [
+            str(item) for item in (dados.get("fingerprints_ciclo") or [])
+            if isinstance(item, str)
+        ][-12:]
         estado._proximo_evidence_id = int(
             dados.get("proximo_evidence_id") or (len(estado.evidence) + 1)
         )

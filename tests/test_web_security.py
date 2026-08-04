@@ -2,7 +2,9 @@
 """Atualizacao 27: autenticacao, rate limit e status sem caminho absoluto."""
 import os
 import stat
+import pytest
 
+pytest.importorskip("flask")
 import web.routes as routes
 
 
@@ -35,17 +37,20 @@ def _cliente(monkeypatch):
     monkeypatch.setattr(
         routes.queue,
         "estatisticas",
-        lambda: {
+        lambda **kwargs: {
             "pending": 0,
             "processing": 0,
             "completed": 0,
             "failed": 1,
+            "live_workers": 1,
+            "head_of_line_blocked": False,
             "ultima_falha": {
                 "erro": f"falha em /tmp/segredo/projeto e {routes.BASE_DIR}/context",
             },
         },
     )
     monkeypatch.setattr(routes.queue, "tamanho", lambda: 0)
+    monkeypatch.setattr(routes.telemetry, "summary", lambda *args, **kwargs: {"total": 0, "groups": {}})
     return routes.app.test_client()
 
 
@@ -150,3 +155,23 @@ def test_job_expoe_estado_real_sem_payload_nem_resultado(monkeypatch):
     assert dados["status"] == "processing"
     assert "payload" not in dados
     assert "resultado" not in dados
+
+
+def test_health_reflete_worker_e_head_of_line(monkeypatch):
+    cliente = _cliente(monkeypatch)
+    resposta = cliente.get("/health", headers=_cabecalho())
+    assert resposta.status_code == 200
+    assert resposta.get_json()["status"] == "ok"
+
+    monkeypatch.setattr(
+        routes.queue, "estatisticas",
+        lambda **kwargs: {
+            "live_workers": 0,
+            "head_of_line_blocked": True,
+            "oldest_pending_seconds": 70,
+            "oldest_processing_seconds": 80,
+        },
+    )
+    degradado = cliente.get("/health", headers=_cabecalho())
+    assert degradado.status_code == 503
+    assert degradado.get_json()["status"] == "degraded"

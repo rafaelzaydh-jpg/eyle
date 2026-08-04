@@ -32,5 +32,11 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements-dev.lock
 
+      - name: Verify release identity
+        run: python engine/release_identity.py
+
+      - name: Compile source
+        run: python -m compileall -q .
+
       - name: Run tests
         run: python -m pytest -q

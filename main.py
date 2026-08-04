@@ -211,18 +211,21 @@ def cmd_agente(args):
 
 
 def cmd_status(args):
+    from engine import queue, telemetry
+
+    config = carregar_config()
     projeto = carregar_projeto()
     if projeto is None:
         print("[main] Nenhum projeto indexado ainda.")
-        return
-    print(json.dumps(projeto, ensure_ascii=False, indent=2))
-    atual = indice_esta_atual(projeto, carregar_config())
-    if atual is True:
-        print("\n[main] Indice: atualizado (fingerprint do conteudo confere).")
-    elif atual is False:
-        print("\n[main] Indice: DESATUALIZADO; rode ingest novamente.")
     else:
-        print("\n[main] Indice: estado desconhecido (memoria legada ou fonte indisponivel).")
+        print(json.dumps(projeto, ensure_ascii=False, indent=2))
+        atual = indice_esta_atual(projeto, config)
+        if atual is True:
+            print("\n[main] Indice: atualizado (fingerprint do conteudo confere).")
+        elif atual is False:
+            print("\n[main] Indice: DESATUALIZADO; rode ingest novamente.")
+        else:
+            print("\n[main] Indice: estado desconhecido (memoria legada ou fonte indisponivel).")
 
     hist_path = os.path.join(MEMORY_DIR, "historico.json")
     if os.path.exists(hist_path):
@@ -235,6 +238,24 @@ def cmd_status(args):
         with open(conversa_path, "r", encoding="utf-8") as f:
             conversa = json.load(f)
         print(f"[main] {len(conversa)} mensagens na conversa persistente.")
+
+    worker_cfg = config.get("worker", {})
+    fila = queue.estatisticas(
+        stale_after_seconds=worker_cfg.get("stale_worker_seconds", 30),
+        blocked_after_seconds=worker_cfg.get("head_of_line_blocked_seconds", 60),
+    )
+    print("\n[main] Fila/Workers:")
+    print(json.dumps(fila, ensure_ascii=False, indent=2))
+    if config.get("telemetry", {}).get("enabled", True):
+        print("\n[main] Telemetria:")
+        print(json.dumps(
+            telemetry.summary(config.get("telemetry", {}).get("window_seconds", 3600)),
+            ensure_ascii=False, indent=2,
+        ))
+    if config.get("_config_warnings"):
+        print("\n[main] Avisos de configuracao:")
+        for warning in config["_config_warnings"]:
+            print(f"- {warning['code']}: {warning['detail']}")
 
 
 def cmd_benchmark(args):
@@ -251,7 +272,9 @@ def cmd_benchmark(args):
             f"[benchmark] {execucao['papel']} | {execucao['modelo']} | gate={gate} | "
             f"leitura={metricas['tarefas_com_uso_correto_de_leitura']}/10 | "
             f"factual={metricas['respostas_factuais_corretas']}/10 | "
-            f"escrita={metricas['checks_escrita_aprovados']}/5"
+            f"escrita={metricas['checks_escrita_aprovados']}/5 | "
+            f"P50={metricas['latencia_p50_ms']}ms | P95={metricas['latencia_p95_ms']}ms | "
+            f"P99={metricas['latencia_p99_ms']}ms"
         )
     print(f"[benchmark] Relatorio: {output}")
 

@@ -24,9 +24,43 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(BASE_DIR, "context", "fila.sqlite3")
 
 _evento_disponivel = threading.Event()
+_schema_lock = threading.Lock()
+_schemas_prontos = set()
 _STATUS = ("pending", "processing", "completed", "failed")
 _AGENT_STATUS = ("running", "waiting_user", "completed", "blocked", "failed")
 _NAO_INFORMADO = object()
+
+
+def _parse_utc(valor):
+    if not valor:
+        return None
+    try:
+        return datetime.fromisoformat(str(valor).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _idade_segundos(valor, agora=None):
+    dt = _parse_utc(valor)
+    if dt is None:
+        return None
+    agora = agora or datetime.now(timezone.utc)
+    return max(0.0, (agora - dt).total_seconds())
+
+
+def _pid_ativo(pid):
+    try:
+        pid = int(pid)
+        if pid <= 0:
+            return False
+        os.kill(pid, 0)
+        return True
+    except (TypeError, ValueError, ProcessLookupError):
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
 
 
 def _agora_utc():
@@ -37,63 +71,96 @@ def _serializar(valor):
     return json.dumps(valor, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
+def _inicializar_schema(conexao, caminho_banco):
+    """Cria/migra o schema uma vez por arquivo, nao em toda conexao."""
+    with _schema_lock:
+        if caminho_banco in _schemas_prontos:
+            return
+        conexao.execute(
+            """
+            CREATE TABLE IF NOT EXISTS jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tipo TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                status TEXT NOT NULL,
+                tentativas INTEGER NOT NULL DEFAULT 0,
+                criado_em TEXT NOT NULL,
+                atualizado_em TEXT NOT NULL,
+                iniciado_em TEXT,
+                concluido_em TEXT,
+                resultado TEXT,
+                erro TEXT,
+                worker_id TEXT
+            )
+            """
+        )
+        conexao.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_status_id ON jobs(status, id)"
+        )
+        conexao.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_tasks (
+                task_id TEXT PRIMARY KEY,
+                objetivo TEXT NOT NULL,
+                modo TEXT NOT NULL,
+                status TEXT NOT NULL,
+                projeto_hash TEXT,
+                source_job_id INTEGER,
+                estado TEXT,
+                continuacao TEXT,
+                acao_pendente TEXT,
+                orcamento_restante INTEGER,
+                pergunta TEXT,
+                resultado TEXT,
+                causa_fallback TEXT,
+                auditoria TEXT NOT NULL DEFAULT '[]',
+                criado_em TEXT NOT NULL,
+                atualizado_em TEXT NOT NULL,
+                expira_em TEXT,
+                concluido_em TEXT
+            )
+            """
+        )
+        conexao.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_tasks_status_updated "
+            "ON agent_tasks(status, atualizado_em)"
+        )
+        conexao.execute(
+            """
+            CREATE TABLE IF NOT EXISTS worker_heartbeat (
+                worker_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                job_id INTEGER,
+                atualizado_em TEXT NOT NULL,
+                detalhe TEXT,
+                pid INTEGER
+            )
+            """
+        )
+        colunas_jobs = {row[1] for row in conexao.execute("PRAGMA table_info(jobs)")}
+        if "worker_id" not in colunas_jobs:
+            conexao.execute("ALTER TABLE jobs ADD COLUMN worker_id TEXT")
+        colunas_hb = {row[1] for row in conexao.execute("PRAGMA table_info(worker_heartbeat)")}
+        if "pid" not in colunas_hb:
+            conexao.execute("ALTER TABLE worker_heartbeat ADD COLUMN pid INTEGER")
+        _schemas_prontos.add(caminho_banco)
+
+
 def _conectar():
     diretorio = os.path.dirname(DB_PATH)
     if diretorio:
         os.makedirs(diretorio, exist_ok=True)
+    caminho_banco = os.path.abspath(DB_PATH)
+    existia = os.path.exists(caminho_banco)
+    if not existia:
+        with _schema_lock:
+            _schemas_prontos.discard(caminho_banco)
     conexao = sqlite3.connect(DB_PATH, timeout=5.0, isolation_level=None)
     conexao.row_factory = sqlite3.Row
     conexao.execute("PRAGMA busy_timeout = 5000")
     conexao.execute("PRAGMA journal_mode = WAL")
     conexao.execute("PRAGMA synchronous = NORMAL")
-    conexao.execute(
-        """
-        CREATE TABLE IF NOT EXISTS jobs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            tipo TEXT NOT NULL,
-            payload TEXT NOT NULL,
-            status TEXT NOT NULL,
-            tentativas INTEGER NOT NULL DEFAULT 0,
-            criado_em TEXT NOT NULL,
-            atualizado_em TEXT NOT NULL,
-            iniciado_em TEXT,
-            concluido_em TEXT,
-            resultado TEXT,
-            erro TEXT
-        )
-        """
-    )
-    conexao.execute(
-        "CREATE INDEX IF NOT EXISTS idx_jobs_status_id ON jobs(status, id)"
-    )
-    conexao.execute(
-        """
-        CREATE TABLE IF NOT EXISTS agent_tasks (
-            task_id TEXT PRIMARY KEY,
-            objetivo TEXT NOT NULL,
-            modo TEXT NOT NULL,
-            status TEXT NOT NULL,
-            projeto_hash TEXT,
-            source_job_id INTEGER,
-            estado TEXT,
-            continuacao TEXT,
-            acao_pendente TEXT,
-            orcamento_restante INTEGER,
-            pergunta TEXT,
-            resultado TEXT,
-            causa_fallback TEXT,
-            auditoria TEXT NOT NULL DEFAULT '[]',
-            criado_em TEXT NOT NULL,
-            atualizado_em TEXT NOT NULL,
-            expira_em TEXT,
-            concluido_em TEXT
-        )
-        """
-    )
-    conexao.execute(
-        "CREATE INDEX IF NOT EXISTS idx_agent_tasks_status_updated "
-        "ON agent_tasks(status, atualizado_em)"
-    )
+    _inicializar_schema(conexao, caminho_banco)
     return conexao
 
 
@@ -104,6 +171,44 @@ def _abrir_conexao():
         yield conexao
     finally:
         conexao.close()
+
+
+def registrar_heartbeat(worker_id, status="idle", job_id=None, detalhe=None, pid=None):
+    """Persiste sinal de vida do worker para health checks/watchdogs."""
+    agora = _agora_utc()
+    with _abrir_conexao() as conexao:
+        conexao.execute(
+            """
+            INSERT INTO worker_heartbeat (worker_id, status, job_id, atualizado_em, detalhe, pid)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(worker_id) DO UPDATE SET
+                status = excluded.status,
+                job_id = excluded.job_id,
+                atualizado_em = excluded.atualizado_em,
+                detalhe = excluded.detalhe,
+                pid = excluded.pid
+            """,
+            (
+                str(worker_id), str(status),
+                int(job_id) if job_id is not None else None,
+                agora, None if detalhe is None else str(detalhe)[:1000],
+                int(pid if pid is not None else os.getpid()),
+            ),
+        )
+    return agora
+
+
+def obter_heartbeat(worker_id=None):
+    with _abrir_conexao() as conexao:
+        if worker_id is None:
+            linhas = conexao.execute(
+                "SELECT * FROM worker_heartbeat ORDER BY atualizado_em DESC"
+            ).fetchall()
+            return [dict(linha) for linha in linhas]
+        linha = conexao.execute(
+            "SELECT * FROM worker_heartbeat WHERE worker_id = ?", (str(worker_id),),
+        ).fetchone()
+    return dict(linha) if linha is not None else None
 
 
 def adicionar(evento):
@@ -128,11 +233,19 @@ def adicionar(evento):
     return job_id
 
 
-def _reservar_proximo():
+def _reservar_proximo(max_invalid_jobs=100, worker_id=None):
     """Reserva atomicamente o job pendente mais antigo."""
     conexao = _conectar()
+    invalidos = 0
+    ciclos = 0
+    # ``BEGIN IMMEDIATE`` ja serializa escritores, mas um banco alterado por
+    # outro processo/versao nao deve transformar um conflito de ``rowcount``
+    # em spin infinito. O teto e maior que o numero de payloads invalidos
+    # permitido para conservar o comportamento normal da fila.
+    max_ciclos = max(4, max(1, int(max_invalid_jobs or 1)) * 2 + 2)
     try:
-        while True:
+        while ciclos < max_ciclos:
+            ciclos += 1
             conexao.execute("BEGIN IMMEDIATE")
             linha = conexao.execute(
                 "SELECT * FROM jobs WHERE status = 'pending' ORDER BY id LIMIT 1"
@@ -156,16 +269,19 @@ def _reservar_proximo():
                     (f"payload invalido: {erro}", agora, agora, linha["id"]),
                 )
                 conexao.commit()
+                invalidos += 1
+                if invalidos >= max(1, int(max_invalid_jobs or 1)):
+                    return None
                 continue
 
             atualizado = conexao.execute(
                 """
                 UPDATE jobs
                 SET status = 'processing', tentativas = tentativas + 1,
-                    iniciado_em = ?, atualizado_em = ?, erro = NULL
+                    iniciado_em = ?, atualizado_em = ?, erro = NULL, worker_id = ?
                 WHERE id = ? AND status = 'pending'
                 """,
-                (agora, agora, linha["id"]),
+                (agora, agora, None if worker_id is None else str(worker_id), linha["id"]),
             )
             if atualizado.rowcount != 1:
                 conexao.rollback()
@@ -174,16 +290,19 @@ def _reservar_proximo():
             evento["_job_id"] = linha["id"]
             evento["_job_tentativa"] = linha["tentativas"] + 1
             return evento
+        return None
     finally:
         conexao.close()
 
 
-def proximo(timeout=1.0):
+def proximo(timeout=1.0, max_invalid_jobs=100, worker_id=None):
     """Espera ate ``timeout`` por um job e o marca como ``processing``."""
     timeout = max(0.0, float(timeout or 0.0))
     limite = time.monotonic() + timeout
     while True:
-        evento = _reservar_proximo()
+        evento = _reservar_proximo(
+            max_invalid_jobs=max_invalid_jobs, worker_id=worker_id,
+        )
         if evento is not None:
             return evento
 
@@ -227,24 +346,40 @@ def falhar(job_id, erro):
         return cursor.rowcount == 1
 
 
-def recuperar_interrompidos():
-    """Recoloca jobs deixados em ``processing`` por um Worker encerrado.
-
-    A Eyle suporta um Worker consumidor por fila. Esta funcao deve ser
-    chamada uma vez na inicializacao desse Worker, antes do loop.
-    """
+def recuperar_interrompidos(stale_after_seconds=30, force=False):
+    """Recoloca jobs cujo worker morreu ou parou de publicar heartbeat."""
     agora = _agora_utc()
     with _abrir_conexao() as conexao:
-        cursor = conexao.execute(
+        linhas = conexao.execute(
             """
-            UPDATE jobs
-            SET status = 'pending', atualizado_em = ?, iniciado_em = NULL,
-                erro = 'worker anterior foi interrompido; job recolocado na fila'
-            WHERE status = 'processing'
-            """,
-            (agora,),
-        )
-        recuperados = cursor.rowcount
+            SELECT j.id, j.worker_id, h.atualizado_em AS heartbeat_em, h.pid
+            FROM jobs j
+            LEFT JOIN worker_heartbeat h ON h.worker_id = j.worker_id
+            WHERE j.status = 'processing'
+            """
+        ).fetchall()
+        ids = []
+        for linha in linhas:
+            stale = _idade_segundos(linha["heartbeat_em"])
+            morto = linha["pid"] is not None and not _pid_ativo(linha["pid"])
+            sem_worker = not linha["worker_id"] or linha["heartbeat_em"] is None
+            if force or sem_worker or morto or (
+                stale is not None and stale >= max(0, float(stale_after_seconds))
+            ):
+                ids.append(int(linha["id"]))
+        recuperados = 0
+        for job_id in ids:
+            cursor = conexao.execute(
+                """
+                UPDATE jobs
+                SET status = 'pending', atualizado_em = ?, iniciado_em = NULL,
+                    worker_id = NULL,
+                    erro = 'worker anterior foi interrompido; job recolocado na fila'
+                WHERE id = ? AND status = 'processing'
+                """,
+                (agora, job_id),
+            )
+            recuperados += cursor.rowcount
     if recuperados:
         _evento_disponivel.set()
     return recuperados
@@ -275,9 +410,10 @@ def obter(job_id):
     return dados
 
 
-def estatisticas():
+def estatisticas(stale_after_seconds=30, blocked_after_seconds=60):
     """Resumo persistente da fila, incluindo a ultima falha registrada."""
     contagens = {status: 0 for status in _STATUS}
+    agora = datetime.now(timezone.utc)
     with _abrir_conexao() as conexao:
         for linha in conexao.execute("SELECT status, COUNT(*) AS total FROM jobs GROUP BY status"):
             contagens[linha["status"]] = int(linha["total"])
@@ -287,8 +423,50 @@ def estatisticas():
             FROM jobs WHERE status = 'failed' ORDER BY id DESC LIMIT 1
             """
         ).fetchone()
+        oldest_pending = conexao.execute(
+            "SELECT criado_em FROM jobs WHERE status = 'pending' ORDER BY id LIMIT 1"
+        ).fetchone()
+        oldest_processing = conexao.execute(
+            "SELECT iniciado_em FROM jobs WHERE status = 'processing' ORDER BY iniciado_em LIMIT 1"
+        ).fetchone()
+        heartbeats = [dict(row) for row in conexao.execute(
+            "SELECT * FROM worker_heartbeat ORDER BY atualizado_em DESC"
+        ).fetchall()]
     contagens["total"] = sum(contagens.get(status, 0) for status in _STATUS)
     contagens["ultima_falha"] = dict(ultima) if ultima is not None else None
+    pending_age = _idade_segundos(oldest_pending["criado_em"], agora) if oldest_pending else None
+    processing_age = _idade_segundos(oldest_processing["iniciado_em"], agora) if oldest_processing else None
+    workers = []
+    live_workers = 0
+    live_idle_workers = 0
+    for heartbeat in heartbeats:
+        age = _idade_segundos(heartbeat.get("atualizado_em"), agora)
+        stale = age is None or age >= max(1, float(stale_after_seconds))
+        pid_alive = _pid_ativo(heartbeat.get("pid")) if heartbeat.get("pid") else None
+        live = not stale and pid_alive is not False
+        live_workers += int(live)
+        live_idle_workers += int(live and heartbeat.get("status") == "idle")
+        workers.append({
+            "worker_id": heartbeat.get("worker_id"),
+            "status": heartbeat.get("status"),
+            "job_id": heartbeat.get("job_id"),
+            "heartbeat_age_seconds": None if age is None else round(age, 3),
+            "stale": stale,
+            "pid_alive": pid_alive,
+            "detail": heartbeat.get("detalhe"),
+        })
+    contagens["oldest_pending_seconds"] = None if pending_age is None else round(pending_age, 3)
+    contagens["oldest_processing_seconds"] = None if processing_age is None else round(processing_age, 3)
+    contagens["workers"] = workers
+    contagens["live_workers"] = live_workers
+    contagens["live_idle_workers"] = live_idle_workers
+    contagens["head_of_line_blocked"] = bool(
+        contagens.get("pending", 0)
+        and contagens.get("processing", 0)
+        and processing_age is not None
+        and processing_age >= max(1, float(blocked_after_seconds))
+        and live_idle_workers == 0
+    )
     with _abrir_conexao() as conexao:
         tarefas_agente = {status: 0 for status in _AGENT_STATUS}
         for linha in conexao.execute(

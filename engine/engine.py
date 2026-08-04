@@ -13,9 +13,11 @@ Nada aqui fala com o navegador. web/routes.py so poe eventos na fila
 daqui. main.py (CLI) tambem chama processar() direto, para testar sem
 precisar subir o Flask.
 """
+import copy
 import hashlib
 import json
 import os
+import random
 import re
 import secrets
 import sys
@@ -85,10 +87,7 @@ def _projeto_full_confiavel(config, projeto):
     confiaveis = (config or {}).get("agent", {}).get("trusted_project_paths") or []
     atual = os.path.realpath(os.path.abspath(str(caminho)))
     for raiz in confiaveis:
-        raiz_expandida = os.path.expanduser(str(raiz))
-        if not os.path.isabs(raiz_expandida):
-            raiz_expandida = os.path.join(BASE_DIR, raiz_expandida)
-        raiz_real = os.path.realpath(os.path.abspath(raiz_expandida))
+        raiz_real = os.path.realpath(os.path.abspath(os.path.expanduser(str(raiz))))
         try:
             if os.path.commonpath((atual, raiz_real)) == raiz_real:
                 return True
@@ -693,9 +692,19 @@ def ciclo_analista(pergunta, config, estrutura, evidencias, entendimento=None):
     chaves_aprovadas = set()
     historico_acumulado = []
     chaves_historico = set()
+    cache_buscas = {}
+    faltantes_vistos = set()
 
     for iteracao in range(1, max_iteracoes + 1):
-        atual = buscar(pergunta_busca, memory_dir=MEMORY_DIR, config=config, out_path=atual_path)
+        assinatura_busca = " ".join(str(pergunta_busca or "").casefold().split())
+        if assinatura_busca in cache_buscas:
+            atual = copy.deepcopy(cache_buscas[assinatura_busca])
+        else:
+            atual = buscar(
+                pergunta_busca, memory_dir=MEMORY_DIR,
+                config=config, out_path=atual_path,
+            )
+            cache_buscas[assinatura_busca] = copy.deepcopy(atual)
         trechos = atual.get("trechos", [])
 
         claro, motivo_atalho = _vencedor_claro(trechos, config)
@@ -743,8 +752,29 @@ def ciclo_analista(pergunta, config, estrutura, evidencias, entendimento=None):
         if not faltando or iteracao == max_iteracoes:
             break
 
+        assinatura_faltando = tuple(sorted(
+            " ".join(str(item).casefold().split())
+            for item in faltando if str(item).strip()
+        ))
+        if not assinatura_faltando:
+            break
+        if assinatura_faltando in faltantes_vistos:
+            decisao.setdefault("riscos", []).append(
+                "Investigacao interrompida: o Analista repetiu exatamente as mesmas lacunas sem progresso."
+            )
+            decisao["_early_exit"] = "repeated_missing"
+            break
+        faltantes_vistos.add(assinatura_faltando)
+
         # retrieval direcionado: a proxima rodada busca especificamente o que falta
-        pergunta_busca = pergunta + " " + " ".join(faltando)
+        proxima_busca = pergunta + " " + " ".join(faltando)
+        if " ".join(proxima_busca.casefold().split()) == assinatura_busca:
+            decisao.setdefault("riscos", []).append(
+                "Investigacao interrompida: a busca direcionada seria identica a anterior."
+            )
+            decisao["_early_exit"] = "identical_retrieval_query"
+            break
+        pergunta_busca = proxima_busca
 
     # O atalho nao passa pelo bloco de filtragem acima; nesse caso todos os
     # candidatos ja foram explicitamente aprovados pela regra objetiva.
@@ -765,6 +795,33 @@ def ciclo_analista(pergunta, config, estrutura, evidencias, entendimento=None):
     )
     _salvar_json(atual_path, atual)
     return atual, decisoes
+
+
+def _esperar_retry_executor(config, tentativa):
+    """Backoff curto entre respostas reprovadas pelo Verify.
+
+    O retry de transporte vive em ``llm/executar.py``. Este backoff cobre o
+    segundo tipo de repeticao: o backend respondeu, mas o Verify recusou a
+    resposta. Sem pausa, duas chamadas pesadas podiam ser disparadas em rajada.
+    """
+    cfg = (config or {}).get("engine", {})
+    base = max(0.0, float(cfg.get("executor_retry_base_delay_seconds", 0.0)))
+    max_delay = max(
+        base, float(cfg.get("executor_retry_max_delay_seconds", base)),
+    )
+    jitter = max(0.0, float(cfg.get("executor_retry_jitter_seconds", 0.0)))
+    atraso = min(max_delay, base * (2 ** max(0, int(tentativa) - 1)))
+    if jitter:
+        atraso += random.uniform(0.0, jitter)
+
+    runtime = (config or {}).get("_runtime_agent_budget") or {}
+    deadline = runtime.get("deadline_monotonic")
+    if deadline is not None:
+        restante = max(0.0, float(deadline) - time.monotonic())
+        atraso = min(atraso, restante)
+    if atraso > 0:
+        time.sleep(atraso)
+    return atraso
 
 
 # ---------------------------------------------------------------------------
@@ -816,7 +873,24 @@ def processar(pergunta, registrar_pergunta=True, forcar_tipo=None, historico_sna
 
     Chamado tanto pelo worker (fila) quanto pelo CLI (main.py).
     """
-    config = carregar_config()
+    config = dict(carregar_config() or {})
+    cfg_agente_runtime = config.get("agent", {})
+    deadline_segundos = max(
+        1, int(config.get("engine", {}).get("task_deadline_seconds", 300)),
+    )
+    agora_monotonic = time.monotonic()
+    config["_runtime_agent_budget"] = {
+        "started_monotonic": agora_monotonic,
+        "deadline_monotonic": agora_monotonic + deadline_segundos,
+        "task_id": task_id,
+        "source_job_id": source_job_id,
+        "max_llm_calls": max(1, int(cfg_agente_runtime.get("max_llm_calls", 12))),
+        "max_generated_tokens": max(
+            1, int(cfg_agente_runtime.get("max_total_generated_tokens", 12000)),
+        ),
+        "llm_calls": 0,
+        "generated_tokens": 0,
+    }
     projeto = carregar_projeto()
 
     if registrar_pergunta:
@@ -1741,24 +1815,35 @@ def _tentar_gerar_proposta(pergunta, config, projeto, atual, entendimento, decis
     real, ou a LLM nao devolveu um JSON valido) -- nesses casos quem chama
     cai no fallback de sempre (Executor gera so texto).
     """
+    def fallback(cause, detail=None):
+        return {
+            "_fallback": True,
+            "fallback_used": True,
+            "fallback_cause": cause,
+            "fallback_detail": detail,
+            "original_strategy": "structured_patch_proposal",
+            "fallback_strategy": "verified_text_response",
+        }
+
     cfg_codar = config.get("codar", {})
     if not cfg_codar.get("ativado", True):
-        return None
+        return fallback("CODING_DISABLED")
 
     alvo_identificado = _identificar_alvo_unico(atual)
     if alvo_identificado is None:
-        return None
+        return fallback("AMBIGUOUS_PATCH_TARGET")
     arquivo, simbolo = alvo_identificado
 
     caminho_projeto = (projeto or {}).get("caminho_origem")
     if not caminho_projeto:
-        return None
+        return fallback("PROJECT_PATH_UNAVAILABLE")
 
     alvo = localizar_simbolo(caminho_projeto, arquivo, simbolo)
     if alvo is None:
-        # simbolo nao encontrado no arquivo REAL agora (pode ter sido
-        # renomeado/removido desde o ultimo ingest) -- fallback silencioso
-        return None
+        return fallback(
+            "SYMBOL_NOT_FOUND",
+            f"{arquivo}:{simbolo} nao existe mais no arquivo real",
+        )
 
     impacto = calcular_impacto(arquivo, entendimento)
     prompt_engenheiro = montar_prompt_engenheiro(
@@ -1768,7 +1853,7 @@ def _tentar_gerar_proposta(pergunta, config, projeto, atual, entendimento, decis
     resposta_bruta = executar_engenheiro(prompt_engenheiro, config)
     proposta_llm = _parse_resposta_engenheiro(resposta_bruta)
     if proposta_llm is None:
-        return None
+        return fallback("INVALID_ENGINEER_RESPONSE")
 
     teste = testar_patch_em_copia(
         caminho_projeto, arquivo, alvo["linha_inicio"], alvo["linha_fim"], proposta_llm["codigo_novo"],
@@ -1863,10 +1948,13 @@ def _processar_engenharia_impl(pergunta, config, projeto, estrutura, entendiment
         }
 
     resultado_proposta = _tentar_gerar_proposta(pergunta, config, projeto, atual, entendimento, decisoes)
-    if resultado_proposta is not None:
+    fallback_proposta = None
+    if resultado_proposta is not None and not resultado_proposta.get("_fallback"):
         resultado_proposta["iteracoes_analista"] = len(decisoes_analista)
         resultado_proposta["decisoes_analista"] = decisoes_analista
         return resultado_proposta
+    if isinstance(resultado_proposta, dict):
+        fallback_proposta = resultado_proposta
 
     prompt_executor = montar_prompt_executor(
         atual, projeto=projeto, evidencias=evidencias,
@@ -1876,6 +1964,7 @@ def _processar_engenharia_impl(pergunta, config, projeto, estrutura, entendiment
     max_tentativas = config.get("engine", {}).get("max_tentativas_executor", 2)
     resposta = ""
     resultado_validacao = None
+    assinatura_avisos_anterior = None
 
     for tentativa in range(1, max_tentativas + 1):
         resposta = executar_executor(prompt_executor, config)
@@ -1887,11 +1976,20 @@ def _processar_engenharia_impl(pergunta, config, projeto, estrutura, entendiment
         if resultado_validacao["verificacao_aprovada"] is not False or tentativa == max_tentativas:
             break
 
+        assinatura_avisos = tuple(sorted(str(item) for item in resultado_validacao.get("avisos", [])))
+        if assinatura_avisos and assinatura_avisos == assinatura_avisos_anterior:
+            resultado_validacao.setdefault("avisos", []).append(
+                "Retry interrompido: o Verify repetiu exatamente os mesmos avisos sem progresso."
+            )
+            break
+        assinatura_avisos_anterior = assinatura_avisos
+
         # reprovado: Executor tenta de novo, agora sabendo o que falhou na verificacao
         prompt_executor += (
             "\n\nSUA RESPOSTA ANTERIOR TEVE PROBLEMAS DE VERIFICACAO, CORRIJA:\n- "
             + "\n- ".join(resultado_validacao["avisos"])
         )
+        _esperar_retry_executor(config, tentativa)
 
     registrar_historico(
         MEMORY_DIR, pergunta, atual.get("arquivos_relevantes", []), resultado_validacao,
@@ -1900,13 +1998,22 @@ def _processar_engenharia_impl(pergunta, config, projeto, estrutura, entendiment
 
     registrar_mensagem("assistant", resposta)
 
-    return {
+    retorno = {
         "resposta": resposta,
         "roteador": {"tipo": "engenharia", "motivo": motivo_roteador},
         "iteracoes_analista": len(decisoes_analista),
         "decisoes_analista": decisoes_analista,
         **_campos_validacao(resultado_validacao),
     }
+    if fallback_proposta:
+        retorno.update({
+            "fallback_used": True,
+            "fallback_cause": fallback_proposta.get("fallback_cause"),
+            "fallback_detail": fallback_proposta.get("fallback_detail"),
+            "original_strategy": fallback_proposta.get("original_strategy"),
+            "fallback_strategy": fallback_proposta.get("fallback_strategy"),
+        })
+    return retorno
 
 
 def _processar_engenharia(pergunta, config, projeto, estrutura, entendimento, motivo_roteador):

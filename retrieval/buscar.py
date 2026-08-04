@@ -26,6 +26,7 @@ import math
 import os
 import re
 import sys
+import threading
 import time
 from collections import Counter, defaultdict
 
@@ -37,6 +38,9 @@ from engine.persistencia import salvar_json_atomico  # noqa: E402
 from engine.config_schema import carregar_config_validada  # noqa: E402
 
 TOKEN_RE = re.compile(r"[^\W\d_]{2,}", re.UNICODE)
+_INDICES_BM25 = {}
+_INDICES_LOCK = threading.Lock()
+_MAX_INDICES_EM_MEMORIA = 4
 
 
 def tokenizar(texto):
@@ -94,6 +98,49 @@ class BM25:
         return pontos
 
 
+def _indice_bm25_cached(memory_dir, k1, b):
+    """Reutiliza chunks/tokenizacao enquanto o arquivo de indice nao muda."""
+    caminho = os.path.abspath(os.path.join(memory_dir, "chunks.jsonl"))
+    try:
+        stat = os.stat(caminho)
+    except OSError:
+        return [], None
+    fingerprint = (stat.st_mtime_ns, stat.st_size, float(k1), float(b))
+    with _INDICES_LOCK:
+        entrada = _INDICES_BM25.get(caminho)
+        if entrada and entrada["fingerprint"] == fingerprint:
+            entrada["ultimo_uso"] = time.monotonic()
+            return entrada["chunks"], entrada["bm25"]
+
+    chunks = carregar_chunks(memory_dir)
+    bm25 = BM25(chunks, k1=k1, b=b) if chunks else None
+    with _INDICES_LOCK:
+        _INDICES_BM25[caminho] = {
+            "fingerprint": fingerprint,
+            "chunks": chunks,
+            "bm25": bm25,
+            "ultimo_uso": time.monotonic(),
+        }
+        if len(_INDICES_BM25) > _MAX_INDICES_EM_MEMORIA:
+            antigo = min(
+                _INDICES_BM25,
+                key=lambda item: _INDICES_BM25[item]["ultimo_uso"],
+            )
+            if antigo != caminho:
+                _INDICES_BM25.pop(antigo, None)
+    return chunks, bm25
+
+
+def invalidar_cache_bm25(memory_dir=None):
+    """Utilitario de testes/ingest; o fingerprint ja invalida automaticamente."""
+    with _INDICES_LOCK:
+        if memory_dir is None:
+            _INDICES_BM25.clear()
+            return
+        caminho = os.path.abspath(os.path.join(memory_dir, "chunks.jsonl"))
+        _INDICES_BM25.pop(caminho, None)
+
+
 def carregar_historico_relacionado(memory_dir, arquivos_relevantes, limite=3):
     caminho = os.path.join(memory_dir, "historico.json")
     if not os.path.exists(caminho):
@@ -120,7 +167,7 @@ def buscar(pergunta, memory_dir="memory", config=None, out_path=None):
     k1 = ret_cfg.get("bm25_k1", 1.5)
     b = ret_cfg.get("bm25_b", 0.75)
 
-    chunks = carregar_chunks(memory_dir)
+    chunks, bm25 = _indice_bm25_cached(memory_dir, k1, b)
     if not chunks:
         print("[buscar] Nenhum chunk encontrado. Rode ingest.py primeiro.", file=sys.stderr)
         atual = {
@@ -134,7 +181,6 @@ def buscar(pergunta, memory_dir="memory", config=None, out_path=None):
         }
         return atual
 
-    bm25 = BM25(chunks, k1=k1, b=b)
     query_tokens = tokenizar(pergunta)
     pontos = bm25.pontuar(query_tokens)
 

@@ -311,6 +311,7 @@ def _tool_list_tree(arguments, ctx):
     cfg_agente = ((ctx or {}).get("config") or {}).get("agent", {})
     max_entradas = cfg_agente.get("max_tree_entries", 200)
     max_profundidade = cfg_agente.get("max_tree_depth", 6)
+    max_secret_scan_bytes = cfg_agente.get("max_secret_scan_bytes", 64 * 1024)
     limite = arguments.get("limite", max_entradas)
     profundidade = arguments.get("profundidade", max_profundidade)
     if limite > max_entradas:
@@ -329,6 +330,7 @@ def _tool_list_tree(arguments, ctx):
             limite=limite,
             profundidade=profundidade,
             filtro=arguments.get("filtro"),
+            max_secret_scan_bytes=max_secret_scan_bytes,
         )
     except ErroLeituraProjeto as erro:
         codigo = "INVALID_ARGUMENT" if erro.error_code in {

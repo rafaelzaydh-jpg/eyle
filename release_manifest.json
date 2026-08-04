@@ -1,0 +1,57 @@
+{
+  "release": "2.7.3",
+  "app_version": "2.7.3",
+  "config_schema_version": "2.7.3",
+  "revision": "53.0-speed-cycle-hardening",
+  "updated": "2026-08-04",
+  "installation": "overlay_safe",
+  "preserve_on_update": [
+    "memory/**",
+    "context/**",
+    "workspace/**"
+  ],
+  "included_runtime_state": false,
+  "validation": {
+    "compileall_passed": true,
+    "tests_passed": 204,
+    "tests_total_executable": 204,
+    "tests_skipped": 1,
+    "web_tests_executed": false,
+    "real_llm_benchmark_executed": false,
+    "notes": [
+      "A suite executavel do pacote GitHub passou integralmente (204/204).",
+      "Um modulo de testes web foi ignorado porque Flask nao esta instalado neste ambiente.",
+      "O benchmark real requer o endpoint LLM local da instalacao final."
+    ]
+  },
+  "hardening_52": [
+    "semantic grounding deterministico por afirmacao e evidencia",
+    "watchdog de parede com processo filho terminavel",
+    "consumidores paralelos e diagnostico de head-of-line blocking",
+    "orcamento LLM central em todos os pipelines",
+    "limite LLM entre processos com lease recuperavel",
+    "cache LLM SQLite com migracao automatica",
+    "telemetria persistente com P50 P95 P99",
+    "fallbacks explicitos e warnings operacionais",
+    "testes de 429 timeout connection reset watchdog cache e recovery"
+  ],
+  "hardening_53": [
+    "rejeicao de respostas ambiguas com mais de uma decisao JSON valida",
+    "invalidacao de envelopes de erro estruturados no cache e publicacao somente apos validar o orcamento",
+    "detector de ciclos curtos por fingerprint de estado e resultado",
+    "teto de reserva da fila mesmo sob conflito permanente",
+    "cache de retrieval por ciclo e early exit para lacunas ou buscas repetidas",
+    "backoff exponencial entre retries reprovados pelo Verify",
+    "falhas de permissao do token web registradas em telemetria"
+  ],
+  "external_validation_required": [
+    "executar testes web com Flask==3.0.3 no ambiente final",
+    "executar benchmark real P50/P95/P99 com o endpoint e modelo locais"
+  ],
+  "known_limits": [
+    "grounding deterministico e conservador nao constitui prova universal de entailment em linguagem natural",
+    "desempenho real depende do hardware backend modelo e projeto do usuario"
+  ],
+  "internal_protocol_language": "English",
+  "user_language_behavior": "Preserva o pedido original e responde no idioma do usuario; portugues continua portugues."
+}

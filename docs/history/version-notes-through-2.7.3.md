@@ -1,3 +1,62 @@
+# Revisão 53.0-speed-cycle-hardening — velocidade, cache e ciclos
+
+- `engine/agent.py`: parser rejeita mais de uma decisão JSON válida e integra
+  detecção de ciclos curtos após cada tool realmente executada.
+- `engine/agent_state.py`: fingerprint estável combina resultado, evidências,
+  estado de edição, blockers e evidências ainda necessárias.
+- `llm/cache.py` e `llm/executar.py`: envelopes estruturados de falha são
+  invalidados; respostas só entram no cache após o orçamento aceitar os tokens.
+- `engine/queue.py`: a reserva de jobs possui teto de ciclos sob conflito.
+- `engine/engine.py`: retrieval repetido é reutilizado, lacunas/buscas repetidas
+  encerram o Analista e retries recusados pelo Verify usam backoff exponencial.
+- `engine/config_schema.py`: valida os novos limites de backoff do Executor.
+- `web/routes.py`: falhas de permissão do token web são observáveis na telemetria.
+- `tests/test_hardening_53.py`: nove regressões específicas.
+- Validação local: `compileall` e **202/202 testes executáveis** aprovados; um
+  teste web ignorado por ausência de Flask. Benchmark real continua dependente
+  do endpoint/modelo da instalação final.
+
+---
+
+# Revisão 52.0-complete-hardening — fechamento da auditoria
+
+- `engine/grounding.py`: valida cada afirmação contra a evidência declarada e
+  bloqueia identificadores, caminhos, números e literais objetivos sem suporte.
+- `engine/worker.py`: executa jobs em processos filhos termináveis, aplica
+  deadline de parede e mantém consumidores paralelos configuráveis.
+- `engine/process_limiter.py`: serializa a LLM entre processos com SQLite, lease
+  recuperável e remoção de slots pertencentes a processos mortos.
+- `llm/cache.py`: cache indexado em SQLite com migração automática do JSON legado.
+- `engine/telemetry.py`: registra jobs, tools e LLM e calcula P50/P95/P99.
+- `engine/queue.py`: heartbeat com PID, recuperação seletiva e detecção de fila bloqueada.
+- `llm/executar.py`: orçamento LLM central, métricas, reset/timeout transitórios e
+  fallback de descoberta de modelo observável.
+- `engine/engine.py`: fallbacks legados estruturados e early exit em reprovação repetida.
+- `web/routes.py` e `main.py`: health/status com fila, workers, avisos e métricas.
+- Validação local: `compileall` e **193/193 testes executáveis** aprovados; um
+  teste web ignorado por ausência de Flask. O benchmark LLM real continua
+  dependente do endpoint/modelo da instalação final.
+
+---
+
+# Revisão 51.0-hardening — limites operacionais e desempenho
+
+- `engine/agent.py`: deadline, orçamento de chamadas/tokens e parser JSON estrito.
+- `llm/executar.py`: timeouts por perfil, retry transitório, backoff/jitter,
+  cooldown, semáforo e cache negativo da descoberta de modelos.
+- `llm/cache.py`: rejeição/invalidação de vazios e `[erro]`; hits em lote.
+- `engine/agent_state.py`: equivalência semântica de tools repetidas.
+- `retrieval/buscar.py`: BM25 em memória com invalidação por fingerprint.
+- `engine/queue.py` e `engine/worker.py`: heartbeat, schema único e ciclo resiliente.
+- `engine/config_schema.py`: limites operacionais e consistência de provider.
+- `engine/release_identity.py`: build falha se config, manifesto e README divergirem.
+- Validação: 179/179 testes não-web e `compileall` aprovados.
+
+Limites: testes web e benchmark real não executados; entailment semântico completo
+ainda não é verificado deterministicamente.
+
+---
+
 # Revisão 50.1 — agente estruturado confiável no llama-server
 
 - `llm/executar.py`: schema JSON explícito, controles de thinking com fallback,
