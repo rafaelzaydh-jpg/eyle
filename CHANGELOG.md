@@ -8,6 +8,26 @@ No unreleased changes yet.
 
 ## 2.7.3 — 2026-08-04
 
+### Revision 54 — token UX and aggressive LLM cache phase 1
+
+- Added a bounded 2,048-entry in-memory LRU before the persistent cache.
+- Expanded the default persistent SQLite cache to 4,096 exact entries.
+- Added an absolute 24-hour TTL configurable through `llm.cache.max_age_hours`.
+- Kept cache keys isolated by backend fingerprint, model, temperature, prompts, and structured-call mode.
+- Preserved poisoned-cache rejection and post-budget publication gates.
+- Rewrote the browser token prompt to identify the terminal line and `context/web_api_token.txt`.
+- Added a visible token retry/replacement button that does not require page reload.
+- Printed the persistent token path from both `main.py serve` and direct `web/routes.py` startup.
+- Made direct `web/routes.py` startup launch the persistent Worker too.
+- Added revision 54 regression coverage.
+
+### Validation
+
+- `python -m compileall -q .` passed.
+- 211/211 executable non-web tests passed.
+- One Flask-dependent web module remained skipped because Flask was unavailable in the packaging environment.
+- JavaScript syntax validation passed with Node.js.
+
 ### Revision 53 — speed and cycle hardening
 
 - Rejected ambiguous agent responses containing more than one valid decision JSON.

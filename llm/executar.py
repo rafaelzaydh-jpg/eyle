@@ -733,9 +733,11 @@ def _chamar_llm_impl(prompt_sistema, prompt_usuario, config, forcar_json=False, 
     if cache_ativado:
         cacheada = _cache.obter(
             BASE_DIR, backend_fingerprint, prompt_sistema, prompt_usuario,
-            max_entradas=cache_cfg.get("max_entradas", 500),
+            max_entradas=cache_cfg.get("max_entradas", 4096),
             max_age_days=cache_cfg.get("max_age_days", 30),
             hit_flush_interval=cache_cfg.get("hit_flush_interval", 20),
+            memoria_max_entradas=cache_cfg.get("memoria_max_entradas", 2048),
+            max_age_hours=cache_cfg.get("max_age_hours", 24),
         )
         if cacheada is not None:
             # Compatibilidade com implementacoes externas/mocks de cache e
@@ -886,8 +888,10 @@ def _chamar_llm_impl(prompt_sistema, prompt_usuario, config, forcar_json=False, 
     if cache_ativado:
         _cache.definir(
             BASE_DIR, backend_fingerprint, prompt_sistema, prompt_usuario, resposta,
-            max_entradas=cache_cfg.get("max_entradas", 500),
+            max_entradas=cache_cfg.get("max_entradas", 4096),
             max_age_days=cache_cfg.get("max_age_days", 30),
+            memoria_max_entradas=cache_cfg.get("memoria_max_entradas", 2048),
+            max_age_hours=cache_cfg.get("max_age_hours", 24),
         )
 
     return resposta

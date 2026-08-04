@@ -30,7 +30,7 @@ Use `openai_compatible: true` for LM Studio, llama.cpp server, and compatible `/
 
 ## Timeouts, retries, and budgets
 
-Revision 51–53 separates connection, read, model-discovery, agent, and executor timeouts. Transient failures can retry with capped exponential backoff, jitter, cooldown, and `Retry-After` support. Permanent client errors do not retry.
+Revision 51–54 separates connection, read, model-discovery, agent, and executor timeouts. Transient failures can retry with capped exponential backoff, jitter, cooldown, and `Retry-After` support. Permanent client errors do not retry.
 
 The task-level deadline and budgets remain authoritative even when an individual operation allows more time:
 
@@ -113,9 +113,28 @@ Jobs run in terminable child processes by default. Queue reservation is bounded,
 
 ## Cache and telemetry
 
-The LLM cache, queue, process limiter, and telemetry use SQLite under `context/`. Legacy JSON cache entries are migrated automatically. Empty responses and structured failure envelopes are invalidated instead of being returned as successful answers.
+The LLM cache now uses two layers: a bounded in-process LRU for repeated calls in the active session and SQLite under `context/cache_llm.sqlite3` for reuse across sessions. Legacy JSON entries are migrated automatically. Empty responses and structured failure envelopes are invalidated instead of being returned as successful answers.
+
+```json
+{
+  "llm": {
+    "cache": {
+      "ativado": true,
+      "max_entradas": 4096,
+      "memoria_max_entradas": 2048,
+      "max_age_hours": 24
+    }
+  }
+}
+```
+
+The TTL is absolute from creation time; a frequently hit response still expires. Exact cache keys include the backend fingerprint, model, temperature, system prompt, user prompt, and call mode.
 
 Telemetry can expose call/tool/job status and latency percentiles without publishing prompt contents.
+
+## Web API token
+
+Run `python main.py serve`. The terminal prints the token and its persistent path. When no environment or explicit configuration token is used, the generated value is stored in `context/web_api_token.txt` with restricted permissions. The browser prompt repeats these locations, and the **token** button allows retrying or replacing the value without reloading.
 
 ## Runtime data
 

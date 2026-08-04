@@ -6,6 +6,7 @@
   const inputEl = document.getElementById("input");
   const sendBtn = document.getElementById("sendBtn");
   const connDot = document.getElementById("connDot");
+  const tokenBtn = document.getElementById("tokenBtn");
   const projectInfo = document.getElementById("projectInfo");
   const pipelineEl = document.getElementById("pipeline");
   const jobStateEl = document.getElementById("jobState");
@@ -167,14 +168,29 @@
   function obterApiToken() {
     if (apiToken) return apiToken;
     if (tokenPromptCancelado) throw new Error("token da API nao informado");
-    const informado = window.prompt("Token da API Eyle:");
+    const informado = window.prompt(
+      "Cole o token da API Eyle.\n\n" +
+      "Onde encontrar:\n" +
+      "• no terminal que executou `python main.py serve` (ou `python web/routes.py`), na linha `[main] Token da API`/`[web] Token da API`\n" +
+      "• ou em `context/web_api_token.txt` (quando o token não veio de variável/configuração)\n\n" +
+      "Você pode clicar no botão ‘token’ no topo para tentar novamente."
+    );
     if (!informado || !informado.trim()) {
       tokenPromptCancelado = true;
       throw new Error("token da API nao informado");
     }
     apiToken = informado.trim();
+    tokenPromptCancelado = false;
     sessionStorage.setItem("eyleApiToken", apiToken);
     return apiToken;
+  }
+
+  function solicitarNovoToken() {
+    apiToken = "";
+    tokenPromptCancelado = false;
+    sessionStorage.removeItem("eyleApiToken");
+    fetchConversa();
+    fetchStatus();
   }
 
   async function apiFetch(url, options = {}) {
@@ -185,7 +201,8 @@
       apiToken = "";
       tokenPromptCancelado = true;
       sessionStorage.removeItem("eyleApiToken");
-      throw new Error("token da API invalido; recarregue para tentar novamente");
+      projectInfo.innerHTML = '<span class="pi-line">token inválido · clique em “token”</span>';
+      throw new Error("token da API invalido; clique no botao token para tentar novamente");
     }
     if (res.status === 429) {
       throw new Error("limite de requisicoes; aguarde um pouco");
@@ -338,6 +355,7 @@
   });
 
   sendBtn.addEventListener("click", sendMessage);
+  tokenBtn.addEventListener("click", solicitarNovoToken);
 
   // ---------- boot ----------
 

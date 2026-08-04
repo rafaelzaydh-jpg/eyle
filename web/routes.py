@@ -168,6 +168,15 @@ def obter_api_token():
     return token_novo
 
 
+def origem_api_token():
+    """Informa onde o operador deve consultar o token ativo, sem expo-lo."""
+    if os.environ.get("EYLE_API_TOKEN", "").strip():
+        return "variavel de ambiente EYLE_API_TOKEN"
+    if str(_carregar_config_web().get("api_token") or "").strip():
+        return "config.json -> web.api_token"
+    return TOKEN_PATH
+
+
 def _valor_limite(nome_app, nome_config, padrao):
     valor_app = app.config.get(nome_app)
     if valor_app is not None:
@@ -384,5 +393,14 @@ def job(job_id):
 
 
 if __name__ == "__main__":
+    # Mantem o atalho direto funcional e com a mesma orientacao de `main.py serve`.
+    from engine.worker import iniciar_em_thread
+
     carregar_config_validada(CONFIG_PATH)
+    token_api = obter_api_token()
+    print("[web] Iniciando Worker permanente...")
+    iniciar_em_thread()
+    print(f"[web] Token da API: {token_api}")
+    print(f"[web] Origem do token: {origem_api_token()}")
+    print("[web] Painel: http://127.0.0.1:5000/")
     app.run(host="127.0.0.1", port=5000, debug=False)

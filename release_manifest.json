@@ -2,7 +2,7 @@
   "release": "2.7.3",
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "53.0-speed-cycle-hardening",
+  "revision": "54.0-token-cache-phase1",
   "updated": "2026-08-04",
   "installation": "overlay_safe",
   "preserve_on_update": [
@@ -13,14 +13,16 @@
   "included_runtime_state": false,
   "validation": {
     "compileall_passed": true,
-    "tests_passed": 204,
-    "tests_total_executable": 204,
+    "tests_passed": 211,
+    "tests_total_executable": 211,
     "tests_skipped": 1,
     "web_tests_executed": false,
+    "javascript_syntax_passed": true,
     "real_llm_benchmark_executed": false,
     "notes": [
-      "A suite executavel do pacote GitHub passou integralmente (204/204).",
-      "Um modulo de testes web foi ignorado porque Flask nao esta instalado neste ambiente.",
+      "A suite executavel do pacote passou integralmente (211/211).",
+      "Um modulo web foi ignorado porque Flask nao estava disponivel no ambiente de empacotamento.",
+      "A sintaxe de web/static/app.js foi validada com Node.js.",
       "O benchmark real requer o endpoint LLM local da instalacao final."
     ]
   },
@@ -53,5 +55,13 @@
     "desempenho real depende do hardware backend modelo e projeto do usuario"
   ],
   "internal_protocol_language": "English",
-  "user_language_behavior": "Preserva o pedido original e responde no idioma do usuario; portugues continua portugues."
+  "user_language_behavior": "Preserva o pedido original e responde no idioma do usuario; portugues continua portugues.",
+  "hardening_54": [
+    "LRU em memoria com 2048 entradas antes do SQLite",
+    "cache persistente SQLite com 4096 entradas e TTL absoluto de 24 horas",
+    "isolamento do LRU por banco e fingerprint completo do backend",
+    "prompt web informa terminal e context/web_api_token.txt",
+    "botao de retry e troca do token sem recarregar",
+    "entrada direta web/routes.py inicia Worker e imprime token/caminho"
+  ]
 }

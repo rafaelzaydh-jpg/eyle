@@ -12,10 +12,12 @@
     "_comentario_max_tokens": "Teto de saida. 1500 permite agentes intermediarios/Thinking, enquanto o modo estruturado tenta desativar reasoning para decisoes curtas.",
     "cache": {
       "ativado": true,
-      "max_entradas": 500,
+      "max_entradas": 4096,
       "max_age_days": 30,
-      "_comentario": "Cache SQLite por hash do prompt completo em context/cache_llm.sqlite3; cache_llm.json legado e migrado automaticamente uma vez.",
-      "hit_flush_interval": 20
+      "_comentario": "Cache em duas camadas: LRU em memoria (sessao atual) + SQLite persistente por hash exato do prompt/backend. TTL absoluto padrao de 24h evita respostas antigas eternas; erros nunca sao armazenados.",
+      "hit_flush_interval": 20,
+      "memoria_max_entradas": 2048,
+      "max_age_hours": 24
     },
     "_comentario_provider": "use 'ollama' para Ollama nativo, ou defina openai_compatible=true para LM Studio / llama.cpp server / text-generation-webui (endpoint /v1/chat/completions)",
     "_comentario_model": "nome do modelo/alias carregado. Em backend OpenAI-compatible/llama-server, a Eyle consulta /v1/models: se houver um unico modelo carregado, usa o ID reportado pelo servidor mesmo que este campo tenha ficado antigo; 'auto' tambem seleciona esse unico modelo. Com varios modelos, mantenha aqui o alias exato.",
@@ -214,7 +216,7 @@
   },
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "53.0-speed-cycle-hardening",
+  "revision": "54.0-token-cache-phase1",
   "telemetry": {
     "enabled": true,
     "window_seconds": 3600,

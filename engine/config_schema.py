@@ -8,7 +8,9 @@ from typing import Any, Dict, List, Optional, TypedDict
 class CacheConfig(TypedDict, total=False):
     ativado: bool
     max_entradas: int
+    memoria_max_entradas: int
     max_age_days: int
+    max_age_hours: int
     hit_flush_interval: int
 
 
@@ -179,7 +181,8 @@ def validar_config(config) -> ConfigEyle:
         "llm.executor_timeout_seconds", "llm.model_discovery_timeout_seconds",
         "llm.model_discovery_negative_ttl_seconds", "llm.retry_max_attempts",
         "llm.max_concurrent_requests", "llm.context_window_tokens",
-        "llm.cache.max_entradas", "llm.cache.hit_flush_interval",
+        "llm.cache.max_entradas", "llm.cache.memoria_max_entradas",
+        "llm.cache.max_age_hours", "llm.cache.hit_flush_interval",
         "context.token_budget", "context.chars_per_token",
         "context_engine.safety_margin_tokens",
         "context_engine.chars_per_token_fallback",
@@ -222,7 +225,7 @@ def validar_config(config) -> ConfigEyle:
         "llm.read_timeout_seconds", "llm.agent_timeout_seconds",
         "llm.executor_timeout_seconds", "llm.model_discovery_timeout_seconds",
         "llm.retry_max_attempts", "llm.max_concurrent_requests",
-        "llm.cache.hit_flush_interval", "agent.max_steps",
+        "llm.cache.max_age_hours", "llm.cache.hit_flush_interval", "agent.max_steps",
         "agent.max_tentativas_parse", "agent.max_erros_consecutivos",
         "agent.task_deadline_seconds", "agent.max_llm_calls",
         "agent.max_total_generated_tokens", "agent.max_secret_scan_bytes",

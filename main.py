@@ -284,7 +284,7 @@ def cmd_serve(args):
     # navegador so fala com o Flask a partir daqui; fechar a aba nao
     # interrompe o Worker.
     from engine.worker import iniciar_em_thread
-    from web.routes import app, obter_api_token
+    from web.routes import app, obter_api_token, origem_api_token
 
     projeto = carregar_projeto()
     if projeto is None:
@@ -295,6 +295,7 @@ def cmd_serve(args):
     print(f"[main] Iniciando Worker permanente...")
     iniciar_em_thread()
     print(f"[main] Token da API: {token_api}")
+    print(f"[main] Origem do token: {origem_api_token()}")
     if args.host not in ("127.0.0.1", "::1", "localhost"):
         print(
             "[main] ATENCAO: host externo. Restrinja firewall/rede e use um "

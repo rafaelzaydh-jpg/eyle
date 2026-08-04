@@ -73,6 +73,22 @@ html, body {
 .conn-dot.online { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
 .conn-dot.offline { background: #d97757; box-shadow: 0 0 6px #d97757; }
 
+.token-btn {
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  padding: 3px 6px;
+  cursor: pointer;
+}
+.token-btn:hover, .token-btn:focus-visible {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+  outline: none;
+}
+
 .project-info {
   font-size: 11px;
   color: var(--muted);

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Cache SQLite por hash do prompt completo.
+"""Cache LLM em duas camadas por hash exato do prompt/backend.
 
-A versao anterior reabria e regravava ``cache_llm.json`` inteiro. Esta versao
-faz lookup/update O(log n) em SQLite, suporta concorrencia entre Flask/Worker e
-migra automaticamente o JSON legado uma unica vez.
+Um LRU thread-safe atende repeticoes na execucao atual sem I/O. O SQLite
+persiste respostas entre sessoes, suporta concorrencia Flask/Worker e migra
+automaticamente o JSON legado uma unica vez.
 """
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import os
 import sqlite3
 import threading
 import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 
 NOME_ARQUIVO = "cache_llm.sqlite3"
@@ -20,6 +21,77 @@ NOME_LEGADO = "cache_llm.json"
 _SCHEMA_LOCK = threading.Lock()
 _READY = set()
 _MIGRATED = set()
+_MEMORY_LOCK = threading.RLock()
+_MEMORY_CACHE = OrderedDict()
+
+
+def _ttl_seconds(max_age_hours=None, max_age_days=30):
+    """Resolve o TTL preservando compatibilidade com max_age_days legado."""
+    if max_age_hours is not None:
+        try:
+            horas = max(0.0, float(max_age_hours))
+        except (TypeError, ValueError):
+            horas = 24.0
+        return horas * 3600.0
+    try:
+        dias = max(0.0, float(max_age_days or 0))
+    except (TypeError, ValueError):
+        dias = 30.0
+    return dias * 86400.0
+
+
+def _chave_memoria(base_dir, key):
+    return f"{os.path.abspath(_caminho(base_dir))}\x1f{key}"
+
+
+def _limite_memoria(memoria_max_entradas, max_entradas):
+    memoria = max(0, int(memoria_max_entradas or 0))
+    disco = max(0, int(max_entradas or 0))
+    if disco == 0:
+        return 0
+    return min(memoria, disco)
+
+
+def _memoria_obter(memory_key, max_entradas, ttl_seconds):
+    max_entradas = max(0, int(max_entradas or 0))
+    if max_entradas == 0:
+        return None
+    agora = time.time()
+    with _MEMORY_LOCK:
+        entrada = _MEMORY_CACHE.get(memory_key)
+        if entrada is None:
+            return None
+        resposta, criado_em, hits = entrada
+        if ttl_seconds and agora - criado_em >= ttl_seconds:
+            _MEMORY_CACHE.pop(memory_key, None)
+            return None
+        if not _resposta_cacheavel(resposta):
+            _MEMORY_CACHE.pop(memory_key, None)
+            return None
+        _MEMORY_CACHE[memory_key] = (resposta, criado_em, hits + 1)
+        _MEMORY_CACHE.move_to_end(memory_key)
+        return resposta
+
+
+def _memoria_definir(memory_key, resposta, criado_em=None, max_entradas=2048, hits=0):
+    max_entradas = max(0, int(max_entradas or 0))
+    if max_entradas == 0 or not _resposta_cacheavel(resposta):
+        return False
+    with _MEMORY_LOCK:
+        _MEMORY_CACHE[memory_key] = (
+            resposta, float(criado_em or time.time()), max(0, int(hits or 0)),
+        )
+        _MEMORY_CACHE.move_to_end(memory_key)
+        while len(_MEMORY_CACHE) > max_entradas:
+            _MEMORY_CACHE.popitem(last=False)
+    return True
+
+
+def limpar_memoria():
+    """Limpa apenas o LRU do processo atual; util em testes e manutencao."""
+    with _MEMORY_LOCK:
+        _MEMORY_CACHE.clear()
+
 
 
 def _caminho(base_dir):
@@ -159,14 +231,15 @@ def _migrate_legacy(base_dir, conn, db_path):
         _MIGRATED.add(db_path)
 
 
-def _prune(conn, max_entries, max_age_days):
+def _prune(conn, max_entries, max_age_days=30, max_age_hours=None):
     now = time.time()
     max_entries = max(0, int(max_entries or 0))
-    max_age_days = max(0, int(max_age_days or 0))
-    if max_age_days:
+    ttl = _ttl_seconds(max_age_hours=max_age_hours, max_age_days=max_age_days)
+    if ttl:
+        # TTL absoluto: um hit nao torna uma resposta antiga eterna.
         conn.execute(
-            "DELETE FROM cache_entries WHERE last_used < ?",
-            (now - max_age_days * 86400,),
+            "DELETE FROM cache_entries WHERE created_at < ?",
+            (now - ttl,),
         )
     if max_entries == 0:
         conn.execute("DELETE FROM cache_entries")
@@ -185,15 +258,23 @@ def _prune(conn, max_entries, max_age_days):
 def obter(
     base_dir, backend_fingerprint, prompt_sistema, prompt_usuario,
     max_entradas=500, max_age_days=30, hit_flush_interval=20,
+    memoria_max_entradas=2048, max_age_hours=None,
 ):
-    """Devolve uma resposta exata sem carregar o cache inteiro em memoria."""
-    del hit_flush_interval  # SQLite torna o update pequeno; mantido por compatibilidade.
+    """Consulta primeiro o LRU em memoria e depois o SQLite persistente."""
+    del hit_flush_interval  # mantido por compatibilidade de configuracao.
     key = _chave(backend_fingerprint, prompt_sistema, prompt_usuario)
+    memory_key = _chave_memoria(base_dir, key)
+    limite_memoria = _limite_memoria(memoria_max_entradas, max_entradas)
+    ttl = _ttl_seconds(max_age_hours=max_age_hours, max_age_days=max_age_days)
+    resposta_memoria = _memoria_obter(memory_key, limite_memoria, ttl)
+    if resposta_memoria is not None:
+        return resposta_memoria
+
     conn = _connect(base_dir)
     try:
-        _prune(conn, max_entradas, max_age_days)
+        _prune(conn, max_entradas, max_age_days, max_age_hours)
         row = conn.execute(
-            "SELECT response FROM cache_entries WHERE cache_key = ?", (key,),
+            "SELECT response, created_at FROM cache_entries WHERE cache_key = ?", (key,),
         ).fetchone()
         if row is None:
             return None
@@ -205,6 +286,10 @@ def obter(
             "UPDATE cache_entries SET hits = hits + 1, last_used = ? WHERE cache_key = ?",
             (time.time(), key),
         )
+        _memoria_definir(
+            memory_key, response, criado_em=row["created_at"],
+            max_entradas=limite_memoria,
+        )
         return response
     finally:
         conn.close()
@@ -212,12 +297,15 @@ def obter(
 
 def definir(
     base_dir, backend_fingerprint, prompt_sistema, prompt_usuario, resposta,
-    max_entradas=500, max_age_days=30,
+    max_entradas=500, max_age_days=30, memoria_max_entradas=2048,
+    max_age_hours=None,
 ):
     if not _resposta_cacheavel(resposta):
         invalidar(base_dir, backend_fingerprint, prompt_sistema, prompt_usuario)
         return False
     key = _chave(backend_fingerprint, prompt_sistema, prompt_usuario)
+    memory_key = _chave_memoria(base_dir, key)
+    limite_memoria = _limite_memoria(memoria_max_entradas, max_entradas)
     now = time.time()
     conn = _connect(base_dir)
     try:
@@ -233,7 +321,10 @@ def definir(
             """,
             (key, resposta, now, now),
         )
-        _prune(conn, max_entradas, max_age_days)
+        _prune(conn, max_entradas, max_age_days, max_age_hours)
+        _memoria_definir(
+            memory_key, resposta, criado_em=now, max_entradas=limite_memoria,
+        )
         return True
     finally:
         conn.close()
@@ -241,6 +332,9 @@ def definir(
 
 def invalidar(base_dir, backend_fingerprint, prompt_sistema, prompt_usuario):
     key = _chave(backend_fingerprint, prompt_sistema, prompt_usuario)
+    memory_key = _chave_memoria(base_dir, key)
+    with _MEMORY_LOCK:
+        _MEMORY_CACHE.pop(memory_key, None)
     conn = _connect(base_dir)
     try:
         cursor = conn.execute("DELETE FROM cache_entries WHERE cache_key = ?", (key,))
@@ -255,6 +349,19 @@ def estatisticas(base_dir):
         row = conn.execute(
             "SELECT COUNT(*) AS total, COALESCE(SUM(hits), 0) AS hits FROM cache_entries"
         ).fetchone()
-        return {"entries": int(row["total"]), "hits": int(row["hits"]), "backend": "sqlite"}
+        prefixo = os.path.abspath(_caminho(base_dir)) + "\x1f"
+        with _MEMORY_LOCK:
+            entradas_memoria = [
+                entrada for chave, entrada in _MEMORY_CACHE.items()
+                if chave.startswith(prefixo)
+            ]
+        memoria = len(entradas_memoria)
+        hits_memoria = sum(entrada[2] for entrada in entradas_memoria)
+        return {
+            "entries": int(row["total"]),
+            "hits": int(row["hits"]) + hits_memoria,
+            "memory_entries": memoria, "memory_hits": hits_memoria,
+            "backend": "sqlite", "layers": ["memory_lru", "sqlite"],
+        }
     finally:
         conn.close()
