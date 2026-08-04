@@ -1,0 +1,13 @@
+# O nucleo (ingest, retrieval, llm, verify, engine) usa so a biblioteca
+# padrao do Python (json, re, urllib, hashlib, etc) -- roda em qualquer
+# maquina com Python 3.8+, sem "pip install" nenhum.
+#
+# A UNICA dependencia externa de todo o projeto e o Flask, e so e usada
+# em web/routes.py (agente persistente) -- necessaria apenas se voce for
+# rodar "python main.py serve". Pra usar so a CLI (ingest/perguntar/status)
+# nada precisa ser instalado.
+Flask==3.0.3
+
+# Pra rodar tests/ (Fase 4 do plano do Agente), instale tambem
+# requirements-dev.txt (so pytest) -- nao e' preciso pra usar a Eyle
+# normalmente, so pra desenvolvimento/CI.

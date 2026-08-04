@@ -1,0 +1,46 @@
+{
+  "release": "10-50.4-agent-internal-protocol-english",
+  "installation": "overlay_safe",
+  "preserve_on_update": [
+    "memory/**",
+    "context/**",
+    "workspace/**"
+  ],
+  "included_runtime_state": false,
+  "validation": {
+    "targeted_internal_protocol_tests_passed": 13,
+    "targeted_internal_protocol_tests_total": 13,
+    "non_web_tests_passed": 165,
+    "non_web_tests_total": 165,
+    "real_llm_benchmark_executed": false,
+    "notes": [
+      "O benchmark real depende do endpoint LLM local configurado e nao foi executado neste ambiente.",
+      "A suite nao-web passou integralmente (165/165).",
+      "Os testes web nao rodaram porque Flask nao esta disponivel no ambiente e o indice de pacotes esta offline."
+    ]
+  },
+  "benchmark_fixes": [
+    "trace e caches internos nao contam mais como escrita no projeto",
+    "read_file e find_symbol agora geram evidencia fresca com hashes",
+    "o indice de busca do benchmark e isolado por caso/projeto",
+    "perguntas livres ao usuario nao sao mais tratadas como confirmacao de escrita",
+    "arquivos e simbolos explicitos no objetivo podem preencher argumentos obvios de leitura",
+    "checks de confirmacao, hashes e dry-run exigem uma pendencia WRITE real",
+    "hashes e codigo original do patch sao derivados da evidencia fresca, nao copiados cegamente pela LLM",
+    "hashes canonicos normalizam CRLF, CR e LF entre plataformas",
+    "STALE_PATCH dispara releitura e nova confirmacao em vez de bloquear a tarefa",
+    "o avaliador aceita equivalentes semanticos controlados para lower/minusculo e 8/eight",
+    "SYMBOL_NOT_FOUND executado vira conclusao negativa grounded",
+    "o prompt informa a proxima acao obrigatoria do ciclo de edicao"
+  ],
+  "internal_protocol_language": "English",
+  "user_language_behavior": "Preserva o pedido original e responde no idioma do usuario; portugues continua portugues.",
+  "internal_protocol_changes": [
+    "instrucoes do Agente e reforco de formato em ingles",
+    "catalogo, regras e schemas descritivos das ferramentas em ingles",
+    "estado e gates projetados para o modelo em ingles sem traduzir o objetivo do usuario",
+    "mensagens READ_REQUIRED, WRITE_PENDING, RUN_TESTS_REQUIRED e POST_WRITE_READ_REQUIRED explicitas",
+    "JSON canonico usa answer, verification, limitations e important_fact",
+    "formato legado em portugues continua aceito para compatibilidade"
+  ]
+}

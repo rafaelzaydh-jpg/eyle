@@ -1,0 +1,173 @@
+{
+  "llm": {
+    "provider": "ollama",
+    "base_url": "http://localhost:8080",
+    "model": "auto",
+    "openai_compatible": true,
+    "temperature": 0.2,
+    "timeout_seconds": 600,
+    "max_tokens": 1500,
+    "context_window_tokens": 8192,
+    "_comentario_context_window_tokens": "Janela usada pela Eyle. Inicie o llama-server com --ctx-size 10240 para manter folga de tokenizacao e resposta.",
+    "_comentario_max_tokens": "Teto de saida. 1500 permite agentes intermediarios/Thinking, enquanto o modo estruturado tenta desativar reasoning para decisoes curtas.",
+    "cache": {
+      "ativado": true,
+      "max_entradas": 500,
+      "max_age_days": 30,
+      "_comentario": "cacheia resposta por hash do prompt COMPLETO (modelo+temperatura+sistema+usuario), nao so da pergunta -- muda o contexto (retrieval/historico/evidencias), muda a chave, cache nunca fica desatualizado. Fica em context/cache_llm.json"
+    },
+    "_comentario_provider": "use 'ollama' para Ollama nativo, ou defina openai_compatible=true para LM Studio / llama.cpp server / text-generation-webui (endpoint /v1/chat/completions)",
+    "_comentario_model": "nome do modelo/alias carregado. Em backend OpenAI-compatible/llama-server, a Eyle consulta /v1/models: se houver um unico modelo carregado, usa o ID reportado pelo servidor mesmo que este campo tenha ficado antigo; 'auto' tambem seleciona esse unico modelo. Com varios modelos, mantenha aqui o alias exato.",
+    "_comentario_modelo_minimo_recomendado": "Para o modo agente supervisionado, o modelo minimo recomendado e LiquidAI/LFM2.5-8B-A1B ou uma quantizacao/derivacao compativel. Modelos menores podem funcionar para leitura, mas nao sao o alvo recomendado para edicao com ferramentas."
+  },
+  "context": {
+    "token_budget": 1500,
+    "chars_per_token": 4,
+    "_comentario": "token_budget é o espaço reservado para os TRECHOS recuperados. O prompt final (instrucoes + pergunta) usa tokens extras acima disso, então para um limite de 2k deixe isso entre 1300-1600"
+  },
+  "context_engine": {
+    "safety_margin_tokens": 500,
+    "chars_per_token_fallback": 3,
+    "max_recent_observations": 4,
+    "_comentario": "Atualizacao 42: em cada passo do Agente, o saldo para evidencias e calculado como context_window_tokens - max_tokens - margem - prompt de sistema - objetivo/catalogo/acoes/observacoes. O conteudo completo fica no AgentState por evidence_id; somente a selecao relevante que cabe entra no prompt. A estimativa de 3 caracteres/token e conservadora para codigo + portugues quando o tokenizador exato nao esta disponivel."
+  },
+  "retrieval": {
+    "chunk_max_tokens": 400,
+    "max_chunks_no_resultado": 8,
+    "bm25_k1": 1.5,
+    "bm25_b": 0.75
+  },
+  "engine": {
+    "max_iteracoes_analista": 2,
+    "max_tentativas_executor": 2,
+    "atalho_analista_ativado": true,
+    "atalho_score_minimo": 3.0,
+    "atalho_score_ratio": 2.5,
+    "_comentario_max_iteracoes_analista": "quantas rodadas do ciclo Retrieval->Analista sao permitidas quando o Analista pede mais informacao (campo 'faltando')",
+    "_comentario_max_tentativas_executor": "quantas vezes o Executor pode tentar de novo se o Verify reprovar a resposta",
+    "_comentario_atalho": "se o vencedor do retrieval tiver score >= atalho_score_minimo E for atalho_score_ratio vezes maior que o 2o colocado (ou for o unico candidato), pula a chamada do Analista e usa o retrieval direto -- desative com atalho_analista_ativado=false se quiser o Analista julgando sempre"
+  },
+  "servidor": {
+    "host": "127.0.0.1",
+    "port": 5000
+  },
+  "web": {
+    "api_token": null,
+    "rate_limit": {
+      "requests": 180,
+      "auth_failures": 10,
+      "window_seconds": 60
+    },
+    "_comentario": "Atualizacao 27: toda rota de dados exige Authorization: Bearer TOKEN (X-API-Token tambem e aceito). Defina EYLE_API_TOKEN, preencha api_token ou deixe null para gerar/persistir um segredo aleatorio em context/web_api_token.txt com permissao 0600. O painel pede o token e o guarda apenas na sessionStorage da aba. O limite geral e por IP; tentativas de autenticacao invalidas tem teto separado."
+  },
+  "entendimento": {
+    "gerar_via_llm": true,
+    "max_chars_por_arquivo": 20000,
+    "_comentario": "Atualizacao 3 (Modelo Interno do Projeto): durante o ingest, a LLM le cada arquivo INTEIRO uma vez e preenche memory/entendimento.json['arquivos'][caminho] com tipo/responsabilidade/entrada/saida/depende_de/funcoes_principais/pontos_criticos. So regenera o que mudou (por hash do arquivo, o mesmo de estrutura.json) -- arquivo sem mudanca reaproveita a entrada anterior sem gastar chamada de LLM. max_chars_por_arquivo trunca arquivos muito grandes antes de mandar pra LLM. Desative com gerar_via_llm=false para um ingest so-heuristico (sem LLM, sem servidor local necessario) -- as entradas antigas ficam preservadas."
+  },
+  "dicas": {
+    "max_componentes_candidatos": 5,
+    "profundidade_dependencia": 1,
+    "max_chars_por_arquivo": 20000,
+    "_comentario": "Atualizacao 4 (Dar dicas reais): quando o roteador classifica a pergunta como 'dicas', engine/dicas.py escolhe ate max_componentes_candidatos arquivos do Modelo Interno (entendimento.json['arquivos']) por match de tipo/responsabilidade/funcoes_principais/pontos_criticos, depois expande a lista seguindo 'depende_de' por profundidade_dependencia nivel(is) -- assim o Sugestor tambem ve do que os candidatos diretos dependem. max_chars_por_arquivo trunca arquivo muito grande antes de mandar pro Sugestor (mesmo limite conceitual do Entendedor, mas configuravel em separado porque o Sugestor pode receber varios arquivos na mesma chamada)."
+  },
+  "codar": {
+    "ativado": true,
+    "fazer_backup": true,
+    "testes": {
+      "ativado": true,
+      "comando_python": "pytest -q",
+      "comando_node": "npm test --silent",
+      "timeout_segundos": 60,
+      "sandbox": {
+        "backend": "auto",
+        "bloquear_rede": true,
+        "comandos_permitidos": [
+          [
+            "pytest"
+          ],
+          [
+            "python",
+            "-m",
+            "pytest"
+          ],
+          [
+            "python3",
+            "-m",
+            "pytest"
+          ],
+          [
+            "npm",
+            "test"
+          ]
+        ],
+        "cpu_segundos": 60,
+        "memoria_mb": 1024,
+        "max_processos": 128,
+        "max_arquivos_abertos": 256,
+        "max_saida_kb": 1024,
+        "max_arquivo_mb": 64,
+        "copiar_projeto": true,
+        "max_arquivos_projeto": 100000,
+        "max_tamanho_projeto_mb": 2048,
+        "cpus": 1.0,
+        "imagem_docker": null,
+        "projetos": {},
+        "_comentario": "Atualizacao 28: toda suite real passa por sandbox. backend=auto prefere Bubblewrap no Linux; sem ele, usa Docker apenas quando imagem_docker estiver definida. Rede fica bloqueada por padrao e, sem backend capaz de cumprir isso, a execucao e recusada (nao cai silenciosamente no host). comandos_permitidos e allowlist de prefixos argv confiavel, definida aqui fora do repositorio. projetos aceita overrides por caminho absoluto real. CPU, memoria, processos, descritores, saida e timeout sao limitados. copiar_projeto=true executa sobre snapshot temporario gravavel, protegendo o projeto real de efeitos colaterais da suite; os dois limites seguintes evitam copia sem teto. No backend Docker, escolha uma imagem local que ja contenha as dependencias do projeto."
+      },
+      "_comentario": "Atualizacao 6 + 28: quando ativado=true, aplicar_patch roda a suite no PROJETO REAL logo apos escrever o patch. So roda se o projeto ja tiver pytest ou npm test configurado. A execucao sempre passa pelo sandbox configurado acima; se o sandbox recusar ou a suite falhar, o patch e revertido automaticamente. timeout_segundos continua sendo o limite de parede e e herdado pelo sandbox quando nao houver override interno."
+    },
+    "_comentario": "Atualizacao 5 (Codar de verdade -- engenheira assistente): quando o ciclo Retrieval->Analista converge num UNICO (arquivo, simbolo) alvo claro dentro do pipeline 'engenharia', a LLM Engenheiro propoe o codigo novo completo daquele simbolo. O ciclo e Proposta -> Impacto (depende_de invertido em entendimento.json) -> Patch (recorte exato por linha, lido fresco do disco em engine/codar.py) -> Teste (numa copia TEMPORARIA -- ast.parse() para .py; outras extensoes (.js/.html/.css) so confirmam arquivo/linha/patch aplicados, sem parser de sintaxe real -- deliberado, ver 'testes' abaixo pra verificacao real opt-in) -> Aplicar (SO na proxima mensagem, se o usuario responder 'sim'/'aplica'; 'nao'/'cancela' descarta). Nada e escrito no arquivo real sem essa confirmacao explicita. ativado=false desliga o ciclo inteiro (engenharia volta a so explicar em texto, como antes da Atualizacao 5). fazer_backup=true salva uma copia historica do arquivo original em context/backups/ antes da escrita real. Desde a Atualizacao 19, o rollback usa o conteudo original ja mantido em memoria e funciona mesmo com fazer_backup=false; a substituicao do arquivo real e atomica."
+  },
+  "confirmacoes": {
+    "expiracao_segundos": 3600,
+    "_comentario": "Atualizacao 22: propostas e tools WRITE pendentes recebem ID, horario de criacao, expiracao e hash da identidade do projeto. Com uma unica pendencia, 'sim' continua suficiente; com duas, use 'confirmar ID' ou 'cancelar ID'. Pendencia expirada ou criada para outro projeto e rejeitada sem executar nada."
+  },
+  "retention": {
+    "historico_max_entradas": 1000,
+    "trace_max_files": 5,
+    "backups_max_files": 50,
+    "backups_max_age_days": 30,
+    "backups_max_total_mb": 256,
+    "_comentario": "Atualizacao 36: historico e cache tem limite; traces sao rotacionados; backups antigos saem por idade, quantidade e tamanho total. Valor 0 conserva zero itens para limites de quantidade/tamanho e desliga somente o filtro de idade."
+  },
+  "benchmark": {
+    "primary_model": null,
+    "baseline_model": null,
+    "_comentario": "Atualizacao 47: primary_model=null usa llm.model (LFM2.5-8B-A1B atual). baseline_model e opcional e deve receber o nome exato do Q4 4B carregado no servidor; ele nunca substitui o alvo principal. Rode python main.py benchmark."
+  },
+  "agent": {
+    "rollout_mode": "full",
+    "trusted_project_paths": [
+      "workspace"
+    ],
+    "enabled_modes": [
+      "analyze",
+      "suggest",
+      "edit"
+    ],
+    "max_steps": 8,
+    "max_no_progress_decisions": 3,
+    "max_tentativas_parse": 3,
+    "usar_json_mode_se_suportado": true,
+    "max_chars_por_observacao": 500,
+    "require_confirmation_for_write": true,
+    "require_confirmation_for_exec": false,
+    "max_erros_consecutivos": 3,
+    "exigir_run_tests_apos_escrita": true,
+    "max_fatos_importantes": 10,
+    "max_tree_entries": 200,
+    "max_tree_depth": 6,
+    "max_read_range_lines": 400,
+    "_comentario_48_49": "Atualizacoes 48-49: rollout_mode substitui a ativacao binaria (off/read_only/full). read_only e o padrao seguro e bloqueia WRITE/EXEC; full exige que o projeto esteja em trusted_project_paths. Toda tarefa recebe task_id e checkpoint duravel na tabela agent_tasks de context/fila.sqlite3; qualquer needs_user pode ser retomado e WRITE e revalidada apos reinicio antes de qualquer repeticao.",
+    "_comentario_46": "Atualizacao 46: edit esta ativo no Agente. Toda escrita exige read_range fresco da faixa exata, hashes do arquivo/faixa, dry-run correspondente e confirmacao. Depois de aplicar, run_tests roda com EXEC; falha reverte atomicamente e sucesso exige releitura final. executed=false nunca vira testes aprovados.",
+    "_comentario_44_45": "Atualizacoes 44-45: todo pedido sobre projeto entra no Agente Eyle e recebe modo analyze/suggest/edit. GoalState guarda objetivo, criterios, restricoes, plano de ate cinco passos, passo atual, bloqueios e evidencias faltantes. max_steps conta apenas ferramentas realmente executadas; max_no_progress_decisions interrompe repeticao de decisoes sem acao.",
+    "_comentario_42_43": "Atualizacoes 42-43: AgentState separa goal_state, evidence, actions e recent_observations. Leituras reais recebem evidence_id/faixa/hash; mudanca de arquivo invalida a evidencia. project_read/project_write so aceitam final depois de validar pelo menos uma evidencia fresca no disco. max_chars_por_observacao continua apenas para resumos operacionais, nunca para armazenar codigo-evidencia.",
+    "_comentario_40_41": "Atualizacoes 40-41: o catalogo de tools nasce do registro executavel e argumentos passam por schema central. list_tree respeita estes tetos de entradas/profundidade; read_range e os trechos frescos de search_code nunca ultrapassam max_read_range_lines.",
+    "_comentario_32_39": "Atualizacao 36 rotaciona traces. Atualizacao 39 separa EXEC: run_tests nao e READ; require_confirmation_for_exec controla seu gate sem alterar o gate WRITE.",
+    "_comentario_legado_ate_43": "Historico das configuracoes do Agente minimo ate a Atualizacao 43. A partir da 44, enabled=true ativa somente os modos declarados em enabled_modes. max_steps conta ferramentas executadas; max_no_progress_decisions limita repeticoes sem acao.",
+    "_comentario_rollout_padrao": "Perfil supervisionado ativo por padrao: projetos dentro de workspace podem receber propostas de edicao, mas toda escrita exige confirmacao explicita. Projetos externos ficam read_only ate serem adicionados conscientemente a trusted_project_paths."
+  },
+  "version": "2.7.0",
+  "updated": "2026-08-04"
+}

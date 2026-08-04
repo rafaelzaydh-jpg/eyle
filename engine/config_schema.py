@@ -1,0 +1,326 @@
+#!/usr/bin/env python3
+"""Schema tipado e validacao de runtime do ``config.json`` da Eyle."""
+import json
+import os
+from typing import Any, Dict, List, Optional, TypedDict
+
+
+class CacheConfig(TypedDict, total=False):
+    ativado: bool
+    max_entradas: int
+    max_age_days: int
+
+
+class LLMConfig(TypedDict, total=False):
+    provider: str
+    base_url: str
+    model: str
+    openai_compatible: bool
+    temperature: float
+    timeout_seconds: int
+    max_tokens: Optional[int]
+    context_window_tokens: int
+    cache: CacheConfig
+
+
+class ContextEngineConfig(TypedDict, total=False):
+    safety_margin_tokens: int
+    chars_per_token_fallback: int
+    max_recent_observations: int
+
+
+class AgentConfig(TypedDict, total=False):
+    enabled: bool
+    rollout_mode: str
+    trusted_project_paths: List[str]
+    enabled_modes: List[str]
+    max_steps: int
+    max_no_progress_decisions: int
+    max_tentativas_parse: int
+    require_confirmation_for_write: bool
+    require_confirmation_for_exec: bool
+    max_chars_por_observacao: int
+    max_erros_consecutivos: int
+    exigir_run_tests_apos_escrita: bool
+    max_fatos_importantes: int
+    max_tree_entries: int
+    max_tree_depth: int
+    max_read_range_lines: int
+
+
+class BenchmarkConfig(TypedDict, total=False):
+    primary_model: Optional[str]
+    baseline_model: Optional[str]
+
+
+class ConfigEyle(TypedDict, total=False):
+    llm: LLMConfig
+    context_engine: ContextEngineConfig
+    agent: AgentConfig
+    benchmark: BenchmarkConfig
+    context: Dict[str, Any]
+    retrieval: Dict[str, Any]
+    engine: Dict[str, Any]
+    servidor: Dict[str, Any]
+    web: Dict[str, Any]
+    entendimento: Dict[str, Any]
+    dicas: Dict[str, Any]
+    codar: Dict[str, Any]
+    confirmacoes: Dict[str, Any]
+    retention: Dict[str, Any]
+    version: str
+    updated: str
+
+
+class ConfigError(ValueError):
+    pass
+
+
+_SECOES = (
+    "llm", "context", "context_engine", "retrieval", "engine", "servidor", "web",
+    "entendimento", "dicas", "codar", "confirmacoes", "agent", "benchmark",
+    "retention",
+)
+
+
+def _valor(config, caminho):
+    atual = config
+    for parte in caminho.split("."):
+        if not isinstance(atual, dict) or parte not in atual:
+            return False, None
+        atual = atual[parte]
+    return True, atual
+
+
+def _tipo_exato(valor, tipo):
+    if tipo is int:
+        return isinstance(valor, int) and not isinstance(valor, bool)
+    if tipo in (float, (int, float)):
+        return isinstance(valor, (int, float)) and not isinstance(valor, bool)
+    return isinstance(valor, tipo)
+
+
+def _validar_tipo(config, erros, caminho, tipo, descricao):
+    existe, valor = _valor(config, caminho)
+    if existe and not _tipo_exato(valor, tipo):
+        erros.append(f"{caminho} precisa ser {descricao}")
+    return existe, valor
+
+
+def _validar_numero(config, erros, caminho, minimo=None, maximo=None, aceitar_none=False):
+    existe, valor = _valor(config, caminho)
+    if not existe or (aceitar_none and valor is None):
+        return
+    if not isinstance(valor, (int, float)) or isinstance(valor, bool):
+        erros.append(f"{caminho} precisa ser numero")
+        return
+    if minimo is not None and valor < minimo:
+        erros.append(f"{caminho} precisa ser >= {minimo}")
+    if maximo is not None and valor > maximo:
+        erros.append(f"{caminho} precisa ser <= {maximo}")
+
+
+def validar_config(config) -> ConfigEyle:
+    """Valida sem preencher defaults; os defaults historicos seguem nos usos."""
+    if not isinstance(config, dict):
+        raise ConfigError("a raiz do config.json precisa ser um objeto JSON")
+
+    erros: List[str] = []
+    for secao in _SECOES:
+        existe, valor = _valor(config, secao)
+        if existe and not isinstance(valor, dict):
+            erros.append(f"{secao} precisa ser um objeto")
+
+    for caminho in (
+        "llm.openai_compatible", "llm.cache.ativado",
+        "engine.atalho_analista_ativado", "entendimento.gerar_via_llm",
+        "codar.ativado", "codar.fazer_backup", "codar.testes.ativado",
+        "codar.testes.sandbox.bloquear_rede",
+        "codar.testes.sandbox.copiar_projeto", "agent.enabled",
+        "agent.usar_json_mode_se_suportado",
+        "agent.require_confirmation_for_write",
+        "agent.require_confirmation_for_exec",
+        "agent.exigir_run_tests_apos_escrita",
+    ):
+        _validar_tipo(config, erros, caminho, bool, "booleano")
+
+    caminhos_inteiros = (
+        "llm.timeout_seconds", "llm.context_window_tokens", "llm.cache.max_entradas",
+        "context.token_budget", "context.chars_per_token",
+        "context_engine.safety_margin_tokens",
+        "context_engine.chars_per_token_fallback",
+        "context_engine.max_recent_observations",
+        "retrieval.chunk_max_tokens", "retrieval.max_chunks_no_resultado",
+        "engine.max_iteracoes_analista", "engine.max_tentativas_executor",
+        "servidor.port", "web.rate_limit.requests",
+        "web.rate_limit.auth_failures", "web.rate_limit.window_seconds",
+        "entendimento.max_chars_por_arquivo", "dicas.max_componentes_candidatos",
+        "dicas.profundidade_dependencia", "dicas.max_chars_por_arquivo",
+        "codar.testes.timeout_segundos", "confirmacoes.expiracao_segundos",
+        "agent.max_steps", "agent.max_tentativas_parse",
+        "agent.max_no_progress_decisions",
+        "agent.max_chars_por_observacao", "agent.max_erros_consecutivos",
+        "agent.max_fatos_importantes", "agent.max_tree_entries",
+        "agent.max_tree_depth", "agent.max_read_range_lines",
+        "retention.historico_max_entradas",
+        "retention.trace_max_files", "retention.backups_max_files",
+        "retention.backups_max_age_days", "retention.backups_max_total_mb",
+    )
+    for caminho in caminhos_inteiros:
+        existe, valor = _validar_tipo(config, erros, caminho, int, "inteiro")
+        if existe and _tipo_exato(valor, int) and valor < 0:
+            erros.append(f"{caminho} precisa ser >= 0")
+
+    for caminho in (
+        "agent.max_tree_entries", "agent.max_tree_depth",
+        "agent.max_read_range_lines", "context_engine.chars_per_token_fallback",
+        "context_engine.max_recent_observations", "agent.max_no_progress_decisions",
+    ):
+        existe, valor = _valor(config, caminho)
+        if existe and _tipo_exato(valor, int) and valor < 1:
+            erros.append(f"{caminho} precisa ser >= 1")
+
+    existe, janela = _valor(config, "llm.context_window_tokens")
+    if existe and _tipo_exato(janela, int) and janela < 512:
+        erros.append("llm.context_window_tokens precisa ser >= 512")
+
+    for caminho in (
+        "codar.testes.sandbox.cpu_segundos",
+        "codar.testes.sandbox.memoria_mb",
+        "codar.testes.sandbox.max_processos",
+        "codar.testes.sandbox.max_arquivos_abertos",
+        "codar.testes.sandbox.max_saida_kb",
+        "codar.testes.sandbox.max_arquivo_mb",
+        "codar.testes.sandbox.max_arquivos_projeto",
+        "codar.testes.sandbox.max_tamanho_projeto_mb",
+        "codar.testes.sandbox.cpus",
+    ):
+        _validar_numero(config, erros, caminho, minimo=0.000001)
+
+    _validar_numero(config, erros, "llm.temperature", minimo=0, maximo=2)
+    _validar_numero(config, erros, "retrieval.bm25_k1", minimo=0)
+    _validar_numero(config, erros, "retrieval.bm25_b", minimo=0, maximo=1)
+    _validar_numero(config, erros, "engine.atalho_score_minimo", minimo=0)
+    _validar_numero(config, erros, "engine.atalho_score_ratio", minimo=1)
+
+    for caminho in (
+        "llm.provider", "llm.base_url", "llm.model", "servidor.host",
+    ):
+        existe, valor = _validar_tipo(config, erros, caminho, str, "texto")
+        if existe and isinstance(valor, str) and not valor.strip():
+            erros.append(f"{caminho} nao pode ser vazio")
+
+    existe, base_url = _valor(config, "llm.base_url")
+    if existe and isinstance(base_url, str) and not base_url.startswith(("http://", "https://")):
+        erros.append("llm.base_url precisa comecar com http:// ou https://")
+
+    existe, porta = _valor(config, "servidor.port")
+    if existe and _tipo_exato(porta, int) and not 1 <= porta <= 65535:
+        erros.append("servidor.port precisa estar entre 1 e 65535")
+
+    existe, token = _valor(config, "web.api_token")
+    if existe and token is not None:
+        if not isinstance(token, str):
+            erros.append("web.api_token precisa ser texto ou null")
+        elif token and len(token) < 32:
+            erros.append("web.api_token precisa ter pelo menos 32 caracteres")
+
+    for caminho in ("codar.testes.comando_python", "codar.testes.comando_node"):
+        existe, comando = _valor(config, caminho)
+        if not existe:
+            continue
+        valido = (
+            isinstance(comando, str) and bool(comando.strip())
+        ) or (
+            isinstance(comando, list) and bool(comando) and
+            all(isinstance(item, str) and item for item in comando)
+        )
+        if not valido:
+            erros.append(f"{caminho} precisa ser texto ou argv nao vazio")
+
+    existe, max_tokens = _valor(config, "llm.max_tokens")
+    if existe and max_tokens is not None:
+        if not _tipo_exato(max_tokens, int):
+            erros.append("llm.max_tokens precisa ser inteiro ou null")
+        elif max_tokens < 0:
+            erros.append("llm.max_tokens precisa ser >= 0")
+
+    _, margem_contexto = _valor(config, "context_engine.safety_margin_tokens")
+    if (
+        _tipo_exato(janela, int)
+        and (max_tokens is None or _tipo_exato(max_tokens, int))
+        and _tipo_exato(margem_contexto, int)
+        and (max_tokens or 0) + margem_contexto >= janela
+    ):
+        erros.append(
+            "llm.max_tokens + context_engine.safety_margin_tokens precisa ser menor que llm.context_window_tokens"
+        )
+
+    existe, backend = _valor(config, "codar.testes.sandbox.backend")
+    if existe and backend not in ("auto", "bubblewrap", "docker", "processo"):
+        erros.append("codar.testes.sandbox.backend invalido")
+
+    existe, permitidos = _valor(config, "codar.testes.sandbox.comandos_permitidos")
+    if existe:
+        valido = isinstance(permitidos, list) and all(
+            isinstance(argv, list) and argv and
+            all(isinstance(item, str) and item for item in argv)
+            for argv in permitidos
+        )
+        if not valido:
+            erros.append(
+                "codar.testes.sandbox.comandos_permitidos precisa ser lista de argv nao vazios"
+            )
+
+    existe, modos = _valor(config, "agent.enabled_modes")
+    if existe:
+        permitidos = {"analyze", "suggest", "edit"}
+        if not isinstance(modos, list) or not modos or not all(
+            isinstance(item, str) and item in permitidos for item in modos
+        ):
+            erros.append(
+                "agent.enabled_modes precisa ser uma lista nao vazia de analyze/suggest/edit"
+            )
+        elif len(modos) != len(set(modos)):
+            erros.append("agent.enabled_modes nao pode conter modos duplicados")
+
+    existe, rollout = _valor(config, "agent.rollout_mode")
+    if existe and rollout not in ("off", "read_only", "full"):
+        erros.append("agent.rollout_mode precisa ser off, read_only ou full")
+
+    existe, confiaveis = _valor(config, "agent.trusted_project_paths")
+    if existe and (
+        not isinstance(confiaveis, list)
+        or not all(isinstance(item, str) and item.strip() for item in confiaveis)
+    ):
+        erros.append("agent.trusted_project_paths precisa ser uma lista de caminhos nao vazios")
+    if rollout == "full" and (not existe or not confiaveis):
+        erros.append("agent.rollout_mode=full exige ao menos um caminho em agent.trusted_project_paths")
+
+    for caminho in ("benchmark.primary_model", "benchmark.baseline_model"):
+        existe, modelo = _valor(config, caminho)
+        if existe and modelo is not None:
+            if not isinstance(modelo, str):
+                erros.append(f"{caminho} precisa ser texto ou null")
+            elif not modelo.strip():
+                erros.append(f"{caminho} nao pode ser vazio")
+
+    if erros:
+        raise ConfigError("config.json invalido:\n- " + "\n- ".join(erros))
+    return config
+
+
+def carregar_config_validada(caminho) -> ConfigEyle:
+    caminho = os.fspath(caminho)
+    try:
+        with open(caminho, "r", encoding="utf-8") as arquivo:
+            config = json.load(arquivo)
+    except FileNotFoundError as erro:
+        raise ConfigError(f"config.json nao encontrado: {caminho}") from erro
+    except json.JSONDecodeError as erro:
+        raise ConfigError(
+            f"config.json malformado em linha {erro.lineno}, coluna {erro.colno}: {erro.msg}"
+        ) from erro
+    except OSError as erro:
+        raise ConfigError(f"nao foi possivel ler config.json: {erro}") from erro
+    return validar_config(config)
