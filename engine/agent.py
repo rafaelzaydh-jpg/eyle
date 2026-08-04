@@ -667,6 +667,19 @@ def _analise_geral_ainda_precisa_list_tree(estado):
     return "list_tree" in str(plano[0].get("description") or "")
 
 
+def _acao_obrigatoria_goal_state(estado):
+    """Executa transicoes que o proprio GoalState ja tornou obrigatorias.
+
+    Isto nao e um atalho por tamanho de projeto. A mesma regra vale para
+    qualquer analise geral: o plano e o validador exigem ``list_tree`` como
+    primeira acao, portanto nao faz sentido gastar uma chamada LLM apenas
+    para ela repetir uma decisao que o sistema ja conhece.
+    """
+    if _analise_geral_ainda_precisa_list_tree(estado):
+        return {"tool": "list_tree", "arguments": {}}
+    return None
+
+
 def _arquivos_explicitos_objetivo(objetivo):
     """Extrai caminhos de arquivo citados literalmente, preservando a ordem."""
     encontrados = re.findall(
@@ -1266,21 +1279,12 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 "tipo": "evidencias_stale_por_hash",
                 "evidence_ids": invalidadas,
             })
-        prompt = montar_prompt_agente(
-            objetivo, observacoes=estado.observacoes, entendimento=entendimento,
-            fatos_importantes=estado.fatos_importantes,
-            catalogo_tools=gerar_catalogo_tools(TOOLS, config=config),
-            goal_state=estado.goal_state,
-            evidencias=estado.evidence,
-            actions=estado.actions,
-            edit_state=estado.edit_state,
-            config=config,
-            system_prompt=PROMPT_AGENTE,
-        )
-        decisao_forcada = (
-            _acao_recuperacao_deterministica(objetivo, estado)
-            if _deve_recuperar_sem_llm(estado) else None
-        )
+        decisao_forcada = _acao_obrigatoria_goal_state(estado)
+        tipo_decisao_forcada = "transicao_obrigatoria"
+        if decisao_forcada is None and _deve_recuperar_sem_llm(estado):
+            decisao_forcada = _acao_recuperacao_deterministica(objetivo, estado)
+            tipo_decisao_forcada = "recuperacao_deterministica"
+
         if decisao_forcada is not None:
             resultado_passo = {
                 "decisao": decisao_forcada,
@@ -1290,11 +1294,22 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
             }
             _registrar_trace_estado(estado, {
                 "step": step,
-                "tipo": "recuperacao_deterministica",
+                "tipo": tipo_decisao_forcada,
                 "tool": decisao_forcada.get("tool"),
                 "arguments": decisao_forcada.get("arguments", {}),
             })
         else:
+            prompt = montar_prompt_agente(
+                objetivo, observacoes=estado.observacoes, entendimento=entendimento,
+                fatos_importantes=estado.fatos_importantes,
+                catalogo_tools=gerar_catalogo_tools(TOOLS, config=config),
+                goal_state=estado.goal_state,
+                evidencias=estado.evidence,
+                actions=estado.actions,
+                edit_state=estado.edit_state,
+                config=config,
+                system_prompt=PROMPT_AGENTE,
+            )
             resultado_passo = decidir_passo(prompt, config)
         decisao = resultado_passo["decisao"]
 

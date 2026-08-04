@@ -11,17 +11,17 @@
   <a href="docs/architecture.md">Arquitetura</a> ·
   <a href="docs/configuration.md">Configuração</a> ·
   <a href="docs/benchmark.md">Benchmark</a> ·
-  <a href="docs/releases/2.7.3-revision-55.1.md">Revisão 55.1</a> ·
+  <a href="docs/releases/2.7.3-revision-55.4.md">Revisão 55.4</a> ·
   <a href="SECURITY.md">Segurança</a>
 </p>
 
 <p align="center">
   <img alt="Python 3.8+" src="https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white">
   <img alt="Versão 2.7.3" src="https://img.shields.io/badge/versão-2.7.3-2563EB">
-  <img alt="Revisão 55.1" src="https://img.shields.io/badge/revisão-55.1-7C3AED">
+  <img alt="Revisão 55.4" src="https://img.shields.io/badge/revisão-55.4-7C3AED">
   <img alt="Execução local" src="https://img.shields.io/badge/execução-local-16A34A">
   <img alt="Retrieval BM25" src="https://img.shields.io/badge/retrieval-BM25-F59E0B">
-  <img alt="Testes" src="https://img.shields.io/badge/testes%20não--web-225%20aprovados-16A34A">
+  <img alt="Testes" src="https://img.shields.io/badge/testes%20não--web-237%20aprovados-16A34A">
 </p>
 
 ## Visão geral
@@ -36,7 +36,7 @@ A Eyle indexa um repositório local, recupera apenas as evidências relevantes e
 | **Privacidade** | Código, índices, traces, fila e histórico permanecem na máquina local |
 | **Estado mutável** | `workspace/`, `memory/` e `context/` são ignorados pelo Git |
 
-**Identidade da release:** **Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.1-windows-pid-hotfix
+**Identidade da release:** **Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.4-agent-budget-hotfix
 
 ### Recursos principais
 
@@ -49,6 +49,14 @@ A Eyle indexa um repositório local, recupera apenas as evidências relevantes e
 - Deadline compartilhado, timeouts separados, backoff, rate limiting e telemetria.
 - Detecção de ciclos curtos e reserva de fila com limite.
 - CLI, painel Flask autenticado opcional, fila SQLite, checkpoints e retenção.
+
+## Hotfix da revisão 55.4
+
+A revisão 55.4 corrige a análise de projeto que esgotava o prazo global enquanto repetia gerações lentas do agente local. A preparação obrigatória de uma análise geral agora começa deterministicamente com `list_tree` em qualquer projeto, as decisões estruturadas usam um teto próprio de 512 tokens e o pacote não repete cegamente três vezes uma geração que já atingiu o timeout de leitura.
+
+O prazo compartilhado ficou maior, mas cada chamada individual continua limitada. Assim o fluxo do Agente permanece igual em projetos pequenos e grandes, sem atalhos por tamanho.
+
+Detalhes: [docs/releases/2.7.3-revision-55.4.md](docs/releases/2.7.3-revision-55.4.md).
 
 ## Hotfix da revisão 55.3
 

@@ -8,6 +8,20 @@ No unreleased changes yet.
 
 ## 2.7.3 — 2026-08-04
 
+### Revision 55.4 — agent deadline and retry-budget hotfix
+
+- General project analysis now executes the mandatory initial `list_tree` transition directly from `GoalState`, without spending an LLM call to rediscover a system-enforced action. The same rule applies to projects of every size.
+- Added `llm.agent_max_tokens` so structured agent decisions no longer inherit the larger general-response token ceiling.
+- Read timeouts no longer retry an entire local generation by default in the shipped configuration; refused connections and transient HTTP failures still retry.
+- Increased the shared task deadline to allow several bounded local-agent decisions on slower CPU hardware, while each agent call remains capped independently.
+- Added regression coverage for deterministic first transitions, per-profile token limits, timeout retry policy, and the complete `list_tree -> read_file -> final` analysis path.
+
+### Validation
+
+- `python -m compileall -q .` passed.
+- 237/237 executable non-web tests passed.
+- One Flask-dependent web module remained skipped because Flask was unavailable in the packaging environment.
+
 ### Revision 55.3 — local LLM response-timeout hotfix
 
 - Fixed `urllib` using the 5-second connection timeout while waiting for non-streaming llama-server response headers.

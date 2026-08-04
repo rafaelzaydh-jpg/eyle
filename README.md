@@ -11,17 +11,17 @@
   <a href="docs/architecture.md">Architecture</a> ·
   <a href="docs/configuration.md">Configuration</a> ·
   <a href="docs/benchmark.md">Benchmark</a> ·
-  <a href="docs/releases/2.7.3-revision-55.1.md">Revision 55.1</a> ·
+  <a href="docs/releases/2.7.3-revision-55.4.md">Revision 55.4</a> ·
   <a href="SECURITY.md">Security</a>
 </p>
 
 <p align="center">
   <img alt="Python 3.8+" src="https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white">
   <img alt="Release 2.7.3" src="https://img.shields.io/badge/release-2.7.3-2563EB">
-  <img alt="Revision 55.1" src="https://img.shields.io/badge/revision-55.1-7C3AED">
+  <img alt="Revision 55.4" src="https://img.shields.io/badge/revision-55.4-7C3AED">
   <img alt="Local execution" src="https://img.shields.io/badge/execution-local-16A34A">
   <img alt="BM25 retrieval" src="https://img.shields.io/badge/retrieval-BM25-F59E0B">
-  <img alt="Tests" src="https://img.shields.io/badge/non--web%20tests-225%20passed-16A34A">
+  <img alt="Tests" src="https://img.shields.io/badge/non--web%20tests-237%20passed-16A34A">
 </p>
 
 ## Overview
@@ -36,7 +36,7 @@ Eyle indexes a local repository, retrieves only relevant evidence, and uses a lo
 | **Privacy** | Source code, indexes, traces, queue, and history remain on the local machine |
 | **Mutable state** | `workspace/`, `memory/`, and `context/` are ignored by Git |
 
-**Release identity marker:** **Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.1-windows-pid-hotfix
+**Release identity marker:** **Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.4-agent-budget-hotfix
 
 ### Main capabilities
 
@@ -49,6 +49,14 @@ Eyle indexes a local repository, retrieves only relevant evidence, and uses a lo
 - Shared deadlines, differentiated timeouts, retry backoff, rate limiting, and telemetry.
 - Short-cycle detection for repeated agent states and bounded queue reservation.
 - CLI, optional authenticated Flask interface, SQLite queue, checkpoints, and retention.
+
+## Revision 55.4 hotfix
+
+Revision 55.4 fixes project analysis exhausting the global task deadline while retrying slow local-agent generations. Mandatory general-analysis setup now starts with `list_tree` deterministically for every project, structured agent decisions use a dedicated 512-token ceiling, and read timeouts are not blindly regenerated three times by the shipped configuration.
+
+The shared agent deadline is longer, but every individual local-model call remains bounded. This preserves one consistent agent workflow for small and large projects instead of adding a project-size shortcut.
+
+See [docs/releases/2.7.3-revision-55.4.md](docs/releases/2.7.3-revision-55.4.md).
 
 ## Revision 55.3 hotfix
 

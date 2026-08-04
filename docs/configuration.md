@@ -17,9 +17,11 @@ The default targets an OpenAI-compatible local server:
     "context_window_tokens": 8192,
     "connect_timeout_seconds": 5,
     "read_timeout_seconds": 120,
-    "agent_timeout_seconds": 90,
+    "agent_timeout_seconds": 180,
+    "agent_max_tokens": 512,
     "executor_timeout_seconds": 180,
-    "retry_max_attempts": 3
+    "retry_max_attempts": 3,
+    "retry_read_timeouts": false
   }
 }
 ```
@@ -30,19 +32,19 @@ Use `openai_compatible: true` for LM Studio, llama.cpp server, and compatible `/
 
 ## Timeouts, retries, and budgets
 
-Revision 51–54 separates connection, read, model-discovery, agent, and executor timeouts. Transient failures can retry with capped exponential backoff, jitter, cooldown, and `Retry-After` support. Permanent client errors do not retry.
+Revision 51–55.4 separates connection, read, model-discovery, agent, and executor timeouts. Transient failures can retry with capped exponential backoff, jitter, cooldown, and `Retry-After` support. Permanent client errors do not retry.
 
-The task-level deadline and budgets remain authoritative even when an individual operation allows more time:
+The task-level deadline and budgets remain authoritative even when an individual operation allows more time. Structured agent decisions have a separate output ceiling, and the shipped configuration does not restart a complete generation after it already consumed the read timeout:
 
 ```json
 {
-  "context": {
-    "task_deadline_seconds": 300,
+  "engine": {
+    "task_deadline_seconds": 900,
     "executor_retry_base_delay_seconds": 0.5,
     "executor_retry_max_delay_seconds": 2.0
   },
   "agent": {
-    "task_deadline_seconds": 300,
+    "task_deadline_seconds": 900,
     "max_llm_calls": 12,
     "max_total_generated_tokens": 12000
   }

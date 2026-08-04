@@ -31,9 +31,11 @@ class LLMConfig(TypedDict, total=False):
     retry_base_delay_seconds: float
     retry_max_delay_seconds: float
     retry_jitter_seconds: float
+    retry_read_timeouts: bool
     max_concurrent_requests: int
     cooldown_seconds: float
     max_tokens: Optional[int]
+    agent_max_tokens: Optional[int]
     context_window_tokens: int
     cache: CacheConfig
 
@@ -178,6 +180,7 @@ def validar_config(config) -> ConfigEyle:
         "agent.semantic_grounding.enabled",
         "agent.semantic_grounding.block_unsupported_anchors",
         "agent.semantic_grounding.require_inline_citations",
+        "llm.retry_read_timeouts",
         "telemetry.enabled",
     ):
         _validar_tipo(config, erros, caminho, bool, "booleano")
@@ -188,6 +191,7 @@ def validar_config(config) -> ConfigEyle:
         "llm.executor_timeout_seconds", "llm.model_discovery_timeout_seconds",
         "llm.model_discovery_negative_ttl_seconds", "llm.retry_max_attempts",
         "llm.max_concurrent_requests", "llm.context_window_tokens",
+        "llm.agent_max_tokens",
         "llm.cache.max_entradas", "llm.cache.memoria_max_entradas",
         "llm.cache.max_age_hours", "llm.cache.hit_flush_interval",
         "context.token_budget", "context.chars_per_token",
@@ -236,6 +240,7 @@ def validar_config(config) -> ConfigEyle:
         "llm.read_timeout_seconds", "llm.agent_timeout_seconds",
         "llm.executor_timeout_seconds", "llm.model_discovery_timeout_seconds",
         "llm.retry_max_attempts", "llm.max_concurrent_requests",
+        "llm.agent_max_tokens",
         "llm.cache.max_age_hours", "llm.cache.hit_flush_interval", "agent.max_steps",
         "agent.max_tentativas_parse", "agent.max_erros_consecutivos",
         "agent.task_deadline_seconds", "agent.max_llm_calls",

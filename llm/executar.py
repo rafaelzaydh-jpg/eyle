@@ -779,6 +779,25 @@ def _registrar_tokens_gerados(config, resposta):
         )
 
 
+def _max_tokens_da_chamada(cfg_llm, perfil):
+    """Resolve o teto de saida por perfil sem mudar o contrato do backend.
+
+    Decisoes do Agente usam JSON curto e nao devem herdar automaticamente o
+    teto grande de respostas finais/chat. Um teto separado impede modelos de
+    raciocinio locais de gastar centenas de tokens internos em cada passo.
+    """
+    valor_global = cfg_llm.get("max_tokens", 700)
+    chave = f"{perfil}_max_tokens" if perfil else None
+    valor = cfg_llm.get(chave, valor_global) if chave else valor_global
+    if valor is None:
+        return None
+    try:
+        valor = int(valor)
+    except (TypeError, ValueError):
+        return valor_global
+    return valor if valor > 0 else None
+
+
 def _timeouts_da_chamada(cfg_llm, perfil, config):
     legado = float(cfg_llm.get("timeout_seconds", 180))
     connect_timeout = float(cfg_llm.get("connect_timeout_seconds", min(legado, 10)))
@@ -806,7 +825,7 @@ def _chamar_llm_impl(prompt_sistema, prompt_usuario, config, forcar_json=False, 
     model = cfg_llm.get("model", "qwen2.5:7b-instruct-q4_0")
     temperature = cfg_llm.get("temperature", 0.2)
     openai_compatible = cfg_llm.get("openai_compatible", False)
-    max_tokens = cfg_llm.get("max_tokens", 700)
+    max_tokens = _max_tokens_da_chamada(cfg_llm, perfil)
     connect_timeout, read_timeout, deadline_restante = _timeouts_da_chamada(
         cfg_llm, perfil, config,
     )
@@ -929,10 +948,30 @@ def _chamar_llm_impl(prompt_sistema, prompt_usuario, config, forcar_json=False, 
                 ultimo_erro = _erro_http(
                     base_url, erro_http, _ler_corpo_http_error(erro_http),
                 )
-            except (
-                urllib.error.URLError, socket.timeout, TimeoutError,
-                ConnectionError,
-            ) as erro_rede:
+            except urllib.error.URLError as erro_rede:
+                motivo = getattr(erro_rede, "reason", None)
+                eh_timeout = isinstance(motivo, (socket.timeout, TimeoutError)) or (
+                    "timed out" in str(motivo or erro_rede).lower()
+                )
+                repetir_timeout = bool(cfg_llm.get("retry_read_timeouts", True))
+                ultimo_erro = ErroLLM(
+                    (
+                        f"A LLM local excedeu o timeout de leitura de {read_atual:.1f}s "
+                        f"em {base_url}."
+                        if eh_timeout else
+                        f"Nao foi possivel conectar/ler em {base_url}. Detalhe: {erro_rede}"
+                    ),
+                    transient=(repetir_timeout if eh_timeout else True),
+                    error_code=("READ_TIMEOUT" if eh_timeout else "TRANSPORT_ERROR"),
+                )
+            except (socket.timeout, TimeoutError) as erro_timeout:
+                ultimo_erro = ErroLLM(
+                    f"A LLM local excedeu o timeout de leitura de {read_atual:.1f}s "
+                    f"em {base_url}. Detalhe: {erro_timeout}",
+                    transient=bool(cfg_llm.get("retry_read_timeouts", True)),
+                    error_code="READ_TIMEOUT",
+                )
+            except ConnectionError as erro_rede:
                 ultimo_erro = ErroLLM(
                     f"Nao foi possivel conectar/ler em {base_url}. Detalhe: {erro_rede}",
                     transient=True, error_code="TRANSPORT_ERROR",

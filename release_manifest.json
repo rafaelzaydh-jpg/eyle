@@ -2,7 +2,7 @@
   "release": "2.7.3",
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "55.3-local-llm-timeout-hotfix",
+  "revision": "55.4-agent-budget-hotfix",
   "updated": "2026-08-04",
   "installation": "overlay_safe",
   "preserve_on_update": [
@@ -13,8 +13,8 @@
   "included_runtime_state": false,
   "validation": {
     "compileall_passed": true,
-    "tests_passed": 231,
-    "tests_total_executable": 231,
+    "tests_passed": 237,
+    "tests_total_executable": 237,
     "tests_skipped": 1,
     "web_tests_executed": false,
     "javascript_syntax_passed": true,
@@ -25,9 +25,10 @@
       "Falhas estruturadas da LLM agora permanecem failed na fila e preservam diagnostico seguro.",
       "O startup testa /v1/models ou /api/tags sem gerar tokens.",
       "O benchmark real requer o endpoint LLM local, o hardware e o repositorio finais.",
-      "A suite executavel do pacote passou integralmente (231/231).",
-      "O timeout de leitura agora cobre a espera pelos cabecalhos da geracao nao-streaming.",
-      "O backend padrao usa 127.0.0.1 para corresponder ao bind IPv4 do llama-server no Windows."
+      "O backend padrao usa 127.0.0.1 para corresponder ao bind IPv4 do llama-server no Windows.",
+      "A suite executavel do pacote passou integralmente (237/237).",
+      "Analise geral inicia list_tree pelo GoalState sem gastar uma chamada LLM redundante.",
+      "Decisoes do Agente usam teto proprio de 512 tokens e timeout de leitura nao repete geracao por padrao."
     ]
   },
   "hardening_52": [
@@ -106,5 +107,14 @@
     "backend padrao alinhado ao bind IPv4 127.0.0.1:8080",
     "teste com servidor OpenAI compativel real e resposta atrasada",
     "231 testes executaveis aprovados"
+  ],
+  "hardening_55_4": [
+    "primeira transicao list_tree derivada deterministicamente do GoalState em toda analise geral",
+    "teto llm.agent_max_tokens separado do max_tokens global",
+    "READ_TIMEOUT separado de TRANSPORT_ERROR",
+    "retry de timeout de leitura desativado por padrao no pacote",
+    "deadline compartilhado ampliado com timeout individual preservado",
+    "fluxo integrado list_tree read_file final coberto por regressao",
+    "237 testes executaveis aprovados"
   ]
 }
