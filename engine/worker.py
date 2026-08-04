@@ -35,6 +35,26 @@ class RemoteJobError(RuntimeError):
         self.remote_traceback = remote_traceback
 
 
+def _resultado_indica_falha(resultado):
+    return (
+        isinstance(resultado, dict)
+        and str(resultado.get("status") or "").strip().lower() == "failed"
+    )
+
+
+def _detalhe_falha_resultado(resultado):
+    if not isinstance(resultado, dict):
+        return "pipeline retornou falha sem diagnostico"
+    for chave in ("resposta", "erro", "motivo"):
+        valor = resultado.get(chave)
+        if isinstance(valor, str) and valor.strip():
+            return valor.strip()
+    codigo = resultado.get("error_code")
+    if codigo:
+        return f"pipeline retornou status failed ({codigo})"
+    return "pipeline retornou status failed"
+
+
 def processar_evento(evento):
     tipo = evento.get("tipo")
 
@@ -236,6 +256,26 @@ def processar_proximo(
         parar_heartbeat.set()
         if thread_heartbeat is not None:
             thread_heartbeat.join(timeout=1.0)
+
+    if _resultado_indica_falha(resultado):
+        detalhe = _detalhe_falha_resultado(resultado)
+        if job_id is not None:
+            queue.falhar(job_id, detalhe, resultado=resultado)
+        if worker_id:
+            queue.registrar_heartbeat(worker_id, "error", job_id=job_id, detalhe=detalhe)
+        telemetry.record(
+            "job", str(evento.get("tipo") or "unknown"), "failed",
+            (time.monotonic() - started) * 1000,
+            task_id=f"job-{job_id}" if job_id is not None else None,
+            job_id=job_id,
+            metadata={
+                "isolated": bool(isolate_job),
+                "error_code": resultado.get("error_code"),
+                "structured_failure": True,
+            },
+        )
+        print(f"[worker][erro] job {job_id} terminou com falha estruturada: {detalhe}")
+        return True
 
     if job_id is not None:
         queue.concluir(job_id, resultado)

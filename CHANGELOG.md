@@ -8,6 +8,24 @@ No unreleased changes yet.
 
 ## 2.7.3 — 2026-08-04
 
+### Revision 55.2 — web response delivery hotfix
+
+- Fixed the Worker treating structured LLM failures as successful completed jobs.
+- Persisted safe structured failure metadata while keeping transport errors out of assistant conversation history.
+- Exposed a redacted failure message and error code through `GET /jobs/<id>` without exposing job payloads or full internal results.
+- Added a visible browser failure notice instead of leaving the user message unanswered.
+- Kept `/conversa` polling alive when `/jobs` polling fails temporarily.
+- Fixed stale rendered message IDs after deletion, which could hide a later message that reused the same numeric ID.
+- Added a startup backend preflight for `/v1/models` or Ollama `/api/tags`, clearly warning when the LLM server is offline.
+- Corrected the shipped provider label to `openai_compatible` for the default port-8080 backend.
+
+### Validation
+
+- `python -m compileall -q .` passed.
+- 229/229 executable non-web tests passed.
+- One Flask-dependent web module remained skipped because Flask was unavailable in the packaging environment.
+- `node --check web/static/app.js` passed.
+
 ### Revision 55.1 — Windows PID safety hotfix
 
 - Replaced direct `os.kill(pid, 0)` liveness checks in the queue and process limiter with a shared cross-platform probe.

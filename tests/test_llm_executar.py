@@ -414,3 +414,49 @@ def test_chamada_estruturada_ignora_cache_envenenado(monkeypatch):
     assert resposta == '{"final":"novo"}'
     assert consultas_cache == []
     assert gravacoes_cache == []
+
+
+def test_diagnosticar_backend_openai_sem_gerar_tokens(monkeypatch):
+    import contextlib
+    import io
+
+    @contextlib.contextmanager
+    def fake_abrir(req, connect_timeout, read_timeout=None):
+        assert req.full_url == "http://localhost:8080/v1/models"
+        yield io.BytesIO(b'{"data":[{"id":"modelo-local"}]}')
+
+    monkeypatch.setattr(llm_mod, "_abrir_url", fake_abrir)
+    resultado = llm_mod.diagnosticar_backend({
+        "llm": {
+            "base_url": "http://localhost:8080",
+            "openai_compatible": True,
+        }
+    })
+
+    assert resultado["ok"] is True
+    assert resultado["reachable"] is True
+    assert resultado["models"] == ["modelo-local"]
+    assert resultado["model_count"] == 1
+
+
+def test_diagnosticar_backend_reporta_servidor_inacessivel(monkeypatch):
+    import contextlib
+    import urllib.error
+
+    @contextlib.contextmanager
+    def fake_abrir(req, connect_timeout, read_timeout=None):
+        raise urllib.error.URLError("conexao recusada")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(llm_mod, "_abrir_url", fake_abrir)
+    resultado = llm_mod.diagnosticar_backend({
+        "llm": {
+            "base_url": "http://localhost:8080",
+            "openai_compatible": True,
+        }
+    })
+
+    assert resultado["ok"] is False
+    assert resultado["reachable"] is False
+    assert resultado["error_code"] == "BACKEND_UNREACHABLE"
+    assert "conexao recusada" in resultado["detail"]

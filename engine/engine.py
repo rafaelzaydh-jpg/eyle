@@ -1103,6 +1103,9 @@ def _resultado_falha_llm(tipo, motivo_roteador, erro, **extras):
     detalhe = str(erro)
     resultado = {
         "status": "failed",
+        "error_code": getattr(erro, "error_code", None) or "LLM_FAILURE",
+        "transient": bool(getattr(erro, "transient", False)),
+        "http_status": getattr(erro, "status_code", None),
         "resposta": f"Nao foi possivel obter uma resposta da LLM local. {detalhe}",
         "roteador": {"tipo": tipo, "motivo": motivo_roteador},
         "iteracoes_analista": 0,

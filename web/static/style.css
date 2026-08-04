@@ -233,6 +233,33 @@ html, body {
 }
 .msg-del:hover { color: #d97757; }
 
+.job-notice {
+  align-self: flex-start;
+  max-width: 84%;
+  margin: 8px 0;
+  animation: rise 0.18s ease;
+}
+
+.job-notice-bubble {
+  padding: 10px 13px;
+  border: 1px solid #5b3027;
+  border-left: 2px solid #d97757;
+  border-radius: 0 3px 3px 0;
+  background: #1a1110;
+  color: #e6c0b5;
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.job-notice-meta {
+  margin-top: 3px;
+  color: #a86d5d;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
 .typing {
   align-self: flex-start;
   display: flex;

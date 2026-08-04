@@ -50,6 +50,14 @@ Eyle indexes a local repository, retrieves only relevant evidence, and uses a lo
 - Short-cycle detection for repeated agent states and bounded queue reservation.
 - CLI, optional authenticated Flask interface, SQLite queue, checkpoints, and retention.
 
+## Revision 55.2 hotfix
+
+Revision 55.2 fixes the silent “job completed, no assistant message” path. Structured LLM transport/backend failures now finish as failed jobs, preserve a safe diagnostic, and are shown in the browser without contaminating assistant conversation history. Conversation polling also continues if job-status polling fails temporarily.
+
+Startup now checks the configured local LLM endpoint and prints a direct warning when `http://localhost:8080` (or the configured backend) is unavailable.
+
+See [docs/releases/2.7.3-revision-55.2.md](docs/releases/2.7.3-revision-55.2.md).
+
 ## Revision 55.1 hotfix
 
 Revision 55.1 fixes a silent Windows shutdown: `os.kill(pid, 0)` was used as an existence check in `engine/queue.py` and `engine/process_limiter.py`, but could terminate the observed process. PID probing is now centralized, uses `OpenProcess` + `WaitForSingleObject` on Windows, and never sends a signal.

@@ -102,3 +102,35 @@ def test_worker_repassa_snapshot_do_job(monkeypatch):
 
     assert chamada["registrar_pergunta"] is False
     assert chamada["historico_snapshot"] == snapshot
+
+
+def test_falha_estruturada_do_engine_nao_vira_completed(monkeypatch, tmp_path):
+    _usar_fila_temporaria(monkeypatch, tmp_path)
+    job_id = queue.adicionar({"tipo": "pergunta", "texto": "oi"})
+    resultado_falha = {
+        "status": "failed",
+        "error_code": "TRANSPORT_ERROR",
+        "resposta": "Nao foi possivel acessar a LLM local.",
+    }
+    monkeypatch.setattr(worker, "processar_evento", lambda evento: resultado_falha)
+
+    assert worker.processar_proximo(timeout=0) is True
+
+    salvo = queue.obter(job_id)
+    assert salvo["status"] == "failed"
+    assert salvo["resultado"] == resultado_falha
+    assert "Nao foi possivel acessar" in salvo["erro"]
+
+
+def test_queue_falhar_pode_preservar_resultado_estruturado(monkeypatch, tmp_path):
+    _usar_fila_temporaria(monkeypatch, tmp_path)
+    job_id = queue.adicionar({"tipo": "pergunta", "texto": "A"})
+    queue.proximo(timeout=0)
+    resultado = {"status": "failed", "error_code": "EMPTY_RESPONSE"}
+
+    assert queue.falhar(job_id, "sem resposta", resultado=resultado) is True
+
+    salvo = queue.obter(job_id)
+    assert salvo["status"] == "failed"
+    assert salvo["resultado"] == resultado
+    assert salvo["erro"] == "sem resposta"

@@ -9,7 +9,7 @@ The default targets an OpenAI-compatible local server:
 ```json
 {
   "llm": {
-    "provider": "ollama",
+    "provider": "openai_compatible",
     "base_url": "http://localhost:8080",
     "model": "auto",
     "openai_compatible": true,

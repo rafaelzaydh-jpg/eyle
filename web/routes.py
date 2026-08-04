@@ -260,6 +260,34 @@ def _projeto_publico(projeto):
     }
 
 
+def _job_publico(registro):
+    if not isinstance(registro, dict):
+        return None
+    publico = {
+        chave: registro.get(chave)
+        for chave in _CHAVES_PUBLICAS_JOB
+        if chave in registro
+    }
+    # O resultado completo pode conter detalhes internos. Para falhas, publique
+    # somente a mensagem operacional e o codigo necessario para o navegador
+    # deixar de falhar em silencio.
+    if registro.get("status") == "failed":
+        resultado = registro.get("resultado")
+        if isinstance(resultado, dict):
+            mensagem = resultado.get("resposta")
+            codigo = resultado.get("error_code")
+            transitorio = resultado.get("transient")
+            if isinstance(mensagem, str) and mensagem.strip():
+                publico["mensagem"] = mensagem.strip()[:2000]
+            if codigo:
+                publico["error_code"] = str(codigo)[:120]
+            if isinstance(transitorio, bool):
+                publico["transient"] = transitorio
+        if not publico.get("mensagem") and registro.get("erro"):
+            publico["mensagem"] = str(registro.get("erro"))[:2000]
+    return publico
+
+
 def _redigir_caminhos_internos(valor, caminhos):
     """Remove caminhos conhecidos sem apagar o diagnostico da fila."""
     caminhos = tuple(
@@ -384,19 +412,22 @@ def job(job_id):
         }), 404
     projeto = eyle_engine.carregar_projeto()
     caminho_projeto = projeto.get("caminho_origem") if isinstance(projeto, dict) else None
-    publico = {
-        chave: registro.get(chave)
-        for chave in _CHAVES_PUBLICAS_JOB
-        if chave in registro
-    }
+    publico = _job_publico(registro)
     return jsonify(_redigir_caminhos_internos(publico, (caminho_projeto, BASE_DIR)))
 
 
 if __name__ == "__main__":
     # Mantem o atalho direto funcional e com a mesma orientacao de `main.py serve`.
     from engine.worker import iniciar_em_thread
+    from llm.executar import diagnosticar_backend
 
-    carregar_config_validada(CONFIG_PATH)
+    config = carregar_config_validada(CONFIG_PATH)
+    diagnostico_llm = diagnosticar_backend(config)
+    if diagnostico_llm.get("ok"):
+        print(f"[web] Backend LLM online: {diagnostico_llm.get('base_url')}")
+    else:
+        rotulo = "preflight falhou" if diagnostico_llm.get("reachable") else "indisponivel"
+        print(f"[web][AVISO] Backend LLM {rotulo}: {diagnostico_llm.get('detail')}")
     token_api = obter_api_token()
     print("[web] Iniciando Worker permanente...")
     iniciar_em_thread()

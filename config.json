@@ -1,6 +1,6 @@
 {
   "llm": {
-    "provider": "ollama",
+    "provider": "openai_compatible",
     "base_url": "http://localhost:8080",
     "model": "auto",
     "openai_compatible": true,
@@ -224,7 +224,7 @@
   },
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "55.1-windows-pid-hotfix",
+  "revision": "55.2-web-job-delivery-hotfix",
   "telemetry": {
     "enabled": true,
     "window_seconds": 3600,

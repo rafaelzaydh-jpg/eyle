@@ -110,7 +110,10 @@
     // remove mensagens que sumiram (ex: DELETE feito em outra aba)
     Array.from(logEl.querySelectorAll(".msg")).forEach((el) => {
       const id = Number(el.dataset.id);
-      if (!incomingIds.has(id)) el.remove();
+      if (!incomingIds.has(id)) {
+        el.remove();
+        renderedIds.delete(id);
+      }
     });
 
     mensagens.forEach((msg) => {
@@ -147,6 +150,30 @@
     el.innerHTML = '<span class="dot"></span><span class="dot"></span><span class="dot"></span>';
     logEl.appendChild(el);
     logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function renderJobFailures() {
+    trackedJobs
+      .filter((job) => job.tipo === "pergunta" && job.status === "failed")
+      .forEach((job) => {
+        const elementId = `jobFailure-${job.id}`;
+        if (document.getElementById(elementId)) return;
+
+        const wrap = document.createElement("div");
+        wrap.className = "job-notice";
+        wrap.id = elementId;
+
+        const bubble = document.createElement("div");
+        bubble.className = "job-notice-bubble";
+        bubble.textContent = job.mensagem || job.erro || "A tarefa falhou sem diagnóstico.";
+        wrap.appendChild(bubble);
+
+        const meta = document.createElement("div");
+        meta.className = "job-notice-meta";
+        meta.textContent = `job #${job.id}${job.error_code ? ` · ${job.error_code}` : ""}`;
+        wrap.appendChild(meta);
+        logEl.appendChild(wrap);
+      });
   }
 
   function renderJobState() {
@@ -212,13 +239,20 @@
 
   async function fetchConversa() {
     try {
-      await atualizarJobsAcompanhados();
+      // Uma falha temporaria em /jobs nao pode bloquear a leitura da conversa.
+      // Antes, qualquer erro de polling escondia ate respostas ja persistidas.
+      try {
+        await atualizarJobsAcompanhados();
+      } catch (jobErr) {
+        // Mantem o job ativo e tenta novamente no proximo ciclo.
+      }
       const res = await apiFetch("/conversa");
       if (!res.ok) throw new Error("status " + res.status);
       const data = await res.json();
       connDot.classList.remove("offline");
       connDot.classList.add("online");
       renderConversa(data);
+      renderJobFailures();
     } catch (err) {
       connDot.classList.remove("online");
       connDot.classList.add("offline");

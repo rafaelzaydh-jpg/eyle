@@ -2,7 +2,7 @@
   "release": "2.7.3",
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "55.1-windows-pid-hotfix",
+  "revision": "55.2-web-job-delivery-hotfix",
   "updated": "2026-08-04",
   "installation": "overlay_safe",
   "preserve_on_update": [
@@ -13,18 +13,18 @@
   "included_runtime_state": false,
   "validation": {
     "compileall_passed": true,
-    "tests_passed": 225,
-    "tests_total_executable": 225,
+    "tests_passed": 229,
+    "tests_total_executable": 229,
     "tests_skipped": 1,
     "web_tests_executed": false,
     "javascript_syntax_passed": true,
     "real_llm_benchmark_executed": false,
     "notes": [
-      "A suite executavel do pacote passou integralmente (225/225).",
+      "A suite executavel do pacote passou integralmente (229/229).",
       "Um modulo web foi ignorado porque Flask nao estava disponivel no ambiente de empacotamento.",
       "A sintaxe de web/static/app.js foi validada com Node.js.",
-      "Os testes de regressao impedem os.kill(pid, 0) no caminho Windows e no PID do proprio processo.",
-      "Ingest serial e paralelo produziram estrutura, chunks e fingerprint identicos nos testes.",
+      "Falhas estruturadas da LLM agora permanecem failed na fila e preservam diagnostico seguro.",
+      "O startup testa /v1/models ou /api/tags sem gerar tokens.",
       "O benchmark real requer o endpoint LLM local, o hardware e o repositorio finais."
     ]
   },
@@ -86,5 +86,16 @@
     "heartbeat invalido recuperado como job interrompido em vez de ficar preso",
     "PID fora da faixa nao derruba health checks em POSIX",
     "225 testes executaveis aprovados"
+  ],
+  "hardening_55_2": [
+    "status failed do Engine nao vira mais completed no Worker",
+    "resultado estruturado de falha preservado sem contaminar conversa",
+    "diagnostico redigido exposto por GET /jobs/<id>",
+    "aviso de falha visivel no navegador",
+    "polling de conversa independente de falha temporaria no polling de jobs",
+    "cache de IDs renderizados corrigido apos exclusao",
+    "preflight do backend LLM na inicializacao",
+    "provider padrao alinhado ao modo OpenAI-compatible",
+    "229 testes executaveis aprovados"
   ]
 }

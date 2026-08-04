@@ -284,12 +284,37 @@ def cmd_serve(args):
     # navegador so fala com o Flask a partir daqui; fechar a aba nao
     # interrompe o Worker.
     from engine.worker import iniciar_em_thread
+    from llm.executar import diagnosticar_backend
     from web.routes import app, obter_api_token, origem_api_token
 
+    config = carregar_config()
     projeto = carregar_projeto()
     if projeto is None:
         print("[main] Aviso: nenhum projeto indexado ainda. Rode 'python main.py ingest ...' "
               "antes de mandar perguntas pelo navegador.")
+
+    diagnostico_llm = diagnosticar_backend(config)
+    if diagnostico_llm.get("ok"):
+        modelos = diagnostico_llm.get("models") or []
+        modelo_txt = f" | modelo(s): {', '.join(modelos[:3])}" if modelos else " | nenhum modelo listado"
+        print(
+            f"[main] Backend LLM online: {diagnostico_llm.get('base_url')}"
+            f" ({diagnostico_llm.get('latency_ms')}ms){modelo_txt}"
+        )
+    else:
+        if diagnostico_llm.get("reachable"):
+            print(
+                f"[main][AVISO] Backend LLM respondeu, mas o preflight falhou: "
+                f"{diagnostico_llm.get('detail')}"
+            )
+        else:
+            print(
+                f"[main][AVISO] Backend LLM indisponivel: {diagnostico_llm.get('detail')}"
+            )
+        print(
+            "[main][AVISO] O painel e o Worker vao iniciar, mas perguntas podem falhar ate "
+            "llm.base_url/model estarem corretos e o servidor ficar pronto."
+        )
 
     token_api = obter_api_token()
     print(f"[main] Iniciando Worker permanente...")

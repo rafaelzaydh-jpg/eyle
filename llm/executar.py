@@ -138,6 +138,85 @@ def _diagnostico(codigo, **campos):
         pass
 
 
+def diagnosticar_backend(config, timeout=None):
+    """Testa somente a API do backend, sem gerar tokens nem alterar cache.
+
+    O diagnostico e usado no startup para diferenciar "Flask/Worker online" de
+    "servidor da LLM ausente". Nunca levanta para o chamador: devolve um objeto
+    pequeno, seguro e pronto para log.
+    """
+    cfg_llm = (config or {}).get("llm", {})
+    base_url = str(cfg_llm.get("base_url") or "http://localhost:11434").rstrip("/")
+    openai_compatible = bool(cfg_llm.get("openai_compatible", False))
+    limite = timeout
+    if limite is None:
+        limite = cfg_llm.get("model_discovery_timeout_seconds", 3)
+    try:
+        limite = max(0.1, min(float(limite), 10.0))
+    except (TypeError, ValueError):
+        limite = 3.0
+
+    if openai_compatible:
+        endpoint = _endpoint_openai(base_url, "models")
+    else:
+        endpoint = base_url + "/api/tags"
+
+    inicio = time.monotonic()
+    req = urllib.request.Request(endpoint, headers={"Accept": "application/json"})
+    try:
+        with _abrir_url(req, limite, limite) as resp:
+            corpo = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as erro:
+        detalhe = _mensagem_http_error(base_url, erro, _ler_corpo_http_error(erro))
+        return {
+            "ok": False,
+            "reachable": True,
+            "base_url": base_url,
+            "endpoint": endpoint,
+            "error_code": "BACKEND_HTTP_ERROR",
+            "status_code": getattr(erro, "code", None),
+            "detail": detalhe,
+            "latency_ms": round((time.monotonic() - inicio) * 1000, 1),
+        }
+    except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError) as erro:
+        return {
+            "ok": False,
+            "reachable": False,
+            "base_url": base_url,
+            "endpoint": endpoint,
+            "error_code": "BACKEND_UNREACHABLE",
+            "detail": f"Nao foi possivel acessar {endpoint}: {erro}",
+            "latency_ms": round((time.monotonic() - inicio) * 1000, 1),
+        }
+    except Exception as erro:
+        return {
+            "ok": False,
+            "base_url": base_url,
+            "endpoint": endpoint,
+            "error_code": "BACKEND_DIAGNOSTIC_ERROR",
+            "detail": f"Falha ao validar o backend: {type(erro).__name__}: {erro}",
+            "latency_ms": round((time.monotonic() - inicio) * 1000, 1),
+        }
+
+    modelos = []
+    itens = corpo.get("data", []) if openai_compatible else corpo.get("models", [])
+    if isinstance(itens, list):
+        for item in itens:
+            if isinstance(item, dict):
+                valor = item.get("id") if openai_compatible else (item.get("name") or item.get("model"))
+                if isinstance(valor, str) and valor.strip():
+                    modelos.append(valor.strip())
+    return {
+        "ok": True,
+        "reachable": True,
+        "base_url": base_url,
+        "endpoint": endpoint,
+        "models": modelos[:20],
+        "model_count": len(modelos),
+        "latency_ms": round((time.monotonic() - inicio) * 1000, 1),
+    }
+
+
 def _retry_after_seconds(erro):
     try:
         valor = erro.headers.get("Retry-After")

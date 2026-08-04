@@ -175,3 +175,33 @@ def test_health_reflete_worker_e_head_of_line(monkeypatch):
     degradado = cliente.get("/health", headers=_cabecalho())
     assert degradado.status_code == 503
     assert degradado.get_json()["status"] == "degraded"
+
+
+def test_job_falho_expoe_so_diagnostico_seguro(monkeypatch):
+    cliente = _cliente(monkeypatch)
+    monkeypatch.setattr(routes.queue, "obter", lambda job_id: {
+        "id": job_id, "tipo": "pergunta", "status": "failed",
+        "tentativas": 1, "payload": {"texto": "segredo"},
+        "resultado": {
+            "status": "failed",
+            "error_code": "TRANSPORT_ERROR",
+            "transient": True,
+            "resposta": f"falha em {routes.BASE_DIR}/llm",
+            "roteador": {"motivo": "interno"},
+        },
+        "erro": f"detalhe em {routes.BASE_DIR}/context",
+    })
+
+    resposta = cliente.get("/jobs/9", headers=_cabecalho())
+    dados = resposta.get_json()
+    corpo = resposta.get_data(as_text=True)
+
+    assert resposta.status_code == 200
+    assert dados["status"] == "failed"
+    assert dados["error_code"] == "TRANSPORT_ERROR"
+    assert dados["transient"] is True
+    assert "mensagem" in dados
+    assert "payload" not in dados
+    assert "resultado" not in dados
+    assert "roteador" not in corpo
+    assert routes.BASE_DIR not in corpo

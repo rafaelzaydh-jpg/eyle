@@ -50,6 +50,14 @@ A Eyle indexa um repositório local, recupera apenas as evidências relevantes e
 - Detecção de ciclos curtos e reserva de fila com limite.
 - CLI, painel Flask autenticado opcional, fila SQLite, checkpoints e retenção.
 
+## Hotfix da revisão 55.2
+
+A revisão 55.2 corrige o caminho silencioso “job concluído, sem mensagem da assistente”. Falhas estruturadas de transporte/backend da LLM agora terminam como jobs com falha, preservam um diagnóstico seguro e aparecem no navegador sem contaminar o histórico da conversa. O polling de `/conversa` também continua mesmo se o polling de `/jobs` falhar temporariamente.
+
+Na inicialização, a Eyle agora testa o endpoint local da LLM e avisa diretamente quando `http://localhost:8080` (ou o backend configurado) está indisponível.
+
+Detalhes: [docs/releases/2.7.3-revision-55.2.md](docs/releases/2.7.3-revision-55.2.md).
+
 ## Hotfix da revisão 55.1
 
 A revisão 55.1 corrige um encerramento silencioso no Windows: `os.kill(pid, 0)` era usado como teste de existência em `engine/queue.py` e `engine/process_limiter.py`, mas podia terminar o processo consultado. O probe agora é centralizado, usa `OpenProcess` + `WaitForSingleObject` no Windows e nunca envia sinal.

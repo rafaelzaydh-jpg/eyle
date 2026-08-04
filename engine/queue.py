@@ -327,18 +327,26 @@ def concluir(job_id, resultado=None):
         return cursor.rowcount == 1
 
 
-def falhar(job_id, erro):
-    """Marca um job reservado como falho e conserva o erro para diagnostico."""
+def falhar(job_id, erro, resultado=None):
+    """Marca um job reservado como falho e conserva erro + resultado seguro.
+
+    ``resultado`` e opcional para manter compatibilidade com excecoes do Worker.
+    Quando o Engine devolve um estado estruturado ``status=failed`` sem levantar,
+    ele e persistido aqui para que a API consiga explicar a falha sem transformar
+    diagnostico de transporte em fala do assistente no historico.
+    """
     agora = _agora_utc()
     detalhe = f"{type(erro).__name__}: {erro}" if isinstance(erro, BaseException) else str(erro)
+    serializado = None if resultado is None else _serializar(resultado)
     with _abrir_conexao() as conexao:
         cursor = conexao.execute(
             """
             UPDATE jobs
-            SET status = 'failed', erro = ?, atualizado_em = ?, concluido_em = ?
+            SET status = 'failed', resultado = ?, erro = ?,
+                atualizado_em = ?, concluido_em = ?
             WHERE id = ? AND status = 'processing'
             """,
-            (detalhe, agora, agora, int(job_id)),
+            (serializado, detalhe, agora, agora, int(job_id)),
         )
         return cursor.rowcount == 1
 
