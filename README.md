@@ -11,17 +11,17 @@
   <a href="docs/architecture.md">Architecture</a> ·
   <a href="docs/configuration.md">Configuration</a> ·
   <a href="docs/benchmark.md">Benchmark</a> ·
-  <a href="docs/releases/2.7.3-revision-54.md">Revision 54</a> ·
+  <a href="docs/releases/2.7.3-revision-55.md">Revision 55</a> ·
   <a href="SECURITY.md">Security</a>
 </p>
 
 <p align="center">
   <img alt="Python 3.8+" src="https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white">
   <img alt="Release 2.7.3" src="https://img.shields.io/badge/release-2.7.3-2563EB">
-  <img alt="Revision 54" src="https://img.shields.io/badge/revision-54-7C3AED">
+  <img alt="Revision 55" src="https://img.shields.io/badge/revision-55-7C3AED">
   <img alt="Local execution" src="https://img.shields.io/badge/execution-local-16A34A">
   <img alt="BM25 retrieval" src="https://img.shields.io/badge/retrieval-BM25-F59E0B">
-  <img alt="Tests" src="https://img.shields.io/badge/non--web%20tests-211%20passed-16A34A">
+  <img alt="Tests" src="https://img.shields.io/badge/non--web%20tests-218%20passed-16A34A">
 </p>
 
 ## Overview
@@ -30,19 +30,19 @@ Eyle indexes a local repository, retrieves only relevant evidence, and uses a lo
 
 | | |
 |---|---|
-| **Release** | 2.7.3 — revision 54 |
+| **Release** | 2.7.3 — revision 55 |
 | **Default rollout** | `read_only` until the real-model benchmark is validated locally |
 | **Recommended model target** | LFM2.5-8B-A1B or a compatible quantization |
 | **Privacy** | Source code, indexes, traces, queue, and history remain on the local machine |
 | **Mutable state** | `workspace/`, `memory/`, and `context/` are ignored by Git |
 
-**Release identity marker:** **Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 54.0-token-cache-phase1
+**Release identity marker:** **Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.0-retrieval-ingest-phase2
 
 ### Main capabilities
 
 - Local models through OpenAI-compatible servers, LM Studio, llama.cpp, and Ollama-style backends.
 - Persistent external memory for projects larger than the model context window.
-- Offline BM25 retrieval without cloud embeddings or a vector database.
+- Offline inverted-index BM25 retrieval with a bounded query LRU, without cloud embeddings or a vector database.
 - Grounded answers tied to fresh files, ranges, hashes, and evidence IDs.
 - Schema-validated tools and explicit `READ`, `EXEC`, and `WRITE` permissions.
 - Atomic patching, explicit confirmation, isolated tests, final reread, and rollback.
@@ -50,21 +50,18 @@ Eyle indexes a local repository, retrieves only relevant evidence, and uses a lo
 - Short-cycle detection for repeated agent states and bounded queue reservation.
 - CLI, optional authenticated Flask interface, SQLite queue, checkpoints, and retention.
 
-## Revision 54 highlights
+## Revision 55 highlights
 
-Revision 54 implements critical optimization phase 1 and fixes token discovery in the web panel:
+Revision 55 implements critical optimization phase 2 for retrieval and ingestion:
 
-- adds an in-process LRU with up to 2,048 exact responses;
-- keeps the SQLite cache across sessions, with 4,096 entries by default;
-- applies an absolute 24-hour TTL so frequent hits cannot keep stale responses forever;
-- preserves isolation by backend, model, temperature, and call format;
-- rejects empty responses and structured runtime failures before caching;
-- explains where the browser token can be found;
-- adds a token button for retry/replacement without reloading;
-- prints the persistent token path in the terminal;
-- starts the Worker when `python web/routes.py` is launched directly.
+- builds inverted BM25 postings and scores only documents containing each query term;
+- selects exact Top-K candidates with a heap instead of sorting every score;
+- adds a 256-entry LRU for lexically equivalent retrieval queries;
+- invalidates cached selections when `chunks.jsonl` changes while reloading related history on every call;
+- parallelizes safe reads, secret detection, hashes, AST/symbol extraction, and chunk generation with up to four threads;
+- preserves deterministic `estrutura.json`, `chunks.jsonl`, and index fingerprints across serial and parallel modes.
 
-See [docs/releases/2.7.3-revision-54.md](docs/releases/2.7.3-revision-54.md).
+See [docs/releases/2.7.3-revision-55.md](docs/releases/2.7.3-revision-55.md).
 
 ## How it works
 
@@ -181,7 +178,7 @@ python main.py benchmark
 
 Release validation in the packaging environment:
 
-- **211/211 executable non-web tests passed**;
+- **218/218 executable non-web tests passed**;
 - **1 web test module was skipped** because Flask was not installed there;
 - the real-model benchmark remains environment-specific and must be run with the actual endpoint, model, quantization, hardware, and target repository.
 
@@ -209,7 +206,7 @@ docs/        Architecture, configuration, benchmark, releases, and history
 - [Benchmark and validation](docs/benchmark.md)
 - [Upgrading and publishing](docs/github-publishing.md)
 - [Detailed technical overview](docs/technical-overview.md)
-- [Revision 54 report](docs/releases/2.7.3-revision-54.md)
+- [Revision 55 report](docs/releases/2.7.3-revision-55.md)
 - [Revision 53 hardening report](docs/releases/2.7.3-hardening.md)
 
 ## License

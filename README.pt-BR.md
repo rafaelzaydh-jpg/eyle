@@ -11,17 +11,17 @@
   <a href="docs/architecture.md">Arquitetura</a> ·
   <a href="docs/configuration.md">Configuração</a> ·
   <a href="docs/benchmark.md">Benchmark</a> ·
-  <a href="docs/releases/2.7.3-revision-54.md">Revisão 54</a> ·
+  <a href="docs/releases/2.7.3-revision-55.md">Revisão 55</a> ·
   <a href="SECURITY.md">Segurança</a>
 </p>
 
 <p align="center">
   <img alt="Python 3.8+" src="https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white">
   <img alt="Versão 2.7.3" src="https://img.shields.io/badge/versão-2.7.3-2563EB">
-  <img alt="Revisão 54" src="https://img.shields.io/badge/revisão-54-7C3AED">
+  <img alt="Revisão 55" src="https://img.shields.io/badge/revisão-55-7C3AED">
   <img alt="Execução local" src="https://img.shields.io/badge/execução-local-16A34A">
   <img alt="Retrieval BM25" src="https://img.shields.io/badge/retrieval-BM25-F59E0B">
-  <img alt="Testes" src="https://img.shields.io/badge/testes%20não--web-211%20aprovados-16A34A">
+  <img alt="Testes" src="https://img.shields.io/badge/testes%20não--web-218%20aprovados-16A34A">
 </p>
 
 ## Visão geral
@@ -30,19 +30,19 @@ A Eyle indexa um repositório local, recupera apenas as evidências relevantes e
 
 | | |
 |---|---|
-| **Versão** | 2.7.3 — revisão 54 |
+| **Versão** | 2.7.3 — revisão 55 |
 | **Rollout padrão** | `read_only` até o benchmark real ser validado localmente |
 | **Modelo-alvo recomendado** | LFM2.5-8B-A1B ou quantização compatível |
 | **Privacidade** | Código, índices, traces, fila e histórico permanecem na máquina local |
 | **Estado mutável** | `workspace/`, `memory/` e `context/` são ignorados pelo Git |
 
-**Identidade da release:** **Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 54.0-token-cache-phase1
+**Identidade da release:** **Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.0-retrieval-ingest-phase2
 
 ### Recursos principais
 
 - Modelos locais via servidores compatíveis com OpenAI, LM Studio, llama.cpp e backends no estilo Ollama.
 - Memória externa persistente para projetos maiores que a janela de contexto.
-- Retrieval BM25 offline, sem embeddings em nuvem ou banco vetorial.
+- Retrieval BM25 com índice invertido e cache LRU de consultas, sem embeddings em nuvem ou banco vetorial.
 - Respostas ligadas a arquivos, faixas, hashes e IDs de evidência frescos.
 - Tools validadas por schema e permissões explícitas `READ`, `EXEC` e `WRITE`.
 - Patches atômicos, confirmação explícita, testes isolados, releitura final e rollback.
@@ -50,21 +50,18 @@ A Eyle indexa um repositório local, recupera apenas as evidências relevantes e
 - Detecção de ciclos curtos e reserva de fila com limite.
 - CLI, painel Flask autenticado opcional, fila SQLite, checkpoints e retenção.
 
-## Destaques da revisão 54
+## Destaques da revisão 55
 
-A revisão 54 implementa a primeira fase de otimização crítica e corrige a descoberta do token no painel:
+A revisão 55 implementa a fase 2 das otimizações críticas de retrieval e ingestão:
 
-- adiciona LRU em memória com até 2.048 respostas exatas por processo;
-- mantém o cache SQLite entre sessões, com até 4.096 entradas por padrão;
-- aplica TTL absoluto de 24 horas, sem tornar respostas antigas eternas por causa de hits;
-- preserva a separação por backend, modelo, temperatura e formato da chamada;
-- rejeita respostas vazias e envelopes estruturados de erro antes de armazenar;
-- explica no prompt do navegador onde encontrar o token;
-- adiciona botão para trocar ou tentar o token novamente sem recarregar;
-- mostra o caminho persistente do token no terminal;
-- inicia também o Worker ao executar `python web/routes.py` diretamente.
+- cria postings invertidos do BM25 e pontua somente documentos que contêm cada termo;
+- escolhe o Top-K exato com heap, sem ordenar todos os scores;
+- adiciona LRU de 256 consultas lexicalmente equivalentes;
+- invalida o cache quando `chunks.jsonl` muda e continua relendo o histórico em cada chamada;
+- paraleliza leitura segura, detecção de segredo, hashes, AST/símbolos e geração de chunks com até quatro threads;
+- preserva `estrutura.json`, `chunks.jsonl` e fingerprints determinísticos nos modos serial e paralelo.
 
-Detalhes: [docs/releases/2.7.3-revision-54.md](docs/releases/2.7.3-revision-54.md).
+Detalhes: [docs/releases/2.7.3-revision-55.md](docs/releases/2.7.3-revision-55.md).
 
 ## Como funciona
 
@@ -181,7 +178,7 @@ python main.py benchmark
 
 Resultado no ambiente de empacotamento:
 
-- **211/211 testes não-web executáveis aprovados**;
+- **218/218 testes não-web executáveis aprovados**;
 - **1 módulo web ignorado** porque o Flask não estava instalado naquele ambiente;
 - o benchmark com modelo real depende do endpoint, modelo, quantização, hardware e repositório usados na instalação final.
 
@@ -209,7 +206,7 @@ docs/        Arquitetura, configuração, benchmark, releases e histórico
 - [Benchmark e validação](docs/benchmark.md)
 - [Atualização e publicação](docs/github-publishing.md)
 - [Visão técnica detalhada](docs/technical-overview.md)
-- [Relatório da revisão 54](docs/releases/2.7.3-revision-54.md)
+- [Relatório da revisão 55](docs/releases/2.7.3-revision-55.md)
 - [Relatório da revisão 53](docs/releases/2.7.3-hardening.md)
 
 ## Licença

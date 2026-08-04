@@ -50,7 +50,15 @@
     "chunk_max_tokens": 400,
     "max_chunks_no_resultado": 8,
     "bm25_k1": 1.5,
-    "bm25_b": 0.75
+    "bm25_b": 0.75,
+    "query_cache_ativado": true,
+    "query_cache_max_entradas": 256,
+    "_comentario_otimizacao": "Revisao 55: BM25 usa indice invertido e pontua apenas documentos que contem os termos. O cache LRU reutiliza selecoes para consultas lexicalmente equivalentes e e invalidado quando chunks.jsonl muda."
+  },
+  "ingest": {
+    "max_workers": 4,
+    "parallel_threshold": 8,
+    "_comentario": "Revisao 55: leitura, verificacao de segredo, hashes e geracao local de estrutura/chunks usam ate 4 threads a partir de 8 arquivos. executor.map preserva a ordem deterministica do indice."
   },
   "engine": {
     "max_iteracoes_analista": 2,
@@ -216,7 +224,7 @@
   },
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "54.0-token-cache-phase1",
+  "revision": "55.0-retrieval-ingest-phase2",
   "telemetry": {
     "enabled": true,
     "window_seconds": 3600,

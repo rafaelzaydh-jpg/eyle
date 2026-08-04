@@ -74,6 +74,11 @@ class BenchmarkConfig(TypedDict, total=False):
     baseline_model: Optional[str]
 
 
+class IngestConfig(TypedDict, total=False):
+    max_workers: int
+    parallel_threshold: int
+
+
 class ConfigEyle(TypedDict, total=False):
     llm: LLMConfig
     context_engine: ContextEngineConfig
@@ -81,6 +86,7 @@ class ConfigEyle(TypedDict, total=False):
     benchmark: BenchmarkConfig
     context: Dict[str, Any]
     retrieval: Dict[str, Any]
+    ingest: IngestConfig
     engine: Dict[str, Any]
     servidor: Dict[str, Any]
     web: Dict[str, Any]
@@ -102,7 +108,7 @@ class ConfigError(ValueError):
 
 
 _SECOES = (
-    "llm", "context", "context_engine", "retrieval", "engine", "servidor", "web",
+    "llm", "context", "context_engine", "retrieval", "ingest", "engine", "servidor", "web",
     "entendimento", "dicas", "codar", "confirmacoes", "agent", "benchmark",
     "retention", "worker",
     "telemetry",
@@ -159,6 +165,7 @@ def validar_config(config) -> ConfigEyle:
 
     for caminho in (
         "llm.openai_compatible", "llm.cache.ativado",
+        "retrieval.query_cache_ativado",
         "engine.atalho_analista_ativado", "entendimento.gerar_via_llm",
         "codar.ativado", "codar.fazer_backup", "codar.testes.ativado",
         "codar.testes.sandbox.bloquear_rede",
@@ -188,6 +195,8 @@ def validar_config(config) -> ConfigEyle:
         "context_engine.chars_per_token_fallback",
         "context_engine.max_recent_observations",
         "retrieval.chunk_max_tokens", "retrieval.max_chunks_no_resultado",
+        "retrieval.query_cache_max_entradas",
+        "ingest.max_workers", "ingest.parallel_threshold",
         "engine.max_iteracoes_analista", "engine.max_tentativas_executor",
         "engine.task_deadline_seconds",
         "servidor.port", "web.rate_limit.requests",
@@ -218,6 +227,8 @@ def validar_config(config) -> ConfigEyle:
             erros.append(f"{caminho} precisa ser >= 0")
 
     for caminho in (
+        "retrieval.query_cache_max_entradas", "ingest.max_workers",
+        "ingest.parallel_threshold",
         "agent.max_tree_entries", "agent.max_tree_depth",
         "agent.max_read_range_lines", "context_engine.chars_per_token_fallback",
         "context_engine.max_recent_observations", "agent.max_no_progress_decisions",
@@ -266,6 +277,7 @@ def validar_config(config) -> ConfigEyle:
     _validar_numero(config, erros, "agent.semantic_grounding.min_claim_token_overlap", minimo=0, maximo=1)
     _validar_numero(config, erros, "retrieval.bm25_k1", minimo=0)
     _validar_numero(config, erros, "retrieval.bm25_b", minimo=0, maximo=1)
+    _validar_numero(config, erros, "ingest.max_workers", minimo=1, maximo=32)
     _validar_numero(config, erros, "engine.atalho_score_minimo", minimo=0)
     _validar_numero(config, erros, "engine.atalho_score_ratio", minimo=1)
     _validar_numero(config, erros, "engine.executor_retry_base_delay_seconds", minimo=0)

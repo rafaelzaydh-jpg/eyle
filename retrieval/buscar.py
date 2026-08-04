@@ -21,6 +21,8 @@ Uso como modulo (chamado pelo main.py):
     ctx = buscar("aumentar limite de upload", memory_dir="memory", config=cfg)
 """
 import argparse
+import copy
+import heapq
 import json
 import math
 import os
@@ -28,7 +30,7 @@ import re
 import sys
 import threading
 import time
-from collections import Counter, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _BASE_DIR not in sys.path:
@@ -41,6 +43,9 @@ TOKEN_RE = re.compile(r"[^\W\d_]{2,}", re.UNICODE)
 _INDICES_BM25 = {}
 _INDICES_LOCK = threading.Lock()
 _MAX_INDICES_EM_MEMORIA = 4
+_CACHE_BUSCAS = OrderedDict()
+_CACHE_BUSCAS_LOCK = threading.Lock()
+_DEFAULT_CACHE_BUSCAS_MAX = 256
 
 
 def tokenizar(texto):
@@ -61,41 +66,74 @@ def carregar_chunks(memory_dir):
 
 
 class BM25:
-    """Implementacao simples e direta do BM25 (Okapi), sem dependencias externas."""
+    """BM25 com indice invertido: pontua somente docs que contem cada termo."""
 
     def __init__(self, chunks, k1=1.5, b=0.75):
         self.chunks = chunks
         self.k1 = k1
         self.b = b
-        self.tokenizados = [tokenizar(c["texto"] + " " + str(c.get("simbolo") or "") + " " + c["arquivo"])
-                             for c in chunks]
-        self.doc_len = [len(t) for t in self.tokenizados]
-        self.avgdl = sum(self.doc_len) / len(self.doc_len) if self.doc_len else 0
-        self.df = defaultdict(int)
-        for tokens in self.tokenizados:
-            for termo in set(tokens):
-                self.df[termo] += 1
         self.n_docs = len(chunks)
-        self.contagens = [Counter(t) for t in self.tokenizados]
+        self.doc_len = []
+        self.postings = defaultdict(list)
+
+        for indice, chunk in enumerate(chunks):
+            tokens = tokenizar(
+                chunk["texto"] + " " + str(chunk.get("simbolo") or "") + " " + chunk["arquivo"]
+            )
+            self.doc_len.append(len(tokens))
+            for termo, frequencia in Counter(tokens).items():
+                self.postings[termo].append((indice, frequencia))
+
+        self.avgdl = sum(self.doc_len) / self.n_docs if self.n_docs else 0
+        self.df = {termo: len(lista) for termo, lista in self.postings.items()}
 
     def _idf(self, termo):
         df = self.df.get(termo, 0)
         return math.log(1 + (self.n_docs - df + 0.5) / (df + 0.5))
 
     def pontuar(self, query_tokens):
-        pontos = [0.0] * self.n_docs
+        """Retorna apenas scores positivos/candidatos em um mapa doc_id -> score."""
+        pontos = defaultdict(float)
         for termo in query_tokens:
-            if termo not in self.df:
+            postings = self.postings.get(termo)
+            if not postings:
                 continue
             idf = self._idf(termo)
-            for i in range(self.n_docs):
-                f = self.contagens[i].get(termo, 0)
-                if f == 0:
-                    continue
-                dl = self.doc_len[i]
-                denom = f + self.k1 * (1 - self.b + self.b * dl / (self.avgdl or 1))
-                pontos[i] += idf * (f * (self.k1 + 1)) / (denom or 1)
-        return pontos
+            for indice, frequencia in postings:
+                dl = self.doc_len[indice]
+                denom = frequencia + self.k1 * (
+                    1 - self.b + self.b * dl / (self.avgdl or 1)
+                )
+                pontos[indice] += idf * (frequencia * (self.k1 + 1)) / (denom or 1)
+        return dict(pontos)
+
+
+def _invalidar_cache_buscas_caminho(caminho=None):
+    with _CACHE_BUSCAS_LOCK:
+        if caminho is None:
+            _CACHE_BUSCAS.clear()
+            return
+        remover = [chave for chave in _CACHE_BUSCAS if chave[0] == caminho]
+        for chave in remover:
+            _CACHE_BUSCAS.pop(chave, None)
+
+
+def _cache_busca_obter(chave):
+    with _CACHE_BUSCAS_LOCK:
+        valor = _CACHE_BUSCAS.get(chave)
+        if valor is None:
+            return None
+        _CACHE_BUSCAS.move_to_end(chave)
+        return copy.deepcopy(valor)
+
+
+def _cache_busca_salvar(chave, valor, max_entradas):
+    limite = max(1, int(max_entradas or _DEFAULT_CACHE_BUSCAS_MAX))
+    with _CACHE_BUSCAS_LOCK:
+        _CACHE_BUSCAS[chave] = copy.deepcopy(valor)
+        _CACHE_BUSCAS.move_to_end(chave)
+        while len(_CACHE_BUSCAS) > limite:
+            _CACHE_BUSCAS.popitem(last=False)
 
 
 def _indice_bm25_cached(memory_dir, k1, b):
@@ -104,13 +142,20 @@ def _indice_bm25_cached(memory_dir, k1, b):
     try:
         stat = os.stat(caminho)
     except OSError:
-        return [], None
-    fingerprint = (stat.st_mtime_ns, stat.st_size, float(k1), float(b))
+        return [], None, None
+    fingerprint = (
+        stat.st_mtime_ns,
+        getattr(stat, "st_ctime_ns", 0),
+        stat.st_size,
+        getattr(stat, "st_ino", 0),
+        float(k1),
+        float(b),
+    )
     with _INDICES_LOCK:
         entrada = _INDICES_BM25.get(caminho)
         if entrada and entrada["fingerprint"] == fingerprint:
             entrada["ultimo_uso"] = time.monotonic()
-            return entrada["chunks"], entrada["bm25"]
+            return entrada["chunks"], entrada["bm25"], fingerprint
 
     chunks = carregar_chunks(memory_dir)
     bm25 = BM25(chunks, k1=k1, b=b) if chunks else None
@@ -128,17 +173,25 @@ def _indice_bm25_cached(memory_dir, k1, b):
             )
             if antigo != caminho:
                 _INDICES_BM25.pop(antigo, None)
-    return chunks, bm25
+                _invalidar_cache_buscas_caminho(antigo)
+
+    # A nova versao do arquivo nunca deve reutilizar resultado da versao anterior.
+    _invalidar_cache_buscas_caminho(caminho)
+    return chunks, bm25, fingerprint
 
 
 def invalidar_cache_bm25(memory_dir=None):
     """Utilitario de testes/ingest; o fingerprint ja invalida automaticamente."""
-    with _INDICES_LOCK:
-        if memory_dir is None:
+    if memory_dir is None:
+        with _INDICES_LOCK:
             _INDICES_BM25.clear()
-            return
-        caminho = os.path.abspath(os.path.join(memory_dir, "chunks.jsonl"))
+        _invalidar_cache_buscas_caminho()
+        return
+
+    caminho = os.path.abspath(os.path.join(memory_dir, "chunks.jsonl"))
+    with _INDICES_LOCK:
         _INDICES_BM25.pop(caminho, None)
+    _invalidar_cache_buscas_caminho(caminho)
 
 
 def carregar_historico_relacionado(memory_dir, arquivos_relevantes, limite=3):
@@ -148,13 +201,37 @@ def carregar_historico_relacionado(memory_dir, arquivos_relevantes, limite=3):
     with open(caminho, "r", encoding="utf-8") as f:
         hist = json.load(f)
     relacionados = []
+    arquivos_alvo = set(arquivos_relevantes)
     for decisao in reversed(hist.get("decisoes", [])):
         arqs = set(decisao.get("arquivos_relevantes", []))
-        if arqs & set(arquivos_relevantes):
+        if arqs & arquivos_alvo:
             relacionados.append(decisao)
         if len(relacionados) >= limite:
             break
     return relacionados
+
+
+def _selecionar_trechos(chunks, pontos, token_budget, chars_per_token, max_chunks):
+    """Seleciona Top-K exato com heap, sem ordenar todos os candidatos."""
+    heap = [(-score, indice) for indice, score in pontos.items() if score > 0]
+    heapq.heapify(heap)
+
+    selecionados = []
+    tokens_usados = 0
+    arquivos_relevantes = []
+    while heap and len(selecionados) < max_chunks:
+        score_negativo, indice = heapq.heappop(heap)
+        score = -score_negativo
+        chunk = chunks[indice]
+        custo = chunk.get("tokens") or (len(chunk["texto"]) // chars_per_token)
+        if tokens_usados + custo > token_budget:
+            continue
+        selecionados.append({**chunk, "score": round(score, 3)})
+        tokens_usados += custo
+        if chunk["arquivo"] not in arquivos_relevantes:
+            arquivos_relevantes.append(chunk["arquivo"])
+
+    return selecionados, tokens_usados, arquivos_relevantes
 
 
 def buscar(pergunta, memory_dir="memory", config=None, out_path=None):
@@ -166,8 +243,10 @@ def buscar(pergunta, memory_dir="memory", config=None, out_path=None):
     max_chunks = ret_cfg.get("max_chunks_no_resultado", 8)
     k1 = ret_cfg.get("bm25_k1", 1.5)
     b = ret_cfg.get("bm25_b", 0.75)
+    cache_ativado = ret_cfg.get("query_cache_ativado", True)
+    cache_max = ret_cfg.get("query_cache_max_entradas", _DEFAULT_CACHE_BUSCAS_MAX)
 
-    chunks, bm25 = _indice_bm25_cached(memory_dir, k1, b)
+    chunks, bm25, fingerprint = _indice_bm25_cached(memory_dir, k1, b)
     if not chunks:
         print("[buscar] Nenhum chunk encontrado. Rode ingest.py primeiro.", file=sys.stderr)
         atual = {
@@ -182,26 +261,33 @@ def buscar(pergunta, memory_dir="memory", config=None, out_path=None):
         return atual
 
     query_tokens = tokenizar(pergunta)
-    pontos = bm25.pontuar(query_tokens)
+    caminho_indice = os.path.abspath(os.path.join(memory_dir, "chunks.jsonl"))
+    chave_cache = (
+        caminho_indice,
+        fingerprint,
+        tuple(sorted(query_tokens)),
+        int(token_budget),
+        int(chars_per_token),
+        int(max_chunks),
+    )
+    dados_selecao = _cache_busca_obter(chave_cache) if cache_ativado else None
 
-    ranking = sorted(range(len(chunks)), key=lambda i: pontos[i], reverse=True)
-
-    selecionados = []
-    tokens_usados = 0
-    arquivos_relevantes = []
-    for i in ranking:
-        if pontos[i] <= 0:
-            break
-        c = chunks[i]
-        custo = c.get("tokens") or (len(c["texto"]) // chars_per_token)
-        if tokens_usados + custo > token_budget:
-            continue  # tenta o proximo (pode ser menor e ainda caber)
-        selecionados.append({**c, "score": round(pontos[i], 3)})
-        tokens_usados += custo
-        if c["arquivo"] not in arquivos_relevantes:
-            arquivos_relevantes.append(c["arquivo"])
-        if len(selecionados) >= max_chunks:
-            break
+    if dados_selecao is None:
+        pontos = bm25.pontuar(query_tokens)
+        selecionados, tokens_usados, arquivos_relevantes = _selecionar_trechos(
+            chunks, pontos, token_budget, chars_per_token, max_chunks,
+        )
+        dados_selecao = {
+            "selecionados": selecionados,
+            "tokens_usados": tokens_usados,
+            "arquivos_relevantes": arquivos_relevantes,
+        }
+        if cache_ativado:
+            _cache_busca_salvar(chave_cache, dados_selecao, cache_max)
+    else:
+        selecionados = dados_selecao["selecionados"]
+        tokens_usados = dados_selecao["tokens_usados"]
+        arquivos_relevantes = dados_selecao["arquivos_relevantes"]
 
     historico_relacionado = carregar_historico_relacionado(memory_dir, arquivos_relevantes)
 

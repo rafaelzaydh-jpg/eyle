@@ -8,6 +8,24 @@ No unreleased changes yet.
 
 ## 2.7.3 — 2026-08-04
 
+### Revision 55 — inverted retrieval and parallel ingest phase 2
+
+- Replaced dense BM25 scoring with an inverted index that visits only documents containing each query term.
+- Replaced full-result sorting with an exact heap-based Top-K selector that preserves token-budget behavior.
+- Added a bounded 256-entry in-memory LRU for lexically equivalent retrieval queries.
+- Invalidated retrieval-query cache entries whenever `chunks.jsonl` changes.
+- Kept related history fresh on cache hits instead of caching `historico.json` results.
+- Parallelized safe file reads, secret checks, content hashes, AST/symbol extraction, and chunk generation during ingest.
+- Preserved deterministic file/chunk ordering across serial and parallel ingest modes.
+- Added revision 55 regression coverage and configuration validation.
+
+### Validation
+
+- `python -m compileall -q .` passed.
+- 218/218 executable non-web tests passed.
+- One Flask-dependent web module remained skipped because Flask was unavailable in the packaging environment.
+- A synthetic 20,000-document rare-term retrieval check confirmed that scoring touches the 20 postings instead of scanning all 20,000 documents; real project gains remain workload-dependent.
+
 ### Revision 54 — token UX and aggressive LLM cache phase 1
 
 - Added a bounded 2,048-entry in-memory LRU before the persistent cache.

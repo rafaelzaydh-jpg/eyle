@@ -22,8 +22,8 @@ flowchart LR
 
 ## Main components
 
-- `ingest.py` scans the project and creates searchable chunks.
-- `retrieval/buscar.py` implements offline BM25 retrieval and in-memory index reuse.
+- `ingest.py` scans the project and creates searchable chunks with bounded deterministic parallelism.
+- `retrieval/buscar.py` implements offline inverted-index BM25, index reuse, exact heap Top-K, and a bounded query LRU.
 - `engine/context_engine.py` budgets evidence sent to the model.
 - `engine/agent.py` runs the goal, evidence, action, cycle-detection, and completion loop.
 - `engine/agent_tools.py` defines executable contracts, schemas, limits, and permissions.

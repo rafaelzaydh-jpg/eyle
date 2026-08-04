@@ -270,7 +270,9 @@ externos são rejeitados sem ler conteúdo.
 
 O ingest também respeita `.gitignore` da raiz e de subpastas, não segue
 diretórios symlink e bloqueia nomes/extensões de credenciais e marcadores de
-segredo de alta confiança antes de gerar chunks ou chamar a LLM. O resumo em
+segredo de alta confiança antes de gerar chunks ou chamar a LLM. Leitura,
+verificação de conteúdo, hashes, AST/símbolos e chunks podem usar até quatro
+threads, mantendo a mesma ordem determinística do modo serial. O resumo em
 `memory/projeto.json -> arquivos_ignorados` guarda só contagens por motivo.
 
 ### Sandbox de testes
@@ -425,12 +427,11 @@ Usa **BM25** — o mesmo tipo de algoritmo usado por motores de busca de
 texto — implementado em Python puro, sem nenhuma dependência externa.
 Ele:
 
-1. Tokeniza a pergunta e todos os chunks indexados
-2. Pontua cada chunk pela relevância estatística dos termos
-3. Seleciona os chunks com maior pontuação, um por um, até estourar o
-   `token_budget` configurado
-4. Também recupera decisões antigas do `historico.json` relacionadas
-   aos mesmos arquivos
+1. Tokeniza os chunks uma vez e constrói postings invertidos por termo
+2. Para cada pergunta, pontua somente os chunks que contêm os termos consultados
+3. Reutiliza seleções lexicalmente equivalentes em um LRU limitado e invalidado quando o índice muda
+4. Seleciona o Top-K exato por heap, respeitando o `token_budget` sem ordenar todos os candidatos
+5. Também recupera decisões antigas do `historico.json` relacionadas aos mesmos arquivos, sempre relendo o histórico
 
 No pipeline de engenharia, o Analista recebe cada candidato identificado
 por `arquivo:linhas`. Os itens em `ignorar` são removidos de verdade, e

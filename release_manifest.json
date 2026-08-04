@@ -2,7 +2,7 @@
   "release": "2.7.3",
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "54.0-token-cache-phase1",
+  "revision": "55.0-retrieval-ingest-phase2",
   "updated": "2026-08-04",
   "installation": "overlay_safe",
   "preserve_on_update": [
@@ -13,17 +13,18 @@
   "included_runtime_state": false,
   "validation": {
     "compileall_passed": true,
-    "tests_passed": 211,
-    "tests_total_executable": 211,
+    "tests_passed": 218,
+    "tests_total_executable": 218,
     "tests_skipped": 1,
     "web_tests_executed": false,
     "javascript_syntax_passed": true,
     "real_llm_benchmark_executed": false,
     "notes": [
-      "A suite executavel do pacote passou integralmente (211/211).",
+      "A suite executavel do pacote passou integralmente (218/218).",
       "Um modulo web foi ignorado porque Flask nao estava disponivel no ambiente de empacotamento.",
       "A sintaxe de web/static/app.js foi validada com Node.js.",
-      "O benchmark real requer o endpoint LLM local da instalacao final."
+      "Ingest serial e paralelo produziram estrutura, chunks e fingerprint identicos nos testes.",
+      "O benchmark real requer o endpoint LLM local, o hardware e o repositorio finais."
     ]
   },
   "hardening_52": [
@@ -48,10 +49,13 @@
   ],
   "external_validation_required": [
     "executar testes web com Flask==3.0.3 no ambiente final",
-    "executar benchmark real P50/P95/P99 com o endpoint e modelo locais"
+    "executar benchmark real P50/P95/P99 com o endpoint e modelo locais",
+    "medir retrieval e ingest em um repositorio grande real no armazenamento final"
   ],
   "known_limits": [
     "grounding deterministico e conservador nao constitui prova universal de entailment em linguagem natural",
+    "BM25 continua lexical e nao substitui busca semantica por embeddings",
+    "ganho do ingest paralelo depende de arquivos armazenamento CPU e custo do entendimento via LLM",
     "desempenho real depende do hardware backend modelo e projeto do usuario"
   ],
   "internal_protocol_language": "English",
@@ -63,5 +67,14 @@
     "prompt web informa terminal e context/web_api_token.txt",
     "botao de retry e troca do token sem recarregar",
     "entrada direta web/routes.py inicia Worker e imprime token/caminho"
+  ],
+  "hardening_55": [
+    "indice invertido BM25 com postings por termo",
+    "Top-K exato por heap sem ordenar todos os candidatos",
+    "LRU de retrieval com 256 entradas e invalidacao por fingerprint do indice",
+    "historico relacionado relido mesmo em cache hit",
+    "leitura verificacao de segredo hashes AST simbolos e chunks paralelos no ingest",
+    "ordem deterministica preservada entre ingest serial e paralelo",
+    "configuracao e testes de regressao da revisao 55"
   ]
 }

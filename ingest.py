@@ -25,6 +25,8 @@ import os
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
@@ -66,7 +68,9 @@ PADROES_SEGREDO_CONTEUDO = (
     re.compile(r"\bsk-[A-Za-z0-9_-]{24,}\b"),
 )
 
-INDEXER_VERSION = "2.0"
+INDEXER_VERSION = "2.1"
+DEFAULT_INGEST_MAX_WORKERS = 4
+DEFAULT_INGEST_PARALLEL_THRESHOLD = 8
 
 # JS/TS continua com o reconhecedor leve; Python usa AST (Atualizacao 24).
 RE_DEF_JS = re.compile(r"^\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)|^\s*(?:export\s+)?class\s+(\w+)|^\s*const\s+(\w+)\s*=\s*(?:async\s*)?\(")
@@ -252,23 +256,55 @@ def _listar_arquivos_ingestao(caminho_projeto):
     return visitar(caminho_projeto, "", []), ignorados
 
 
-def _coletar_arquivos_indexaveis(caminho_projeto):
-    """Le uma vez os candidatos que realmente podem entrar no indice."""
+def _config_paralelismo_ingest(config=None):
+    cfg = (config or {}).get("ingest", {})
+    max_workers = cfg.get("max_workers", DEFAULT_INGEST_MAX_WORKERS)
+    parallel_threshold = cfg.get(
+        "parallel_threshold", DEFAULT_INGEST_PARALLEL_THRESHOLD,
+    )
+    # Evita configuracoes acidentais que criem centenas de threads.
+    max_workers = max(1, min(int(max_workers), 32))
+    parallel_threshold = max(1, int(parallel_threshold))
+    return max_workers, parallel_threshold
+
+
+def _ler_candidato_indexavel(candidato):
+    caminho_rel, caminho_abs = candidato
+    try:
+        with open(caminho_abs, "r", encoding="utf-8", errors="ignore") as arquivo:
+            conteudo = arquivo.read()
+    except OSError:
+        return "erro", None
+    if _conteudo_parece_segredo(conteudo):
+        return "segredo", None
+    return "ok", (caminho_rel, caminho_abs, conteudo)
+
+
+def _coletar_arquivos_indexaveis(caminho_projeto, config=None):
+    """Le candidatos em paralelo, preservando ordem deterministica."""
+    candidatos_iter, ignorados = _listar_arquivos_ingestao(caminho_projeto)
+    candidatos = [
+        (caminho_rel, caminho_abs)
+        for caminho_rel, caminho_abs in candidatos_iter
+        if os.path.splitext(caminho_rel)[1].lower() in EXTENSOES_TEXTO
+    ]
+    max_workers, parallel_threshold = _config_paralelismo_ingest(config)
+
+    if max_workers > 1 and len(candidatos) >= parallel_threshold:
+        with ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="eyle-ingest-read",
+        ) as executor:
+            resultados = executor.map(_ler_candidato_indexavel, candidatos)
+            resultados = list(resultados)
+    else:
+        resultados = [_ler_candidato_indexavel(item) for item in candidatos]
+
     arquivos = []
-    candidatos, ignorados = _listar_arquivos_ingestao(caminho_projeto)
-    for caminho_rel, caminho_abs in candidatos:
-        ext = os.path.splitext(caminho_rel)[1].lower()
-        if ext not in EXTENSOES_TEXTO:
-            continue
-        try:
-            with open(caminho_abs, "r", encoding="utf-8", errors="ignore") as arquivo:
-                conteudo = arquivo.read()
-        except OSError:
-            continue
-        if _conteudo_parece_segredo(conteudo):
+    for status, item in resultados:
+        if status == "segredo":
             ignorados["segredo"] += 1
-            continue
-        arquivos.append((caminho_rel, caminho_abs, conteudo))
+        elif status == "ok":
+            arquivos.append(item)
     return arquivos, ignorados
 
 
@@ -295,14 +331,23 @@ def _config_indexacao(config, chunk_max_tokens, chars_per_token):
     }
 
 
+def _item_manifesto_arquivo(item):
+    caminho_rel, _caminho_abs, conteudo = item
+    return {
+        "arquivo": caminho_rel.replace(os.sep, "/"),
+        "sha256": hashlib.sha256(conteudo.encode("utf-8")).hexdigest(),
+    }
+
+
 def _fingerprint_arquivos(arquivos, config, chunk_max_tokens, chars_per_token):
-    manifesto = [
-        {
-            "arquivo": caminho_rel.replace(os.sep, "/"),
-            "sha256": hashlib.sha256(conteudo.encode("utf-8")).hexdigest(),
-        }
-        for caminho_rel, _caminho_abs, conteudo in arquivos
-    ]
+    max_workers, parallel_threshold = _config_paralelismo_ingest(config)
+    if max_workers > 1 and len(arquivos) >= parallel_threshold:
+        with ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="eyle-ingest-hash",
+        ) as executor:
+            manifesto = list(executor.map(_item_manifesto_arquivo, arquivos))
+    else:
+        manifesto = [_item_manifesto_arquivo(item) for item in arquivos]
     manifesto.sort(key=lambda item: item["arquivo"])
     payload = {
         "config": _config_indexacao(config, chunk_max_tokens, chars_per_token),
@@ -319,7 +364,7 @@ def calcular_index_fingerprint(
 ):
     """Recalcula o fingerprint da fonte atual sem gravar memoria."""
     caminho_projeto = os.path.realpath(os.path.abspath(caminho_projeto))
-    arquivos, _ignorados = _coletar_arquivos_indexaveis(caminho_projeto)
+    arquivos, _ignorados = _coletar_arquivos_indexaveis(caminho_projeto, config=config)
     return _fingerprint_arquivos(
         arquivos, config, chunk_max_tokens, chars_per_token,
     )
@@ -629,6 +674,31 @@ def _subdividir_por_tamanho(texto, linha_inicial, chunk_max_tokens, chars_per_to
     return resultado
 
 
+def _processar_arquivo_indexavel(item, chunk_max_tokens, chars_per_token):
+    """Extrai estrutura, hashes e chunks de um arquivo sem estado compartilhado."""
+    caminho_rel, _caminho_abs, conteudo = item
+    ext = os.path.splitext(caminho_rel)[1].lower()
+    linhas = conteudo.split("\n")
+    tokens_arquivo = estimar_tokens(conteudo, chars_per_token)
+    simbolos = extrair_simbolos(linhas, ext)
+    estrutura_arquivo = {
+        "linhas": len(linhas),
+        "tokens_estimados": tokens_arquivo,
+        "funcoes_classes": [nome for nome, _ in simbolos],
+        "hash": hashlib.sha256(conteudo.encode("utf-8")).hexdigest()[:16],
+    }
+
+    chunks = dividir_em_chunks(
+        caminho_rel, linhas, ext, chunk_max_tokens, chars_per_token,
+    )
+    for chunk in chunks:
+        chunk["tokens"] = estimar_tokens(chunk["texto"], chars_per_token)
+        chunk["id"] = hashlib.md5(
+            f"{chunk['arquivo']}:{chunk['linha_inicio']}:{chunk['linha_fim']}".encode()
+        ).hexdigest()[:12]
+    return caminho_rel, estrutura_arquivo, chunks, tokens_arquivo
+
+
 def ingerir(caminho_projeto, nome_projeto, out_dir, chunk_max_tokens=400, chars_per_token=4, config=None):
     caminho_projeto = os.path.abspath(caminho_projeto)
     if not os.path.isdir(caminho_projeto):
@@ -642,32 +712,30 @@ def ingerir(caminho_projeto, nome_projeto, out_dir, chunk_max_tokens=400, chars_
     total_tokens = 0
     total_arquivos = 0
 
-    arquivos_indexaveis, ignorados = _coletar_arquivos_indexaveis(caminho_projeto)
+    arquivos_indexaveis, ignorados = _coletar_arquivos_indexaveis(
+        caminho_projeto, config=config,
+    )
     index_fingerprint = _fingerprint_arquivos(
         arquivos_indexaveis, config, chunk_max_tokens, chars_per_token,
     )
-    for caminho_rel, caminho_abs, conteudo in arquivos_indexaveis:
-        ext = os.path.splitext(caminho_rel)[1].lower()
+    max_workers, parallel_threshold = _config_paralelismo_ingest(config)
+    processar = partial(
+        _processar_arquivo_indexavel,
+        chunk_max_tokens=chunk_max_tokens,
+        chars_per_token=chars_per_token,
+    )
+    if max_workers > 1 and len(arquivos_indexaveis) >= parallel_threshold:
+        with ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="eyle-ingest-process",
+        ) as executor:
+            resultados_processamento = list(executor.map(processar, arquivos_indexaveis))
+    else:
+        resultados_processamento = [processar(item) for item in arquivos_indexaveis]
 
-        linhas = conteudo.split("\n")
-        tokens_arquivo = estimar_tokens(conteudo, chars_per_token)
-        simbolos = extrair_simbolos(linhas, ext)
-
-        estrutura[caminho_rel] = {
-            "linhas": len(linhas),
-            "tokens_estimados": tokens_arquivo,
-            "funcoes_classes": [nome for nome, _ in simbolos],
-            "hash": hashlib.sha256(conteudo.encode("utf-8")).hexdigest()[:16],
-        }
-
-        chunks = dividir_em_chunks(caminho_rel, linhas, ext, chunk_max_tokens, chars_per_token)
-        for c in chunks:
-            c["tokens"] = estimar_tokens(c["texto"], chars_per_token)
-            c["id"] = hashlib.md5(
-                f"{c['arquivo']}:{c['linha_inicio']}:{c['linha_fim']}".encode()
-            ).hexdigest()[:12]
+    # executor.map preserva a ordem de entrada; chunks.jsonl continua reproduzivel.
+    for caminho_rel, estrutura_arquivo, chunks, tokens_arquivo in resultados_processamento:
+        estrutura[caminho_rel] = estrutura_arquivo
         todos_chunks.extend(chunks)
-
         total_tokens += tokens_arquivo
         total_arquivos += 1
 

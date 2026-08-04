@@ -130,6 +130,25 @@ The LLM cache now uses two layers: a bounded in-process LRU for repeated calls i
 
 The TTL is absolute from creation time; a frequently hit response still expires. Exact cache keys include the backend fingerprint, model, temperature, system prompt, user prompt, and call mode.
 
+## Retrieval and ingest performance
+
+Revision 55 uses an inverted BM25 index and a bounded in-memory LRU for lexically equivalent queries:
+
+```json
+{
+  "retrieval": {
+    "query_cache_ativado": true,
+    "query_cache_max_entradas": 256
+  },
+  "ingest": {
+    "max_workers": 4,
+    "parallel_threshold": 8
+  }
+}
+```
+
+The retrieval cache is invalidated when `memory/chunks.jsonl` changes. Related history is still read fresh. Ingest uses threads only when the candidate count reaches `parallel_threshold`; serial and parallel modes preserve the same output order. Keep `max_workers` modest on slow disks or memory-constrained machines.
+
 Telemetry can expose call/tool/job status and latency percentiles without publishing prompt contents.
 
 ## Web API token
