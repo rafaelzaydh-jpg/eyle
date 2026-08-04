@@ -19,6 +19,8 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
+from engine.process_utils import pid_ativo
+
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(BASE_DIR, "context", "fila.sqlite3")
@@ -35,9 +37,14 @@ def _parse_utc(valor):
     if not valor:
         return None
     try:
-        return datetime.fromisoformat(str(valor).replace("Z", "+00:00"))
+        instante = datetime.fromisoformat(str(valor).replace("Z", "+00:00"))
     except (TypeError, ValueError):
         return None
+    # Bancos antigos ou editados manualmente podem conter timestamps sem
+    # timezone. Trate-os como UTC em vez de derrubar /status na subtracao.
+    if instante.tzinfo is None:
+        instante = instante.replace(tzinfo=timezone.utc)
+    return instante.astimezone(timezone.utc)
 
 
 def _idade_segundos(valor, agora=None):
@@ -49,18 +56,8 @@ def _idade_segundos(valor, agora=None):
 
 
 def _pid_ativo(pid):
-    try:
-        pid = int(pid)
-        if pid <= 0:
-            return False
-        os.kill(pid, 0)
-        return True
-    except (TypeError, ValueError, ProcessLookupError):
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
+    """Compatibilidade interna para o probe central e seguro de PID."""
+    return pid_ativo(pid)
 
 
 def _agora_utc():
@@ -362,9 +359,9 @@ def recuperar_interrompidos(stale_after_seconds=30, force=False):
         for linha in linhas:
             stale = _idade_segundos(linha["heartbeat_em"])
             morto = linha["pid"] is not None and not _pid_ativo(linha["pid"])
-            sem_worker = not linha["worker_id"] or linha["heartbeat_em"] is None
-            if force or sem_worker or morto or (
-                stale is not None and stale >= max(0, float(stale_after_seconds))
+            sem_heartbeat_valido = not linha["worker_id"] or stale is None
+            if force or sem_heartbeat_valido or morto or (
+                stale >= max(0, float(stale_after_seconds))
             ):
                 ids.append(int(linha["id"]))
         recuperados = 0

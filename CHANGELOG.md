@@ -8,6 +8,21 @@ No unreleased changes yet.
 
 ## 2.7.3 — 2026-08-04
 
+### Revision 55.1 — Windows PID safety hotfix
+
+- Replaced direct `os.kill(pid, 0)` liveness checks in the queue and process limiter with a shared cross-platform probe.
+- Added a self-PID fast path so `/status` and limiter cleanup cannot signal the Eyle process itself.
+- Used read-only `OpenProcess`/`WaitForSingleObject` checks on Windows; no signal is sent to observed processes.
+- Treated legacy timezone-free timestamps as UTC and invalid heartbeats as interrupted jobs eligible for recovery.
+- Prevented out-of-range PIDs from crashing POSIX health checks.
+- Added regression tests covering the Windows branch, `/status`, limiter cleanup, malformed timestamps, and invalid PIDs.
+
+### Validation
+
+- `python -m compileall -q .` passed.
+- 225/225 executable non-web tests passed.
+- One Flask-dependent web module remained skipped because Flask was unavailable in the packaging environment.
+
 ### Revision 55 — inverted retrieval and parallel ingest phase 2
 
 - Replaced dense BM25 scoring with an inverted index that visits only documents containing each query term.

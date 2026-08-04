@@ -224,7 +224,7 @@
   },
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "55.0-retrieval-ingest-phase2",
+  "revision": "55.1-windows-pid-hotfix",
   "telemetry": {
     "enabled": true,
     "window_seconds": 3600,

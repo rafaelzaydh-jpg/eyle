@@ -9,6 +9,8 @@ import threading
 import time
 import uuid
 
+from engine.process_utils import pid_ativo
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(BASE_DIR, "context", "llm_limiter.sqlite3")
 _SCHEMA_LOCK = threading.Lock()
@@ -56,22 +58,19 @@ def _owner_pid(owner):
 
 
 def _pid_alive(pid):
-    if pid is None:
-        return False
-    try:
-        os.kill(int(pid), 0)
-        return True
-    except PermissionError:
-        return True
-    except (OSError, TypeError, ValueError):
-        return False
+    """Compatibilidade interna para o probe central e seguro de PID."""
+    return pid_ativo(pid)
 
 
 def _cleanup_stale(conn, now):
     conn.execute("DELETE FROM limiter_slots WHERE expires_at <= ?", (now,))
     rows = conn.execute("SELECT limiter_key, slot, owner FROM limiter_slots").fetchall()
+    estado_por_pid = {}
     for row in rows:
-        if not _pid_alive(_owner_pid(row["owner"])):
+        pid = _owner_pid(row["owner"])
+        if pid not in estado_por_pid:
+            estado_por_pid[pid] = _pid_alive(pid)
+        if not estado_por_pid[pid]:
             conn.execute(
                 "DELETE FROM limiter_slots WHERE limiter_key=? AND slot=? AND owner=?",
                 (row["limiter_key"], row["slot"], row["owner"]),
