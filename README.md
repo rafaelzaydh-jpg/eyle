@@ -11,17 +11,17 @@
   <a href="docs/architecture.md">Architecture</a> ·
   <a href="docs/configuration.md">Configuration</a> ·
   <a href="docs/benchmark.md">Benchmark</a> ·
-  <a href="docs/releases/2.7.3-revision-55.5.md">Revision 55.5</a> ·
+  <a href="CHANGELOG.md">Revision 55.7</a> ·
   <a href="SECURITY.md">Security</a>
 </p>
 
 <p align="center">
   <img alt="Python 3.8+" src="https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white">
   <img alt="Release 2.7.3" src="https://img.shields.io/badge/release-2.7.3-2563EB">
-  <img alt="Revision 55.5" src="https://img.shields.io/badge/revision-55.5-7C3AED">
+  <img alt="Revision 55.7" src="https://img.shields.io/badge/revision-55.7-7C3AED">
   <img alt="Local execution" src="https://img.shields.io/badge/execution-local-16A34A">
   <img alt="BM25 retrieval" src="https://img.shields.io/badge/retrieval-BM25-F59E0B">
-  <img alt="Tests" src="https://img.shields.io/badge/non--web%20tests-243%20passed-16A34A">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-254%20passed-16A34A">
 </p>
 
 ## Overview
@@ -30,13 +30,13 @@ Eyle indexes a local repository, retrieves only relevant evidence, and uses a lo
 
 | | |
 |---|---|
-| **Release** | 2.7.3 — revision 55.5 |
+| **Release** | 2.7.3 — revision 55.7 |
 | **Default rollout** | `read_only` until the real-model benchmark is validated locally |
 | **Recommended model target** | LFM2.5-8B-A1B or a compatible quantization |
 | **Privacy** | Source code, indexes, traces, queue, and history remain on the local machine |
 | **Mutable state** | `workspace/`, `memory/`, and `context/` are ignored by Git |
 
-**Release identity marker:** **Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.6-read-fallback
+**Release identity marker:** **Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.7-live-progress
 
 ### Main capabilities
 

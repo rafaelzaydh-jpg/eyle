@@ -87,7 +87,9 @@ def _inicializar_schema(conexao, caminho_banco):
                 concluido_em TEXT,
                 resultado TEXT,
                 erro TEXT,
-                worker_id TEXT
+                worker_id TEXT,
+                progresso TEXT,
+                progresso_seq INTEGER NOT NULL DEFAULT 0
             )
             """
         )
@@ -137,6 +139,12 @@ def _inicializar_schema(conexao, caminho_banco):
         colunas_jobs = {row[1] for row in conexao.execute("PRAGMA table_info(jobs)")}
         if "worker_id" not in colunas_jobs:
             conexao.execute("ALTER TABLE jobs ADD COLUMN worker_id TEXT")
+        if "progresso" not in colunas_jobs:
+            conexao.execute("ALTER TABLE jobs ADD COLUMN progresso TEXT")
+        if "progresso_seq" not in colunas_jobs:
+            conexao.execute(
+                "ALTER TABLE jobs ADD COLUMN progresso_seq INTEGER NOT NULL DEFAULT 0"
+            )
         colunas_hb = {row[1] for row in conexao.execute("PRAGMA table_info(worker_heartbeat)")}
         if "pid" not in colunas_hb:
             conexao.execute("ALTER TABLE worker_heartbeat ADD COLUMN pid INTEGER")
@@ -275,10 +283,19 @@ def _reservar_proximo(max_invalid_jobs=100, worker_id=None):
                 """
                 UPDATE jobs
                 SET status = 'processing', tentativas = tentativas + 1,
-                    iniciado_em = ?, atualizado_em = ?, erro = NULL, worker_id = ?
+                    iniciado_em = ?, atualizado_em = ?, erro = NULL, worker_id = ?,
+                    progresso = ?, progresso_seq = progresso_seq + 1
                 WHERE id = ? AND status = 'pending'
                 """,
-                (agora, agora, None if worker_id is None else str(worker_id), linha["id"]),
+                (
+                    agora, agora, None if worker_id is None else str(worker_id),
+                    _serializar({
+                        "phase": "starting",
+                        "message": "Preparando a tarefa",
+                        "updated_at": agora,
+                    }),
+                    linha["id"],
+                ),
             )
             if atualizado.rowcount != 1:
                 conexao.rollback()
@@ -311,8 +328,57 @@ def proximo(timeout=1.0, max_invalid_jobs=100, worker_id=None):
         _evento_disponivel.clear()
 
 
+def atualizar_progresso(job_id, progresso=None, **campos):
+    """Publica progresso seguro e incremental de um job em processamento.
+
+    O navegador recebe apenas este objeto resumido; prompts, observacoes internas
+    e respostas estruturadas brutas nunca sao gravados aqui. Atualizacoes podem
+    vir do processo filho isolado porque o estado vive no mesmo SQLite da fila.
+    """
+    job_id = int(job_id)
+    patch = {}
+    if isinstance(progresso, dict):
+        patch.update(progresso)
+    patch.update(campos)
+    if not patch:
+        return False
+
+    agora = _agora_utc()
+    with _abrir_conexao() as conexao:
+        conexao.execute("BEGIN IMMEDIATE")
+        linha = conexao.execute(
+            "SELECT progresso, status FROM jobs WHERE id = ?", (job_id,),
+        ).fetchone()
+        if linha is None or linha["status"] not in ("pending", "processing"):
+            conexao.rollback()
+            return False
+        atual = {}
+        if linha["progresso"]:
+            try:
+                carregado = json.loads(linha["progresso"])
+                if isinstance(carregado, dict):
+                    atual = carregado
+            except (TypeError, ValueError, json.JSONDecodeError):
+                atual = {}
+        atual.update(patch)
+        atual["updated_at"] = agora
+        cursor = conexao.execute(
+            """
+            UPDATE jobs
+            SET progresso = ?, progresso_seq = progresso_seq + 1, atualizado_em = ?
+            WHERE id = ? AND status IN ('pending', 'processing')
+            """,
+            (_serializar(atual), agora, job_id),
+        )
+        conexao.commit()
+        return cursor.rowcount == 1
+
+
 def concluir(job_id, resultado=None):
     """Marca um job reservado como concluido e persiste seu resultado."""
+    atualizar_progresso(
+        job_id, phase="completed", message="Tarefa concluida",
+    )
     agora = _agora_utc()
     with _abrir_conexao() as conexao:
         cursor = conexao.execute(
@@ -335,8 +401,11 @@ def falhar(job_id, erro, resultado=None):
     ele e persistido aqui para que a API consiga explicar a falha sem transformar
     diagnostico de transporte em fala do assistente no historico.
     """
-    agora = _agora_utc()
     detalhe = f"{type(erro).__name__}: {erro}" if isinstance(erro, BaseException) else str(erro)
+    atualizar_progresso(
+        job_id, phase="failed", message="A tarefa falhou", error=detalhe[:500],
+    )
+    agora = _agora_utc()
     serializado = None if resultado is None else _serializar(resultado)
     with _abrir_conexao() as conexao:
         cursor = conexao.execute(
@@ -406,7 +475,7 @@ def obter(job_id):
     if linha is None:
         return None
     dados = dict(linha)
-    for campo in ("payload", "resultado"):
+    for campo in ("payload", "resultado", "progresso"):
         if dados.get(campo) is not None:
             try:
                 dados[campo] = json.loads(dados[campo])

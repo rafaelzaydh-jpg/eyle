@@ -21,6 +21,7 @@ sys.path.insert(0, BASE_DIR)
 
 from engine import queue
 from engine import telemetry
+from engine import progress
 from engine import engine as eyle_engine
 
 
@@ -59,6 +60,10 @@ def processar_evento(evento):
     tipo = evento.get("tipo")
 
     if tipo == "pergunta":
+        if evento.get("_job_id") is not None:
+            progress.publicar_job(
+                evento["_job_id"], "routing", "Entendendo o pedido e escolhendo o fluxo",
+            )
         resultado = eyle_engine.processar(
             evento["texto"],
             registrar_pergunta=False,

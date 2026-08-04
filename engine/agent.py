@@ -96,6 +96,7 @@ from engine.retencao import rotacionar_arquivo  # noqa: E402
 from engine.roteador import classificar_modo_projeto  # noqa: E402
 from engine.seguranca import _resolver_caminho_seguro  # noqa: E402
 from engine import telemetry  # noqa: E402
+from engine import progress as job_progress  # noqa: E402
 
 try:
     from engine.agent_tools import (  # noqa: E402
@@ -135,6 +136,26 @@ except ImportError:
 
 
 _RE_JSON_BLOCO = re.compile(r"\{.*\}", re.DOTALL)
+
+_ROTULOS_TOOL_PROGRESSO = {
+    "list_tree": "Lendo a estrutura do projeto",
+    "search_code": "Procurando codigo relevante",
+    "read_range": "Lendo um trecho de codigo",
+    "read_file": "Lendo um arquivo do projeto",
+    "find_symbol": "Localizando um simbolo no codigo",
+    "test_patch_dry_run": "Testando a alteracao em uma copia",
+    "apply_patch": "Aplicando a alteracao confirmada",
+    "run_tests": "Executando os testes do projeto",
+}
+
+def _publicar_tool(config, tool, step=None, concluida=False):
+    rotulo = _ROTULOS_TOOL_PROGRESSO.get(tool, f"Executando {tool}")
+    if concluida:
+        rotulo = rotulo + " concluido; avaliando o resultado"
+    job_progress.publicar(
+        config, "tool_result" if concluida else "tool", rotulo,
+        tool=tool, step=step,
+    )
 
 _RE_INTENCAO_ESCRITA = re.compile(
     r"\b(implement|alter|corrig|consert|edit|modific|cri|adicion|remov|apag|"
@@ -979,6 +1000,19 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
         else:
             acao_pendente = None
 
+        if status in ("success", "needs_user"):
+            job_progress.publicar(
+                config, "finalizing",
+                "Preparando a resposta final" if status == "success" else "Aguardando uma resposta do usuario",
+                partial_text=texto[-16000:] if isinstance(texto, str) else None,
+                step=estado.acoes_executadas if estado is not None else None,
+            )
+        elif status in ("failed", "max_steps"):
+            job_progress.publicar(
+                config, "agent_issue", texto,
+                step=estado.acoes_executadas if estado is not None else None,
+            )
+
         status_persistido = {
             "success": "completed",
             "needs_user": "waiting_user",
@@ -1114,6 +1148,8 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                     else {"retomada_interna": True}
                 ),
             }
+            if tool_confirmada not in ("__user_response__", "__resume__"):
+                _publicar_tool(config, tool_confirmada, step=step)
             if tool_confirmada == "__user_response__":
                 bloqueios = estado.goal_state.setdefault("blockers", [])
                 pergunta_anterior = retomar.get("pergunta_ao_usuario")
@@ -1155,6 +1191,8 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 tool_confirmada, arguments_confirmados,
                 {"config": config, "entendimento": entendimento, "projeto": projeto},
             )
+        if tool_confirmada not in ("__user_response__", "__resume__"):
+            _publicar_tool(config, tool_confirmada, step=step, concluida=True)
         acao_realmente_executada = bool(
             isinstance(resultado_tool, dict) and resultado_tool.get("executed") is True
         ) or write_recuperada
@@ -1275,6 +1313,10 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 retornar_detalhes,
             )
         step = estado.acoes_executadas + 1
+        job_progress.publicar(
+            config, "agent_decision", "Decidindo o proximo passo do agente",
+            profile="agent", step=step,
+        )
         invalidadas = _atualizar_frescor_evidencias(estado, projeto)
         if invalidadas:
             _registrar_trace_estado(estado, {
@@ -1804,6 +1846,7 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 retornar_detalhes,
             )
 
+        _publicar_tool(config, tool, step=step)
         _checkpoint_acao({
             "tool": tool,
             "arguments": arguments,
@@ -1836,6 +1879,7 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 "changed": resultado_tool.get("changed") if isinstance(resultado_tool, dict) else None,
             },
         )
+        _publicar_tool(config, tool, step=step, concluida=True)
         estado.registrar_chamada(tool, arguments)
         estado.registrar_resultado_tool(resultado_tool)  # Atualizacao 11
         estado.registrar_acao(tool, arguments, resultado_tool, contar_execucao=True)

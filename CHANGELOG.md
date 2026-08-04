@@ -8,6 +8,21 @@ No unreleased changes yet.
 
 ## 2.7.3 — 2026-08-04
 
+### Revision 55.7 — live progress and stale-job cleanup
+
+- Added safe live progress for web jobs: current stage, active tool, elapsed time, estimated generated tokens, and tokens per second.
+- Added streaming of user-visible textual responses for Ollama and OpenAI-compatible backends. Internal reasoning fields and structured Agent decisions remain private.
+- Persisted progress in the queue so the browser keeps showing the latest real activity even if polling pauses briefly.
+- Fixed terminal jobs cached in `sessionStorage` reappearing after reload as “job #N failed” without a new request. Only pending/processing jobs survive a page reload.
+- Kept the existing read-only fallback for timeout and invalid structured output.
+
+### Validation
+
+- `python -m compileall -q engine llm web tests` passed.
+- `node --check web/static/app.js` passed.
+- 254/254 executable tests passed.
+- One Flask-dependent module remained skipped because Flask was unavailable in the packaging environment.
+
 ### Revision 55.6 — read fallback after structured-agent failure
 
 - Added `llm.agent_retry_max_attempts=1`, preventing transport retries from nesting inside the Agent's own format-repair retry and consuming the whole task deadline.

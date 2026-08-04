@@ -29,6 +29,7 @@ class LLMConfig(TypedDict, total=False):
     model_discovery_negative_ttl_seconds: int
     retry_max_attempts: int
     agent_retry_max_attempts: int
+    stream_responses: bool
     retry_base_delay_seconds: float
     retry_max_delay_seconds: float
     retry_jitter_seconds: float
@@ -182,7 +183,7 @@ def validar_config(config) -> ConfigEyle:
         "agent.semantic_grounding.enabled",
         "agent.semantic_grounding.block_unsupported_anchors",
         "agent.semantic_grounding.require_inline_citations",
-        "llm.retry_read_timeouts",
+        "llm.retry_read_timeouts", "llm.stream_responses",
         "telemetry.enabled",
     ):
         _validar_tipo(config, erros, caminho, bool, "booleano")

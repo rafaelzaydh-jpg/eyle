@@ -60,7 +60,12 @@ _CHAVES_PUBLICAS_PROJETO = (
 )
 _CHAVES_PUBLICAS_JOB = (
     "id", "tipo", "status", "tentativas", "criado_em", "atualizado_em",
-    "iniciado_em", "concluido_em", "erro",
+    "iniciado_em", "concluido_em", "erro", "progresso_seq",
+)
+_CHAVES_PUBLICAS_PROGRESSO = (
+    "phase", "message", "profile", "attempt", "max_attempts", "step",
+    "tool", "partial_text", "estimated_tokens", "tokens_per_second",
+    "elapsed_seconds", "updated_at", "error", "cached",
 )
 
 
@@ -268,6 +273,24 @@ def _job_publico(registro):
         for chave in _CHAVES_PUBLICAS_JOB
         if chave in registro
     }
+    progresso = registro.get("progresso")
+    if isinstance(progresso, dict):
+        seguro = {
+            chave: progresso.get(chave)
+            for chave in _CHAVES_PUBLICAS_PROGRESSO
+            if chave in progresso
+        }
+        texto_parcial = seguro.get("partial_text")
+        if isinstance(texto_parcial, str):
+            seguro["partial_text"] = texto_parcial[-16000:]
+        mensagem = seguro.get("message")
+        if isinstance(mensagem, str):
+            seguro["message"] = mensagem[:500]
+        erro_progresso = seguro.get("error")
+        if isinstance(erro_progresso, str):
+            seguro["error"] = erro_progresso[:500]
+        publico["progresso"] = seguro
+
     payload = registro.get("payload")
     if isinstance(payload, dict) and registro.get("tipo") == "pergunta":
         mensagem_id = payload.get("mensagem_id")

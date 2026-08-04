@@ -53,3 +53,14 @@ def test_navegador_associa_falha_a_mensagem_de_origem():
     assert "mensagem_id: data.mensagem_id" in fonte
     assert 'origemEl.insertAdjacentElement("afterend", wrap)' in fonte
     assert "Falha ao processar" in fonte
+
+
+def test_navegador_descarta_job_terminal_ao_recarregar():
+    from pathlib import Path
+
+    fonte = (Path(__file__).parents[1] / "web" / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    assert '["pending", "processing"].includes(job.status)' in fonte
+    assert 'sessionStorage.setItem(JOBS_STORAGE_KEY, JSON.stringify(ativos))' in fonte
+    assert 'sessionStorage.removeItem(JOBS_STORAGE_KEY)' in fonte

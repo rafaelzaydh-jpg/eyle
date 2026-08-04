@@ -50,6 +50,7 @@ from engine.persistencia import salvar_texto_atomico  # noqa: E402
 from engine.config_schema import carregar_config_validada  # noqa: E402
 from engine import telemetry  # noqa: E402
 from engine import process_limiter  # noqa: E402
+from engine import progress as job_progress  # noqa: E402
 
 
 class ErroLLM(RuntimeError):
@@ -520,15 +521,29 @@ Regras obrigatorias:
 5. Responda SOMENTE com o JSON pedido, sem nenhum texto antes ou depois."""
 
 
+def _conteudo_delta_openai(valor):
+    if isinstance(valor, str):
+        return valor
+    if isinstance(valor, list):
+        partes = []
+        for item in valor:
+            if isinstance(item, str):
+                partes.append(item)
+            elif isinstance(item, dict):
+                texto = item.get("text") or item.get("content")
+                if isinstance(texto, str):
+                    partes.append(texto)
+        return "".join(partes)
+    return ""
+
+
 def _chamar_ollama(
     base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
-    forcar_json=False, max_tokens=None, read_timeout=None,
+    forcar_json=False, max_tokens=None, read_timeout=None, on_chunk=None,
 ):
     url = base_url.rstrip("/") + "/api/chat"
     options = {"temperature": temperature}
     if max_tokens:
-        # Ollama usa "num_predict" (nao "max_tokens") dentro de "options" --
-        # ver Atualizacao 15 no comentario de _chamar_llm pro motivo.
         options["num_predict"] = max_tokens
     payload = {
         "model": model,
@@ -536,23 +551,41 @@ def _chamar_ollama(
             {"role": "system", "content": prompt_sistema},
             {"role": "user", "content": prompt_usuario},
         ],
-        "stream": False,
+        "stream": bool(on_chunk),
         "options": options,
     }
     if forcar_json:
-        # Ollama nativo aceita "format": "json" no corpo do /api/chat
         payload["format"] = "json"
     dados = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=dados, headers={"Content-Type": "application/json"})
     with _abrir_url(req, timeout, read_timeout or timeout) as resp:
-        corpo = json.loads(resp.read().decode("utf-8"))
-    return corpo.get("message", {}).get("content", "")
+        if on_chunk is None:
+            corpo = json.loads(resp.read().decode("utf-8"))
+            return corpo.get("message", {}).get("content", "")
+
+        partes = []
+        ultimo = {}
+        for linha_bruta in resp:
+            linha = linha_bruta.decode("utf-8", errors="replace").strip()
+            if not linha:
+                continue
+            corpo = json.loads(linha)
+            ultimo = corpo if isinstance(corpo, dict) else {}
+            delta = _conteudo_delta_openai(
+                (corpo.get("message") or {}).get("content")
+                if isinstance(corpo, dict) else ""
+            )
+            if delta:
+                partes.append(delta)
+            on_chunk(delta, ultimo, bool(ultimo.get("done")))
+        on_chunk("", ultimo, True)
+        return "".join(partes)
 
 
 def _chamar_openai_compatible(
     base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
     forcar_json=False, max_tokens=None, usar_system_role=True,
-    desativar_raciocinio=False, read_timeout=None,
+    desativar_raciocinio=False, read_timeout=None, on_chunk=None,
 ):
     url = _endpoint_openai(base_url, "chat/completions")
     if usar_system_role:
@@ -561,7 +594,6 @@ def _chamar_openai_compatible(
             {"role": "user", "content": prompt_usuario},
         ]
     else:
-        # Fallback para templates/backends antigos que rejeitam role=system.
         messages = [{
             "role": "user",
             "content": (
@@ -574,48 +606,60 @@ def _chamar_openai_compatible(
         "model": model,
         "messages": messages,
         "temperature": temperature,
-        "stream": False,
+        "stream": bool(on_chunk),
     }
     if max_tokens:
         payload["max_tokens"] = max_tokens
     if forcar_json:
-        # Schema explicito: em llama-server moderno isso gera uma gramatica,
-        # em vez de apenas pedir genericamente "algum objeto JSON".
         payload["response_format"] = {
             "type": "json_object",
             "schema": _SCHEMA_DECISAO_AGENTE,
         }
-        # Modelos thinking (Qwen e semelhantes) podem gastar todo max_tokens
-        # em reasoning e devolver content vazio. llama-server atual aceita os
-        # dois controles; builds antigas caem no fallback sem esses campos.
         if desativar_raciocinio:
             payload["reasoning_effort"] = "none"
             payload["chat_template_kwargs"] = {"enable_thinking": False}
     dados = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=dados, headers={"Content-Type": "application/json"})
     with _abrir_url(req, timeout, read_timeout or timeout) as resp:
+        if on_chunk is not None:
+            partes = []
+            ultimo = {}
+            terminou = False
+            for linha_bruta in resp:
+                linha = linha_bruta.decode("utf-8", errors="replace").strip()
+                if not linha:
+                    continue
+                if linha.startswith("data:"):
+                    linha = linha[5:].strip()
+                if linha == "[DONE]":
+                    terminou = True
+                    break
+                if not linha.startswith("{"):
+                    continue
+                corpo = json.loads(linha)
+                ultimo = corpo if isinstance(corpo, dict) else {}
+                escolhas = ultimo.get("choices") or []
+                delta = ""
+                if escolhas and isinstance(escolhas[0], dict):
+                    bloco = escolhas[0].get("delta") or escolhas[0].get("message") or {}
+                    # reasoning_content e deliberadamente ignorado: progresso
+                    # publico nao e chain-of-thought.
+                    delta = _conteudo_delta_openai(bloco.get("content"))
+                if delta:
+                    partes.append(delta)
+                on_chunk(delta, ultimo, False)
+            on_chunk("", ultimo, True)
+            return "".join(partes)
+
         corpo = json.loads(resp.read().decode("utf-8"))
     mensagem = corpo["choices"][0]["message"]
     conteudo = mensagem.get("content")
     if isinstance(conteudo, str) and conteudo.strip():
         return conteudo
     if isinstance(conteudo, list):
-        partes = []
-        for item in conteudo:
-            if isinstance(item, dict):
-                texto = item.get("text") or item.get("content")
-                if isinstance(texto, str):
-                    partes.append(texto)
-            elif isinstance(item, str):
-                partes.append(item)
-        combinado = "".join(partes).strip()
+        combinado = _conteudo_delta_openai(conteudo).strip()
         if combinado:
             return combinado
-
-    # Algumas combinacoes modelo/template colocam a geracao em
-    # reasoning_content e deixam content vazio. Para chamada estruturada,
-    # devolver esse campo e melhor do que transformar uma resposta existente
-    # em string vazia; o parser do Agente ainda exige um JSON reconhecivel.
     if forcar_json:
         raciocinio = mensagem.get("reasoning_content")
         if isinstance(raciocinio, str) and raciocinio.strip():
@@ -625,7 +669,7 @@ def _chamar_openai_compatible(
 
 def _chamar_openai_com_fallback(
     base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
-    forcar_json=False, max_tokens=None, read_timeout=None,
+    forcar_json=False, max_tokens=None, read_timeout=None, on_chunk=None,
 ):
     """Detecta duas incompatibilidades comuns sem perfil por familia de modelo.
 
@@ -656,7 +700,7 @@ def _chamar_openai_com_fallback(
             forcar_json=usar_json_nativo, max_tokens=max_tokens,
             usar_system_role=usar_system,
             desativar_raciocinio=usar_controles_raciocinio,
-            read_timeout=read_timeout,
+            read_timeout=read_timeout, on_chunk=on_chunk,
         )
         if usar_json_nativo:
             capacidades["json_mode"] = True
@@ -680,7 +724,7 @@ def _chamar_openai_com_fallback(
                 base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
                 forcar_json=True, max_tokens=max_tokens,
                 usar_system_role=usar_system, desativar_raciocinio=False,
-                read_timeout=read_timeout,
+                read_timeout=read_timeout, on_chunk=on_chunk,
             )
             capacidades["reasoning_controls"] = False
             capacidades["json_mode"] = True
@@ -704,7 +748,7 @@ def _chamar_openai_com_fallback(
                 base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
                 forcar_json=False, max_tokens=max_tokens,
                 usar_system_role=usar_system,
-                read_timeout=read_timeout,
+                read_timeout=read_timeout, on_chunk=on_chunk,
             )
             capacidades["json_mode"] = False
             if usar_system:
@@ -725,7 +769,7 @@ def _chamar_openai_com_fallback(
             resposta = _chamar_openai_compatible(
                 base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
                 forcar_json=False, max_tokens=max_tokens, usar_system_role=False,
-                read_timeout=read_timeout,
+                read_timeout=read_timeout, on_chunk=on_chunk,
             )
             capacidades["system_role"] = False
             if usar_json_nativo:
@@ -818,8 +862,82 @@ def _timeouts_da_chamada(cfg_llm, perfil, config):
     return max(0.1, connect_timeout), max(0.1, read_timeout), restante
 
 
-def _chamar_llm_impl(prompt_sistema, prompt_usuario, config, forcar_json=False, perfil=None):
-    """Chama o backend com cache seguro, limites separados e retry transitório."""
+def _metricas_stream(metadata, estimativa_tokens, segundos):
+    metadata = metadata if isinstance(metadata, dict) else {}
+    tokens = None
+    tps = None
+
+    uso = metadata.get("usage")
+    if isinstance(uso, dict):
+        valor = uso.get("completion_tokens")
+        if isinstance(valor, (int, float)):
+            tokens = int(valor)
+
+    eval_count = metadata.get("eval_count")
+    eval_duration = metadata.get("eval_duration")
+    if isinstance(eval_count, (int, float)):
+        tokens = int(eval_count)
+        if isinstance(eval_duration, (int, float)) and eval_duration > 0:
+            tps = float(eval_count) / (float(eval_duration) / 1_000_000_000.0)
+
+    timings = metadata.get("timings")
+    if isinstance(timings, dict):
+        for chave in ("predicted_per_second", "tokens_per_second"):
+            valor = timings.get(chave)
+            if isinstance(valor, (int, float)) and valor >= 0:
+                tps = float(valor)
+                break
+        if tokens is None:
+            valor = timings.get("predicted_n")
+            if isinstance(valor, (int, float)):
+                tokens = int(valor)
+
+    if tokens is None:
+        tokens = max(0, int(estimativa_tokens or 0))
+    if tps is None and segundos > 0 and tokens > 0:
+        tps = tokens / segundos
+    return tokens, tps
+
+
+def _criar_callback_stream(config, perfil, visivel, chars_por_token):
+    partes = []
+    inicio = [None]
+    ultima_metadata = [{}]
+
+    def callback(delta, metadata=None, done=False):
+        agora = time.monotonic()
+        if inicio[0] is None:
+            inicio[0] = agora
+        if isinstance(delta, str) and delta:
+            partes.append(delta)
+        if isinstance(metadata, dict) and metadata:
+            ultima_metadata[0] = metadata
+        texto = "".join(partes)
+        estimativa = (len(texto) + chars_por_token - 1) // chars_por_token
+        segundos = max(0.001, agora - inicio[0])
+        tokens, tps = _metricas_stream(ultima_metadata[0], estimativa, segundos)
+        mensagem = "Escrevendo a resposta" if visivel else "LLM gerando tokens"
+        campos = {
+            "profile": perfil or "default",
+            "estimated_tokens": tokens,
+            "tokens_per_second": round(tps, 2) if tps is not None else None,
+        }
+        if visivel:
+            campos["partial_text"] = texto[-16000:]
+        job_progress.publicar(
+            config, "generating" if not done else "validating",
+            mensagem if not done else "Geracao concluida; validando a resposta",
+            force=bool(done), min_interval=0.18, **campos,
+        )
+
+    return callback
+
+
+def _chamar_llm_impl(
+    prompt_sistema, prompt_usuario, config, forcar_json=False, perfil=None,
+    stream_visible=False,
+):
+    """Chama o backend com cache seguro, limites separados e retry transitorio."""
     cfg_llm = config.get("llm", {})
     base_url = cfg_llm.get("base_url", "http://localhost:11434")
     model = cfg_llm.get("model", "qwen2.5:7b-instruct-q4_0")
@@ -871,8 +989,19 @@ def _chamar_llm_impl(prompt_sistema, prompt_usuario, config, forcar_json=False, 
                     backend=backend_fingerprint[:16],
                 )
             else:
+                campos_cache = {"profile": perfil or "default", "cached": True}
+                if stream_visible:
+                    campos_cache["partial_text"] = cacheada[-16000:]
+                job_progress.publicar(
+                    config, "validating", "Resposta recuperada do cache",
+                    **campos_cache,
+                )
                 return cacheada
 
+    job_progress.publicar(
+        config, "llm_wait", "Aguardando a LLM local",
+        profile=perfil or "default",
+    )
     _reservar_orcamento_llm(config)
 
     chave_tentativas = (
@@ -920,6 +1049,14 @@ def _chamar_llm_impl(prompt_sistema, prompt_usuario, config, forcar_json=False, 
             transient=True, error_code="LLM_PROCESS_RATE_LIMIT_WAIT_TIMEOUT",
         )
 
+    streaming_ativado = bool(
+        job_progress.job_id_de(config) is not None
+        and cfg_llm.get("stream_responses", True)
+    )
+    chars_por_token = max(
+        1, int((config or {}).get("context_engine", {}).get("chars_per_token_fallback", 3)),
+    )
+
     try:
         ultimo_erro = None
         for tentativa in range(1, tentativas + 1):
@@ -928,18 +1065,30 @@ def _chamar_llm_impl(prompt_sistema, prompt_usuario, config, forcar_json=False, 
                 deadline=(config.get("_runtime_agent_budget") or {}).get("deadline_monotonic"),
             )
             connect_atual, read_atual, _ = _timeouts_da_chamada(cfg_llm, perfil, config)
+            job_progress.publicar(
+                config, "llm_request",
+                "Solicitando geracao a LLM local" if tentativa == 1 else "Tentando a LLM novamente",
+                profile=perfil or "default", attempt=tentativa, max_attempts=tentativas,
+                partial_text="" if stream_visible else None,
+            )
+            on_chunk = (
+                _criar_callback_stream(
+                    config, perfil, bool(stream_visible), chars_por_token,
+                )
+                if streaming_ativado else None
+            )
             try:
                 if openai_compatible:
                     resposta = _chamar_openai_com_fallback(
                         base_url, model, prompt_sistema, prompt_usuario, temperature,
                         connect_atual, forcar_json=forcar_json, max_tokens=max_tokens,
-                        read_timeout=read_atual,
+                        read_timeout=read_atual, on_chunk=on_chunk,
                     )
                 else:
                     resposta = _chamar_ollama(
                         base_url, model, prompt_sistema, prompt_usuario, temperature,
                         connect_atual, forcar_json=forcar_json, max_tokens=max_tokens,
-                        read_timeout=read_atual,
+                        read_timeout=read_atual, on_chunk=on_chunk,
                     )
                 if forcar_json:
                     resposta = _limpar_resposta_estruturada(resposta)
@@ -1011,6 +1160,11 @@ def _chamar_llm_impl(prompt_sistema, prompt_usuario, config, forcar_json=False, 
                         transient=False, error_code="TASK_DEADLINE_EXCEEDED",
                     )
                 atraso = min(atraso, restante)
+            job_progress.publicar(
+                config, "retry", "A LLM falhou; preparando nova tentativa",
+                profile=perfil or "default", attempt=tentativa, max_attempts=tentativas,
+                error=str(ultimo_erro)[:500],
+            )
             _diagnostico(
                 "LLM_RETRY", attempt=tentativa, max_attempts=tentativas,
                 delay_seconds=round(atraso, 3), status_code=ultimo_erro.status_code,
@@ -1025,6 +1179,13 @@ def _chamar_llm_impl(prompt_sistema, prompt_usuario, config, forcar_json=False, 
         semaforo.release()
 
     _registrar_tokens_gerados(config, resposta)
+    campos_finais = {"profile": perfil or "default"}
+    if stream_visible and not streaming_ativado:
+        campos_finais["partial_text"] = str(resposta or "")[-16000:]
+    job_progress.publicar(
+        config, "validating", "Resposta gerada; executando validacoes",
+        **campos_finais,
+    )
 
     # So publica no cache depois de todos os gates locais terem aceitado a
     # resposta. Assim uma resposta que estoura o orçamento da tarefa nao vira
@@ -1041,7 +1202,10 @@ def _chamar_llm_impl(prompt_sistema, prompt_usuario, config, forcar_json=False, 
     return resposta
 
 
-def _chamar_llm(prompt_sistema, prompt_usuario, config, forcar_json=False, perfil=None):
+def _chamar_llm(
+    prompt_sistema, prompt_usuario, config, forcar_json=False, perfil=None,
+    stream_visible=False,
+):
     """Fronteira observavel de toda chamada LLM, inclusive pipelines legados."""
     inicio = time.monotonic()
     runtime = (config or {}).get("_runtime_agent_budget") or {}
@@ -1052,6 +1216,7 @@ def _chamar_llm(prompt_sistema, prompt_usuario, config, forcar_json=False, perfi
         resposta = _chamar_llm_impl(
             prompt_sistema, prompt_usuario, config,
             forcar_json=forcar_json, perfil=perfil,
+            stream_visible=stream_visible,
         )
         chamadas_depois = int(runtime.get("llm_calls", 0) or 0)
         if chamadas_depois == chamadas_antes:
@@ -1159,24 +1324,32 @@ def executar_chat(pergunta, config, historico=None):
     if historico:
         linhas = [f"{m['role']}: {m['text']}" for m in historico]
         prompt_usuario = "HISTORICO RECENTE DA CONVERSA:\n" + "\n".join(linhas) + f"\n\nMENSAGEM ATUAL:\n{pergunta}"
-    return _chamar_llm(PROMPT_CHAT, prompt_usuario, config, perfil="read")
+    return _chamar_llm(
+        PROMPT_CHAT, prompt_usuario, config, perfil="chat", stream_visible=True,
+    )
 
 
 def executar_analista(prompt_usuario, config):
     """Primeira chamada da LLM: decide o que importa. Nunca gera codigo, nunca responde ao usuario."""
-    return _chamar_llm(PROMPT_ANALISTA, prompt_usuario, config, perfil="read")
+    return _chamar_llm(PROMPT_ANALISTA, prompt_usuario, config, perfil="analyst")
 
 
 def executar_executor(prompt_usuario, config):
     """Segunda chamada da LLM: resolve o objetivo com o contexto ja compilado."""
-    return _chamar_llm(PROMPT_EXECUTOR, prompt_usuario, config, perfil="executor")
+    return _chamar_llm(
+        PROMPT_EXECUTOR, prompt_usuario, config,
+        perfil="executor", stream_visible=True,
+    )
 
 
 def executar_sugestor(prompt_usuario, config):
     """Quarta personalidade (Atualizacao 4): le o codigo real dos componentes
     ja escolhidos pelo Modelo Interno e devolve sugestoes fundamentadas.
     Nunca aplica nada -- so sugere."""
-    return _chamar_llm(PROMPT_SUGESTOR, prompt_usuario, config, perfil="read")
+    return _chamar_llm(
+        PROMPT_SUGESTOR, prompt_usuario, config,
+        perfil="suggester", stream_visible=True,
+    )
 
 
 def executar_engenheiro(prompt_usuario, config):
@@ -1184,7 +1357,7 @@ def executar_engenheiro(prompt_usuario, config):
     de UM simbolo ja localizado por linha no arquivo real. Devolve o JSON
     de proposta -- quem aplica de fato (so apos confirmacao) e
     engine/codar.py:aplicar_patch, chamado por engine/engine.py."""
-    return _chamar_llm(PROMPT_ENGENHEIRO, prompt_usuario, config, perfil="executor")
+    return _chamar_llm(PROMPT_ENGENHEIRO, prompt_usuario, config, perfil="engineer")
 
 
 def executar_entendedor(prompt_usuario, config):
@@ -1192,7 +1365,7 @@ def executar_entendedor(prompt_usuario, config):
     devolve o retrato estrutural dele para o Modelo Interno do Projeto
     (memory/entendimento.json). Nunca gera codigo, nunca responde ao usuario --
     so descreve o arquivo que acabou de ler."""
-    return _chamar_llm(PROMPT_ENTENDEDOR, prompt_usuario, config, perfil="executor")
+    return _chamar_llm(PROMPT_ENTENDEDOR, prompt_usuario, config, perfil="indexer")
 
 
 def main():

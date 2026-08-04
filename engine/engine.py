@@ -46,6 +46,7 @@ from engine.memoria_lock import lock_para
 from engine.persistencia import salvar_json_atomico, salvar_texto_atomico
 from engine.config_schema import carregar_config_validada
 from engine import queue as fila_persistente
+from engine import progress as job_progress
 
 MEMORY_DIR = os.path.join(BASE_DIR, "memory")
 CONTEXT_DIR = os.path.join(BASE_DIR, "context")
@@ -891,6 +892,9 @@ def processar(pergunta, registrar_pergunta=True, forcar_tipo=None, historico_sna
         "llm_calls": 0,
         "generated_tokens": 0,
     }
+    job_progress.publicar(
+        config, "context", "Carregando contexto e memoria do projeto",
+    )
     projeto = carregar_projeto()
 
     if registrar_pergunta:
@@ -970,6 +974,18 @@ def processar(pergunta, registrar_pergunta=True, forcar_tipo=None, historico_sna
     else:
         agent_habilitado = _rollout_agente_configurado(config) != "off"
         tipo, motivo_roteador = classificar_pergunta(pergunta, estrutura, entendimento, agent_habilitado)
+
+    rotulos_fluxo = {
+        "chat": "Conversa direta com a LLM",
+        "consulta": "Buscando trechos relevantes do projeto",
+        "dicas": "Selecionando componentes para analise",
+        "visao_geral": "Montando uma visao geral do projeto",
+        "agente": "Iniciando o agente de analise do projeto",
+        "engenharia": "Preparando o pipeline de engenharia",
+    }
+    job_progress.publicar(
+        config, "routing", rotulos_fluxo.get(tipo, f"Executando fluxo {tipo}"),
+    )
 
     fallback_rollout = (
         "agent_rollout_off"
@@ -1421,6 +1437,9 @@ def _processar_agente(pergunta, config, projeto, entendimento, motivo_roteador,
     config_execucao["agent"] = dict(config.get("agent", {}))
     config_execucao["agent"]["rollout_mode"] = rollout_efetivo
 
+    job_progress.publicar(
+        config_execucao, "agent", "Agente iniciado; preparando o primeiro passo",
+    )
     tarefa = fila_persistente.criar_tarefa_agente(
         pergunta,
         modo,
@@ -1564,6 +1583,10 @@ def _processar_agente(pergunta, config, projeto, entendimento, motivo_roteador,
         )
         texto = estado_pendente["pergunta_ao_usuario"]
 
+    job_progress.publicar(
+        config_execucao, "finalizing", "Montando a resposta final",
+        partial_text=texto[-16000:] if isinstance(texto, str) else None,
+    )
     salvar_texto_atomico(os.path.join(CONTEXT_DIR, "ultima_resposta.txt"), texto)
 
     arquivos_evidencia = [

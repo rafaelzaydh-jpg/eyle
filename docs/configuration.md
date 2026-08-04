@@ -22,6 +22,7 @@ The default targets an OpenAI-compatible local server:
     "executor_timeout_seconds": 180,
     "retry_max_attempts": 3,
     "agent_retry_max_attempts": 1,
+    "stream_responses": true,
     "retry_read_timeouts": false
   }
 }
@@ -33,7 +34,9 @@ Use `openai_compatible: true` for LM Studio, llama.cpp server, and compatible `/
 
 ## Timeouts, retries, and budgets
 
-Revision 51–55.6 separates connection, read, model-discovery, agent, and executor timeouts. General calls may retry transient failures with capped exponential backoff, jitter, cooldown, and `Retry-After` support. Structured Agent calls use `agent_retry_max_attempts` (1 by default), because the Agent already owns a separate format-repair attempt; this prevents nested retries from consuming the entire task deadline. Permanent client errors do not retry.
+Revision 51–55.7 separates connection, read, model-discovery, agent, and executor timeouts. General calls may retry transient failures with capped exponential backoff, jitter, cooldown, and `Retry-After` support. Structured Agent calls use `agent_retry_max_attempts` (1 by default), because the Agent already owns a separate format-repair attempt; this prevents nested retries from consuming the entire task deadline. Permanent client errors do not retry.
+
+`stream_responses=true` enables safe web progress. Textual answers are streamed into the visible response, while structured Agent calls publish only stage, elapsed time, estimated tokens, and tokens per second. Raw Agent JSON and backend reasoning fields are never exposed.
 
 The task-level deadline and budgets remain authoritative even when an individual operation allows more time. Structured agent decisions have a separate output ceiling, and the shipped configuration does not restart a complete generation after it already consumed the read timeout:
 

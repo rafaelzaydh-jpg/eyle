@@ -2,7 +2,7 @@
   "release": "2.7.3",
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "55.6-read-fallback",
+  "revision": "55.7-live-progress",
   "updated": "2026-08-04",
   "installation": "overlay_safe",
   "preserve_on_update": [
@@ -13,19 +13,18 @@
   "included_runtime_state": false,
   "validation": {
     "compileall_passed": true,
-    "tests_passed": 248,
-    "tests_total_executable": 248,
+    "tests_passed": 254,
+    "tests_total_executable": 254,
     "tests_skipped": 1,
     "web_tests_executed": false,
     "javascript_syntax_passed": true,
     "real_llm_benchmark_executed": false,
     "notes": [
-      "Um modulo web foi ignorado porque Flask nao estava disponivel no ambiente de empacotamento.",
-      "Chamadas estruturadas do Agente usam uma unica tentativa de transporte antes do retry de formato.",
-      "Falhas de timeout/transporte ou JSON invalido em tarefas READ caem no pipeline textual legado correspondente.",
-      "Pedidos de edicao continuam fail-closed e nunca usam o fallback de leitura.",
-      "O pacote final nao inclui bancos SQLite, traces ou checkpoints de runtime.",
-      "A suite executavel do pacote passou integralmente (248/248)."
+      "254/254 testes executaveis passaram.",
+      "Um modulo dependente de Flask foi ignorado porque Flask nao estava instalado no ambiente de empacotamento.",
+      "node --check web/static/app.js passou.",
+      "Streaming estruturado publica somente metricas; JSON interno e reasoning_content permanecem ocultos.",
+      "O pacote final nao inclui bancos SQLite, traces, caches ou checkpoints de runtime."
     ]
   },
   "hardening_52": [
@@ -132,5 +131,13 @@
     "causa invalid_agent_json preservada no checkpoint duravel",
     "runtime SQLite traces caches e checkpoints removidos do ZIP",
     "248 testes executaveis aprovados"
+  ],
+  "hardening_55_7": [
+    "progresso operacional persistido por job e exibido durante a execucao",
+    "streaming da resposta textual para backends Ollama e OpenAI-compatible",
+    "tokens por segundo e contagem estimada durante a geracao",
+    "reasoning_content e decisoes JSON internas nunca sao publicados no painel",
+    "jobs completed/failed antigos removidos do sessionStorage no carregamento",
+    "254 testes executaveis aprovados"
   ]
 }

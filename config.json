@@ -38,7 +38,9 @@
     "_comentario_timeouts_retries": "Revisao 51: connect/read e perfis possuem limites separados. Falhas transitorias 429/5xx/conexao usam ate 3 tentativas com backoff+jitter; 4xx permanentes nao repetem. timeout_seconds permanece apenas como fallback legado.",
     "agent_max_tokens": 512,
     "retry_read_timeouts": false,
-    "_comentario_agent_budget": "Revisao 55.4: decisoes estruturadas do Agente usam ate 512 tokens e 180s. Timeout de leitura nao repete a geracao inteira por padrao; conexao recusada/503 continuam com retry."
+    "_comentario_agent_budget": "Revisao 55.4: decisoes estruturadas do Agente usam ate 512 tokens e 180s. Timeout de leitura nao repete a geracao inteira por padrao; conexao recusada/503 continuam com retry.",
+    "stream_responses": true,
+    "_comentario_stream_responses": "Revisao 55.7: respostas textuais usam streaming no painel. Decisoes JSON do Agente continuam ocultas; o usuario ve apenas etapas operacionais, texto final parcial e tokens por segundo."
   },
   "context": {
     "token_budget": 1500,
@@ -231,7 +233,7 @@
   },
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "55.6-read-fallback",
+  "revision": "55.7-live-progress",
   "telemetry": {
     "enabled": true,
     "window_seconds": 3600,

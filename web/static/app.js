@@ -12,7 +12,7 @@
   const jobStateEl = document.getElementById("jobState");
 
   const CONVERSA_POLL_IDLE = 2200;
-  const CONVERSA_POLL_PENDING = 900;
+  const CONVERSA_POLL_PENDING = 400;
   const STATUS_POLL = 5000;
   const JOBS_STORAGE_KEY = "eyleTrackedJobs";
 
@@ -26,8 +26,20 @@
   function carregarJobsAcompanhados() {
     try {
       const dados = JSON.parse(sessionStorage.getItem(JOBS_STORAGE_KEY) || "[]");
-      return Array.isArray(dados) ? dados.slice(-20) : [];
+      if (!Array.isArray(dados)) return [];
+
+      // Jobs concluidos pertencem a uma execucao anterior da pagina. Manter
+      // "failed" no sessionStorage fazia o painel abrir exibindo, por exemplo,
+      // "job #4 falhou" sem um novo POST /enviar. Preserve somente trabalhos
+      // ainda ativos para que eles possam ser reconciliados com /jobs/<id>.
+      const ativos = dados.filter((job) =>
+        job && Number.isInteger(Number(job.id)) &&
+        ["pending", "processing"].includes(job.status)
+      ).slice(-20);
+      sessionStorage.setItem(JOBS_STORAGE_KEY, JSON.stringify(ativos));
+      return ativos;
     } catch (err) {
+      sessionStorage.removeItem(JOBS_STORAGE_KEY);
       return [];
     }
   }
@@ -115,7 +127,7 @@
     const incomingIds = new Set(mensagens.map((m) => m.id));
 
     // remove mensagens que sumiram (ex: DELETE feito em outra aba)
-    Array.from(logEl.querySelectorAll(".msg")).forEach((el) => {
+    Array.from(logEl.querySelectorAll(".msg[data-id]")).forEach((el) => {
       const id = Number(el.dataset.id);
       if (!incomingIds.has(id)) {
         el.remove();
@@ -136,27 +148,72 @@
   }
 
   function updatePendingState() {
-    const wasPending = pending;
     pending = trackedJobs.some(
       (job) => job.tipo === "pergunta" && ["pending", "processing"].includes(job.status),
     );
-
-    if (pending !== wasPending) {
-      renderTypingIndicator();
-    }
+    renderLiveProgress();
     renderJobState();
   }
 
-  function renderTypingIndicator() {
-    const existing = document.getElementById("typingIndicator");
-    if (existing) existing.remove();
-    if (!pending) return;
-    const el = document.createElement("div");
-    el.className = "typing";
-    el.id = "typingIndicator";
-    el.innerHTML = '<span class="dot"></span><span class="dot"></span><span class="dot"></span>';
-    logEl.appendChild(el);
-    logEl.scrollTop = logEl.scrollHeight;
+  function jobPerguntaMaisRecente() {
+    return [...trackedJobs].reverse().find((job) => job.tipo === "pergunta") || null;
+  }
+
+  function formatMetric(value, digits = 1) {
+    const numero = Number(value);
+    if (!Number.isFinite(numero)) return null;
+    return numero.toLocaleString("pt-BR", {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    });
+  }
+
+  function renderLiveProgress() {
+    const job = jobPerguntaMaisRecente();
+    Array.from(logEl.querySelectorAll(".live-response")).forEach((el) => {
+      if (!job || el.id !== `liveJob-${job.id}` || !["pending", "processing"].includes(job.status)) {
+        el.remove();
+      }
+    });
+    if (!job || !["pending", "processing"].includes(job.status)) return;
+
+    if (emptyState.parentNode === logEl) logEl.removeChild(emptyState);
+    const progresso = job.progresso || {};
+    const textoParcial = String(progresso.partial_text || "");
+    const mensagem = String(progresso.message || (
+      job.status === "pending" ? "Aguardando na fila" : "Processando a tarefa"
+    ));
+    let wrap = document.getElementById(`liveJob-${job.id}`);
+    const pertoDoFim = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 110;
+    if (!wrap) {
+      wrap = document.createElement("div");
+      wrap.className = "msg assistant live-response";
+      wrap.id = `liveJob-${job.id}`;
+      const bubble = document.createElement("div");
+      bubble.className = "msg-bubble live-bubble";
+      wrap.appendChild(bubble);
+      const meta = document.createElement("div");
+      meta.className = "msg-meta live-meta";
+      wrap.appendChild(meta);
+      logEl.appendChild(wrap);
+    }
+
+    const bubble = wrap.querySelector(".msg-bubble");
+    bubble.textContent = textoParcial || `◆ ${mensagem}`;
+    bubble.classList.toggle("status-only", !textoParcial);
+
+    const metricas = [];
+    if (textoParcial) metricas.push(mensagem);
+    const tps = formatMetric(progresso.tokens_per_second, 1);
+    if (tps !== null) metricas.push(`${tps} tok/s`);
+    const tokens = Number(progresso.estimated_tokens);
+    if (Number.isFinite(tokens) && tokens > 0) metricas.push(`${Math.round(tokens)} tokens`);
+    const tempo = formatMetric(progresso.elapsed_seconds, 1);
+    if (tempo !== null) metricas.push(`${tempo}s`);
+    metricas.push(`job #${job.id}`);
+    wrap.querySelector(".msg-meta").textContent = metricas.join(" · ");
+
+    if (pertoDoFim) logEl.scrollTop = logEl.scrollHeight;
   }
 
   function renderJobFailures() {
@@ -195,7 +252,7 @@
   }
 
   function renderJobState() {
-    const job = trackedJobs.length ? trackedJobs[trackedJobs.length - 1] : null;
+    const job = jobPerguntaMaisRecente() || (trackedJobs.length ? trackedJobs[trackedJobs.length - 1] : null);
     const ativo = job && ["pending", "processing"].includes(job.status);
     pipelineEl.classList.toggle("active", Boolean(ativo));
     if (!job) return;
@@ -205,8 +262,13 @@
       completed: "concluída",
       failed: "falhou",
     };
-    jobStateEl.textContent = `job #${job.id} · ${rotulos[job.status] || job.status}`;
+    const progresso = job.progresso || {};
+    const partes = [`job #${job.id}`, progresso.message || rotulos[job.status] || job.status];
+    const tps = formatMetric(progresso.tokens_per_second, 1);
+    if (tps !== null && ativo) partes.push(`${tps} tok/s`);
+    jobStateEl.textContent = partes.join(" · ");
   }
+
 
   // ---------- network ----------
 
@@ -270,6 +332,7 @@
       connDot.classList.remove("offline");
       connDot.classList.add("online");
       renderConversa(data);
+      renderLiveProgress();
       renderJobFailures();
     } catch (err) {
       connDot.classList.remove("online");
@@ -288,13 +351,23 @@
     await Promise.all(ativos.map(async (job) => {
       const res = await apiFetch(`/jobs/${job.id}`);
       if (res.status === 404) {
-        job.status = "failed";
-        job.erro = "tarefa nao encontrada";
+        // Pode ser um job de outra execucao da Eyle usando a mesma aba/origem.
+        // Nao transforme lixo de sessionStorage em uma falha nova na tela.
+        job._descartar = true;
         return;
       }
       if (!res.ok) throw new Error("status " + res.status);
-      Object.assign(job, await res.json());
+      const remoto = await res.json();
+      if (
+        job.mensagem_id && remoto.mensagem_id &&
+        Number(job.mensagem_id) !== Number(remoto.mensagem_id)
+      ) {
+        job._descartar = true;
+        return;
+      }
+      Object.assign(job, remoto);
     }));
+    trackedJobs = trackedJobs.filter((job) => !job._descartar);
     salvarJobsAcompanhados();
     updatePendingState();
   }

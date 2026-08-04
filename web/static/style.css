@@ -345,3 +345,27 @@ html, body {
   .project-info { display: none; }
   .msg { max-width: 92%; }
 }
+
+/* ---------- live progress / streaming ---------- */
+
+.live-response .msg-bubble {
+  min-width: 190px;
+}
+
+.live-response .live-bubble.status-only {
+  color: var(--accent);
+  font-size: 12px;
+  border-left-color: var(--accent);
+  animation: livePulse 1.7s infinite ease-in-out;
+}
+
+.live-response .live-meta {
+  opacity: 1;
+  color: var(--accent-dim);
+  flex-wrap: wrap;
+}
+
+@keyframes livePulse {
+  0%, 100% { opacity: 0.72; }
+  50% { opacity: 1; }
+}
