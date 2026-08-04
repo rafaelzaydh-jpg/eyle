@@ -875,7 +875,13 @@ def _chamar_llm_impl(prompt_sistema, prompt_usuario, config, forcar_json=False, 
 
     _reservar_orcamento_llm(config)
 
-    tentativas = max(1, int(cfg_llm.get("retry_max_attempts", 3)))
+    chave_tentativas = (
+        "agent_retry_max_attempts" if perfil == "agent" else "retry_max_attempts"
+    )
+    tentativas = max(
+        1,
+        int(cfg_llm.get(chave_tentativas, cfg_llm.get("retry_max_attempts", 3))),
+    )
     base_delay = max(0.0, float(cfg_llm.get("retry_base_delay_seconds", 0.5)))
     max_delay = max(base_delay, float(cfg_llm.get("retry_max_delay_seconds", 2.0)))
     jitter = max(0.0, float(cfg_llm.get("retry_jitter_seconds", 0.2)))

@@ -910,11 +910,16 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
             "requires_user": status == "needs_user",
         }
         bloqueios_sistema = set((estado.goal_state or {}).get("blockers") or [])
+        fallback_explicito = detalhes.get("fallback_cause")
         if "rollout_read_only" in bloqueios_sistema:
             completion_gate["code"] = "read_only_write_blocked"
             fallback_cause = "rollout_read_only_write_blocked"
         else:
-            fallback_cause = None if status in ("success", "needs_user") else status
+            fallback_cause = (
+                fallback_explicito
+                if isinstance(fallback_explicito, str) and fallback_explicito.strip()
+                else None if status in ("success", "needs_user") else status
+            )
         acoes_read = [
             item for item in acoes
             if item.get("action_number")
@@ -1345,7 +1350,13 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 "failed",
                 "O agente nao conseguiu decidir o proximo passo (formato invalido apos as tentativas configuradas).",
                 None,
-                {"task_type": task_type, "goal_state": estado.goal_state},
+                {
+                    "task_type": task_type,
+                    "mode": modo,
+                    "goal_state": estado.goal_state,
+                    "failure_code": "AGENT_INVALID_DECISION_FORMAT",
+                    "fallback_cause": "invalid_agent_json",
+                },
                 retornar_detalhes,
             )
 

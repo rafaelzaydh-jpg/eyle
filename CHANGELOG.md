@@ -8,6 +8,20 @@ No unreleased changes yet.
 
 ## 2.7.3 — 2026-08-04
 
+### Revision 55.6 — read fallback after structured-agent failure
+
+- Added `llm.agent_retry_max_attempts=1`, preventing transport retries from nesting inside the Agent's own format-repair retry and consuming the whole task deadline.
+- Added a read-only fallback to the legacy `consulta`, `dicas`, or `visao_geral` pipeline when the structured Agent times out or exhausts invalid-JSON attempts.
+- Kept edit requests fail-closed: the fallback never converts a write request into an unsupervised action.
+- Preserved the specific `invalid_agent_json` failure cause in the durable task checkpoint.
+- Cleaned runtime SQLite databases, traces, caches, and checkpoints from the release package.
+
+### Validation
+
+- `python -m compileall -q engine llm web tests` passed.
+- 248/248 executable tests passed.
+- One Flask-dependent module remained skipped because Flask was unavailable in the packaging environment.
+
 ### Revision 55.5 — agent reliability and ordered delivery
 
 - Capped effective Worker consumers by `llm.max_concurrent_requests`, preventing an older local-LLM job from outliving a newer chat job and surfacing its failure later.

@@ -1292,6 +1292,80 @@ def _processar_visao_geral(pergunta, config, projeto, estrutura, entendimento, m
     }
 
 
+def _fallback_leitura_legado(
+    pergunta, config, projeto, entendimento, motivo_roteador, task_id, causa,
+):
+    """Usa os pipelines de leitura sem JSON quando o Agente estruturado falha.
+
+    O fallback existe apenas para tarefas READ. Ele reaproveita a classificacao
+    legada com ``agent_habilitado=False`` e nunca encaminha pedidos de edicao.
+    Assim, uma falha de transporte ou de formato do protocolo interno nao vira
+    uma resposta vazia quando o Executor textual ainda esta funcional.
+    """
+    estrutura = carregar_estrutura()
+    tipo_legado, motivo_legado = classificar_pergunta(
+        pergunta, estrutura, entendimento, agent_habilitado=False,
+    )
+    if tipo_legado not in {"consulta", "dicas", "visao_geral"}:
+        return None
+
+    motivo_fallback = (
+        f"{motivo_roteador}; fallback de leitura apos {causa}: {motivo_legado}"
+    )
+    if tipo_legado == "consulta":
+        resultado = _processar_consulta(
+            pergunta, config, projeto, estrutura, entendimento, motivo_fallback,
+        )
+    elif tipo_legado == "dicas":
+        resultado = _processar_dicas(
+            pergunta, config, projeto, entendimento, motivo_fallback,
+        )
+    else:
+        resultado = _processar_visao_geral(
+            pergunta, config, projeto, estrutura, entendimento, motivo_fallback,
+        )
+
+    falhou = isinstance(resultado, dict) and resultado.get("status") == "failed"
+    detalhes = {
+        "task_id": task_id,
+        "task_type": "project_read",
+        "mode": classificar_modo_projeto(pergunta),
+        "response": (resultado or {}).get("resposta") if isinstance(resultado, dict) else None,
+        "completion_gate": {
+            "code": "legacy_read_fallback_failed" if falhou else "legacy_read_fallback",
+            "passed": not falhou,
+        },
+        "fallback_cause": causa,
+        "fallback_pipeline": tipo_legado,
+        "evidence_ids": [],
+        "evidencias_usadas": [],
+    }
+    fila_persistente.atualizar_tarefa_agente(
+        task_id,
+        status="failed" if falhou else "completed",
+        continuacao=None,
+        acao_pendente=None,
+        pergunta=None,
+        resultado=detalhes,
+        causa_fallback=causa,
+        evento={
+            "tipo": "legacy_read_fallback",
+            "pipeline": tipo_legado,
+            "cause": causa,
+            "success": not falhou,
+        },
+    )
+    if isinstance(resultado, dict):
+        resultado["agente_status"] = "failed" if falhou else "success"
+        resultado["agente_conclusao"] = detalhes
+        roteador = resultado.setdefault("roteador", {})
+        roteador["tipo"] = "agente_fallback_leitura"
+        roteador["fallback_pipeline"] = tipo_legado
+        roteador["fallback_cause"] = causa
+        roteador["task_id"] = task_id
+    return resultado
+
+
 def _desempacotar_resultado_agente(resultado):
     """Aceita o contrato 42 (4 itens) e mocks/implementacoes legadas (3)."""
     if len(resultado) == 4:
@@ -1447,6 +1521,13 @@ def _processar_agente(pergunta, config, projeto, entendimento, motivo_roteador,
             )
         )
     except ErroLLM as erro:
+        codigo_erro = getattr(erro, "error_code", None) or "LLM_FAILURE"
+        fallback = _fallback_leitura_legado(
+            pergunta, config, projeto, entendimento, motivo_roteador, task_id,
+            f"agent_llm_{str(codigo_erro).lower()}",
+        )
+        if fallback is not None:
+            return fallback
         fila_persistente.atualizar_tarefa_agente(
             task_id,
             status="failed",
@@ -1456,6 +1537,17 @@ def _processar_agente(pergunta, config, projeto, entendimento, motivo_roteador,
         return _resultado_falha_llm(
             "agente", motivo_roteador, erro, agente_status="failed",
         )
+
+    if (
+        status == "failed"
+        and detalhes_agente.get("fallback_cause") == "invalid_agent_json"
+    ):
+        fallback = _fallback_leitura_legado(
+            pergunta, config, projeto, entendimento, motivo_roteador, task_id,
+            "invalid_agent_json",
+        )
+        if fallback is not None:
+            return fallback
 
     if causa_rollout:
         detalhes_agente["fallback_cause"] = causa_rollout

@@ -36,7 +36,7 @@ A Eyle indexa um repositório local, recupera apenas as evidências relevantes e
 | **Privacidade** | Código, índices, traces, fila e histórico permanecem na máquina local |
 | **Estado mutável** | `workspace/`, `memory/` e `context/` são ignorados pelo Git |
 
-**Identidade da release:** **Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.5-agent-reliability
+**Identidade da release:** **Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.6-read-fallback
 
 ### Recursos principais
 

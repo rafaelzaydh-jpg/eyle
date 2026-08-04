@@ -2,7 +2,7 @@
   "release": "2.7.3",
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "55.5-agent-reliability",
+  "revision": "55.6-read-fallback",
   "updated": "2026-08-04",
   "installation": "overlay_safe",
   "preserve_on_update": [
@@ -13,19 +13,19 @@
   "included_runtime_state": false,
   "validation": {
     "compileall_passed": true,
-    "tests_passed": 243,
-    "tests_total_executable": 243,
+    "tests_passed": 248,
+    "tests_total_executable": 248,
     "tests_skipped": 1,
     "web_tests_executed": false,
     "javascript_syntax_passed": true,
     "real_llm_benchmark_executed": false,
     "notes": [
       "Um modulo web foi ignorado porque Flask nao estava disponivel no ambiente de empacotamento.",
-      "A sintaxe de web/static/app.js foi validada com Node.js.",
-      "O Worker limita consumidores pela concorrencia real da LLM para preservar ordem e prazo.",
-      "Falhas do navegador ficam associadas a mensagem de origem por metadados seguros do job.",
-      "Ciclos exigem tres repeticoes completas e decisoes estruturadas usam ramos JSON exclusivos.",
-      "A suite executavel do pacote passou integralmente (243/243)."
+      "Chamadas estruturadas do Agente usam uma unica tentativa de transporte antes do retry de formato.",
+      "Falhas de timeout/transporte ou JSON invalido em tarefas READ caem no pipeline textual legado correspondente.",
+      "Pedidos de edicao continuam fail-closed e nunca usam o fallback de leitura.",
+      "O pacote final nao inclui bancos SQLite, traces ou checkpoints de runtime.",
+      "A suite executavel do pacote passou integralmente (248/248)."
     ]
   },
   "hardening_52": [
@@ -123,5 +123,14 @@
     "ultima decisao JSON valida usada como autocorrecao final",
     "uma unica tentativa adicional para reparar formato invalido",
     "243 testes executaveis aprovados"
+  ],
+  "hardening_55_6": [
+    "agent_retry_max_attempts separado do retry geral da LLM",
+    "fim de retries aninhados entre transporte e correcao de formato",
+    "fallback read-only para consulta dicas ou visao_geral",
+    "fallback bloqueado para pedidos de edicao",
+    "causa invalid_agent_json preservada no checkpoint duravel",
+    "runtime SQLite traces caches e checkpoints removidos do ZIP",
+    "248 testes executaveis aprovados"
   ]
 }

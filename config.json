@@ -28,6 +28,8 @@
     "model_discovery_timeout_seconds": 3,
     "model_discovery_negative_ttl_seconds": 60,
     "retry_max_attempts": 3,
+    "agent_retry_max_attempts": 1,
+    "_comentario_agent_retries": "Decisoes estruturadas do Agente fazem uma tentativa de transporte por chamada; a correcao de formato ja controla a segunda geracao. Isso evita retries aninhados consumirem todo o prazo antes do fallback de leitura.",
     "retry_base_delay_seconds": 0.5,
     "retry_max_delay_seconds": 2.0,
     "retry_jitter_seconds": 0.2,
@@ -229,7 +231,7 @@
   },
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "55.5-agent-reliability",
+  "revision": "55.6-read-fallback",
   "telemetry": {
     "enabled": true,
     "window_seconds": 3600,

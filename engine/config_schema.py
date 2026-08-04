@@ -28,6 +28,7 @@ class LLMConfig(TypedDict, total=False):
     model_discovery_timeout_seconds: int
     model_discovery_negative_ttl_seconds: int
     retry_max_attempts: int
+    agent_retry_max_attempts: int
     retry_base_delay_seconds: float
     retry_max_delay_seconds: float
     retry_jitter_seconds: float
@@ -191,6 +192,7 @@ def validar_config(config) -> ConfigEyle:
         "llm.read_timeout_seconds", "llm.agent_timeout_seconds",
         "llm.executor_timeout_seconds", "llm.model_discovery_timeout_seconds",
         "llm.model_discovery_negative_ttl_seconds", "llm.retry_max_attempts",
+        "llm.agent_retry_max_attempts",
         "llm.max_concurrent_requests", "llm.context_window_tokens",
         "llm.agent_max_tokens",
         "llm.cache.max_entradas", "llm.cache.memoria_max_entradas",
@@ -241,7 +243,8 @@ def validar_config(config) -> ConfigEyle:
         "llm.timeout_seconds", "llm.connect_timeout_seconds",
         "llm.read_timeout_seconds", "llm.agent_timeout_seconds",
         "llm.executor_timeout_seconds", "llm.model_discovery_timeout_seconds",
-        "llm.retry_max_attempts", "llm.max_concurrent_requests",
+        "llm.retry_max_attempts", "llm.agent_retry_max_attempts",
+        "llm.max_concurrent_requests",
         "llm.agent_max_tokens",
         "llm.cache.max_age_hours", "llm.cache.hit_flush_interval", "agent.max_steps",
         "agent.max_tentativas_parse", "agent.max_erros_consecutivos",

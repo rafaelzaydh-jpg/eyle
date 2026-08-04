@@ -36,7 +36,7 @@ Eyle indexes a local repository, retrieves only relevant evidence, and uses a lo
 | **Privacy** | Source code, indexes, traces, queue, and history remain on the local machine |
 | **Mutable state** | `workspace/`, `memory/`, and `context/` are ignored by Git |
 
-**Release identity marker:** **Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.5-agent-reliability
+**Release identity marker:** **Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.6-read-fallback
 
 ### Main capabilities
 
