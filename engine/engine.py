@@ -1318,10 +1318,23 @@ def _fallback_leitura_legado(
     Assim, uma falha de transporte ou de formato do protocolo interno nao vira
     uma resposta vazia quando o Executor textual ainda esta funcional.
     """
+    modo = classificar_modo_projeto(pergunta)
+    if modo == "edit":
+        return None
+
     estrutura = carregar_estrutura()
     tipo_legado, motivo_legado = classificar_pergunta(
         pergunta, estrutura, entendimento, agent_habilitado=False,
     )
+    # Uma tarefa ja classificada pelo Agente como leitura nao pode voltar a
+    # publicar o erro de protocolo so porque o roteador legado considerou a
+    # frase curta demais. Nesse ultimo caso, usa o panorama textual seguro.
+    if tipo_legado == "chat" and modo == "analyze":
+        tipo_legado = "visao_geral"
+        motivo_legado = "fallback textual para tarefa de leitura do projeto"
+    elif tipo_legado == "chat" and modo == "suggest":
+        tipo_legado = "dicas"
+        motivo_legado = "fallback textual para sugestao sobre o projeto"
     if tipo_legado not in {"consulta", "dicas", "visao_geral"}:
         return None
 
@@ -1394,6 +1407,43 @@ def _desempacotar_resultado_agente(resultado):
         "evidencias_usadas": [],
         "limitacoes": [],
     }
+
+
+def _causa_fallback_leitura_agente(status, texto, detalhes, modo):
+    """Reconhece falha estruturada de READ mesmo com metadados incompletos.
+
+    A revisao 55.6 dependia exclusivamente de ``fallback_cause``. Em execucoes
+    reais esse campo pode chegar ausente ou ser substituido por um codigo mais
+    generico no checkpoint/adapter, deixando a mensagem de JSON invalido escapar
+    ao usuario. O gate abaixo usa sinais redundantes, mas continua fail-closed
+    para qualquer tarefa de escrita.
+    """
+    detalhes = detalhes if isinstance(detalhes, dict) else {}
+    task_type = detalhes.get("task_type")
+    if modo == "edit" or task_type == "project_write":
+        return None
+    if modo not in ("analyze", "suggest") and task_type != "project_read":
+        return None
+
+    causa = str(detalhes.get("fallback_cause") or "").strip().lower()
+    codigo = str(
+        detalhes.get("failure_code")
+        or (detalhes.get("completion_gate") or {}).get("code")
+        or ""
+    ).strip().upper()
+    texto_norm = str(texto or "").strip().lower()
+
+    if causa == "invalid_agent_json":
+        return "invalid_agent_json"
+    if codigo in {"AGENT_INVALID_DECISION_FORMAT", "INVALID_AGENT_JSON"}:
+        return "invalid_agent_json"
+    if status == "failed" and (
+        "formato invalido" in texto_norm
+        or "invalid decision format" in texto_norm
+        or "nao conseguiu decidir o proximo passo" in texto_norm
+    ):
+        return "invalid_agent_json"
+    return None
 
 
 def _persistir_checkpoint_agente(payload):
@@ -1557,13 +1607,13 @@ def _processar_agente(pergunta, config, projeto, entendimento, motivo_roteador,
             "agente", motivo_roteador, erro, agente_status="failed",
         )
 
-    if (
-        status == "failed"
-        and detalhes_agente.get("fallback_cause") == "invalid_agent_json"
-    ):
+    causa_fallback_leitura = _causa_fallback_leitura_agente(
+        status, texto, detalhes_agente, modo,
+    )
+    if causa_fallback_leitura:
         fallback = _fallback_leitura_legado(
             pergunta, config, projeto, entendimento, motivo_roteador, task_id,
-            "invalid_agent_json",
+            causa_fallback_leitura,
         )
         if fallback is not None:
             return fallback

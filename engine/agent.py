@@ -420,14 +420,111 @@ def _resultado_pos_testes(estado, resultado_tool, projeto):
     )
 
 
+def _argumentos_decisao(valor):
+    """Converte argumentos comuns de backends locais para ``dict``.
+
+    Alguns templates OpenAI-compatible devolvem ``arguments`` como JSON em
+    string, mesmo quando o prompt pediu um objeto. A conversao e deliberadamente
+    estreita: somente um objeto JSON valido e aceito; texto livre continua
+    rejeitado.
+    """
+    if isinstance(valor, dict):
+        return valor
+    if isinstance(valor, str):
+        try:
+            convertido = json.loads(valor)
+        except json.JSONDecodeError:
+            return None
+        return convertido if isinstance(convertido, dict) else None
+    return None
+
+
+def _normalizar_decisao_agente(dados):
+    """Normaliza envelopes JSON comuns sem afrouxar o gate de seguranca.
+
+    Modelos locais variam bastante no nome do envelope mesmo sob JSON mode.
+    Aceitamos apenas aliases mecanicos e inequivocos para os tres ramos do
+    protocolo. Objetos que misturam tool/final/needs_user continuam recusados.
+    """
+    if _decisao_estruturalmente_valida(dados):
+        return dados
+    if not isinstance(dados, dict):
+        return None
+
+    # Nunca escolha silenciosamente um ramo quando o modelo misturou ramos
+    # canonicos. Isso preserva a exclusividade do protocolo original.
+    ramos_canonicos = [
+        chave for chave in ("tool", "final", "needs_user") if chave in dados
+    ]
+    if len(ramos_canonicos) > 1:
+        return None
+
+    # OpenAI/native-tool-like envelope serializado no content.
+    tool_calls = dados.get("tool_calls")
+    if isinstance(tool_calls, list) and len(tool_calls) == 1:
+        chamada = tool_calls[0]
+        if isinstance(chamada, dict):
+            funcao = chamada.get("function", chamada)
+            if isinstance(funcao, dict):
+                nome = funcao.get("name")
+                argumentos = _argumentos_decisao(
+                    funcao.get("arguments", funcao.get("parameters", {}))
+                )
+                candidata = {"tool": nome, "arguments": argumentos}
+                if _decisao_estruturalmente_valida(candidata):
+                    return candidata
+
+    # Envelopes comuns: {"tool_call": {...}} ou {"function": {...}}.
+    for chave in ("tool_call", "function"):
+        chamada = dados.get(chave)
+        if not isinstance(chamada, dict):
+            continue
+        nome = chamada.get("name", chamada.get("tool"))
+        argumentos = _argumentos_decisao(
+            chamada.get("arguments", chamada.get("parameters", chamada.get("args", {})))
+        )
+        candidata = {"tool": nome, "arguments": argumentos}
+        if _decisao_estruturalmente_valida(candidata):
+            return candidata
+
+    # Aliases planos usados por modelos ReAct e templates simples.
+    nome = dados.get("name", dados.get("action"))
+    if isinstance(nome, str) and nome.strip():
+        argumentos = _argumentos_decisao(
+            dados.get(
+                "arguments",
+                dados.get("parameters", dados.get("args", dados.get("action_input", {}))),
+            )
+        )
+        candidata = {"tool": nome, "arguments": argumentos}
+        if _decisao_estruturalmente_valida(candidata):
+            return candidata
+
+    # Final textual com nomes alternativos. O gate de evidencias do Agente
+    # ainda decide se essa conclusao pode ser aceita para uma tarefa de projeto.
+    for chave in ("answer", "resposta", "response", "result", "output"):
+        valor = dados.get(chave)
+        if isinstance(valor, str) and valor.strip():
+            candidata = {"final": valor}
+            if _decisao_estruturalmente_valida(candidata):
+                return candidata
+
+    pergunta = dados.get("question", dados.get("ask_user"))
+    if isinstance(pergunta, str) and pergunta.strip():
+        candidata = {"needs_user": pergunta}
+        if _decisao_estruturalmente_valida(candidata):
+            return candidata
+    return None
+
+
 def _parse_decisao_agente(texto):
     """Extrai a decisao JSON final reconhecivel da resposta da LLM.
 
     O decoder incremental ignora objetos auxiliares invalidos e percorre toda
     a resposta. Quando um backend sem gramatica devolve mais de uma decisao
     valida, a ultima e escolhida: modelos locais costumam emitir um rascunho e
-    depois se autocorrigir no fim. O schema nativo usa ``oneOf`` e impede esse
-    caso quando o backend respeita JSON Schema.
+    depois se autocorrigir no fim. Envelopes JSON equivalentes usados por
+    templates locais sao normalizados antes da validacao final.
 
     A validacao estrutural continua exigindo exatamente um ramo por objeto;
     portanto um unico envelope contendo ``tool`` e ``final`` segue rejeitado.
@@ -435,19 +532,43 @@ def _parse_decisao_agente(texto):
     bruto = str(texto or "")
     decoder = json.JSONDecoder()
     candidatas = []
+    intervalos_canonicos = []
     for match in re.finditer(r"\{", bruto):
+        inicio = match.start()
         try:
-            dados, _ = decoder.raw_decode(bruto[match.start():])
+            dados, fim_relativo = decoder.raw_decode(bruto[inicio:])
         except json.JSONDecodeError:
             continue
-        if _decisao_estruturalmente_valida(dados):
-            candidatas.append(dados)
-    if len(candidatas) > 1:
+        fim = inicio + fim_relativo
+        canonica = _decisao_estruturalmente_valida(dados)
+        normalizada = dados if canonica else _normalizar_decisao_agente(dados)
+        if normalizada is not None:
+            candidatas.append({
+                "inicio": inicio,
+                "fim": fim,
+                "canonica": canonica,
+                "decisao": normalizada,
+            })
+            if canonica:
+                intervalos_canonicos.append((inicio, fim))
+
+    # Nao trate um objeto interno (ex.: o dict dentro de ``final``) como uma
+    # segunda decisao alias. Ele pertence ao envelope canonico externo.
+    filtradas = []
+    for item in candidatas:
+        if not item["canonica"] and any(
+            inicio <= item["inicio"] and item["fim"] <= fim
+            for inicio, fim in intervalos_canonicos
+        ):
+            continue
+        filtradas.append(item)
+
+    if len(filtradas) > 1:
         telemetry.record(
             "internal", "agent_json_parse", "multiple_valid_last_selected",
-            metadata={"valid_objects": len(candidatas)},
+            metadata={"valid_objects": len(filtradas)},
         )
-    return candidatas[-1] if candidatas else None
+    return filtradas[-1]["decisao"] if filtradas else None
 
 
 def prompt_reforco_formato(prompt, resposta_llm):

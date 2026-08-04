@@ -2,7 +2,7 @@
   "release": "2.7.3",
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "55.7-live-progress",
+  "revision": "55.8-invalid-format-recovery",
   "updated": "2026-08-04",
   "installation": "overlay_safe",
   "preserve_on_update": [
@@ -13,17 +13,18 @@
   "included_runtime_state": false,
   "validation": {
     "compileall_passed": true,
-    "tests_passed": 254,
-    "tests_total_executable": 254,
+    "tests_passed": 263,
+    "tests_total_executable": 263,
     "tests_skipped": 1,
     "web_tests_executed": false,
     "javascript_syntax_passed": true,
     "real_llm_benchmark_executed": false,
     "notes": [
-      "254/254 testes executaveis passaram.",
+      "263/263 testes executaveis passaram.",
       "Um modulo dependente de Flask foi ignorado porque Flask nao estava instalado no ambiente de empacotamento.",
       "node --check web/static/app.js passou.",
-      "Streaming estruturado publica somente metricas; JSON interno e reasoning_content permanecem ocultos.",
+      "Falhas de formato em tarefas READ usam sinais redundantes e caem no pipeline textual.",
+      "Aliases JSON comuns de modelos locais sao normalizados sem aceitar ramos ambiguos.",
       "O pacote final nao inclui bancos SQLite, traces, caches ou checkpoints de runtime."
     ]
   },
@@ -139,5 +140,13 @@
     "reasoning_content e decisoes JSON internas nunca sao publicados no painel",
     "jobs completed/failed antigos removidos do sessionStorage no carregamento",
     "254 testes executaveis aprovados"
+  ],
+  "hardening_55_8": [
+    "normalizacao segura de tool_calls tool_call action action_input e answer",
+    "fallback READ reconhecido por causa codigo e texto redundantes",
+    "mensagem terminal de formato invalido bloqueada em analise de projeto",
+    "tarefas de edicao permanecem fail-closed",
+    "pedido curto Faça a analise usa o contexto do projeto",
+    "263 testes executaveis aprovados"
   ]
 }

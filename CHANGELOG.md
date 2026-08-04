@@ -8,6 +8,21 @@ No unreleased changes yet.
 
 ## 2.7.3 — 2026-08-04
 
+### Revision 55.8 — tolerant local-model decisions and guaranteed read fallback
+
+- Normalized common local-model JSON envelopes such as `tool_calls`, `tool_call`, `action`, `action_input`, and `answer` into the Agent protocol without accepting ambiguous mixed branches.
+- Fixed read-only project analysis leaking the terminal “formato invalido” message when `fallback_cause` was missing or overwritten. The Engine now recognizes the failure through redundant status, code, and text signals.
+- Kept edit requests fail-closed; no write task is converted into a textual fallback.
+- Routed short project-panel requests such as “Faça a análise” to project analysis instead of generic chat.
+- Added regression coverage for the exact reported conversation and nested final-object parsing.
+
+### Validation
+
+- `python -m compileall -q engine llm web tests` passed.
+- `node --check web/static/app.js` passed.
+- 263/263 executable tests passed.
+- One Flask-dependent module remained skipped because Flask was unavailable in the packaging environment.
+
 ### Revision 55.7 — live progress and stale-job cleanup
 
 - Added safe live progress for web jobs: current stage, active tool, elapsed time, estimated generated tokens, and tokens per second.

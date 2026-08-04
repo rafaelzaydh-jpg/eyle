@@ -105,6 +105,16 @@ PALAVRAS_CONTEUDO = {
     "tem", "ta", "tá", "esta", "está", "faz", "existe", "contem", "contém", "ha", "há",
 }
 
+# No painel da Eyle, pedidos curtissimos como "faça a análise" normalmente
+# se referem ao projeto indexado. Antes eles caiam em chat e a LLM respondia
+# que nao tinha contexto, mesmo com o projeto carregado.
+_RE_ANALISE_CURTA = re.compile(
+    r"^(?:por\s+favor\s+)?(?:faça|faca|faz|faça-me|faca-me)?\s*"
+    r"(?:(?:a|uma)\s+)?(?:análise|analise|avaliação|avaliacao)"
+    r"(?:\s+(?:do|desse|deste)\s+projeto)?(?:\s+pra\s+mim)?[.!?]*$",
+    re.IGNORECASE,
+)
+
 _RE_PALAVRA = re.compile(r"[^\W\d_]{2,}", re.UNICODE)
 
 
@@ -230,6 +240,10 @@ def _pede_tarefa_multipasso(texto_norm):
     return _contem_frase(texto_norm, PALAVRAS_MULTIPASSO)
 
 
+def _pede_analise_curta(texto_norm):
+    return bool(_RE_ANALISE_CURTA.fullmatch((texto_norm or "").strip()))
+
+
 def classificar_modo_projeto(pergunta):
     """Classifica a intencao interna do Agente unificado (Atualizacao 44).
 
@@ -267,6 +281,14 @@ def classificar_pergunta(pergunta, estrutura=None, entendimento=None, agent_habi
     mesmo ponto de entrada e usa fallback interno ate a Atualizacao 46.
     """
     texto_norm = _normalizar(pergunta)
+
+    if _pede_analise_curta(texto_norm):
+        if agent_habilitado:
+            return (
+                "agente",
+                "pedido curto de analise encaminhado ao Agente Eyle no modo analyze",
+            )
+        return "visao_geral", "pedido curto de analise geral do projeto"
 
     if _contem_frase(texto_norm, PALAVRAS_ENGENHARIA):
         if agent_habilitado:
