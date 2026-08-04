@@ -164,28 +164,48 @@
 
   // ---------- network ----------
 
-  function obterApiToken() {
-    if (apiToken) return apiToken;
-    if (tokenPromptCancelado) throw new Error("token da API nao informado");
-    const informado = window.prompt("Token da API Eyle:");
+  function obterApiToken(forcarNovo = false) {
+    if (!forcarNovo && apiToken) return apiToken;
+    if (tokenPromptCancelado && !forcarNovo) throw new Error("token da API nao informado");
+    const informado = window.prompt("Token da API Eyle:\n\n" + 
+      "Copie o token do arquivo: context/web_api_token.txt\n" +
+      "Ou defina a variavel de ambiente EYLE_API_TOKEN");
     if (!informado || !informado.trim()) {
       tokenPromptCancelado = true;
       throw new Error("token da API nao informado");
     }
     apiToken = informado.trim();
     sessionStorage.setItem("eyleApiToken", apiToken);
+    tokenPromptCancelado = false;
     return apiToken;
   }
 
   async function apiFetch(url, options = {}) {
     const headers = new Headers(options.headers || {});
-    headers.set("Authorization", `Bearer ${obterApiToken()}`);
+    let tentouRenovarToken = false;
+    try {
+      headers.set("Authorization", `Bearer ${obterApiToken()}`);
+    } catch (err) {
+      console.error("[apiFetch] Falha ao obter token:", err.message);
+      throw err;
+    }
     const res = await fetch(url, { ...options, headers });
     if (res.status === 401) {
       apiToken = "";
-      tokenPromptCancelado = true;
+      tokenPromptCancelado = false;
       sessionStorage.removeItem("eyleApiToken");
-      throw new Error("token da API invalido; recarregue para tentar novamente");
+      if (!tentouRenovarToken) {
+        tentouRenovarToken = true;
+        const novoToken = obterApiToken(true);
+        if (novoToken) {
+          headers.set("Authorization", `Bearer ${novoToken}`);
+          const retryRes = await fetch(url, { ...options, headers });
+          if (retryRes.status !== 401) {
+            return retryRes;
+          }
+        }
+      }
+      throw new Error("token da API invalido; verifique context/web_api_token.txt");
     }
     if (res.status === 429) {
       throw new Error("limite de requisicoes; aguarde um pouco");

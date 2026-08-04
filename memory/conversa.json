@@ -1,0 +1,44 @@
+[
+  {
+    "id": 1,
+    "role": "user",
+    "text": "ola, teste",
+    "timestamp": "2026-08-04T17:44:37"
+  },
+  {
+    "id": 2,
+    "role": "user",
+    "text": "teste de saude do servidor",
+    "timestamp": "2026-08-04T17:44:56"
+  },
+  {
+    "id": 3,
+    "role": "user",
+    "text": "mensagem teste 3",
+    "timestamp": "2026-08-04T17:45:20"
+  },
+  {
+    "id": 4,
+    "role": "user",
+    "text": "mensagem teste 0",
+    "timestamp": "2026-08-04T17:45:20"
+  },
+  {
+    "id": 5,
+    "role": "user",
+    "text": "mensagem teste 2",
+    "timestamp": "2026-08-04T17:45:20"
+  },
+  {
+    "id": 6,
+    "role": "user",
+    "text": "mensagem teste 4",
+    "timestamp": "2026-08-04T17:45:20"
+  },
+  {
+    "id": 7,
+    "role": "user",
+    "text": "mensagem teste 1",
+    "timestamp": "2026-08-04T17:45:20"
+  }
+]
