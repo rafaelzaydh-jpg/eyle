@@ -1,6 +1,6 @@
 # Eyle — memória externa, auditoria determinística e retrieval seletivo
 
-**Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.21-audit-truthfulness-hardening
+**Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.22-project-read-orchestration-and-benchmark-truth
 
 Implementação funcional da ideia:
 

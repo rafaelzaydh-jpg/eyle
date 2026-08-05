@@ -1032,3 +1032,56 @@ def montar_prompt_finalizer_auditoria(
         ),
     ])
     return "\n".join(partes)
+
+
+def montar_prompt_finalizer_leitura(
+    pergunta, *, goal_state=None, evidencias=None, actions=None, config=None, system_prompt="",
+):
+    """Compila a resposta final de project_read sem catalogo de tools."""
+    partes = [
+        "ORIGINAL USER REQUEST:",
+        str(pergunta or ""),
+        "",
+        "GOAL STATE (system-owned):",
+        json.dumps(_valor_para_modelo(goal_state or {}), ensure_ascii=False, separators=(",", ":")),
+        "",
+        "EXECUTED ACTIONS (navigation metadata; facts still require evidence_ids):",
+        json.dumps(_valor_para_modelo(actions or []), ensure_ascii=False, separators=(",", ":")),
+        "",
+        "SELECTED FRESH EVIDENCE:",
+    ]
+    config = config or {}
+    cfg_contexto = config.get("context_engine", {})
+    cfg_llm = config.get("llm", {})
+    budget_config = dict(config)
+    budget_llm = dict(cfg_llm)
+    budget_llm["max_tokens"] = budget_llm.get(
+        "project_read_finalizer_max_tokens", budget_llm.get("max_tokens", 0)
+    )
+    budget_config["llm"] = budget_llm
+    prompt_sem_evidencias = "\n".join(partes)
+    orcamento = calcular_orcamento_evidencias(
+        budget_config, system_prompt, prompt_sem_evidencias,
+    )
+    selecao = selecionar_evidencias(
+        evidencias or [], pergunta,
+        orcamento["evidence_budget_tokens"], orcamento["chars_per_token"],
+    )
+    for item in selecao.get("selecionadas") or []:
+        partes.extend(["", item["bloco"]])
+    if not selecao.get("selecionadas"):
+        partes.append("(no fresh evidence fits; do not invent an answer)")
+    partes.extend([
+        "",
+        "FINALIZER CONTRACT:",
+        "- No tools are available.",
+        "- Answer the exact target in the original request.",
+        "- A negative find_symbol observation proves explicit absence; BM25/search_code alone does not.",
+        "- Return only the required JSON final envelope.",
+        "CONTEXT BUDGET: window={} tokens; reserved response={}; safety margin={}.".format(
+            cfg_llm.get("context_window_tokens", 2048),
+            cfg_llm.get("project_read_finalizer_max_tokens", cfg_llm.get("max_tokens", 0)) or 0,
+            cfg_contexto.get("safety_margin_tokens", 256),
+        ),
+    ])
+    return "\n".join(partes)

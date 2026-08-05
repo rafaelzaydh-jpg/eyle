@@ -20,6 +20,12 @@ class NormalizedModelResponse:
     raw_text: str = ""
     streaming: bool = False
     partial_json: bool = False
+    finish_reason: str | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    model: str | None = None
+    response_id: str | None = None
 
     def usable_text(self, *, allow_reasoning: bool = False) -> str:
         # Preserve espacos dos chunks: em streaming, ``"Oi"`` + ``" mundo"``
@@ -50,6 +56,14 @@ def _join_content(value: Any) -> str:
     return ""
 
 
+def _last_not_none(items, field):
+    for item in reversed(items):
+        value = getattr(item, field, None)
+        if value is not None:
+            return value
+    return None
+
+
 def _merge(items: Iterable[NormalizedModelResponse], *, streaming=False) -> NormalizedModelResponse:
     items = list(items)
     return NormalizedModelResponse(
@@ -58,6 +72,12 @@ def _merge(items: Iterable[NormalizedModelResponse], *, streaming=False) -> Norm
         raw_text="".join(item.raw_text for item in items),
         streaming=bool(streaming or any(item.streaming for item in items)),
         partial_json=any(item.partial_json for item in items),
+        finish_reason=_last_not_none(items, "finish_reason"),
+        prompt_tokens=_last_not_none(items, "prompt_tokens"),
+        completion_tokens=_last_not_none(items, "completion_tokens"),
+        reasoning_tokens=_last_not_none(items, "reasoning_tokens"),
+        model=_last_not_none(items, "model"),
+        response_id=_last_not_none(items, "response_id"),
     )
 
 
@@ -84,6 +104,21 @@ def _decode_partial_string(raw: str, field: str) -> str:
         return fragment.replace('\\n', '\n').replace('\\"', '"').replace('\\\\', '\\')
 
 
+def _usage_metadata(payload: dict[str, Any]):
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return None, None, None
+    prompt = usage.get("prompt_tokens")
+    completion = usage.get("completion_tokens")
+    reasoning = usage.get("reasoning_tokens")
+    details = usage.get("completion_tokens_details")
+    if reasoning is None and isinstance(details, dict):
+        reasoning = details.get("reasoning_tokens")
+    def as_int(value):
+        return int(value) if isinstance(value, (int, float)) else None
+    return as_int(prompt), as_int(completion), as_int(reasoning)
+
+
 def _from_mapping(payload: dict[str, Any], *, streaming=False) -> NormalizedModelResponse:
     # Envelopes OpenAI.
     choices = payload.get("choices")
@@ -93,15 +128,57 @@ def _from_mapping(payload: dict[str, Any], *, streaming=False) -> NormalizedMode
             if not isinstance(choice, dict):
                 continue
             block = choice.get("delta") or choice.get("message") or choice
-            parts.append(_from_mapping(block, streaming=streaming or "delta" in choice))
-        return _merge(parts, streaming=streaming)
+            nested = _from_mapping(block, streaming=streaming or "delta" in choice)
+            parts.append(NormalizedModelResponse(
+                content=nested.content,
+                reasoning_content=nested.reasoning_content,
+                raw_text=nested.raw_text,
+                streaming=nested.streaming,
+                partial_json=nested.partial_json,
+                finish_reason=choice.get("finish_reason") or nested.finish_reason,
+                prompt_tokens=nested.prompt_tokens,
+                completion_tokens=nested.completion_tokens,
+                reasoning_tokens=nested.reasoning_tokens,
+                model=nested.model,
+                response_id=nested.response_id,
+            ))
+        merged = _merge(parts, streaming=streaming)
+        prompt_tokens, completion_tokens, reasoning_tokens = _usage_metadata(payload)
+        return NormalizedModelResponse(
+            content=merged.content,
+            reasoning_content=merged.reasoning_content,
+            raw_text=merged.raw_text,
+            streaming=merged.streaming,
+            partial_json=merged.partial_json,
+            finish_reason=merged.finish_reason,
+            prompt_tokens=prompt_tokens if prompt_tokens is not None else merged.prompt_tokens,
+            completion_tokens=completion_tokens if completion_tokens is not None else merged.completion_tokens,
+            reasoning_tokens=reasoning_tokens if reasoning_tokens is not None else merged.reasoning_tokens,
+            model=str(payload.get("model")) if payload.get("model") is not None else merged.model,
+            response_id=str(payload.get("id")) if payload.get("id") is not None else merged.response_id,
+        )
 
     # Envelope Ollama e blocos OpenAI ja internos.
     message = payload.get("message")
     if isinstance(message, dict):
         nested = _from_mapping(message, streaming=streaming)
         if nested.content or nested.reasoning_content:
-            return nested
+            prompt_tokens, completion_tokens, reasoning_tokens = _usage_metadata(payload)
+            if completion_tokens is None and isinstance(payload.get("eval_count"), (int, float)):
+                completion_tokens = int(payload.get("eval_count"))
+            return NormalizedModelResponse(
+                content=nested.content,
+                reasoning_content=nested.reasoning_content,
+                raw_text=nested.raw_text,
+                streaming=nested.streaming,
+                partial_json=nested.partial_json,
+                finish_reason=payload.get("done_reason") or payload.get("finish_reason") or nested.finish_reason,
+                prompt_tokens=prompt_tokens if prompt_tokens is not None else nested.prompt_tokens,
+                completion_tokens=completion_tokens if completion_tokens is not None else nested.completion_tokens,
+                reasoning_tokens=reasoning_tokens if reasoning_tokens is not None else nested.reasoning_tokens,
+                model=str(payload.get("model")) if payload.get("model") is not None else nested.model,
+                response_id=str(payload.get("id")) if payload.get("id") is not None else nested.response_id,
+            )
 
     content = _join_content(payload.get("content"))
     reasoning = _join_content(
@@ -126,12 +203,19 @@ def _from_mapping(payload: dict[str, Any], *, streaming=False) -> NormalizedMode
         content = nested.content
         reasoning = reasoning or nested.reasoning_content
 
+    prompt_tokens, completion_tokens, reasoning_tokens = _usage_metadata(payload)
     return NormalizedModelResponse(
         content=content,
         reasoning_content=reasoning,
         raw_text="",
         streaming=streaming,
         partial_json=False,
+        finish_reason=payload.get("finish_reason"),
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        reasoning_tokens=reasoning_tokens,
+        model=str(payload.get("model")) if payload.get("model") is not None else None,
+        response_id=str(payload.get("id")) if payload.get("id") is not None else None,
     )
 
 
@@ -141,6 +225,8 @@ def normalize_model_response(raw: Any, *, streaming: bool = False) -> Normalized
     Texto JSON que representa a decisao do agente continua texto; apenas
     envelopes conhecidos de servidor sao desembrulhados.
     """
+    if isinstance(raw, NormalizedModelResponse):
+        return raw
     if raw is None:
         return NormalizedModelResponse(streaming=streaming)
     if isinstance(raw, bytes):
@@ -202,6 +288,12 @@ def normalize_model_response(raw: Any, *, streaming: bool = False) -> Normalized
             raw_text=raw,
             streaming=streaming or normalized.streaming,
             partial_json=False,
+            finish_reason=normalized.finish_reason,
+            prompt_tokens=normalized.prompt_tokens,
+            completion_tokens=normalized.completion_tokens,
+            reasoning_tokens=normalized.reasoning_tokens,
+            model=normalized.model,
+            response_id=normalized.response_id,
         )
 
     # JSON parcial de envelope: extrai somente campos reconhecidos. Se nao for

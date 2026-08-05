@@ -20,10 +20,10 @@
   <img alt="Release 2.7.3" src="https://img.shields.io/badge/release-2.7.3-2563EB">
   <img alt="Local execution" src="https://img.shields.io/badge/execution-local-16A34A">
   <img alt="BM25 retrieval" src="https://img.shields.io/badge/retrieval-BM25-F59E0B">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-353%20passed-16A34A">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-362%20passed-16A34A">
 </p>
 
-**Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.21-audit-truthfulness-hardening
+**Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.22-project-read-orchestration-and-benchmark-truth
 
 ## Overview
 
@@ -55,6 +55,10 @@ Eyle indexes a local repository, retrieves only relevant evidence, and uses a lo
 - Every project audit publishes deterministic real-coverage metrics: complete inventory status, source files read, critical components reviewed, current test execution, documents actually used, and a `none`/`partial`/`targeted`/`complete` level.
 - The system adds an honest coverage disclosure after grounding and always states that the audit cannot guarantee universal absence of bugs.
 - Global project-health claims are denied; only explicitly scoped findings about reviewed components may proceed to grounding, and the latest test run is the sole source of test status.
+- `project_read` now separates evidence collection from a dedicated 1,400-token Finalizer, so tool planning no longer competes with the final explanation.
+- Provider completion metadata (`finish_reason`, resolved model, usage, and reasoning tokens) is preserved; token-limit truncation retries once with a larger budget and otherwise fails closed.
+- Exact symbol-existence questions route deterministically to `find_symbol`, while confirmed writes advance automatically through tests and a fresh post-write reread.
+- Benchmark v2 separates factual correctness, completion, grounding, workflow, safety, per-call LLM latency, and the actually resolved model.
 - Schema-validated tools and explicit `READ`, `EXEC`, and `WRITE` permissions.
 - Atomic patching, explicit confirmation, isolated tests, final reread, and rollback.
 - Shared deadlines, differentiated timeouts, retry backoff, rate limiting, and telemetry.

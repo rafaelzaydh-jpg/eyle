@@ -51,7 +51,7 @@ from engine.config_schema import carregar_config_validada  # noqa: E402
 from engine import telemetry  # noqa: E402
 from engine import process_limiter  # noqa: E402
 from engine import progress as job_progress  # noqa: E402
-from llm.response_adapter import normalize_model_response  # noqa: E402
+from llm.response_adapter import NormalizedModelResponse, normalize_model_response  # noqa: E402
 
 
 class ErroLLM(RuntimeError):
@@ -74,6 +74,7 @@ _SEMAFOROS_LLM = {}
 _SEMAFOROS_LOCK = threading.Lock()
 _COOLDOWN_ATE = {}
 _COOLDOWN_LOCK = threading.Lock()
+_LLM_RESPONSE_LOCAL = threading.local()
 _RE_BLOCO_RACIOCINIO = re.compile(
     r"<(?:think|analysis|reasoning)>.*?</(?:think|analysis|reasoning)>",
     re.IGNORECASE | re.DOTALL,
@@ -164,6 +165,7 @@ _SCHEMA_DECISAO_AGENTE = {
             ]
         },
         "needs_user": {"type": "string"},
+        "ready_to_finalize": {"type": "boolean", "const": True},
         "important_fact": {"type": "string"},
         # Legacy key remains accepted during migration.
         "fato_importante": {"type": "string"},
@@ -173,6 +175,7 @@ _SCHEMA_DECISAO_AGENTE = {
         {"required": ["tool", "arguments"]},
         {"required": ["final"]},
         {"required": ["needs_user"]},
+        {"required": ["ready_to_finalize"]},
     ],
     "additionalProperties": True,
 }
@@ -574,9 +577,51 @@ def _conteudo_delta_openai(valor):
     return normalize_model_response({"content": valor}).content
 
 
+def _metadata_resposta_normalizada(normalizada):
+    return {
+        "finish_reason": normalizada.finish_reason,
+        "prompt_tokens": normalizada.prompt_tokens,
+        "completion_tokens": normalizada.completion_tokens,
+        "reasoning_tokens": normalizada.reasoning_tokens,
+        "provider_model": normalizada.model,
+        "response_id": normalizada.response_id,
+        "partial_json": bool(normalizada.partial_json),
+        "streaming": bool(normalizada.streaming),
+    }
+
+
+def _registrar_metadata_backend(normalizada):
+    if not isinstance(normalizada, NormalizedModelResponse):
+        normalizada = normalize_model_response(normalizada)
+    _LLM_RESPONSE_LOCAL.metadata = _metadata_resposta_normalizada(normalizada)
+    return normalizada
+
+
+def _ultima_metadata_backend():
+    return dict(getattr(_LLM_RESPONSE_LOCAL, "metadata", {}) or {})
+
+
 def _texto_normalizado_backend(valor, *, permitir_raciocinio=False, streaming=False):
-    normalizada = normalize_model_response(valor, streaming=streaming)
+    normalizada = _registrar_metadata_backend(
+        normalize_model_response(valor, streaming=streaming)
+    )
     return normalizada.usable_text(allow_reasoning=permitir_raciocinio)
+
+
+def _finish_reason_truncado(metadata):
+    reason = str((metadata or {}).get("finish_reason") or "").strip().lower()
+    return reason in {"length", "max_tokens", "max_output_tokens", "token_limit"}
+
+
+def _registrar_metadata_runtime(config, metadata):
+    runtime = (config or {}).get("_runtime_agent_budget")
+    if not isinstance(runtime, dict):
+        return
+    clean = {key: value for key, value in dict(metadata or {}).items() if value is not None}
+    runtime["last_llm_response"] = clean
+    history = runtime.setdefault("llm_responses", [])
+    history.append(clean)
+    del history[:-50]
 
 
 def _chamar_ollama(
@@ -851,14 +896,22 @@ def _reservar_orcamento_llm(config):
     runtime["llm_calls"] = atual + 1
 
 
-def _registrar_tokens_gerados(config, resposta):
+def _registrar_tokens_gerados(config, resposta, metadata_respostas=None):
     runtime = (config or {}).get("_runtime_agent_budget")
     if not isinstance(runtime, dict):
         return
+    metadata_respostas = list(metadata_respostas or [])
+    reais = [
+        int(item.get("completion_tokens"))
+        for item in metadata_respostas
+        if isinstance(item, dict) and isinstance(item.get("completion_tokens"), (int, float))
+    ]
     chars_por_token = max(
         1, int((config or {}).get("context_engine", {}).get("chars_per_token_fallback", 3)),
     )
-    estimativa = (len(str(resposta or "")) + chars_por_token - 1) // chars_por_token
+    estimativa = sum(reais) if reais else (
+        len(str(resposta or "")) + chars_por_token - 1
+    ) // chars_por_token
     total = int(runtime.get("generated_tokens", 0) or 0) + estimativa
     max_tokens = int(runtime.get("max_generated_tokens", 0) or 0)
     runtime["generated_tokens"] = total
@@ -986,7 +1039,8 @@ def _chamar_llm_impl(
     """Chama o backend com cache seguro, limites separados e retry transitorio."""
     cfg_llm = config.get("llm", {})
     base_url = cfg_llm.get("base_url", "http://localhost:11434")
-    model = cfg_llm.get("model", "qwen2.5:7b-instruct-q4_0")
+    configured_model = cfg_llm.get("model", "qwen2.5:7b-instruct-q4_0")
+    model = configured_model
     temperature = cfg_llm.get("temperature", 0.2)
     openai_compatible = cfg_llm.get("openai_compatible", False)
     max_tokens = _max_tokens_da_chamada(cfg_llm, perfil)
@@ -1108,6 +1162,7 @@ def _chamar_llm_impl(
         1, int((config or {}).get("context_engine", {}).get("chars_per_token_fallback", 3)),
     )
 
+    metadata_chamadas = []
     try:
         ultimo_erro = None
         for tentativa in range(1, tentativas + 1):
@@ -1129,18 +1184,78 @@ def _chamar_llm_impl(
                 if streaming_ativado else None
             )
             try:
-                if openai_compatible:
-                    resposta = _chamar_openai_com_fallback(
-                        base_url, model, prompt_sistema, prompt_usuario, temperature,
-                        connect_atual, forcar_json=forcar_json, max_tokens=max_tokens,
-                        read_timeout=read_atual, on_chunk=on_chunk,
+                def chamar_backend(token_limit, callback):
+                    _LLM_RESPONSE_LOCAL.metadata = {}
+                    inicio_backend = time.monotonic()
+                    if openai_compatible:
+                        resposta_backend = _chamar_openai_com_fallback(
+                            base_url, model, prompt_sistema, prompt_usuario, temperature,
+                            connect_atual, forcar_json=forcar_json, max_tokens=token_limit,
+                            read_timeout=read_atual, on_chunk=callback,
+                        )
+                    else:
+                        resposta_backend = _chamar_ollama(
+                            base_url, model, prompt_sistema, prompt_usuario, temperature,
+                            connect_atual, forcar_json=forcar_json, max_tokens=token_limit,
+                            read_timeout=read_atual, on_chunk=callback,
+                        )
+                    metadata_backend = _ultima_metadata_backend()
+                    metadata_backend["latency_ms"] = round(
+                        (time.monotonic() - inicio_backend) * 1000, 2,
                     )
+                    return resposta_backend, metadata_backend
+
+                resposta, metadata_resposta = chamar_backend(max_tokens, on_chunk)
+                metadata_resposta.update({
+                    "configured_model": str(configured_model),
+                    "resolved_model": str(metadata_resposta.get("provider_model") or model),
+                    "provider": str(cfg_llm.get("provider") or ("openai_compatible" if openai_compatible else "ollama")),
+                    "profile": perfil or "default",
+                    "max_tokens_requested": max_tokens,
+                })
+                if _finish_reason_truncado(metadata_resposta):
+                    retry_limit = int(cfg_llm.get("truncation_retry_max_tokens", 2048) or 2048)
+                    multiplier = max(1.1, float(cfg_llm.get("truncation_retry_multiplier", 2.0) or 2.0))
+                    current = int(max_tokens or cfg_llm.get("max_tokens") or 700)
+                    expanded = max(current + 256, int(current * multiplier))
+                    expanded = min(expanded, retry_limit)
+                    metadata_resposta.update({
+                        "truncated": True,
+                        "truncation_retry_planned": bool(expanded > current and not streaming_ativado),
+                    })
+                    _registrar_metadata_runtime(config, metadata_resposta)
+                    metadata_chamadas.append(dict(metadata_resposta))
+                    if expanded <= current or streaming_ativado:
+                        raise ErroLLM(
+                            "A resposta do modelo foi interrompida pelo limite de tokens.",
+                            transient=False, error_code="MODEL_OUTPUT_TRUNCATED",
+                        )
+                    _diagnostico(
+                        "MODEL_OUTPUT_TRUNCATED_RETRY", profile=perfil or "default",
+                        configured_model=str(configured_model), resolved_model=str(model),
+                        previous_max_tokens=current, retry_max_tokens=expanded,
+                    )
+                    _reservar_orcamento_llm(config)
+                    resposta, metadata_resposta = chamar_backend(expanded, None)
+                    metadata_resposta.update({
+                        "configured_model": str(configured_model),
+                        "resolved_model": str(metadata_resposta.get("provider_model") or model),
+                        "provider": str(cfg_llm.get("provider") or ("openai_compatible" if openai_compatible else "ollama")),
+                        "profile": perfil or "default",
+                        "max_tokens_requested": expanded,
+                        "truncation_retry": True,
+                        "truncated": _finish_reason_truncado(metadata_resposta),
+                    })
+                    _registrar_metadata_runtime(config, metadata_resposta)
+                    metadata_chamadas.append(dict(metadata_resposta))
+                    if _finish_reason_truncado(metadata_resposta):
+                        raise ErroLLM(
+                            "A resposta do modelo continuou truncada após a repetição com orçamento maior.",
+                            transient=False, error_code="MODEL_OUTPUT_TRUNCATED",
+                        )
                 else:
-                    resposta = _chamar_ollama(
-                        base_url, model, prompt_sistema, prompt_usuario, temperature,
-                        connect_atual, forcar_json=forcar_json, max_tokens=max_tokens,
-                        read_timeout=read_atual, on_chunk=on_chunk,
-                    )
+                    _registrar_metadata_runtime(config, metadata_resposta)
+                    metadata_chamadas.append(dict(metadata_resposta))
                 if forcar_json:
                     resposta = _limpar_resposta_estruturada(resposta)
                 if not isinstance(resposta, str) or not resposta.strip():
@@ -1229,7 +1344,7 @@ def _chamar_llm_impl(
         process_limiter.release(slot_processo)
         semaforo.release()
 
-    _registrar_tokens_gerados(config, resposta)
+    _registrar_tokens_gerados(config, resposta, metadata_chamadas)
     campos_finais = {"profile": perfil or "default"}
     if stream_visible and not streaming_ativado:
         campos_finais["partial_text"] = str(resposta or "")[-16000:]
@@ -1273,6 +1388,18 @@ def _chamar_llm(
         if chamadas_depois == chamadas_antes:
             status = "cache_hit"
         metadata["estimated_output_chars"] = len(str(resposta or ""))
+        last_response = runtime.get("last_llm_response")
+        if isinstance(last_response, dict):
+            elapsed_ms = round((time.monotonic() - inicio) * 1000, 2)
+            last_response["orchestration_latency_ms"] = elapsed_ms
+            if not isinstance(last_response.get("latency_ms"), (int, float)):
+                last_response["latency_ms"] = elapsed_ms
+            history = runtime.get("llm_responses") or []
+            if history and isinstance(history[-1], dict):
+                history[-1]["orchestration_latency_ms"] = elapsed_ms
+                if not isinstance(history[-1].get("latency_ms"), (int, float)):
+                    history[-1]["latency_ms"] = elapsed_ms
+            metadata.update({key: value for key, value in last_response.items() if value is not None})
         return resposta
     except ErroLLM as erro:
         status = "error"
@@ -1344,6 +1471,19 @@ Rules:
 The system, not you, renders the final text from validated claims. Write claim text in the user's language."""
 
 
+PROMPT_PROJECT_READ_FINALIZER = """You are the Eyle PROJECT READ FINALIZER. Evidence collection is complete. You do not call tools.
+
+Rules:
+1. Answer the exact user request directly using only the fresh evidence shown.
+2. Explicitly answer the named file, symbol, behavior, or existence question. Do not replace the requested target with a nearby symbol.
+3. Every factual statement must be supported by visible evidence_ids.
+4. If evidence proves absence, state the absence explicitly. search_code relevance alone never proves absence.
+5. Do not write headings with no content, incomplete sentences, or a trailing colon awaiting missing text.
+6. Return JSON only, exactly:
+{"final":{"answer":"...","evidence_ids":["ev-0001"],"verification":"...","limitations":[],"claim_annotations":[]}}
+Write the answer in the user's language. Paths and identifiers remain unchanged."""
+
+
 PROMPT_AGENTE = """You are the Eyle AGENT. Perform exactly one action per decision and output JSON only.
 
 Language contract:
@@ -1371,7 +1511,7 @@ Mandatory rules:
    - `RUN_TESTS` or `RUN_TESTS_REQUIRED`: call `run_tests` and do not finalize first.
    - `STALE_PATCH`: do not retry the same patch blindly; follow the system recovery/re-read instruction.
    - If the prompt contains `MANDATORY NEXT EDIT ACTION`, execute exactly that step.
-5. `project_read` and `project_write` may finish only with fresh code evidence. Tree, metadata, observations, and `important_fact` are not evidence. Stale evidence or an old hash requires a new read.
+5. Project tasks require fresh code evidence. Tree, metadata, observations, and `important_fact` do not count. Reread stale evidence. For sufficient `project_read` evidence, return `{"ready_to_finalize":true}`; do not draft the answer.
 6. Use only visible `evidence_ids`. Every `file:line` citation must be covered by those evidence ranges. Report real limitations.
    The project is observed state, not universal truth. You may reason beyond what is literally written, but keep epistemic types honest:
    - unannotated assertive statements are treated as observed `fact` and must be grounded;
@@ -1402,6 +1542,14 @@ def executar_agente(prompt_usuario, config):
         forcar_json=forcar_json, perfil="agent",
     )
 
+
+
+def executar_project_read_finalizer(prompt_usuario, config):
+    """Redige project_read somente depois da coleta de evidencias."""
+    return _chamar_llm(
+        PROMPT_PROJECT_READ_FINALIZER, prompt_usuario, config,
+        forcar_json=True, perfil="project_read_finalizer", stream_visible=True,
+    )
 
 
 def executar_audit_scout(prompt_usuario, config):

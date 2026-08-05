@@ -20,10 +20,10 @@
   <img alt="Versão 2.7.3" src="https://img.shields.io/badge/versão-2.7.3-2563EB">
   <img alt="Execução local" src="https://img.shields.io/badge/execução-local-16A34A">
   <img alt="Retrieval BM25" src="https://img.shields.io/badge/retrieval-BM25-F59E0B">
-  <img alt="Testes" src="https://img.shields.io/badge/testes-353%20aprovados-16A34A">
+  <img alt="Testes" src="https://img.shields.io/badge/testes-345%20aprovados-16A34A">
 </p>
 
-**Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.21-audit-truthfulness-hardening
+**Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.22-project-read-orchestration-and-benchmark-truth
 
 ## Visão geral
 
@@ -54,7 +54,10 @@ A Eyle indexa um repositório local, recupera apenas as evidências relevantes e
 - A memória indexada do projeto é marcada como pista de navegação não confiável, salvo quando o hash persistido ainda corresponde ao disco; conclusões de auditoria continuam exigindo Evidence IDs frescos.
 - Toda auditoria de projeto publica métricas determinísticas de cobertura real: inventário completo, arquivos de código lidos, componentes críticos revisados, execução atual de testes, documentos realmente usados e nível `none`/`partial`/`targeted`/`complete`.
 - O sistema adiciona uma declaração honesta de cobertura após o grounding e sempre informa que a auditoria não garante ausência universal de bugs.
-- Declarações globais de saúde do projeto são recusadas; apenas conclusões explicitamente limitadas aos componentes revisados seguem para grounding, e somente a última execução de testes define o estado atual.
+- `project_read` agora separa a coleta de evidências de um Finalizer dedicado de 1.400 tokens, evitando que o planejamento de ferramentas dispute espaço com a resposta final.
+- Metadados do provider (`finish_reason`, modelo resolvido, uso e tokens de raciocínio) são preservados; truncamento por limite repete uma vez com orçamento maior e depois falha fechado.
+- Consultas exatas sobre existência de símbolos usam `find_symbol` deterministicamente, enquanto escritas confirmadas avançam automaticamente por testes e releitura fresca.
+- O benchmark v2 separa factualidade, completude, grounding, workflow, segurança, latência por chamada LLM e modelo realmente resolvido.
 - Tools validadas por schema e permissões explícitas `READ`, `EXEC` e `WRITE`.
 - Patches atômicos, confirmação explícita, testes isolados, releitura final e rollback.
 - Deadline compartilhado, timeouts separados, backoff, rate limiting e telemetria.

@@ -9,7 +9,7 @@ python -m pip install -r requirements-dev.lock
 python -m pytest -q
 ```
 
-Packaging result for release 2.7.3 revision 55.21:
+Packaging result for release 2.7.3 revision 55.22:
 
 - The complete executable test count is recorded in `release_manifest.json` after packaging;
 - web tests must be executed when the locked Flask dependency is available;
@@ -29,11 +29,12 @@ The report is written to `context/benchmark_latest.json` by default. Run it seve
 The gate covers:
 
 - correct project reading;
-- factual and grounded answers;
+- factual correctness, response completion, and semantic grounding as separate metrics;
 - invented references and unsupported anchors;
 - false success states;
 - tool schema and permission behavior;
 - confirmation, hashes, dry run, atomic write, tests, rollback, and post-write reread;
+- configured and resolved model, provider finish reasons, token usage, actual LLM-call latency, and workflow phases;
 - queue/worker timing and telemetry where available.
 
 Deterministic tests prove orchestration properties; they do not prove that a particular model will always choose the correct tool sequence or meet a latency target. Do not claim a percentage speed improvement without measuring the final environment.

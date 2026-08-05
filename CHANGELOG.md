@@ -6,6 +6,25 @@ All notable changes to Eyle are documented here.
 
 ## 2.7.3 — 2026-08-05
 
+### Revision 55.22 — Project-read orchestration and benchmark truth
+
+- Preserved provider completion metadata including `finish_reason`, configured/resolved model, prompt/completion/reasoning token usage, response ID, and per-call latency.
+- Retried one token-limit truncation with a larger bounded output budget and failed with `MODEL_OUTPUT_TRUNCATED` if the provider still returned a truncated completion.
+- Split `project_read` into evidence collection and a dedicated tool-free Finalizer with its own output budget.
+- Added `ready_to_finalize` so the planning agent hands off without spending its small decision budget drafting a disposable answer.
+- Routed exact symbol-existence questions deterministically to `find_symbol`, producing structured negative evidence instead of treating BM25 relevance as proof of absence.
+- Converted the known post-write sequence into deterministic transitions: confirmed patch, tests, fresh reread, then finalization.
+- Upgraded the benchmark report to separate factual correctness, completion, semantic grounding, workflow, and safety; it now records the resolved model, finish reasons, LLM calls, and latency per actual LLM call.
+- Fixed edit-case continuation and legacy benchmark compatibility so old reports remain readable without silently satisfying the new fields.
+
+### Validation
+
+- `python -m compileall -q .` passed.
+- JavaScript syntax checks passed.
+- 362/362 executable tests passed, including `pytest -q -W error`.
+- One Flask-dependent module remained skipped because Flask was unavailable in the packaging environment.
+- The real Qwen 3.8 MAX benchmark must be rerun against revision 55.22 in the deployment environment.
+
 ### Revision 55.21 — Audit truthfulness hardening
 
 - Rejected global project-health claims even when targeted coverage and a successful test run exist; only explicitly scoped findings about reviewed components may proceed.

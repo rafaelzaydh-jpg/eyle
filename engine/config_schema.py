@@ -40,6 +40,9 @@ class LLMConfig(TypedDict, total=False):
     agent_max_tokens: Optional[int]
     audit_scout_max_tokens: Optional[int]
     audit_finalizer_max_tokens: Optional[int]
+    project_read_finalizer_max_tokens: Optional[int]
+    truncation_retry_multiplier: float
+    truncation_retry_max_tokens: Optional[int]
     context_window_tokens: int
     cache: CacheConfig
 
@@ -77,6 +80,9 @@ class AgentConfig(TypedDict, total=False):
     audit_initial_read_limit: int
     audit_gap_read_limit: int
     audit_health_claim_required_score: float
+    project_read_finalizer_enabled: bool
+    deterministic_post_write_enabled: bool
+    deterministic_symbol_lookup_enabled: bool
     semantic_grounding: Dict[str, Any]
     response_recovery: Dict[str, Any]
 
@@ -186,6 +192,9 @@ def validar_config(config) -> ConfigEyle:
         "agent.require_confirmation_for_write",
         "agent.require_confirmation_for_exec",
         "agent.exigir_run_tests_apos_escrita",
+        "agent.project_read_finalizer_enabled",
+        "agent.deterministic_post_write_enabled",
+        "agent.deterministic_symbol_lookup_enabled",
         "worker.isolate_jobs",
         "agent.semantic_grounding.enabled",
         "agent.semantic_grounding.block_unsupported_anchors",
@@ -210,6 +219,7 @@ def validar_config(config) -> ConfigEyle:
         "llm.max_concurrent_requests", "llm.context_window_tokens",
         "llm.agent_max_tokens",
         "llm.audit_scout_max_tokens", "llm.audit_finalizer_max_tokens",
+        "llm.project_read_finalizer_max_tokens", "llm.truncation_retry_max_tokens",
         "llm.cache.max_entradas", "llm.cache.memoria_max_entradas",
         "llm.cache.max_age_hours", "llm.cache.hit_flush_interval",
         "context.token_budget", "context.chars_per_token",
@@ -270,6 +280,7 @@ def validar_config(config) -> ConfigEyle:
         "llm.max_concurrent_requests",
         "llm.agent_max_tokens",
         "llm.audit_scout_max_tokens", "llm.audit_finalizer_max_tokens",
+        "llm.project_read_finalizer_max_tokens", "llm.truncation_retry_max_tokens",
         "llm.cache.max_age_hours", "llm.cache.hit_flush_interval", "agent.max_steps",
         "agent.max_tentativas_parse", "agent.max_erros_consecutivos",
         "agent.task_deadline_seconds", "agent.max_llm_calls",
@@ -314,6 +325,7 @@ def validar_config(config) -> ConfigEyle:
     _validar_numero(config, erros, "llm.cooldown_seconds", minimo=0)
     _validar_numero(config, erros, "agent.semantic_repeat_overlap", minimo=0.5, maximo=1)
     _validar_numero(config, erros, "agent.audit_health_claim_required_score", minimo=0, maximo=1)
+    _validar_numero(config, erros, "llm.truncation_retry_multiplier", minimo=1, maximo=10)
     _validar_numero(config, erros, "agent.semantic_grounding.min_claim_token_overlap", minimo=0, maximo=1)
     _validar_numero(config, erros, "retrieval.bm25_k1", minimo=0)
     _validar_numero(config, erros, "retrieval.bm25_b", minimo=0, maximo=1)

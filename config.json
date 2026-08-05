@@ -42,7 +42,11 @@
     "stream_responses": true,
     "_comentario_stream_responses": "Revisao 55.7: respostas textuais usam streaming no painel. Decisoes JSON do Agente continuam ocultas; o usuario ve apenas etapas operacionais, texto final parcial e tokens por segundo.",
     "audit_scout_max_tokens": 700,
-    "audit_finalizer_max_tokens": 1600
+    "audit_finalizer_max_tokens": 1600,
+    "project_read_finalizer_max_tokens": 1400,
+    "truncation_retry_multiplier": 2.0,
+    "truncation_retry_max_tokens": 2400,
+    "_comentario_55_22": "Revisao 55.22: project_read usa Finalizer separado; metadados finish_reason/usage/modelo resolvido sao preservados; saidas truncadas repetem uma vez com teto maior e nunca viram success."
   },
   "context": {
     "token_budget": 1500,
@@ -239,7 +243,10 @@
     "audit_health_claim_required_score": 1.0,
     "_comentario_55_19": "Revisao 55.19: o Finalizer de project_audit retorna claims atomicas com type, text, evidence_ids e basis; o sistema renderiza a resposta, bloqueia declaracoes globais de saude sem cobertura e prova operacional, exige run_tests executado para afirmar testes passando e trata entendimento.json como pista nao confiavel salvo hash atual correspondente.",
     "_comentario_55_20": "Revisao 55.20: project_audit mede cobertura real com inventario completo, arquivos de codigo lidos, componentes criticos selecionados pelo pipeline, execucao atual de testes, documentos usados e nivel none/partial/targeted/complete. A conclusao recebe divulgacao deterministica e nunca afirma ausencia total de bugs.",
-    "_comentario_55_21": "Revisao 55.21: declaracoes globais de saude sao bloqueadas mesmo com cobertura e testes; somente o ultimo run_tests define o estado atual; recovery de project_audit preserva claims estruturadas; idioma, metricas criticas, documentacao ativa e warnings SQLite foram corrigidos."
+    "_comentario_55_21": "Revisao 55.21: declaracoes globais de saude sao bloqueadas mesmo com cobertura e testes; somente o ultimo run_tests define o estado atual; recovery de project_audit preserva claims estruturadas; idioma, metricas criticas, documentacao ativa e warnings SQLite foram corrigidos.",
+    "project_read_finalizer_enabled": true,
+    "deterministic_post_write_enabled": true,
+    "deterministic_symbol_lookup_enabled": true
   },
   "version": "2.7.3",
   "updated": "2026-08-05",
@@ -257,7 +264,7 @@
   },
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "55.21-audit-truthfulness-hardening",
+  "revision": "55.22-project-read-orchestration-and-benchmark-truth",
   "telemetry": {
     "enabled": true,
     "window_seconds": 3600,

@@ -88,9 +88,11 @@ from llm.executar import (  # noqa: E402
     PROMPT_AGENTE,
     PROMPT_AUDIT_SCOUT,
     PROMPT_AUDIT_FINALIZER,
+    PROMPT_PROJECT_READ_FINALIZER,
     executar_agente as executar_agente_llm,
     executar_audit_scout as executar_audit_scout_llm,
     executar_audit_finalizer as executar_audit_finalizer_llm,
+    executar_project_read_finalizer as executar_project_read_finalizer_llm,
 )
 from engine.agent_state import AgentState, GoalState  # noqa: E402
 from engine.text_hash import hash_texto, normalizar_quebras  # noqa: E402
@@ -98,6 +100,7 @@ from engine.compiler import (  # noqa: E402
     montar_prompt_agente,
     montar_prompt_scout_auditoria,
     montar_prompt_finalizer_auditoria,
+    montar_prompt_finalizer_leitura,
 )
 from engine.grounding import (  # noqa: E402
     build_safe_grounded_answer,
@@ -206,7 +209,7 @@ def _decisao_estruturalmente_valida(dados):
     """Valida o envelope antes de escolher um objeto entre varios JSONs."""
     if not isinstance(dados, dict):
         return False
-    ramos = [chave for chave in ("tool", "final", "needs_user") if chave in dados]
+    ramos = [chave for chave in ("tool", "final", "needs_user", "ready_to_finalize") if chave in dados]
     if len(ramos) != 1:
         return False
     ramo = ramos[0]
@@ -218,6 +221,8 @@ def _decisao_estruturalmente_valida(dados):
         )
     if ramo == "needs_user":
         return isinstance(dados.get("needs_user"), str) and bool(dados["needs_user"].strip())
+    if ramo == "ready_to_finalize":
+        return dados.get("ready_to_finalize") is True
     final = dados.get("final")
     if isinstance(final, str):
         return bool(final.strip())
@@ -541,7 +546,7 @@ def _normalizar_decisao_agente(dados):
     # Nunca escolha silenciosamente um ramo quando o modelo misturou ramos
     # canonicos. Isso preserva a exclusividade do protocolo original.
     ramos_canonicos = [
-        chave for chave in ("tool", "final", "needs_user") if chave in dados
+        chave for chave in ("tool", "final", "needs_user", "ready_to_finalize") if chave in dados
     ]
     if len(ramos_canonicos) > 1:
         return None
@@ -905,16 +910,53 @@ def _analise_geral_ainda_precisa_list_tree(estado):
     return "list_tree" in str(plano[0].get("description") or "")
 
 
-def _acao_obrigatoria_goal_state(estado):
-    """Executa transicoes que o proprio GoalState tornou obrigatorias.
+def _acao_obrigatoria_goal_state(estado, objetivo=None, config=None):
+    """Executa transicoes que o estado tornou deterministicas.
 
-    Na revisao 55.18, ``project_audit`` usa a fila do pipeline Scout em vez de
-    pedir uma nova escolha de arquivo a cada rodada. O fallback antigo por
-    cobertura continua apenas para checkpoints legados sem pipeline montado.
+    A LLM escolhe investigacao aberta. Passos mecanicos conhecidos pelo sistema
+    (consulta exata de simbolo e verificacao pos-write) nao voltam ao modelo.
     """
     if _analise_geral_ainda_precisa_list_tree(estado):
         return {"tool": "list_tree", "arguments": {}}
-    if estado.goal_state.get("task_type") == "project_audit":
+
+    task_type = estado.goal_state.get("task_type")
+    if task_type == "project_write" and bool((config or {}).get("agent", {}).get("deterministic_post_write_enabled", False)):
+        edit_state = estado.edit_state or {}
+        status = edit_state.get("status")
+        if status == "applied_pending_tests":
+            return {"tool": "run_tests", "arguments": {}}
+        if status in ("tests_passed", "applied_without_suite") and not edit_state.get("post_write_evidence_id"):
+            path = edit_state.get("arquivo")
+            inicio = edit_state.get("linha_inicio")
+            fim = edit_state.get("linha_fim_final") or edit_state.get("linha_fim_original")
+            if path and isinstance(inicio, int) and isinstance(fim, int):
+                return {
+                    "tool": "read_range",
+                    "arguments": {
+                        "caminho_relativo": path,
+                        "linha_inicio": inicio,
+                        "linha_fim": fim,
+                    },
+                }
+
+    if task_type == "project_read" and bool((config or {}).get("agent", {}).get("deterministic_symbol_lookup_enabled", False)):
+        arquivos = _arquivos_explicitos_objetivo(objetivo)
+        simbolo = _simbolo_explicito_objetivo(objetivo)
+        if len(arquivos) == 1 and simbolo:
+            alvo = arquivos[0]
+            ja_tentou = any(
+                item.get("tool") == "find_symbol"
+                and (item.get("arguments") or {}).get("caminho_relativo") == alvo
+                and (item.get("arguments") or {}).get("simbolo") == simbolo
+                for item in estado.actions
+            )
+            if not ja_tentou:
+                return {
+                    "tool": "find_symbol",
+                    "arguments": {"caminho_relativo": alvo, "simbolo": simbolo},
+                }
+
+    if task_type == "project_audit":
         pipeline = estado.audit_pipeline or {}
         pendentes = pipeline.get("pending_reads") or []
         if pendentes:
@@ -1104,7 +1146,7 @@ def _arquivos_explicitos_objetivo(objetivo):
 
 def _simbolo_explicito_objetivo(objetivo):
     match = re.search(
-        r"\b(?:fun[cç][aã]o|s[ií]mbolo)\s+[`'\"]?([A-Za-z_][A-Za-z0-9_]*)",
+        r"\b(?:fun[cç][aã]o|s[ií]mbolo|function|symbol|classe?|class|m[eé]todo|method)\s+[`'\"]?([A-Za-z_][A-Za-z0-9_]*)",
         str(objetivo or ""),
         re.IGNORECASE,
     )
@@ -1234,6 +1276,21 @@ def _preparar_recuperacao_stale(estado, arguments, resultado_tool):
         "changed": False, "error_code": None, "detail": mensagem,
     })
     return mensagem
+
+
+def _finalizar_project_read(estado, objetivo, config):
+    prompt = montar_prompt_finalizer_leitura(
+        objetivo,
+        goal_state=estado.goal_state,
+        evidencias=estado.evidence,
+        actions=estado.actions,
+        config=config,
+        system_prompt=PROMPT_PROJECT_READ_FINALIZER,
+    )
+    decision, attempts, raw = _executar_perfil_json(
+        executar_project_read_finalizer_llm, prompt, config, kind="project read finalizer",
+    )
+    return decision, attempts, raw
 
 
 def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=None,
@@ -1391,6 +1448,9 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
     def _retorno_agente(status, texto, estado_pendente, detalhes, retornar_detalhes_local):
         """Fecha qualquer saida com continuacao e auditoria estruturada."""
         detalhes = dict(detalhes or {})
+        runtime_llm = config.get("_runtime_agent_budget") or {}
+        detalhes.setdefault("llm_responses", list(runtime_llm.get("llm_responses") or []))
+        detalhes.setdefault("resolved_model", (runtime_llm.get("last_llm_response") or {}).get("resolved_model"))
         estado_serializado = estado.to_dict() if estado is not None else {}
         acoes = list(estado.actions) if estado is not None else []
         evidencias = list(estado.evidence) if estado is not None else []
@@ -1877,7 +1937,7 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                         },
                         retornar_detalhes,
                     )
-        decisao_forcada = _acao_obrigatoria_goal_state(estado)
+        decisao_forcada = _acao_obrigatoria_goal_state(estado, objetivo, config)
         tipo_decisao_forcada = "transicao_obrigatoria"
         if decisao_forcada is None and decisao_pipeline is None and _deve_recuperar_sem_llm(estado):
             decisao_forcada = _acao_recuperacao_deterministica(objetivo, estado)
@@ -2045,7 +2105,64 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 )
             continue
 
-        if "final" in decisao:
+        if "final" in decisao or decisao.get("ready_to_finalize") is True:
+            if decisao.get("ready_to_finalize") is True and task_type != "project_read":
+                estado.observar("ready_to_finalize", {
+                    "status": "failed", "ok": False, "executed": False,
+                    "changed": False, "error_code": "READY_TO_FINALIZE_INVALID_TASK",
+                    "detail": "ready_to_finalize e exclusivo de project_read",
+                })
+                continue
+            if (
+                task_type == "project_read"
+                and estado.evidencias_frescas()
+                and bool(cfg_agente.get("project_read_finalizer_enabled", False))
+            ):
+                try:
+                    decisao_finalizer, finalizer_attempts, finalizer_raw = _finalizar_project_read(
+                        estado, objetivo, config,
+                    )
+                except ErroLLM as erro_finalizer:
+                    return _retorno_agente(
+                        "failed",
+                        "O Finalizer da leitura falhou antes de produzir uma resposta grounded.",
+                        None,
+                        {
+                            "task_type": task_type, "mode": modo,
+                            "goal_state": estado.goal_state,
+                            "failure_code": getattr(erro_finalizer, "error_code", None) or "PROJECT_READ_FINALIZER_LLM_FAILURE",
+                            "llm_responses": list((config.get("_runtime_agent_budget") or {}).get("llm_responses") or []),
+                        },
+                        retornar_detalhes,
+                    )
+                _registrar_trace_estado(estado, {
+                    "step": step,
+                    "tipo": "project_read_finalizer",
+                    "attempts": finalizer_attempts,
+                    "valid": bool(decisao_finalizer and "final" in decisao_finalizer),
+                })
+                if not isinstance(decisao_finalizer, dict) or "final" not in decisao_finalizer:
+                    return _retorno_agente(
+                        "failed",
+                        "O Finalizer da leitura não devolveu o contrato JSON exigido.",
+                        None,
+                        {
+                            "task_type": task_type, "mode": modo,
+                            "goal_state": estado.goal_state,
+                            "failure_code": "PROJECT_READ_FINALIZER_INVALID_FORMAT",
+                            "finalizer_raw": str(finalizer_raw or "")[:500],
+                        },
+                        retornar_detalhes,
+                    )
+                decisao = decisao_finalizer
+            elif decisao.get("ready_to_finalize") is True:
+                estado.observar("ready_to_finalize", {
+                    "status": "failed", "ok": False, "executed": False,
+                    "changed": False, "error_code": "PROJECT_READ_FINALIZER_NOT_READY",
+                    "detail": "faltam evidencia fresca ou Finalizer habilitado",
+                })
+                continue
+
             # Atualizacao 10: nao aceita "final" so' porque a LLM disse
             # que terminou -- se a tarefa escreveu no projeto (tool
             # WRITE) e 'run_tests' ainda nao passou depois dessa
@@ -2707,6 +2824,8 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 "coverage_disclosure": conclusao.get("coverage_disclosure"),
                 "audit_pipeline": public_pipeline_state(estado.audit_pipeline) if task_type == "project_audit" else {},
                 "edit_state": _edit_state_publico(estado),
+                "llm_responses": list((config.get("_runtime_agent_budget") or {}).get("llm_responses") or []),
+                "resolved_model": ((config.get("_runtime_agent_budget") or {}).get("last_llm_response") or {}).get("resolved_model"),
             }
             _registrar_trace_estado(estado, {
                 "step": step,

@@ -1,4 +1,5 @@
 # Release hardening reports
+- [2.7.3 — revision 55.22 project-read orchestration and benchmark truth](2.7.3-revision-55.22.md)
 - [2.7.3 — revision 55.21 audit truthfulness hardening](2.7.3-revision-55.21.md)
 - [2.7.3 — revision 55.20 real audit coverage](2.7.3-revision-55.20.md)
 - [2.7.3 — revision 55.19 structured claims and health gates](2.7.3-revision-55.19.md)

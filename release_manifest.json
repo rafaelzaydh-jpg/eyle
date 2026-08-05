@@ -2,7 +2,7 @@
   "release": "2.7.3",
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "55.21-audit-truthfulness-hardening",
+  "revision": "55.22-project-read-orchestration-and-benchmark-truth",
   "updated": "2026-08-05",
   "installation": "overlay_safe",
   "preserve_on_update": [
@@ -13,21 +13,20 @@
   "included_runtime_state": false,
   "validation": {
     "compileall_passed": true,
-    "tests_passed": 353,
-    "tests_total_executable": 353,
+    "tests_passed": 362,
+    "tests_total_executable": 362,
     "tests_skipped": 1,
     "web_tests_executed": false,
     "javascript_syntax_passed": true,
     "real_llm_benchmark_executed": false,
     "notes": [
-      "353/353 testes executaveis passaram, inclusive com warnings tratados como erro.",
+      "362/362 testes executaveis passaram, inclusive com warnings tratados como erro.",
+      "Metadados de termino do provider, retry de truncamento e Finalizer separado de project_read foram cobertos por testes deterministas.",
+      "Busca exata de simbolo e transicoes pos-write deterministicas foram validadas por regressao.",
+      "Benchmark v2 separa factualidade completude grounding workflow seguranca e latencia por chamada LLM.",
       "Um modulo dependente de Flask foi ignorado porque Flask nao estava instalado no ambiente de empacotamento.",
-      "node --check web/static/app.js passou.",
-      "Declaracoes globais de saude sao bloqueadas; conclusoes de saude devem ser limitadas ao escopo revisado.",
-      "Somente a ultima execucao run_tests da tarefa define o estado atual dos testes.",
-      "Recovery de project_audit preserva o contrato claims[] e revalida grounding, utilidade e cobertura.",
-      "Documentacao ativa foi atualizada para nao apresentar resultados da revisao 53 como atuais.",
-      "O pacote final nao inclui bancos SQLite, traces, caches ou checkpoints de runtime."
+      "O benchmark real do Qwen 3.8 MAX precisa ser repetido com a revisao 55.22 no endpoint final.",
+      "O pacote final nao inclui bancos SQLite traces caches ou checkpoints de runtime."
     ]
   },
   "hardening_52": [
@@ -52,7 +51,8 @@
   ],
   "external_validation_required": [
     "executar testes web com Flask==3.0.3 no ambiente final",
-    "executar benchmark real P50/P95/P99 com o endpoint e modelo locais",
+    "repetir o benchmark 55.22 pelo menos tres vezes com o endpoint Qwen 3.8 MAX de producao",
+    "validar o fluxo de confirmacao pela API web fila Worker e polling alem do contrato direto do agente",
     "medir retrieval e ingest em um repositorio grande real no armazenamento final"
   ],
   "known_limits": [
@@ -71,10 +71,13 @@
     "o catalogo enviado ao Scout e limitado por agent.audit_candidate_limit; candidatos fora do teto permanecem no inventario mas nao entram na primeira selecao",
     "a revisao 55.18 le por padrao seis candidatos iniciais e uma lacuna adicional para caber no teto de passos; auditorias mais profundas ainda dependem de configuracao e iteracoes futuras",
     "o endpoint real do Qwen 3.8 MAX nao estava disponivel no ambiente de empacotamento; o comportamento de selecao e finalizacao foi validado com doubles deterministas e testes integrados",
-    "padroes deterministas bloqueiam declaracoes globais conhecidas; parafrases sem limite exigem classificador estruturado planejado para a revisao 55.22",
     "project_audit permanece somente leitura por padrao; por isso afirmacoes de testes passando ficam bloqueadas ate uma execucao run_tests autorizada e registrada",
     "hash correspondente em entendimento.json comprova frescor da versao do arquivo mas nao perfeicao semantica do resumo indexado; claims finais ainda exigem evidencia fresca",
-    "cobertura real mede alcance observado e componentes selecionados, mas nao constitui cobertura de branches, execucao de todos os caminhos ou prova universal de ausencia de bugs"
+    "cobertura real mede alcance observado e componentes selecionados, mas nao constitui cobertura de branches, execucao de todos os caminhos ou prova universal de ausencia de bugs",
+    "o retry de truncamento depende de o provider informar finish_reason; servidores que omitem esse campo exigem validacao por completude e testes de conformidade adicionais",
+    "a consulta deterministica de simbolo exige caminho explicito e um simbolo reconhecivel no pedido; consultas vagas continuam sob planejamento do agente",
+    "o benchmark 55.22 retoma confirmacoes pelo contrato direto do agente; o caminho completo web fila Worker ainda requer teste de integracao no ambiente final",
+    "o benchmark real da revisao 55.22 nao foi executado no ambiente de empacotamento porque o endpoint Qwen de producao nao estava acessivel"
   ],
   "internal_protocol_language": "English",
   "user_language_behavior": "Preserva o pedido original e responde no idioma do usuario; portugues continua portugues.",
@@ -297,5 +300,18 @@
     "componentes criticos filtrados por papeis criticos do catalogo",
     "documentacao ativa atualizada e conexoes SQLite de testes fechadas explicitamente",
     "353 testes executaveis aprovados com warnings como erro"
+  ],
+  "hardening_55_22": [
+    "finish_reason uso de tokens reasoning tokens modelo resolvido response id e latencia preservados na fronteira LLM",
+    "retry unico e limitado para finish_reason de truncamento com MODEL_OUTPUT_TRUNCATED fail closed apos nova falha",
+    "Finalizer separado de 1400 tokens para project_read sem acesso a tools",
+    "sinal ready_to_finalize separa decisao de ferramenta da redacao final em project_read",
+    "consultas exatas de existencia de simbolo roteadas deterministicamente para find_symbol",
+    "evidencia negativa estruturada para simbolo ausente sem usar BM25 como prova de ausencia",
+    "transicao pos-write deterministica apply_patch confirmado run_tests releitura fresca e finalizacao",
+    "benchmark v2 separa factualidade completude grounding workflow e seguranca",
+    "modelo configurado e resolvido finish reasons chamadas e latencia LLM real registrados por caso",
+    "continuacoes de escrita percorridas ate estado terminal com limite de seguranca",
+    "362 testes executaveis aprovados com warnings como erro"
   ]
 }
