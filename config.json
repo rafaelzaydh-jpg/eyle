@@ -45,7 +45,10 @@
   "context": {
     "token_budget": 1500,
     "chars_per_token": 4,
-    "_comentario": "token_budget é o espaço reservado para os TRECHOS recuperados. O prompt final (instrucoes + pergunta) usa tokens extras acima disso, então para um limite de 2k deixe isso entre 1300-1600"
+    "small_project_full_read_max_files": 8,
+    "small_project_full_read_max_lines": 600,
+    "small_project_full_read_max_chars": 16000,
+    "_comentario": "token_budget reserva espaço para trechos. Projetos pequenos (até os limites acima) têm o código real lido por completo na visão geral e também no fallback textual; projetos maiores continuam usando seleção por ferramentas/retrieval."
   },
   "context_engine": {
     "safety_margin_tokens": 500,
@@ -233,7 +236,7 @@
   },
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "55.7-live-progress",
+  "revision": "55.10-expandable-work-summary",
   "telemetry": {
     "enabled": true,
     "window_seconds": 3600,

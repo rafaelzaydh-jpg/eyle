@@ -2,7 +2,7 @@
   "release": "2.7.3",
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "55.8-invalid-format-recovery",
+  "revision": "55.10-expandable-work-summary",
   "updated": "2026-08-04",
   "installation": "overlay_safe",
   "preserve_on_update": [
@@ -13,18 +13,21 @@
   "included_runtime_state": false,
   "validation": {
     "compileall_passed": true,
-    "tests_passed": 263,
-    "tests_total_executable": 263,
+    "tests_passed": 272,
+    "tests_total_executable": 272,
     "tests_skipped": 1,
     "web_tests_executed": false,
     "javascript_syntax_passed": true,
     "real_llm_benchmark_executed": false,
     "notes": [
-      "263/263 testes executaveis passaram.",
+      "272/272 testes executaveis passaram.",
       "Um modulo dependente de Flask foi ignorado porque Flask nao estava instalado no ambiente de empacotamento.",
       "node --check web/static/app.js passou.",
-      "Falhas de formato em tarefas READ usam sinais redundantes e caem no pipeline textual.",
-      "Aliases JSON comuns de modelos locais sao normalizados sem aceitar ramos ambiguos.",
+      "Cada job concluido persiste um resumo operacional publico com quatro etapas: entendimento, leitura, analise e conclusao.",
+      "O resumo usa modo, tools, evidencias, fallback, validacao e limitacoes reais do resultado estruturado.",
+      "O painel exibe Trabalho concluido em XmYYs como um bloco details expansivel entre o pedido e a resposta.",
+      "Prompts, chain-of-thought, conteudo bruto de tools e dados internos da LLM nao sao publicados.",
+      "Projetos pequenos continuam usando leitura real completa dentro dos limites da revisao 55.9.",
       "O pacote final nao inclui bancos SQLite, traces, caches ou checkpoints de runtime."
     ]
   },
@@ -148,5 +151,24 @@
     "tarefas de edicao permanecem fail-closed",
     "pedido curto Faça a analise usa o contexto do projeto",
     "263 testes executaveis aprovados"
+  ],
+  "hardening_55_9": [
+    "polling ativo limitado a dois jobs por ciclo e 1,2 segundo entre ciclos",
+    "backoff global baseado em Retry-After para respostas 429",
+    "requests de status sem sobreposicao e sem falso worker offline durante rate limit",
+    "assets estaticos revalidados para evitar app.js antigo apos atualizacao",
+    "visao geral de projetos pequenos recebe codigo real fresco completo dentro de limites configuraveis",
+    "fallback textual de analise pequena deixa de responder apenas com nomes e contagem de linhas",
+    "267 testes executaveis aprovados"
+  ],
+  "hardening_55_10": [
+    "resumo operacional estruturado e persistente por job",
+    "quatro etapas publicas: entendimento leitura analise conclusao",
+    "duracao final formatada no painel como XmYYs",
+    "bloco HTML details expansivel inserido na conversa",
+    "arquivos faixas e leitura completa derivados de evidencias reais",
+    "fallback validacao e limitacoes declarados sem chain-of-thought",
+    "sanitizacao e limites antes de publicar GET /jobs/<id>",
+    "272 testes executaveis aprovados"
   ]
 }

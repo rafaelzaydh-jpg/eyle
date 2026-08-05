@@ -11,17 +11,17 @@
   <a href="docs/architecture.md">Arquitetura</a> ·
   <a href="docs/configuration.md">Configuração</a> ·
   <a href="docs/benchmark.md">Benchmark</a> ·
-  <a href="CHANGELOG.md">Revisão 55.8</a> ·
+  <a href="CHANGELOG.md">Revisão 55.10</a> ·
   <a href="SECURITY.md">Segurança</a>
 </p>
 
 <p align="center">
   <img alt="Python 3.8+" src="https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white">
   <img alt="Versão 2.7.3" src="https://img.shields.io/badge/versão-2.7.3-2563EB">
-  <img alt="Revisão 55.8" src="https://img.shields.io/badge/revisão-55.8-7C3AED">
+  <img alt="Revisão 55.10" src="https://img.shields.io/badge/revisão-55.10-7C3AED">
   <img alt="Execução local" src="https://img.shields.io/badge/execução-local-16A34A">
   <img alt="Retrieval BM25" src="https://img.shields.io/badge/retrieval-BM25-F59E0B">
-  <img alt="Testes" src="https://img.shields.io/badge/testes-263%20aprovados-16A34A">
+  <img alt="Testes" src="https://img.shields.io/badge/testes-272%20aprovados-16A34A">
 </p>
 
 ## Visão geral
@@ -30,13 +30,13 @@ A Eyle indexa um repositório local, recupera apenas as evidências relevantes e
 
 | | |
 |---|---|
-| **Versão** | 2.7.3 — revisão 55.8 |
+| **Versão** | 2.7.3 — revisão 55.10 |
 | **Rollout padrão** | `read_only` até o benchmark real ser validado localmente |
 | **Modelo-alvo recomendado** | LFM2.5-8B-A1B ou quantização compatível |
 | **Privacidade** | Código, índices, traces, fila e histórico permanecem na máquina local |
 | **Estado mutável** | `workspace/`, `memory/` e `context/` são ignorados pelo Git |
 
-**Identidade da release:** **Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.8-invalid-format-recovery
+**Identidade da release:** **Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.10-expandable-work-summary
 
 ### Recursos principais
 
@@ -49,6 +49,20 @@ A Eyle indexa um repositório local, recupera apenas as evidências relevantes e
 - Deadline compartilhado, timeouts separados, backoff, rate limiting e telemetria.
 - Detecção de ciclos curtos e reserva de fila com limite.
 - CLI, painel Flask autenticado opcional, fila SQLite, checkpoints e retenção.
+
+## Revisão 55.10
+
+A revisão 55.10 adiciona um resumo expansível e compacto para cada job concluído. A conversa mostra somente `Trabalho concluído em XmYYs`; ao abrir, aparecem o objetivo, arquivos e faixas lidas, modo de análise, tools, IDs de evidência, uso de fallback, validação e limitações.
+
+O resumo nasce de metadados determinísticos do job e do resultado. Ele não publica prompts, chain-of-thought, saída bruta de tools nem o conteúdo do código-fonte.
+
+Detalhes: [docs/releases/2.7.3-revision-55.10.md](docs/releases/2.7.3-revision-55.10.md).
+
+## Revisão 55.9
+
+A revisão 55.9 impede o painel de atingir o próprio rate limit e restaura a análise com código real para projetos pequenos. O polling ativo é limitado e respeita `Retry-After`; projetos pequenos são lidos por completo dentro dos limites configurados, em vez de serem resumidos apenas por nomes e contagem de linhas.
+
+Detalhes: [docs/releases/2.7.3-revision-55.9.md](docs/releases/2.7.3-revision-55.9.md).
 
 ## Revisão 55.5
 

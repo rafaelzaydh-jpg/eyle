@@ -32,7 +32,8 @@ from engine.compiler import (
     montar_prompt_analista, montar_prompt_executor, montar_prompt_visao_geral,
     montar_prompt_dicas, montar_prompt_engenheiro, montar_texto_proposta,
 )
-from engine.dicas import preparar_dicas
+from engine.dicas import preparar_dicas, ler_codigo_real
+from engine.project_reader import ErroLeituraProjeto, listar_arvore_projeto
 from engine.codar import localizar_simbolo, calcular_impacto, testar_patch_em_copia, aplicar_patch
 from engine.roteador import (
     classificar_pergunta, classificar_modo_projeto, detectar_resposta_proposta,
@@ -1272,6 +1273,80 @@ def _processar_dicas(pergunta, config, projeto, entendimento, motivo_roteador):
     }
 
 
+def _codigos_reais_projeto_pequeno(config, projeto, estrutura):
+    """Le todos os arquivos de um projeto pequeno antes da analise textual.
+
+    O fallback antigo recebia apenas ``estrutura.json`` e podia responder que
+    nao tinha acesso ao conteudo mesmo para um unico ``app.py``. Esta selecao
+    usa limites de arquivos, linhas e caracteres para manter o mesmo nivel de
+    analise sem estourar a janela do modelo local.
+    """
+    caminho_projeto = (projeto or {}).get("caminho_origem")
+    if not caminho_projeto or not isinstance(estrutura, dict) or not estrutura:
+        return {}
+
+    cfg = (config or {}).get("context", {})
+    max_arquivos = max(1, int(cfg.get("small_project_full_read_max_files", 8)))
+    max_linhas = max(1, int(cfg.get("small_project_full_read_max_lines", 600)))
+    max_chars = max(1, int(cfg.get("small_project_full_read_max_chars", 16000)))
+    try:
+        arvore = listar_arvore_projeto(
+            caminho_projeto,
+            limite=max(32, max_arquivos * 4),
+            profundidade=max(1, int((config or {}).get("agent", {}).get("max_tree_depth", 6))),
+            max_secret_scan_bytes=max(
+                1024, int((config or {}).get("agent", {}).get("max_secret_scan_bytes", 64 * 1024)),
+            ),
+        )
+    except (ErroLeituraProjeto, OSError, ValueError):
+        return {}
+    if arvore.get("truncado"):
+        return {}
+    arquivos = [
+        item.get("caminho") for item in arvore.get("entradas", [])
+        if item.get("tipo") == "arquivo" and isinstance(item.get("caminho"), str)
+    ]
+    if not arquivos or len(arquivos) > max_arquivos:
+        return {}
+
+    linhas_conhecidas = []
+    for arquivo in arquivos:
+        info = estrutura.get(arquivo) if isinstance(estrutura, dict) else None
+        linhas = info.get("linhas") if isinstance(info, dict) else None
+        if isinstance(linhas, int) and not isinstance(linhas, bool) and linhas >= 0:
+            linhas_conhecidas.append(linhas)
+    if len(linhas_conhecidas) == len(arquivos) and sum(linhas_conhecidas) > max_linhas:
+        return {}
+
+    lidos = ler_codigo_real(
+        arquivos, caminho_projeto, max_chars_por_arquivo=max_chars,
+    )
+    resultado = {}
+    restantes = max_chars
+    for arquivo in arquivos:
+        info = lidos.get(arquivo)
+        if not isinstance(info, dict) or not isinstance(info.get("conteudo"), str):
+            continue
+        if restantes <= 0:
+            break
+        conteudo = info["conteudo"]
+        truncado_total = len(conteudo) > restantes
+        trecho = conteudo[:restantes]
+        total_linhas = len(conteudo.splitlines())
+        linhas_lidas = len(trecho.splitlines())
+        truncado = bool(info.get("truncado") or truncado_total)
+        resultado[arquivo] = {
+            "conteudo": trecho,
+            "truncado": truncado,
+            "linha_inicio": 1,
+            "linha_fim": linhas_lidas,
+            "total_linhas_arquivo": total_linhas,
+            "leitura_completa": bool(not truncado and linhas_lidas >= total_linhas),
+        }
+        restantes -= len(trecho)
+    return resultado
+
+
 def _processar_visao_geral(pergunta, config, projeto, estrutura, entendimento, motivo_roteador):
     """Pipeline 'visao_geral': pedido generico tipo 'da uma olhada no projeto',
     'confere o codigo' -- NAO roda retrieval (a pergunta nao tem vocabulario em
@@ -1281,10 +1356,14 @@ def _processar_visao_geral(pergunta, config, projeto, estrutura, entendimento, m
     ctx_cfg = config.get("context", {})
     decisoes = carregar_decisoes()
 
+    codigos_reais = _codigos_reais_projeto_pequeno(
+        config, projeto, estrutura,
+    )
     prompt_executor = montar_prompt_visao_geral(
         pergunta, projeto=projeto, estrutura=estrutura, entendimento=entendimento,
         decisoes=decisoes, token_budget=ctx_cfg.get("token_budget", 1500),
         chars_per_token=ctx_cfg.get("chars_per_token", 4),
+        codigos_reais=codigos_reais,
     )
     try:
         resposta = executar_executor(prompt_executor, config)
@@ -1295,15 +1374,45 @@ def _processar_visao_geral(pergunta, config, projeto, estrutura, entendimento, m
 
     arquivos_no_mapa = list(estrutura.keys()) if estrutura else []
     resultado_validacao = validar_resposta(resposta, MEMORY_DIR, arquivos_no_mapa)
-    registrar_historico(MEMORY_DIR, pergunta, arquivos_no_mapa, resultado_validacao,
-                         resumo_decisao="visao geral do projeto (sem retrieval, roteador)")
+    registrar_historico(
+        MEMORY_DIR, pergunta, arquivos_no_mapa, resultado_validacao,
+        resumo_decisao=(
+            "visao geral com codigo real completo de projeto pequeno"
+            if codigos_reais else "visao geral estrutural do projeto"
+        ),
+    )
     registrar_mensagem("assistant", resposta)
 
+    arquivos_lidos = [
+        {
+            "arquivo": arquivo,
+            "linha_inicio": info.get("linha_inicio"),
+            "linha_fim": info.get("linha_fim"),
+            "total_linhas_arquivo": info.get("total_linhas_arquivo"),
+            "truncado": info.get("truncado"),
+            "leitura_completa": info.get("leitura_completa"),
+        }
+        for arquivo, info in codigos_reais.items()
+        if isinstance(info, dict)
+    ]
     return {
         "resposta": resposta,
         "roteador": {"tipo": "visao_geral", "motivo": motivo_roteador},
         "iteracoes_analista": 0,
         "decisoes_analista": [],
+        "trabalho_contexto": {
+            "modo": "analyze",
+            "ferramentas": (
+                ["list_tree", "read_file"] if arquivos_lidos else ["list_tree"]
+            ),
+            "arquivos_lidos": arquivos_lidos,
+            "evidence_ids": [],
+            "limitacoes": [
+                "leitura integral limitada pelo orçamento de contexto"
+                for info in codigos_reais.values()
+                if isinstance(info, dict) and info.get("truncado")
+            ],
+        },
         **_campos_validacao(resultado_validacao),
     }
 

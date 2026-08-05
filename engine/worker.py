@@ -23,6 +23,7 @@ from engine import queue
 from engine import telemetry
 from engine import progress
 from engine import engine as eyle_engine
+from engine.work_summary import construir_resumo_trabalho
 
 
 class JobDeadlineExceeded(TimeoutError):
@@ -41,6 +42,22 @@ def _resultado_indica_falha(resultado):
         isinstance(resultado, dict)
         and str(resultado.get("status") or "").strip().lower() == "failed"
     )
+
+
+def _resumo_publico(evento, resultado, duracao_segundos, status_job):
+    try:
+        projeto = eyle_engine.carregar_projeto()
+    except Exception:
+        projeto = None
+    try:
+        return construir_resumo_trabalho(
+            evento, resultado, duracao_segundos, projeto=projeto,
+            status_job=status_job,
+        )
+    except Exception as erro:
+        # O resumo e observabilidade; nunca pode derrubar o job principal.
+        print(f"[worker][aviso] resumo operacional falhou: {erro}")
+        return None
 
 
 def _detalhe_falha_resultado(resultado):
@@ -240,8 +257,21 @@ def processar_proximo(
                 thread_heartbeat.start()
             resultado = processar_evento(evento)
     except Exception as error:
+        duracao = time.monotonic() - started
+        resumo = _resumo_publico(
+            evento, {
+                "status": "failed",
+                "error_code": getattr(error, "error_code", None),
+                "agente_status": "failed",
+                "avisos": [str(error)],
+            },
+            duracao, "failed",
+        )
         if job_id is not None:
-            queue.falhar(job_id, error)
+            queue.falhar(
+                job_id, error, resumo_trabalho=resumo,
+                duracao_segundos=duracao,
+            )
         if worker_id:
             queue.registrar_heartbeat(worker_id, "error", job_id=job_id, detalhe=error)
         telemetry.record(
@@ -264,8 +294,13 @@ def processar_proximo(
 
     if _resultado_indica_falha(resultado):
         detalhe = _detalhe_falha_resultado(resultado)
+        duracao = time.monotonic() - started
+        resumo = _resumo_publico(evento, resultado, duracao, "failed")
         if job_id is not None:
-            queue.falhar(job_id, detalhe, resultado=resultado)
+            queue.falhar(
+                job_id, detalhe, resultado=resultado,
+                resumo_trabalho=resumo, duracao_segundos=duracao,
+            )
         if worker_id:
             queue.registrar_heartbeat(worker_id, "error", job_id=job_id, detalhe=detalhe)
         telemetry.record(
@@ -282,8 +317,13 @@ def processar_proximo(
         print(f"[worker][erro] job {job_id} terminou com falha estruturada: {detalhe}")
         return True
 
+    duracao = time.monotonic() - started
+    resumo = _resumo_publico(evento, resultado, duracao, "completed")
     if job_id is not None:
-        queue.concluir(job_id, resultado)
+        queue.concluir(
+            job_id, resultado, resumo_trabalho=resumo,
+            duracao_segundos=duracao,
+        )
     if worker_id:
         queue.registrar_heartbeat(worker_id, "idle")
     telemetry.record(

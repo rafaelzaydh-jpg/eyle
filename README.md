@@ -11,17 +11,17 @@
   <a href="docs/architecture.md">Architecture</a> ·
   <a href="docs/configuration.md">Configuration</a> ·
   <a href="docs/benchmark.md">Benchmark</a> ·
-  <a href="CHANGELOG.md">Revision 55.8</a> ·
+  <a href="CHANGELOG.md">Revision 55.10</a> ·
   <a href="SECURITY.md">Security</a>
 </p>
 
 <p align="center">
   <img alt="Python 3.8+" src="https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white">
   <img alt="Release 2.7.3" src="https://img.shields.io/badge/release-2.7.3-2563EB">
-  <img alt="Revision 55.8" src="https://img.shields.io/badge/revision-55.8-7C3AED">
+  <img alt="Revision 55.10" src="https://img.shields.io/badge/revision-55.10-7C3AED">
   <img alt="Local execution" src="https://img.shields.io/badge/execution-local-16A34A">
   <img alt="BM25 retrieval" src="https://img.shields.io/badge/retrieval-BM25-F59E0B">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-263%20passed-16A34A">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-272%20passed-16A34A">
 </p>
 
 ## Overview
@@ -30,13 +30,13 @@ Eyle indexes a local repository, retrieves only relevant evidence, and uses a lo
 
 | | |
 |---|---|
-| **Release** | 2.7.3 — revision 55.8 |
+| **Release** | 2.7.3 — revision 55.10 |
 | **Default rollout** | `read_only` until the real-model benchmark is validated locally |
 | **Recommended model target** | LFM2.5-8B-A1B or a compatible quantization |
 | **Privacy** | Source code, indexes, traces, queue, and history remain on the local machine |
 | **Mutable state** | `workspace/`, `memory/`, and `context/` are ignored by Git |
 
-**Release identity marker:** **Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.8-invalid-format-recovery
+**Release identity marker:** **Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.10-expandable-work-summary
 
 ### Main capabilities
 
@@ -49,6 +49,20 @@ Eyle indexes a local repository, retrieves only relevant evidence, and uses a lo
 - Shared deadlines, differentiated timeouts, retry backoff, rate limiting, and telemetry.
 - Short-cycle detection for repeated agent states and bounded queue reservation.
 - CLI, optional authenticated Flask interface, SQLite queue, checkpoints, and retention.
+
+## Revision 55.10
+
+Revision 55.10 adds a compact expandable work summary to completed jobs. The conversation shows only `Trabalho concluído em XmYYs`; opening it reveals the objective, files and line ranges read, analysis mode, tools, evidence IDs, fallback status, validation, and limitations.
+
+The summary is derived from deterministic job/result metadata. It does not expose prompts, chain-of-thought, raw tool output, or source-code contents.
+
+See [docs/releases/2.7.3-revision-55.10.md](docs/releases/2.7.3-revision-55.10.md).
+
+## Revision 55.9
+
+Revision 55.9 prevents the web panel from rate-limiting itself and restores full-code analysis for small projects. Active polling is bounded and respects `Retry-After`; small projects are read completely within configured limits instead of being summarized only by filenames and line counts.
+
+See [docs/releases/2.7.3-revision-55.9.md](docs/releases/2.7.3-revision-55.9.md).
 
 ## Revision 55.5
 

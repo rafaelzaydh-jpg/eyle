@@ -157,16 +157,13 @@ def montar_prompt_entendedor(caminho_relativo, conteudo, max_chars=20000):
 
 
 def montar_prompt_visao_geral(pergunta, projeto=None, estrutura=None, entendimento=None,
-                               decisoes=None, token_budget=1500, chars_per_token=4):
-    """
-    Contexto para um pedido GENERICO de "olhar o projeto" (ex: "da uma
-    olhada no projeto", "confere o codigo") -- SEM passar pelo
-    retrieval/buscar.py. A pergunta em si ("olhada no projeto") nao tem
-    vocabulario em comum com o conteudo indexado, entao BM25 nao acharia
-    nada util; em vez de arriscar retornar ruido, monta o panorama direto
-    da memoria estrutural: identidade do projeto, resumo funcional
-    (entendimento.json) e o mapa de arquivos/simbolos (estrutura.json),
-    respeitando o orcamento de contexto.
+                               decisoes=None, token_budget=1500, chars_per_token=4,
+                               codigos_reais=None):
+    """Monta uma visao geral estrutural ou uma analise completa de projeto pequeno.
+
+    Quando ``codigos_reais`` esta presente, o Executor recebe o conteudo fresco
+    dos arquivos e deve analisar comportamento, fluxo, riscos e melhorias. Para
+    projetos maiores, conserva o panorama estrutural usado como fallback seguro.
     """
     partes = []
     if projeto:
@@ -195,6 +192,7 @@ def montar_prompt_visao_geral(pergunta, projeto=None, estrutura=None, entendimen
     if estrutura:
         omitidos = 0
         for arquivo, info in estrutura.items():
+            info = info if isinstance(info, dict) else {}
             simbolos = info.get("funcoes_classes", [])
             linha = f"- {arquivo} ({info.get('linhas', '?')} linhas)"
             if simbolos:
@@ -212,13 +210,41 @@ def montar_prompt_visao_geral(pergunta, projeto=None, estrutura=None, entendimen
     else:
         partes.append("(projeto ainda nao foi indexado -- rode 'python main.py ingest <pasta>')")
 
-    partes.append(
-        "\nOBSERVACAO: isto e um panorama ESTRUTURAL (nomes de arquivo/funcao e contagem de "
-        "linhas), sem o conteudo linha a linha de cada trecho. Descreva o projeto em nivel de "
-        "arquivo/funcao. Nao invente numeros de linha especificos que nao foram dados aqui -- "
-        "se precisar citar uma faixa exata, diga que precisa consultar o arquivo especifico "
-        "primeiro."
-    )
+    codigos_reais = codigos_reais or {}
+    codigos_lidos = [
+        (arquivo, info) for arquivo, info in codigos_reais.items()
+        if isinstance(info, dict) and isinstance(info.get("conteudo"), str)
+    ]
+    if codigos_lidos:
+        partes.append(
+            "\nCODIGO REAL FRESCO DO PROJETO PEQUENO "
+            "(analise o conteudo abaixo; nao diga que ele esta indisponivel):"
+        )
+        for arquivo, info in codigos_lidos:
+            partes.append(f"\n--- {arquivo} ---")
+            linhas = info["conteudo"].splitlines()
+            partes.append("\n".join(
+                f"{numero:>6} | {linha}"
+                for numero, linha in enumerate(linhas, start=1)
+            ))
+            if info.get("truncado"):
+                partes.append(
+                    "[arquivo truncado pelo limite de contexto; analise o trecho mostrado "
+                    "e declare essa limitacao]"
+                )
+        partes.append(
+            "\nENTREGA OBRIGATORIA: explique o que o projeto faz, descreva o fluxo real, "
+            "aponte problemas/riscos encontrados no codigo e sugira correcoes praticas. "
+            "Nao reduza a resposta a contagem de arquivos ou linhas."
+        )
+    else:
+        partes.append(
+            "\nOBSERVACAO: isto e um panorama ESTRUTURAL (nomes de arquivo/funcao e contagem de "
+            "linhas), sem o conteudo linha a linha de cada trecho. Descreva o projeto em nivel de "
+            "arquivo/funcao. Nao invente numeros de linha especificos que nao foram dados aqui -- "
+            "se precisar citar uma faixa exata, diga que precisa consultar o arquivo especifico "
+            "primeiro."
+        )
     return "\n".join(partes)
 
 

@@ -1,5 +1,7 @@
 # Release hardening reports
 
+- [2.7.3 — revision 55.10 expandable work summary](2.7.3-revision-55.10.md)
+- [2.7.3 — revision 55.9 polling and small projects](2.7.3-revision-55.9.md)
 - [2.7.1 — revision 51](2.7.1-hardening.md)
 - [2.7.2 — revision 52](2.7.2-hardening.md)
 - [2.7.3 — revision 53](2.7.3-hardening.md)

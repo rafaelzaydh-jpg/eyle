@@ -374,10 +374,22 @@ def atualizar_progresso(job_id, progresso=None, **campos):
         return cursor.rowcount == 1
 
 
-def concluir(job_id, resultado=None):
-    """Marca um job reservado como concluido e persiste seu resultado."""
+def concluir(job_id, resultado=None, resumo_trabalho=None, duracao_segundos=None):
+    """Marca um job reservado como concluido e persiste seu resultado.
+
+    ``resumo_trabalho`` e um relato operacional publico e estruturado. Ele fica
+    junto do progresso do job, separado do resultado completo do Engine.
+    """
+    campos = {}
+    if isinstance(resumo_trabalho, dict):
+        campos["work_summary"] = resumo_trabalho
+    if duracao_segundos is not None:
+        try:
+            campos["elapsed_seconds"] = round(max(0.0, float(duracao_segundos)), 2)
+        except (TypeError, ValueError):
+            pass
     atualizar_progresso(
-        job_id, phase="completed", message="Tarefa concluida",
+        job_id, phase="completed", message="Tarefa concluida", **campos,
     )
     agora = _agora_utc()
     with _abrir_conexao() as conexao:
@@ -393,7 +405,7 @@ def concluir(job_id, resultado=None):
         return cursor.rowcount == 1
 
 
-def falhar(job_id, erro, resultado=None):
+def falhar(job_id, erro, resultado=None, resumo_trabalho=None, duracao_segundos=None):
     """Marca um job reservado como falho e conserva erro + resultado seguro.
 
     ``resultado`` e opcional para manter compatibilidade com excecoes do Worker.
@@ -402,8 +414,16 @@ def falhar(job_id, erro, resultado=None):
     diagnostico de transporte em fala do assistente no historico.
     """
     detalhe = f"{type(erro).__name__}: {erro}" if isinstance(erro, BaseException) else str(erro)
+    campos = {"error": detalhe[:500]}
+    if isinstance(resumo_trabalho, dict):
+        campos["work_summary"] = resumo_trabalho
+    if duracao_segundos is not None:
+        try:
+            campos["elapsed_seconds"] = round(max(0.0, float(duracao_segundos)), 2)
+        except (TypeError, ValueError):
+            pass
     atualizar_progresso(
-        job_id, phase="failed", message="A tarefa falhou", error=detalhe[:500],
+        job_id, phase="failed", message="A tarefa falhou", **campos,
     )
     agora = _agora_utc()
     serializado = None if resultado is None else _serializar(resultado)

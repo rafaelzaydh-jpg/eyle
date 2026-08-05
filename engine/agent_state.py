@@ -633,12 +633,27 @@ class AgentState:
                 evidencia["estado"] = "fresh"
                 return evidencia["id"]
 
+        total_linhas = item.get("total_linhas_arquivo")
+        truncado = bool(item.get("truncado") or item.get("faixa_truncada_pelo_limite"))
         evidencia = {
             "id": self._novo_evidence_id(),
             "source_tool": source_tool,
             "arquivo": arquivo,
             "linha_inicio": linha_inicio,
             "linha_fim": linha_fim,
+            "total_linhas_arquivo": (
+                total_linhas
+                if isinstance(total_linhas, int) and not isinstance(total_linhas, bool)
+                else None
+            ),
+            "truncado": truncado,
+            "leitura_completa": bool(
+                not truncado
+                and linha_inicio == 1
+                and isinstance(total_linhas, int)
+                and not isinstance(total_linhas, bool)
+                and linha_fim >= total_linhas
+            ),
             "conteudo": conteudo,
             "conteudo_raw": normalizar_quebras(conteudo_raw) if isinstance(conteudo_raw, str) else None,
             "content_hash": content_hash,

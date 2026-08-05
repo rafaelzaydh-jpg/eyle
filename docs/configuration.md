@@ -34,7 +34,7 @@ Use `openai_compatible: true` for LM Studio, llama.cpp server, and compatible `/
 
 ## Timeouts, retries, and budgets
 
-Revision 51–55.8 separates connection, read, model-discovery, agent, and executor timeouts. General calls may retry transient failures with capped exponential backoff, jitter, cooldown, and `Retry-After` support. Structured Agent calls use `agent_retry_max_attempts` (1 by default), because the Agent already owns a separate format-repair attempt; this prevents nested retries from consuming the entire task deadline. Permanent client errors do not retry.
+Revision 51–55.10 separates connection, read, model-discovery, agent, and executor timeouts. General calls may retry transient failures with capped exponential backoff, jitter, cooldown, and `Retry-After` support. Structured Agent calls use `agent_retry_max_attempts` (1 by default), because the Agent already owns a separate format-repair attempt; this prevents nested retries from consuming the entire task deadline. Permanent client errors do not retry.
 
 `stream_responses=true` enables safe web progress. Textual answers are streamed into the visible response, while structured Agent calls publish only stage, elapsed time, estimated tokens, and tokens per second. Raw Agent JSON and backend reasoning fields are never exposed.
 

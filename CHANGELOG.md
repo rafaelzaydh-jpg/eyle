@@ -8,6 +8,30 @@ No unreleased changes yet.
 
 ## 2.7.3 — 2026-08-04
 
+### Revision 55.10 — expandable operational work summary
+
+- Added a compact `Trabalho concluído em XmYYs` row for completed question jobs.
+- Added four expandable stages: understanding, reading, analysis, and conclusion.
+- Derived files, line ranges, full-read status, tools, evidence IDs, fallback, validation, and limitations from real structured metadata.
+- Persisted the summary with the job and exposed only a length-limited sanitized schema through `GET /jobs/<id>`.
+- Kept prompts, chain-of-thought, raw tool results, and source-code contents private.
+- Added equivalent read metadata to the small-project full-code fallback.
+
+### Validation
+
+- `python -m compileall -q .` passed.
+- `node --check web/static/app.js` passed.
+- 272/272 executable tests passed.
+- One Flask-dependent module remained skipped because Flask was unavailable in the packaging environment.
+
+### Revision 55.9 — bounded polling and real small-project analysis
+
+- Limited active browser polling to two jobs per cycle and 1.2 seconds between cycles.
+- Added global `Retry-After` backoff and prevented overlapping status requests.
+- Revalidated static assets so an old aggressive `app.js` does not survive an update.
+- Added complete fresh-code context for small projects within configurable file, line, and character limits.
+- Fixed the fallback response that previously reported only filenames and line counts.
+
 ### Revision 55.8 — tolerant local-model decisions and guaranteed read fallback
 
 - Normalized common local-model JSON envelopes such as `tool_calls`, `tool_call`, `action`, `action_input`, and `answer` into the Agent protocol without accepting ambiguous mixed branches.

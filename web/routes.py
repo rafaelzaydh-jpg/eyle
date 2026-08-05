@@ -106,6 +106,10 @@ def cabecalhos_seguros(resposta):
     resposta.headers["Referrer-Policy"] = "no-referrer"
     if request.endpoint not in _ROTAS_PUBLICAS:
         resposta.headers["Cache-Control"] = "no-store"
+    elif request.endpoint == "static":
+        # O painel local precisa revalidar app.js depois de uma atualizacao;
+        # um JS antigo manteria o polling agressivo e repetiria os 429.
+        resposta.headers["Cache-Control"] = "no-cache"
     return resposta
 
 
@@ -265,6 +269,50 @@ def _projeto_publico(projeto):
     }
 
 
+def _resumo_trabalho_publico(resumo):
+    """Valida e limita o resumo operacional antes de publica-lo no navegador."""
+    if not isinstance(resumo, dict):
+        return None
+
+    def texto(valor, limite):
+        if not isinstance(valor, str):
+            return None
+        return valor[:limite]
+
+    etapas = []
+    for etapa in (resumo.get("steps") or [])[:8]:
+        if not isinstance(etapa, dict):
+            continue
+        campos = []
+        for campo in (etapa.get("fields") or [])[:12]:
+            if not isinstance(campo, dict):
+                continue
+            rotulo = texto(campo.get("label"), 80)
+            valor = texto(campo.get("value"), 1200)
+            if rotulo and valor:
+                campos.append({"label": rotulo, "value": valor})
+        try:
+            numero = int(etapa.get("number"))
+        except (TypeError, ValueError):
+            numero = len(etapas) + 1
+        titulo = texto(etapa.get("title"), 80)
+        if titulo and campos:
+            etapas.append({"number": numero, "title": titulo, "fields": campos})
+
+    if not etapas:
+        return None
+    try:
+        duracao = round(max(0.0, float(resumo.get("duration_seconds") or 0.0)), 2)
+    except (TypeError, ValueError):
+        duracao = 0.0
+    return {
+        "schema_version": 1,
+        "title": texto(resumo.get("title"), 80) or "Trabalho concluído",
+        "duration_seconds": duracao,
+        "steps": etapas,
+    }
+
+
 def _job_publico(registro):
     if not isinstance(registro, dict):
         return None
@@ -290,6 +338,9 @@ def _job_publico(registro):
         if isinstance(erro_progresso, str):
             seguro["error"] = erro_progresso[:500]
         publico["progresso"] = seguro
+        resumo_trabalho = _resumo_trabalho_publico(progresso.get("work_summary"))
+        if resumo_trabalho is not None:
+            publico["work_summary"] = resumo_trabalho
 
     payload = registro.get("payload")
     if isinstance(payload, dict) and registro.get("tipo") == "pergunta":
