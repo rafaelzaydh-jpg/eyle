@@ -2,7 +2,7 @@
   "release": "2.7.3",
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "55.10-expandable-work-summary",
+  "revision": "55.11-cancellation-reasoning-fallback",
   "updated": "2026-08-04",
   "installation": "overlay_safe",
   "preserve_on_update": [
@@ -13,21 +13,20 @@
   "included_runtime_state": false,
   "validation": {
     "compileall_passed": true,
-    "tests_passed": 272,
-    "tests_total_executable": 272,
+    "tests_passed": 279,
+    "tests_total_executable": 279,
     "tests_skipped": 1,
     "web_tests_executed": false,
     "javascript_syntax_passed": true,
     "real_llm_benchmark_executed": false,
     "notes": [
-      "272/272 testes executaveis passaram.",
+      "279/279 testes executaveis passaram.",
       "Um modulo dependente de Flask foi ignorado porque Flask nao estava instalado no ambiente de empacotamento.",
       "node --check web/static/app.js passou.",
-      "Cada job concluido persiste um resumo operacional publico com quatro etapas: entendimento, leitura, analise e conclusao.",
-      "O resumo usa modo, tools, evidencias, fallback, validacao e limitacoes reais do resultado estruturado.",
-      "O painel exibe Trabalho concluido em XmYYs como um bloco details expansivel entre o pedido e a resposta.",
-      "Prompts, chain-of-thought, conteudo bruto de tools e dados internos da LLM nao sao publicados.",
-      "Projetos pequenos continuam usando leitura real completa dentro dos limites da revisao 55.9.",
+      "Exclusao de mensagem cancela somente o job originado por ela e remove respostas tardias do job cancelado.",
+      "Chamadas estruturadas permanecem nao-streaming para nao publicar reasoning_content.",
+      "Quando response_format e rejeitado, o fallback por prompt preserva a recuperacao de JSON em reasoning_content.",
+      "Chamadas textuais comuns continuam sem expor reasoning_content.",
       "O pacote final nao inclui bancos SQLite, traces, caches ou checkpoints de runtime."
     ]
   },
@@ -170,5 +169,15 @@
     "fallback validacao e limitacoes declarados sem chain-of-thought",
     "sanitizacao e limites antes de publicar GET /jobs/<id>",
     "272 testes executaveis aprovados"
+  ],
+  "hardening_55_11": [
+    "cancelamento de job vinculado a mensagem removida sem afetar mensagens diferentes",
+    "processo filho terminavel para interromper chamadas LLM bloqueantes no painel web",
+    "purga de resposta tardia produzida por job cancelado",
+    "streaming desativado em decisoes estruturadas do Agent",
+    "intencao estruturada preservada quando response_format e rejeitado",
+    "JSON recuperado de reasoning_content no fallback por prompt",
+    "reasoning_content permanece privado em chamadas textuais comuns",
+    "279 testes executaveis aprovados"
   ]
 }

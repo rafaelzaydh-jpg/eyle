@@ -28,7 +28,7 @@ DB_PATH = os.path.join(BASE_DIR, "context", "fila.sqlite3")
 _evento_disponivel = threading.Event()
 _schema_lock = threading.Lock()
 _schemas_prontos = set()
-_STATUS = ("pending", "processing", "completed", "failed")
+_STATUS = ("pending", "processing", "completed", "failed", "cancelled")
 _AGENT_STATUS = ("running", "waiting_user", "completed", "blocked", "failed")
 _NAO_INFORMADO = object()
 
@@ -89,7 +89,9 @@ def _inicializar_schema(conexao, caminho_banco):
                 erro TEXT,
                 worker_id TEXT,
                 progresso TEXT,
-                progresso_seq INTEGER NOT NULL DEFAULT 0
+                progresso_seq INTEGER NOT NULL DEFAULT 0,
+                cancel_requested INTEGER NOT NULL DEFAULT 0,
+                cancel_reason TEXT
             )
             """
         )
@@ -145,6 +147,12 @@ def _inicializar_schema(conexao, caminho_banco):
             conexao.execute(
                 "ALTER TABLE jobs ADD COLUMN progresso_seq INTEGER NOT NULL DEFAULT 0"
             )
+        if "cancel_requested" not in colunas_jobs:
+            conexao.execute(
+                "ALTER TABLE jobs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0"
+            )
+        if "cancel_reason" not in colunas_jobs:
+            conexao.execute("ALTER TABLE jobs ADD COLUMN cancel_reason TEXT")
         colunas_hb = {row[1] for row in conexao.execute("PRAGMA table_info(worker_heartbeat)")}
         if "pid" not in colunas_hb:
             conexao.execute("ALTER TABLE worker_heartbeat ADD COLUMN pid INTEGER")
@@ -284,7 +292,8 @@ def _reservar_proximo(max_invalid_jobs=100, worker_id=None):
                 UPDATE jobs
                 SET status = 'processing', tentativas = tentativas + 1,
                     iniciado_em = ?, atualizado_em = ?, erro = NULL, worker_id = ?,
-                    progresso = ?, progresso_seq = progresso_seq + 1
+                    progresso = ?, progresso_seq = progresso_seq + 1,
+                    cancel_requested = 0, cancel_reason = NULL
                 WHERE id = ? AND status = 'pending'
                 """,
                 (
@@ -347,9 +356,13 @@ def atualizar_progresso(job_id, progresso=None, **campos):
     with _abrir_conexao() as conexao:
         conexao.execute("BEGIN IMMEDIATE")
         linha = conexao.execute(
-            "SELECT progresso, status FROM jobs WHERE id = ?", (job_id,),
+            "SELECT progresso, status, cancel_requested FROM jobs WHERE id = ?", (job_id,),
         ).fetchone()
-        if linha is None or linha["status"] not in ("pending", "processing"):
+        if (
+            linha is None
+            or linha["status"] not in ("pending", "processing")
+            or int(linha["cancel_requested"] or 0)
+        ):
             conexao.rollback()
             return False
         atual = {}
@@ -367,11 +380,180 @@ def atualizar_progresso(job_id, progresso=None, **campos):
             UPDATE jobs
             SET progresso = ?, progresso_seq = progresso_seq + 1, atualizado_em = ?
             WHERE id = ? AND status IN ('pending', 'processing')
+              AND cancel_requested = 0
             """,
             (_serializar(atual), agora, job_id),
         )
         conexao.commit()
         return cursor.rowcount == 1
+
+
+def cancelamento_solicitado(job_id):
+    """Devolve o motivo quando um job recebeu pedido de cancelamento."""
+    with _abrir_conexao() as conexao:
+        linha = conexao.execute(
+            "SELECT status, cancel_requested, cancel_reason FROM jobs WHERE id = ?",
+            (int(job_id),),
+        ).fetchone()
+    if linha is None:
+        return None
+    if linha["status"] == "cancelled" or int(linha["cancel_requested"] or 0):
+        return str(linha["cancel_reason"] or "cancelado pelo usuario")
+    return None
+
+
+def cancelar_job(job_id, motivo="mensagem removida pelo usuario"):
+    """Cancela job pendente ou sinaliza interrupcao do job em processamento."""
+    job_id = int(job_id)
+    motivo = str(motivo or "cancelado pelo usuario")[:500]
+    agora = _agora_utc()
+    with _abrir_conexao() as conexao:
+        conexao.execute("BEGIN IMMEDIATE")
+        linha = conexao.execute(
+            "SELECT status, progresso FROM jobs WHERE id = ?", (job_id,),
+        ).fetchone()
+        if linha is None:
+            conexao.rollback()
+            return {"job_id": job_id, "status": "missing", "changed": False}
+
+        status = linha["status"]
+        if status not in ("pending", "processing"):
+            conexao.rollback()
+            return {"job_id": job_id, "status": status, "changed": False}
+
+        progresso = {}
+        if linha["progresso"]:
+            try:
+                carregado = json.loads(linha["progresso"])
+                if isinstance(carregado, dict):
+                    progresso = carregado
+            except (TypeError, ValueError, json.JSONDecodeError):
+                progresso = {}
+        progresso.update({
+            "phase": "cancelling" if status == "processing" else "cancelled",
+            "message": "Cancelando a tarefa" if status == "processing" else "Tarefa cancelada",
+            "updated_at": agora,
+        })
+
+        if status == "pending":
+            conexao.execute(
+                """
+                UPDATE jobs
+                SET status = 'cancelled', cancel_requested = 1, cancel_reason = ?,
+                    progresso = ?, progresso_seq = progresso_seq + 1,
+                    atualizado_em = ?, concluido_em = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (motivo, _serializar(progresso), agora, agora, job_id),
+            )
+            novo_status = "cancelled"
+        else:
+            conexao.execute(
+                """
+                UPDATE jobs
+                SET cancel_requested = 1, cancel_reason = ?, progresso = ?,
+                    progresso_seq = progresso_seq + 1, atualizado_em = ?
+                WHERE id = ? AND status = 'processing'
+                """,
+                (motivo, _serializar(progresso), agora, job_id),
+            )
+            novo_status = "processing"
+        conexao.commit()
+    _evento_disponivel.set()
+    return {"job_id": job_id, "status": novo_status, "changed": True}
+
+
+def marcar_cancelado(job_id, motivo="cancelado pelo usuario", resultado=None):
+    """Fecha definitivamente um job cujo processo foi interrompido."""
+    job_id = int(job_id)
+    motivo = str(motivo or "cancelado pelo usuario")[:500]
+    agora = _agora_utc()
+    serializado = None if resultado is None else _serializar(resultado)
+    with _abrir_conexao() as conexao:
+        linha = conexao.execute(
+            "SELECT progresso FROM jobs WHERE id = ?", (job_id,),
+        ).fetchone()
+        if linha is None:
+            return False
+        progresso = {}
+        if linha["progresso"]:
+            try:
+                carregado = json.loads(linha["progresso"])
+                if isinstance(carregado, dict):
+                    progresso = carregado
+            except (TypeError, ValueError, json.JSONDecodeError):
+                progresso = {}
+        progresso.update({
+            "phase": "cancelled",
+            "message": "Tarefa cancelada",
+            "updated_at": agora,
+        })
+        cursor = conexao.execute(
+            """
+            UPDATE jobs
+            SET status = 'cancelled', cancel_requested = 1, cancel_reason = ?,
+                resultado = ?, erro = NULL, progresso = ?,
+                progresso_seq = progresso_seq + 1,
+                atualizado_em = ?, concluido_em = ?
+            WHERE id = ? AND status IN ('pending', 'processing')
+            """,
+            (motivo, serializado, _serializar(progresso), agora, agora, job_id),
+        )
+        return cursor.rowcount == 1
+
+
+def _jobs_pergunta_ativos():
+    with _abrir_conexao() as conexao:
+        linhas = conexao.execute(
+            """
+            SELECT id, status, payload
+            FROM jobs
+            WHERE tipo = 'pergunta' AND status IN ('pending', 'processing')
+            ORDER BY id
+            """
+        ).fetchall()
+    ativos = []
+    for linha in linhas:
+        try:
+            payload = json.loads(linha["payload"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            ativos.append({"id": int(linha["id"]), "status": linha["status"], "payload": payload})
+    return ativos
+
+
+def jobs_da_mensagem_ativos(mensagem_id):
+    """Jobs cuja pergunta de origem e exatamente a mensagem informada."""
+    mensagem_id = int(mensagem_id)
+    return [
+        item for item in _jobs_pergunta_ativos()
+        if item["payload"].get("mensagem_id") == mensagem_id
+    ]
+
+
+def jobs_ativos_usando_mensagem(mensagem_id, excluir_job_ids=None):
+    """Jobs que ja congelaram a mensagem em seu snapshot de contexto."""
+    mensagem_id = int(mensagem_id)
+    excluidos = {int(job_id) for job_id in (excluir_job_ids or [])}
+    usados = []
+    for item in _jobs_pergunta_ativos():
+        if item["id"] in excluidos:
+            continue
+        snapshot = item["payload"].get("historico_snapshot") or []
+        if any(
+            isinstance(mensagem, dict) and mensagem.get("id") == mensagem_id
+            for mensagem in snapshot
+        ):
+            usados.append(item)
+    return usados
+
+
+def cancelar_jobs_da_mensagem(mensagem_id, motivo="mensagem de origem removida"):
+    resultados = []
+    for item in jobs_da_mensagem_ativos(mensagem_id):
+        resultados.append(cancelar_job(item["id"], motivo=motivo))
+    return resultados
 
 
 def concluir(job_id, resultado=None, resumo_trabalho=None, duracao_segundos=None):
@@ -380,6 +562,11 @@ def concluir(job_id, resultado=None, resumo_trabalho=None, duracao_segundos=None
     ``resumo_trabalho`` e um relato operacional publico e estruturado. Ele fica
     junto do progresso do job, separado do resultado completo do Engine.
     """
+    motivo_cancelamento = cancelamento_solicitado(job_id)
+    if motivo_cancelamento:
+        marcar_cancelado(job_id, motivo_cancelamento)
+        return False
+
     campos = {}
     if isinstance(resumo_trabalho, dict):
         campos["work_summary"] = resumo_trabalho
@@ -398,7 +585,7 @@ def concluir(job_id, resultado=None, resumo_trabalho=None, duracao_segundos=None
             UPDATE jobs
             SET status = 'completed', resultado = ?, erro = NULL,
                 atualizado_em = ?, concluido_em = ?
-            WHERE id = ? AND status = 'processing'
+            WHERE id = ? AND status = 'processing' AND cancel_requested = 0
             """,
             (_serializar(resultado), agora, agora, int(job_id)),
         )
@@ -413,6 +600,11 @@ def falhar(job_id, erro, resultado=None, resumo_trabalho=None, duracao_segundos=
     ele e persistido aqui para que a API consiga explicar a falha sem transformar
     diagnostico de transporte em fala do assistente no historico.
     """
+    motivo_cancelamento = cancelamento_solicitado(job_id)
+    if motivo_cancelamento:
+        marcar_cancelado(job_id, motivo_cancelamento, resultado=resultado)
+        return False
+
     detalhe = f"{type(erro).__name__}: {erro}" if isinstance(erro, BaseException) else str(erro)
     campos = {"error": detalhe[:500]}
     if isinstance(resumo_trabalho, dict):
@@ -433,7 +625,7 @@ def falhar(job_id, erro, resultado=None, resumo_trabalho=None, duracao_segundos=
             UPDATE jobs
             SET status = 'failed', resultado = ?, erro = ?,
                 atualizado_em = ?, concluido_em = ?
-            WHERE id = ? AND status = 'processing'
+            WHERE id = ? AND status = 'processing' AND cancel_requested = 0
             """,
             (serializado, detalhe, agora, agora, int(job_id)),
         )
@@ -446,14 +638,19 @@ def recuperar_interrompidos(stale_after_seconds=30, force=False):
     with _abrir_conexao() as conexao:
         linhas = conexao.execute(
             """
-            SELECT j.id, j.worker_id, h.atualizado_em AS heartbeat_em, h.pid
+            SELECT j.id, j.worker_id, j.cancel_requested, j.cancel_reason,
+                   h.atualizado_em AS heartbeat_em, h.pid
             FROM jobs j
             LEFT JOIN worker_heartbeat h ON h.worker_id = j.worker_id
             WHERE j.status = 'processing'
             """
         ).fetchall()
         ids = []
+        cancelados = []
         for linha in linhas:
+            if int(linha["cancel_requested"] or 0):
+                cancelados.append((int(linha["id"]), str(linha["cancel_reason"] or "cancelado pelo usuario")))
+                continue
             stale = _idade_segundos(linha["heartbeat_em"])
             morto = linha["pid"] is not None and not _pid_ativo(linha["pid"])
             sem_heartbeat_valido = not linha["worker_id"] or stale is None
@@ -461,6 +658,16 @@ def recuperar_interrompidos(stale_after_seconds=30, force=False):
                 stale >= max(0, float(stale_after_seconds))
             ):
                 ids.append(int(linha["id"]))
+        for job_id, motivo in cancelados:
+            conexao.execute(
+                """
+                UPDATE jobs
+                SET status = 'cancelled', cancel_reason = ?, atualizado_em = ?,
+                    concluido_em = ?, worker_id = NULL
+                WHERE id = ? AND status = 'processing'
+                """,
+                (motivo, agora, agora, job_id),
+            )
         recuperados = 0
         for job_id in ids:
             cursor = conexao.execute(
@@ -758,6 +965,22 @@ def expirar_tarefas_agente(agora=None):
             evento={"tipo": "task_expired"},
         )
     return len(ids)
+
+
+def cancelar_tarefas_agente_por_job(source_job_id, motivo="job principal cancelado"):
+    """Cancela continuacoes duraveis criadas pelo job principal."""
+    with _abrir_conexao() as conexao:
+        linhas = conexao.execute(
+            """
+            SELECT task_id FROM agent_tasks
+            WHERE source_job_id = ? AND status IN ('running', 'waiting_user')
+            """,
+            (int(source_job_id),),
+        ).fetchall()
+    total = 0
+    for linha in linhas:
+        total += int(bool(cancelar_tarefa_agente(linha["task_id"], motivo=motivo)))
+    return total
 
 
 def recuperar_tarefas_agente_interrompidas():

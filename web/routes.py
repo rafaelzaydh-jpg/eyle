@@ -60,7 +60,7 @@ _CHAVES_PUBLICAS_PROJETO = (
 )
 _CHAVES_PUBLICAS_JOB = (
     "id", "tipo", "status", "tentativas", "criado_em", "atualizado_em",
-    "iniciado_em", "concluido_em", "erro", "progresso_seq",
+    "iniciado_em", "concluido_em", "erro", "progresso_seq", "cancel_reason",
 )
 _CHAVES_PUBLICAS_PROGRESSO = (
     "phase", "message", "profile", "attempt", "max_attempts", "step",
@@ -368,6 +368,10 @@ def _job_publico(registro):
                 publico["transient"] = transitorio
         if not publico.get("mensagem") and registro.get("erro"):
             publico["mensagem"] = str(registro.get("erro"))[:2000]
+    elif registro.get("status") == "cancelled":
+        publico["mensagem"] = str(
+            registro.get("cancel_reason") or "Tarefa cancelada"
+        )[:500]
     return publico
 
 
@@ -423,16 +427,18 @@ def enviar():
 
 @app.route("/conversa", methods=["GET"])
 def conversa():
+    # Fecha exclusoes adiadas que ficaram prontas entre dois ciclos do worker.
+    eyle_engine.finalizar_remocoes_pendentes()
     return jsonify(eyle_engine.carregar_conversa())
 
 
 @app.route("/mensagem/<int:mensagem_id>", methods=["DELETE"])
 def apagar_mensagem(mensagem_id):
-    # assim como /enviar, so entra na fila -- quem remove de verdade e o
-    # Engine (via worker), nunca o Flask direto. O navegador confirma
-    # olhando GET /conversa de novo em seguida.
-    job_id = queue.adicionar({"tipo": "remover", "mensagem_id": mensagem_id})
-    return jsonify({"status": "ok", "job_id": job_id})
+    # A exclusao precisa agir imediatamente sobre o job correto. Colocar esta
+    # operacao atras do proprio job na FIFO impediria o cancelamento.
+    resultado = eyle_engine.solicitar_remocao_mensagem(mensagem_id)
+    codigo = 404 if resultado.get("status") == "not_found" else 200
+    return jsonify(resultado), codigo
 
 
 @app.route("/status", methods=["GET"])

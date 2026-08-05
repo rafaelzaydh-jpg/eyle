@@ -66,15 +66,9 @@ def test_openai_stream_monta_texto_e_ignora_reasoning_publico(monkeypatch):
     assert recebidos[-1][2] is True
 
 
-def test_streaming_estruturado_publica_metricas_sem_texto_parcial(monkeypatch):
-    callbacks = []
-
+def test_chamada_estruturada_desativa_streaming_mesmo_com_job_ativo(monkeypatch):
     def fake_openai(*args, **kwargs):
-        callback = kwargs["on_chunk"]
-        assert callback is not None
-        callbacks.append(callback)
-        callback('{"tool":"list_tree",', {}, False)
-        callback('"arguments":{}}', {"usage": {"completion_tokens": 7}}, True)
+        assert kwargs["on_chunk"] is None
         return '{"tool":"list_tree","arguments":{}}'
 
     publicados = []
@@ -115,10 +109,8 @@ def test_streaming_estruturado_publica_metricas_sem_texto_parcial(monkeypatch):
     )
 
     assert json.loads(resposta)["tool"] == "list_tree"
-    geracoes = [item for item in publicados if item["phase"] in ("generating", "validating")]
-    assert geracoes
-    assert any(item.get("estimated_tokens", 0) > 0 for item in geracoes)
-    assert all("partial_text" not in item for item in geracoes)
+    assert any(item["phase"] == "validating" for item in publicados)
+    assert all(item.get("partial_text") in (None, "") for item in publicados)
 
 
 def test_navegador_nao_reabre_job_terminal_cacheado():

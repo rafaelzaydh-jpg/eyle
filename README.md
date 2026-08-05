@@ -11,17 +11,16 @@
   <a href="docs/architecture.md">Architecture</a> ·
   <a href="docs/configuration.md">Configuration</a> ·
   <a href="docs/benchmark.md">Benchmark</a> ·
-  <a href="CHANGELOG.md">Revision 55.10</a> ·
+  <a href="CHANGELOG.md">Changelog</a> ·
   <a href="SECURITY.md">Security</a>
 </p>
 
 <p align="center">
   <img alt="Python 3.8+" src="https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white">
   <img alt="Release 2.7.3" src="https://img.shields.io/badge/release-2.7.3-2563EB">
-  <img alt="Revision 55.10" src="https://img.shields.io/badge/revision-55.10-7C3AED">
   <img alt="Local execution" src="https://img.shields.io/badge/execution-local-16A34A">
   <img alt="BM25 retrieval" src="https://img.shields.io/badge/retrieval-BM25-F59E0B">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-272%20passed-16A34A">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-276%20passed-16A34A">
 </p>
 
 ## Overview
@@ -30,13 +29,12 @@ Eyle indexes a local repository, retrieves only relevant evidence, and uses a lo
 
 | | |
 |---|---|
-| **Release** | 2.7.3 — revision 55.10 |
+| **Release** | 2.7.3 |
 | **Default rollout** | `read_only` until the real-model benchmark is validated locally |
 | **Recommended model target** | LFM2.5-8B-A1B or a compatible quantization |
 | **Privacy** | Source code, indexes, traces, queue, and history remain on the local machine |
 | **Mutable state** | `workspace/`, `memory/`, and `context/` are ignored by Git |
 
-**Release identity marker:** **Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.10-expandable-work-summary
 
 ### Main capabilities
 
@@ -49,73 +47,6 @@ Eyle indexes a local repository, retrieves only relevant evidence, and uses a lo
 - Shared deadlines, differentiated timeouts, retry backoff, rate limiting, and telemetry.
 - Short-cycle detection for repeated agent states and bounded queue reservation.
 - CLI, optional authenticated Flask interface, SQLite queue, checkpoints, and retention.
-
-## Revision 55.10
-
-Revision 55.10 adds a compact expandable work summary to completed jobs. The conversation shows only `Trabalho concluído em XmYYs`; opening it reveals the objective, files and line ranges read, analysis mode, tools, evidence IDs, fallback status, validation, and limitations.
-
-The summary is derived from deterministic job/result metadata. It does not expose prompts, chain-of-thought, raw tool output, or source-code contents.
-
-See [docs/releases/2.7.3-revision-55.10.md](docs/releases/2.7.3-revision-55.10.md).
-
-## Revision 55.9
-
-Revision 55.9 prevents the web panel from rate-limiting itself and restores full-code analysis for small projects. Active polling is bounded and respects `Retry-After`; small projects are read completely within configured limits instead of being summarized only by filenames and line counts.
-
-See [docs/releases/2.7.3-revision-55.9.md](docs/releases/2.7.3-revision-55.9.md).
-
-## Revision 55.5
-
-Revision 55.5 fixes three failures that looked unrelated but shared the same reliability path. Worker concurrency is now capped by the real LLM concurrency, so a stale analysis cannot keep running beside a newer chat job and publish its failure later. Browser failure notices are attached to the user message that created the job instead of appearing at the bottom without context.
-
-The cycle guard now requires three complete repetitions instead of pausing after only two similar states. Structured decisions use an exclusive JSON Schema branch, tool calls must include `arguments`, and fallback parsing selects the model's last valid self-correction. Parse recovery is limited to one retry. The same agent state machine remains active for projects of every size.
-
-See [docs/releases/2.7.3-revision-55.5.md](docs/releases/2.7.3-revision-55.5.md).
-
-## Revision 55.4
-
-Revision 55.4 fixes project analysis exhausting the global task deadline while retrying slow local-agent generations. Mandatory general-analysis setup now starts with `list_tree` deterministically for every project, structured agent decisions use a dedicated 512-token ceiling, and read timeouts are not blindly regenerated three times by the shipped configuration.
-
-The shared agent deadline is longer, but every individual local-model call remains bounded. This preserves one consistent agent workflow for small and large projects instead of adding a project-size shortcut.
-
-See [docs/releases/2.7.3-revision-55.4.md](docs/releases/2.7.3-revision-55.4.md).
-
-## Revision 55.3
-
-Revision 55.3 fixes local LLM requests being cancelled after exactly five seconds. `urllib` was using the short connection timeout while waiting for non-streaming llama-server response headers. Generation now receives the configured 120-second read window.
-
-The default backend was also changed from `localhost` to `127.0.0.1`, matching the IPv4 address used by llama-server on Windows.
-
-See [docs/releases/2.7.3-revision-55.3.md](docs/releases/2.7.3-revision-55.3.md).
-
-## Revision 55.2
-
-Revision 55.2 fixes the silent “job completed, no assistant message” path. Structured LLM transport/backend failures now finish as failed jobs, preserve a safe diagnostic, and are shown in the browser without contaminating assistant conversation history. Conversation polling also continues if job-status polling fails temporarily.
-
-Startup now checks the configured local LLM endpoint and prints a direct warning when `http://127.0.0.1:8080` (or the configured backend) is unavailable.
-
-See [docs/releases/2.7.3-revision-55.2.md](docs/releases/2.7.3-revision-55.2.md).
-
-## Revision 55.1
-
-Revision 55.1 fixes a silent Windows shutdown: `os.kill(pid, 0)` was used as an existence check in `engine/queue.py` and `engine/process_limiter.py`, but could terminate the observed process. PID probing is now centralized, uses `OpenProcess` + `WaitForSingleObject` on Windows, and never sends a signal.
-
-It also hardens legacy timezone-free timestamps, invalid heartbeats that could leave jobs stuck, and out-of-range PIDs that could crash health checks.
-
-See [docs/releases/2.7.3-revision-55.1.md](docs/releases/2.7.3-revision-55.1.md).
-
-## Revision 55 highlights
-
-Revision 55 implements critical optimization phase 2 for retrieval and ingestion:
-
-- builds inverted BM25 postings and scores only documents containing each query term;
-- selects exact Top-K candidates with a heap instead of sorting every score;
-- adds a 256-entry LRU for lexically equivalent retrieval queries;
-- invalidates cached selections when `chunks.jsonl` changes while reloading related history on every call;
-- parallelizes safe reads, secret detection, hashes, AST/symbol extraction, and chunk generation with up to four threads;
-- preserves deterministic `estrutura.json`, `chunks.jsonl`, and index fingerprints across serial and parallel modes.
-
-See [docs/releases/2.7.3-revision-55.md](docs/releases/2.7.3-revision-55.md).
 
 ## How it works
 
@@ -260,8 +191,6 @@ docs/        Architecture, configuration, benchmark, releases, and history
 - [Benchmark and validation](docs/benchmark.md)
 - [Upgrading and publishing](docs/github-publishing.md)
 - [Detailed technical overview](docs/technical-overview.md)
-- [Revision 55 report](docs/releases/2.7.3-revision-55.md)
-- [Revision 53 hardening report](docs/releases/2.7.3-hardening.md)
 
 ## License
 

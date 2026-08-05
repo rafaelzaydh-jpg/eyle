@@ -14,6 +14,7 @@ daqui. main.py (CLI) tambem chama processar() direto, para testar sem
 precisar subir o Flask.
 """
 import copy
+import contextvars
 import hashlib
 import json
 import os
@@ -52,6 +53,9 @@ from engine import progress as job_progress
 MEMORY_DIR = os.path.join(BASE_DIR, "memory")
 CONTEXT_DIR = os.path.join(BASE_DIR, "context")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+
+_JOB_ATUAL_ID = contextvars.ContextVar("eyle_source_job_id", default=None)
+_MENSAGEM_ORIGEM_ATUAL_ID = contextvars.ContextVar("eyle_source_message_id", default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +167,7 @@ def salvar_conversa(mensagens):
     _salvar_json(os.path.join(MEMORY_DIR, "conversa.json"), mensagens)
 
 
-def registrar_mensagem_com_snapshot(role, texto, limite_snapshot=6):
+def registrar_mensagem_com_snapshot(role, texto, limite_snapshot=6, metadata=None):
     """Registra uma mensagem e captura, sob o mesmo lock, o historico do job.
 
     O snapshot atomico impede que outra requisicao web inclua uma mensagem
@@ -173,12 +177,24 @@ def registrar_mensagem_com_snapshot(role, texto, limite_snapshot=6):
     with lock_para(caminho):
         mensagens = carregar_conversa()
         novo_id = (max((m["id"] for m in mensagens), default=0)) + 1
-        mensagens.append({
+        mensagem = {
             "id": novo_id,
             "role": role,
             "text": texto,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        })
+        }
+        if role == "assistant":
+            source_job_id = _JOB_ATUAL_ID.get()
+            source_message_id = _MENSAGEM_ORIGEM_ATUAL_ID.get()
+            if source_job_id is not None:
+                mensagem["source_job_id"] = int(source_job_id)
+            if source_message_id is not None:
+                mensagem["reply_to_message_id"] = int(source_message_id)
+        if isinstance(metadata, dict):
+            for chave, valor in metadata.items():
+                if chave not in {"id", "role", "text", "timestamp"}:
+                    mensagem[chave] = valor
+        mensagens.append(mensagem)
         salvar_conversa(mensagens)
         historico = _historico_sem_erros_llm(mensagens)
         if limite_snapshot is not None:
@@ -187,7 +203,7 @@ def registrar_mensagem_com_snapshot(role, texto, limite_snapshot=6):
         return novo_id, [dict(mensagem) for mensagem in historico]
 
 
-def registrar_mensagem(role, texto):
+def registrar_mensagem(role, texto, metadata=None):
     """Adiciona uma mensagem em memory/conversa.json e devolve o id gerado.
 
     Bug 2 do plano de correcao: registrar_mensagem e' chamada tanto pela
@@ -199,7 +215,7 @@ def registrar_mensagem(role, texto):
     mensagem (lost update) ou gerar o mesmo id duas vezes. O lock cobre a
     operacao inteira (ler, calcular novo_id, gravar), nao so a escrita.
     """
-    novo_id, _ = registrar_mensagem_com_snapshot(role, texto)
+    novo_id, _ = registrar_mensagem_com_snapshot(role, texto, metadata=metadata)
     return novo_id
 
 
@@ -214,29 +230,157 @@ def registrar_mensagem_se_nova(role, texto):
         ):
             return mensagens[-1].get("id")
         novo_id = max((m.get("id", 0) for m in mensagens), default=0) + 1
-        mensagens.append({
+        mensagem = {
             "id": novo_id,
             "role": role,
             "text": texto,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        })
+        }
+        if role == "assistant":
+            source_job_id = _JOB_ATUAL_ID.get()
+            source_message_id = _MENSAGEM_ORIGEM_ATUAL_ID.get()
+            if source_job_id is not None:
+                mensagem["source_job_id"] = int(source_job_id)
+            if source_message_id is not None:
+                mensagem["reply_to_message_id"] = int(source_message_id)
+        mensagens.append(mensagem)
         salvar_conversa(mensagens)
         return novo_id
 
 
 def remover_mensagem(mensagem_id):
-    """Remove uma mensagem de memory/conversa.json pelo id. Devolve True se
-    removeu algo. Mesmo lock de registrar_mensagem -- e' o mesmo arquivo,
-    tambem chamado pelo Worker (via fila de /mensagem/<id>) enquanto o
-    Flask pode estar processando outra requisicao ao mesmo tempo."""
+    """Remove uma mensagem de memory/conversa.json pelo id."""
     caminho = os.path.join(MEMORY_DIR, "conversa.json")
     with lock_para(caminho):
         mensagens = carregar_conversa()
-        restantes = [m for m in mensagens if m["id"] != mensagem_id]
+        restantes = [m for m in mensagens if m.get("id") != mensagem_id]
         removeu = len(restantes) != len(mensagens)
         if removeu:
             salvar_conversa(restantes)
         return removeu
+
+
+def remover_respostas_do_job(job_id):
+    """Apaga respostas que um job cancelado conseguiu gravar numa corrida final."""
+    caminho = os.path.join(MEMORY_DIR, "conversa.json")
+    with lock_para(caminho):
+        mensagens = carregar_conversa()
+        restantes = [
+            mensagem for mensagem in mensagens
+            if mensagem.get("source_job_id") != int(job_id)
+        ]
+        removeu = len(restantes) != len(mensagens)
+        if removeu:
+            salvar_conversa(restantes)
+        return removeu
+
+
+def _marcar_remocao_pendente(mensagem_id, job_ids):
+    caminho = os.path.join(MEMORY_DIR, "conversa.json")
+    job_ids = sorted({int(job_id) for job_id in job_ids})
+    with lock_para(caminho):
+        mensagens = carregar_conversa()
+        encontrou = False
+        for mensagem in mensagens:
+            if mensagem.get("id") != int(mensagem_id):
+                continue
+            encontrou = True
+            mensagem["pending_delete"] = True
+            anteriores = mensagem.get("delete_after_jobs") or []
+            mensagem["delete_after_jobs"] = sorted({
+                int(job_id) for job_id in [*anteriores, *job_ids]
+            })
+            mensagem.setdefault(
+                "delete_requested_at", time.strftime("%Y-%m-%dT%H:%M:%S"),
+            )
+            break
+        if encontrou:
+            salvar_conversa(mensagens)
+        return encontrou
+
+
+def finalizar_remocoes_pendentes():
+    """Remove mensagens quando todos os jobs que congelaram seu contexto terminam."""
+    caminho = os.path.join(MEMORY_DIR, "conversa.json")
+    with lock_para(caminho):
+        mensagens = carregar_conversa()
+        restantes = []
+        removidos = []
+        for mensagem in mensagens:
+            if not mensagem.get("pending_delete"):
+                restantes.append(mensagem)
+                continue
+            bloqueadores = mensagem.get("delete_after_jobs") or []
+            ainda_ativos = []
+            for job_id in bloqueadores:
+                registro = fila_persistente.obter(job_id)
+                if registro and registro.get("status") in ("pending", "processing"):
+                    ainda_ativos.append(int(job_id))
+            if ainda_ativos:
+                mensagem["delete_after_jobs"] = ainda_ativos
+                restantes.append(mensagem)
+            else:
+                removidos.append(mensagem.get("id"))
+        if removidos or restantes != mensagens:
+            salvar_conversa(restantes)
+        return [mensagem_id for mensagem_id in removidos if mensagem_id is not None]
+
+
+def solicitar_remocao_mensagem(mensagem_id):
+    """Aplica as regras de exclusao sem contaminar ou abortar o job errado.
+
+    A mensagem e marcada antes de consultar a fila. Assim, snapshots novos ja
+    deixam de usa-la. Jobs que ja possuem uma copia congelada continuam ate o
+    fim; o job originado pela propria mensagem recebe cancelamento imediato.
+    """
+    mensagem_id = int(mensagem_id)
+    caminho = os.path.join(MEMORY_DIR, "conversa.json")
+    with lock_para(caminho):
+        mensagens = carregar_conversa()
+        alvo = next((m for m in mensagens if m.get("id") == mensagem_id), None)
+        if alvo is None:
+            return {
+                "status": "not_found", "mensagem_id": mensagem_id,
+                "removed": False, "cancelled_jobs": [], "waiting_jobs": [],
+            }
+        alvo["pending_delete"] = True
+        alvo.setdefault("delete_after_jobs", [])
+        alvo.setdefault("delete_requested_at", time.strftime("%Y-%m-%dT%H:%M:%S"))
+        salvar_conversa(mensagens)
+
+    cancelamentos = fila_persistente.cancelar_jobs_da_mensagem(
+        mensagem_id, motivo="mensagem de origem removida pelo usuario",
+    )
+    cancelados = [
+        int(item["job_id"]) for item in cancelamentos
+        if item.get("changed") or item.get("status") == "cancelled"
+    ]
+    for job_id in cancelados:
+        fila_persistente.cancelar_tarefas_agente_por_job(
+            job_id, motivo="mensagem de origem removida pelo usuario",
+        )
+        remover_respostas_do_job(job_id)
+
+    bloqueadores = fila_persistente.jobs_ativos_usando_mensagem(
+        mensagem_id, excluir_job_ids=cancelados,
+    )
+    aguardando = [int(item["id"]) for item in bloqueadores]
+    if aguardando:
+        _marcar_remocao_pendente(mensagem_id, aguardando)
+    else:
+        remover_mensagem(mensagem_id)
+
+    finalizar_remocoes_pendentes()
+    ainda_existe = any(
+        mensagem.get("id") == mensagem_id for mensagem in carregar_conversa()
+    )
+    return {
+        "status": "deferred" if ainda_existe else "removed",
+        "mensagem_id": mensagem_id,
+        "removed": not ainda_existe,
+        "cancelled_jobs": cancelados,
+        "waiting_jobs": aguardando,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -831,7 +975,7 @@ def _esperar_retry_executor(config, tentativa):
 # ---------------------------------------------------------------------------
 
 def processar(pergunta, registrar_pergunta=True, forcar_tipo=None, historico_snapshot=None,
-              task_id=None, source_job_id=None):
+              task_id=None, source_job_id=None, source_message_id=None):
     """
     Roteia a pergunta ANTES de qualquer retrieval/LLM pesada. Na configuracao
     2.4, o alto nivel e conversa livre ou Agente Eyle; os pipelines antigos
@@ -875,6 +1019,8 @@ def processar(pergunta, registrar_pergunta=True, forcar_tipo=None, historico_sna
 
     Chamado tanto pelo worker (fila) quanto pelo CLI (main.py).
     """
+    _JOB_ATUAL_ID.set(source_job_id)
+    _MENSAGEM_ORIGEM_ATUAL_ID.set(source_message_id)
     config = dict(carregar_config() or {})
     cfg_agente_runtime = config.get("agent", {})
     deadline_segundos = max(
@@ -1076,7 +1222,11 @@ def _historico_sem_erros_llm(mensagens):
     historico legado criado antes dela. Filtra ANTES de cortar as ultimas
     6, pra uma sequencia de erros nao empurrar conteudo real pra fora da
     janela."""
-    return [m for m in mensagens if not (m.get("text") or "").startswith("[erro]")]
+    return [
+        m for m in mensagens
+        if not (m.get("text") or "").startswith("[erro]")
+        and not m.get("pending_delete")
+    ]
 
 
 def _historico_sem_mensagem_atual(mensagens, pergunta):

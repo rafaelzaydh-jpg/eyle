@@ -4,9 +4,21 @@ All notable changes to Eyle are documented here.
 
 ## Unreleased
 
-No unreleased changes yet.
-
 ## 2.7.3 — 2026-08-04
+
+### Revision 55.11 — cancellation-safe messages and structured reasoning fallback
+
+- Message deletion now cancels only the job created by that message. If a different message is already frozen in an active job context, its deletion is deferred until that response ends; new jobs exclude it immediately. Question jobs from the web panel run in a terminable child process so cancellation interrupts blocking local-LLM calls, and any late assistant response from the cancelled job is purged.
+- Disabled response streaming for structured Agent decisions (`forcar_json=True`) so private `reasoning_content` is never published as progress and the complete non-streaming response can be recovered safely.
+- Preserved the original structured-call intent when an OpenAI-compatible backend rejects `response_format`. The prompt-only JSON fallback now reads a decision stored only in `reasoning_content` even though the native JSON option is disabled.
+- Kept `reasoning_content` private for ordinary textual calls; it is recovered only for structured Agent requests.
+
+### Validation
+
+- `python -m compileall -q .` passed.
+- `node --check web/static/app.js` passed.
+- 279/279 executable tests passed.
+- One Flask-dependent module remained skipped because Flask was unavailable in the packaging environment.
 
 ### Revision 55.10 — expandable operational work summary
 

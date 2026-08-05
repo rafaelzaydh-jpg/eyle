@@ -585,7 +585,8 @@ def _chamar_ollama(
 def _chamar_openai_compatible(
     base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
     forcar_json=False, max_tokens=None, usar_system_role=True,
-    desativar_raciocinio=False, read_timeout=None, on_chunk=None,
+    desativar_raciocinio=False, recuperar_reasoning_content=False,
+    read_timeout=None, on_chunk=None,
 ):
     url = _endpoint_openai(base_url, "chat/completions")
     if usar_system_role:
@@ -660,7 +661,11 @@ def _chamar_openai_compatible(
         combinado = _conteudo_delta_openai(conteudo).strip()
         if combinado:
             return combinado
-    if forcar_json:
+    # Em chamadas estruturadas, alguns backends colocam o JSON somente em
+    # reasoning_content. A recuperacao precisa continuar ativa mesmo quando o
+    # response_format foi removido por compatibilidade. Chamadas textuais
+    # comuns mantêm esse campo privado.
+    if forcar_json or recuperar_reasoning_content:
         raciocinio = mensagem.get("reasoning_content")
         if isinstance(raciocinio, str) and raciocinio.strip():
             return raciocinio
@@ -700,6 +705,7 @@ def _chamar_openai_com_fallback(
             forcar_json=usar_json_nativo, max_tokens=max_tokens,
             usar_system_role=usar_system,
             desativar_raciocinio=usar_controles_raciocinio,
+            recuperar_reasoning_content=forcar_json,
             read_timeout=read_timeout, on_chunk=on_chunk,
         )
         if usar_json_nativo:
@@ -724,6 +730,7 @@ def _chamar_openai_com_fallback(
                 base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
                 forcar_json=True, max_tokens=max_tokens,
                 usar_system_role=usar_system, desativar_raciocinio=False,
+                recuperar_reasoning_content=forcar_json,
                 read_timeout=read_timeout, on_chunk=on_chunk,
             )
             capacidades["reasoning_controls"] = False
@@ -748,6 +755,7 @@ def _chamar_openai_com_fallback(
                 base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
                 forcar_json=False, max_tokens=max_tokens,
                 usar_system_role=usar_system,
+                recuperar_reasoning_content=forcar_json,
                 read_timeout=read_timeout, on_chunk=on_chunk,
             )
             capacidades["json_mode"] = False
@@ -769,6 +777,7 @@ def _chamar_openai_com_fallback(
             resposta = _chamar_openai_compatible(
                 base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
                 forcar_json=False, max_tokens=max_tokens, usar_system_role=False,
+                recuperar_reasoning_content=forcar_json,
                 read_timeout=read_timeout, on_chunk=on_chunk,
             )
             capacidades["system_role"] = False
@@ -1049,9 +1058,14 @@ def _chamar_llm_impl(
             transient=True, error_code="LLM_PROCESS_RATE_LIMIT_WAIT_TIMEOUT",
         )
 
+    # Decisoes estruturadas podem vir apenas em reasoning_content. O parser de
+    # streaming omite esse campo de proposito para nao publicar raciocinio
+    # interno; por isso chamadas JSON precisam usar a resposta nao-streaming,
+    # que ja possui a recuperacao segura desse campo.
     streaming_ativado = bool(
         job_progress.job_id_de(config) is not None
         and cfg_llm.get("stream_responses", True)
+        and not forcar_json
     )
     chars_por_token = max(
         1, int((config or {}).get("context_engine", {}).get("chars_per_token_fallback", 3)),

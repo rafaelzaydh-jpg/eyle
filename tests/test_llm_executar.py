@@ -394,6 +394,91 @@ def test_openai_usa_reasoning_content_se_content_vier_vazio(monkeypatch):
     assert resposta == '{"tool":"list_tree","arguments":{}}'
 
 
+
+def test_openai_json_fallback_recupera_reasoning_content_sem_response_format(monkeypatch):
+    payloads_chat = []
+
+    def fake_urlopen(req, timeout=None):
+        if req.full_url.endswith("/v1/models"):
+            return _RespostaFalsa({"data": [{"id": "modelo-teste"}]})
+        payload = json.loads(req.data.decode("utf-8"))
+        payloads_chat.append(payload)
+        if len(payloads_chat) <= 2:
+            assert "response_format" in payload
+            raise urllib.error.HTTPError(
+                req.full_url, 400, "Bad Request", {},
+                io.BytesIO(b'{"error":"response_format unsupported"}'),
+            )
+        assert "response_format" not in payload
+        return _RespostaFalsa({
+            "choices": [{"message": {
+                "content": "",
+                "reasoning_content": '{"tool":"list_tree","arguments":{}}',
+            }}],
+        })
+
+    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
+
+    resposta = llm_mod._chamar_llm(
+        "s", "u", _config(openai_compatible=True), forcar_json=True,
+    )
+
+    assert resposta == '{"tool":"list_tree","arguments":{}}'
+    assert len(payloads_chat) == 3
+
+
+def test_openai_json_mode_incompativel_lembrado_preserva_reasoning_content(monkeypatch):
+    payloads_chat = []
+
+    def fake_urlopen(req, timeout=None):
+        if req.full_url.endswith("/v1/models"):
+            return _RespostaFalsa({"data": [{"id": "modelo-teste"}]})
+        payload = json.loads(req.data.decode("utf-8"))
+        payloads_chat.append(payload)
+        if len(payloads_chat) <= 2:
+            raise urllib.error.HTTPError(
+                req.full_url, 400, "Bad Request", {},
+                io.BytesIO(b'{"error":"response_format unsupported"}'),
+            )
+        numero = len(payloads_chat) - 2
+        return _RespostaFalsa({
+            "choices": [{"message": {
+                "content": "",
+                "reasoning_content": f'{{"final":"ok-{numero}"}}',
+            }}],
+        })
+
+    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
+    cfg = _config(openai_compatible=True)
+
+    primeira = llm_mod._chamar_llm("s1", "u1", cfg, forcar_json=True)
+    segunda = llm_mod._chamar_llm("s2", "u2", cfg, forcar_json=True)
+
+    assert primeira == '{"final":"ok-1"}'
+    assert segunda == '{"final":"ok-2"}'
+    assert "response_format" not in payloads_chat[2]
+    assert "response_format" not in payloads_chat[3]
+
+
+def test_openai_textual_nao_expoe_reasoning_content(monkeypatch):
+    def fake_urlopen(req, timeout=None):
+        if req.full_url.endswith("/v1/models"):
+            return _RespostaFalsa({"data": [{"id": "modelo-teste"}]})
+        return _RespostaFalsa({
+            "choices": [{"message": {
+                "content": "",
+                "reasoning_content": "raciocinio privado",
+            }}],
+        })
+
+    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(llm_mod.ErroLLM) as erro:
+        llm_mod._chamar_llm("s", "u", _config(openai_compatible=True))
+
+    assert erro.value.error_code == "EMPTY_RESPONSE"
+
+
 def test_chamada_estruturada_ignora_cache_envenenado(monkeypatch):
     cfg = _config(openai_compatible=False, cache={"ativado": True})
     consultas_cache = []

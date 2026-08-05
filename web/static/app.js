@@ -82,6 +82,15 @@
     return t ? t.slice(0, 5) : "";
   }
 
+  function syncDeleteState(wrap, msg) {
+    const del = wrap.querySelector(".msg-del");
+    if (!del) return;
+    const pendente = Boolean(msg.pending_delete);
+    del.disabled = pendente;
+    del.textContent = pendente ? "removendo após resposta" : "remover";
+    wrap.classList.toggle("pending-delete", pendente);
+  }
+
   function buildMessageEl(msg) {
     const wrap = document.createElement("div");
     wrap.className = `msg ${msg.role === "user" ? "user" : "assistant"}`;
@@ -114,6 +123,7 @@
     meta.appendChild(del);
 
     wrap.appendChild(meta);
+    syncDeleteState(wrap, msg);
     return wrap;
   }
 
@@ -144,10 +154,13 @@
     });
 
     mensagens.forEach((msg) => {
-      if (!renderedIds.has(msg.id)) {
-        logEl.appendChild(buildMessageEl(msg));
-        renderedIds.add(msg.id);
+      const existente = logEl.querySelector(`.msg[data-id="${msg.id}"]`);
+      if (existente) {
+        syncDeleteState(existente, msg);
+        return;
       }
+      logEl.appendChild(buildMessageEl(msg));
+      renderedIds.add(msg.id);
     });
 
     if (atBottom) {
@@ -353,6 +366,7 @@
       processing: "em processamento",
       completed: "concluída",
       failed: "falhou",
+      cancelled: "cancelada",
     };
     const progresso = job.progresso || {};
     const partes = [`job #${job.id}`, progresso.message || rotulos[job.status] || job.status];
@@ -590,13 +604,26 @@
 
   async function deleteMessage(id) {
     const el = logEl.querySelector(`.msg[data-id="${id}"]`);
-    if (el) el.remove();
-    renderedIds.delete(id);
+    const botao = el ? el.querySelector(".msg-del") : null;
+    if (botao) {
+      botao.disabled = true;
+      botao.textContent = "removendo...";
+    }
     try {
       const res = await apiFetch(`/mensagem/${id}`, { method: "DELETE" });
-      if (res.ok) {
-        const data = await res.json();
-        acompanharJob(data.job_id, "remover");
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok && res.status !== 404) throw new Error("falha ao remover mensagem");
+
+      if (data.removed && el) {
+        el.remove();
+        renderedIds.delete(id);
+      } else if (data.status === "deferred" && botao) {
+        botao.textContent = "removendo após resposta";
+      }
+    } catch (err) {
+      if (botao) {
+        botao.disabled = false;
+        botao.textContent = "remover";
       }
     } finally {
       clearTimeout(conversaTimer);

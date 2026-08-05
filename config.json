@@ -236,7 +236,7 @@
   },
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "55.10-expandable-work-summary",
+  "revision": "55.11-cancellation-reasoning-fallback",
   "telemetry": {
     "enabled": true,
     "window_seconds": 3600,

@@ -30,6 +30,10 @@ class JobDeadlineExceeded(TimeoutError):
     error_code = "JOB_DEADLINE_EXCEEDED"
 
 
+class JobCancelled(RuntimeError):
+    error_code = "JOB_CANCELLED"
+
+
 class RemoteJobError(RuntimeError):
     def __init__(self, remote_type, message, remote_traceback=None):
         super().__init__(f"{remote_type}: {message}")
@@ -90,6 +94,7 @@ def processar_evento(evento):
                 if evento.get("_job_id") is not None else None
             ),
             source_job_id=evento.get("_job_id"),
+            source_message_id=evento.get("mensagem_id"),
         )
         print(
             f"[worker] processado: {evento['texto'][:60]!r} -> "
@@ -144,7 +149,7 @@ def _terminate_process(process, grace_seconds=1.0):
 
 def executar_evento_isolado(
     evento, deadline_seconds, *, heartbeat=None, heartbeat_interval=5,
-    mp_context="spawn", target=None,
+    mp_context="spawn", target=None, cancel_check=None,
 ):
     """Executa um evento em filho terminavel e devolve seu resultado."""
     deadline_seconds = max(0.1, float(deadline_seconds))
@@ -161,6 +166,11 @@ def executar_evento_isolado(
     child.close()
     try:
         while True:
+            if cancel_check is not None:
+                motivo_cancelamento = cancel_check()
+                if motivo_cancelamento:
+                    _terminate_process(process)
+                    raise JobCancelled(str(motivo_cancelamento))
             now = time.monotonic()
             if heartbeat is not None and now >= next_heartbeat:
                 heartbeat(process.pid)
@@ -175,6 +185,10 @@ def executar_evento_isolado(
                 status, payload = parent.recv()
                 process.join(timeout=1.0)
                 if status == "ok":
+                    if cancel_check is not None:
+                        motivo_cancelamento = cancel_check()
+                        if motivo_cancelamento:
+                            raise JobCancelled(str(motivo_cancelamento))
                     return payload
                 raise RemoteJobError(
                     payload.get("type", "RemoteError"),
@@ -186,6 +200,10 @@ def executar_evento_isolado(
                 if parent.poll():
                     status, payload = parent.recv()
                     if status == "ok":
+                        if cancel_check is not None:
+                            motivo_cancelamento = cancel_check()
+                            if motivo_cancelamento:
+                                raise JobCancelled(str(motivo_cancelamento))
                         return payload
                     raise RemoteJobError(
                         payload.get("type", "RemoteError"),
@@ -213,6 +231,34 @@ def _heartbeat_durante_job(worker_id, job_id, intervalo, parar):
             print(f"[worker][aviso] heartbeat falhou: {erro}")
 
 
+def _limpar_remocoes_pendentes_seguro():
+    try:
+        return eyle_engine.finalizar_remocoes_pendentes()
+    except Exception as erro:
+        print(f"[worker][aviso] limpeza de mensagens adiadas falhou: {erro}")
+        return []
+
+
+def _finalizar_cancelamento(evento, job_id, motivo, worker_id=None, started=None):
+    motivo = str(motivo or "cancelado pelo usuario")
+    if job_id is not None:
+        queue.marcar_cancelado(job_id, motivo)
+        queue.cancelar_tarefas_agente_por_job(job_id, motivo=motivo)
+        eyle_engine.remover_respostas_do_job(job_id)
+    _limpar_remocoes_pendentes_seguro()
+    if worker_id:
+        queue.registrar_heartbeat(worker_id, "idle")
+    duracao_ms = 0.0 if started is None else (time.monotonic() - started) * 1000
+    telemetry.record(
+        "job", str(evento.get("tipo") or "unknown"), "cancelled", duracao_ms,
+        task_id=f"job-{job_id}" if job_id is not None else None,
+        job_id=job_id,
+        metadata={"error_code": "JOB_CANCELLED", "detail": motivo[:500]},
+    )
+    print(f"[worker] job {job_id} cancelado: {motivo}")
+    return True
+
+
 def processar_proximo(
     timeout=1.0, *, worker_id=None, heartbeat_interval=5,
     max_invalid_jobs=100, isolate_job=False, job_deadline_seconds=300,
@@ -232,8 +278,18 @@ def processar_proximo(
     if worker_id:
         queue.registrar_heartbeat(worker_id, "processing", job_id=job_id)
 
+    motivo_inicial = queue.cancelamento_solicitado(job_id) if job_id is not None else None
+    if motivo_inicial:
+        return _finalizar_cancelamento(evento, job_id, motivo_inicial, worker_id, started)
+
+    # Perguntas web sempre rodam em processo terminavel. Sem isso, uma chamada
+    # HTTP sincrona da LLM nao pode ser interrompida com seguranca no Windows.
+    usar_isolamento = bool(
+        isolate_job or (worker_id is not None and evento.get("tipo") == "pergunta")
+    )
+
     try:
-        if isolate_job:
+        if usar_isolamento:
             def heartbeat(child_pid):
                 if worker_id:
                     queue.registrar_heartbeat(
@@ -246,6 +302,10 @@ def processar_proximo(
                 heartbeat=heartbeat,
                 heartbeat_interval=heartbeat_interval,
                 mp_context=mp_context,
+                cancel_check=(
+                    (lambda: queue.cancelamento_solicitado(job_id))
+                    if job_id is not None else None
+                ),
             )
         else:
             if worker_id:
@@ -256,7 +316,18 @@ def processar_proximo(
                 )
                 thread_heartbeat.start()
             resultado = processar_evento(evento)
+    except JobCancelled as error:
+        return _finalizar_cancelamento(
+            evento, job_id, str(error), worker_id=worker_id, started=started,
+        )
     except Exception as error:
+        motivo_cancelamento = (
+            queue.cancelamento_solicitado(job_id) if job_id is not None else None
+        )
+        if motivo_cancelamento:
+            return _finalizar_cancelamento(
+                evento, job_id, motivo_cancelamento, worker_id=worker_id, started=started,
+            )
         duracao = time.monotonic() - started
         resumo = _resumo_publico(
             evento, {
@@ -268,10 +339,17 @@ def processar_proximo(
             duracao, "failed",
         )
         if job_id is not None:
-            queue.falhar(
+            falhou = queue.falhar(
                 job_id, error, resumo_trabalho=resumo,
                 duracao_segundos=duracao,
             )
+            if not falhou:
+                motivo_cancelamento = queue.cancelamento_solicitado(job_id)
+                if motivo_cancelamento:
+                    return _finalizar_cancelamento(
+                        evento, job_id, motivo_cancelamento,
+                        worker_id=worker_id, started=started,
+                    )
         if worker_id:
             queue.registrar_heartbeat(worker_id, "error", job_id=job_id, detalhe=error)
         telemetry.record(
@@ -286,21 +364,37 @@ def processar_proximo(
             },
         )
         print(f"[worker][erro] falha processando job {job_id}: {error}")
+        _limpar_remocoes_pendentes_seguro()
         return True
     finally:
         parar_heartbeat.set()
         if thread_heartbeat is not None:
             thread_heartbeat.join(timeout=1.0)
 
+    motivo_cancelamento = (
+        queue.cancelamento_solicitado(job_id) if job_id is not None else None
+    )
+    if motivo_cancelamento:
+        return _finalizar_cancelamento(
+            evento, job_id, motivo_cancelamento, worker_id=worker_id, started=started,
+        )
+
     if _resultado_indica_falha(resultado):
         detalhe = _detalhe_falha_resultado(resultado)
         duracao = time.monotonic() - started
         resumo = _resumo_publico(evento, resultado, duracao, "failed")
         if job_id is not None:
-            queue.falhar(
+            falhou = queue.falhar(
                 job_id, detalhe, resultado=resultado,
                 resumo_trabalho=resumo, duracao_segundos=duracao,
             )
+            if not falhou:
+                motivo_cancelamento = queue.cancelamento_solicitado(job_id)
+                if motivo_cancelamento:
+                    return _finalizar_cancelamento(
+                        evento, job_id, motivo_cancelamento,
+                        worker_id=worker_id, started=started,
+                    )
         if worker_id:
             queue.registrar_heartbeat(worker_id, "error", job_id=job_id, detalhe=detalhe)
         telemetry.record(
@@ -309,29 +403,38 @@ def processar_proximo(
             task_id=f"job-{job_id}" if job_id is not None else None,
             job_id=job_id,
             metadata={
-                "isolated": bool(isolate_job),
+                "isolated": bool(usar_isolamento),
                 "error_code": resultado.get("error_code"),
                 "structured_failure": True,
             },
         )
         print(f"[worker][erro] job {job_id} terminou com falha estruturada: {detalhe}")
+        _limpar_remocoes_pendentes_seguro()
         return True
 
     duracao = time.monotonic() - started
     resumo = _resumo_publico(evento, resultado, duracao, "completed")
     if job_id is not None:
-        queue.concluir(
+        concluiu = queue.concluir(
             job_id, resultado, resumo_trabalho=resumo,
             duracao_segundos=duracao,
         )
+        if not concluiu:
+            motivo_cancelamento = queue.cancelamento_solicitado(job_id)
+            if motivo_cancelamento:
+                return _finalizar_cancelamento(
+                    evento, job_id, motivo_cancelamento,
+                    worker_id=worker_id, started=started,
+                )
     if worker_id:
         queue.registrar_heartbeat(worker_id, "idle")
+    _limpar_remocoes_pendentes_seguro()
     telemetry.record(
         "job", str(evento.get("tipo") or "unknown"), "ok",
         (time.monotonic() - started) * 1000,
         task_id=f"job-{job_id}" if job_id is not None else None,
         job_id=job_id,
-        metadata={"isolated": bool(isolate_job)},
+        metadata={"isolated": bool(usar_isolamento)},
     )
     return True
 
@@ -350,6 +453,7 @@ def _consumer_loop(worker_id, cfg):
                 mp_context=cfg["mp_context"],
             )
             if not processed:
+                _limpar_remocoes_pendentes_seguro()
                 queue.registrar_heartbeat(worker_id, "idle")
         except Exception as error:
             print(f"[worker][erro] ciclo da fila falhou: {type(error).__name__}: {error}")
@@ -394,6 +498,7 @@ def loop():
     stale_after = max(1, int(cfg_worker.get("stale_worker_seconds", 30)))
     recovered = queue.recuperar_interrompidos(stale_after_seconds=stale_after)
     agent_recovered = queue.recuperar_tarefas_agente_interrompidas()
+    _limpar_remocoes_pendentes_seguro()
     root_id = f"worker-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     print(
         f"[worker] iniciado: consumidores={parallel} "
