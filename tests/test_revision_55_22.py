@@ -179,8 +179,12 @@ def test_project_read_usa_finalizer_separado(tmp_path, monkeypatch):
         chamadas_finalizer.append(prompt)
         return json.dumps({
             "final": {
-                "answer": "Em a.py:1, `valor` recebe o inteiro `1`.",
-                "evidence_ids": ["ev-0001"],
+                "claims": [{
+                    "type": "fact",
+                    "text": "Em a.py:1, `valor` recebe o inteiro `1`.",
+                    "evidence_ids": ["ev-0001"],
+                    "basis": "",
+                }],
                 "verification": "Leitura fresca de a.py:1.",
                 "limitations": [],
             }

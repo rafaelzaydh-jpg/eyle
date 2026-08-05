@@ -1,40 +1,8 @@
 #!/usr/bin/env python3
-"""
-roteador.py
------------
-Classificador heuristico (0 chamadas de LLM) que decide o caminho de alto
-nivel antes de retrieval/LLM. Desde a Atualizacao 44, quando o Agente esta
-ativo, existem dois caminhos publicos:
+"""Roteador leve da Eyle 2.7.4.
 
-    "chat"       -> conversa geral sem projeto
-    "agente"     -> qualquer pedido reconhecido como relativo ao projeto
-
-Dentro de "agente", ``classificar_modo_projeto`` escolhe analyze, suggest ou
-edit. Os tipos historicos abaixo permanecem somente como fallback compativel
-quando o Agente estiver desligado ou enquanto edit aguarda a Atualizacao 46:
-
-    "chat"       -> conversa geral, nao precisa do projeto (Executor direto)
-    "consulta"   -> pergunta especifica sobre o projeto, precisa buscar
-                    (Retrieval -> Executor, sem Analista, sem retry)
-    "dicas"      -> pede sugestao/opiniao sobre o projeto (Atualizacao 4):
-                    usa o Modelo Interno (entendimento.json['arquivos']) pra
-                    escolher componentes candidatos, le o codigo real deles
-                    e so entao sugere -- nao aplica nenhuma mudanca
-    "visao_geral"-> pedido generico tipo "da uma olhada no projeto"/"confere
-                    o codigo" -- sem termo especifico pra buscar, entao NAO
-                    usa retrieval; monta o panorama direto de
-                    estrutura.json/entendimento.json (Executor direto)
-    "engenharia" -> pede mudanca real (editar/criar/corrigir codigo),
-                    precisa do pipeline completo (Retrieval -> Analista ->
-                    Executor -> Verify, com retry)
-
-Isso resolve o gargalo principal descrito no plano de otimizacao: hoje
-TODA mensagem roda o pipeline pesado, mesmo um "oi" ou "quanto e 2+2".
-
-Atualizacao 5 acrescenta um mecanismo separado (nao um tipo de pipeline):
-detectar_resposta_proposta(...), usado so quando ja existe uma proposta de
-patch pendente -- decide se a mensagem atual e uma confirmacao ('sim') ou
-cancelamento ('nao') dela, ANTES de classificar_pergunta(...) rodar.
+Existem somente dois caminhos publicos: ``chat`` e ``agente``. O modo interno
+do agente (analyze/suggest/edit) e derivado da intencao do pedido.
 """
 import difflib
 import re
@@ -207,12 +175,9 @@ def _pede_inspecao_projeto(texto_norm):
     (ex: 'da uma olhada no projeto', 'confere o codigo', 'analisa o
     projeto pra mim') -- generaliza melhor que listar frase por frase.
 
-    Isso NAO e uma pergunta especifica (nao ha palavra-chave pra buscar no
-    codigo): a palavra 'olhada'/'projeto' nao aparece no conteudo indexado,
-    entao rodar retrieval/buscar.py com o texto literal da pergunta so
-    devolveria ruido. Por isso vira seu proprio tipo ('visao_geral'), que
-    o engine trata SEM retrieval -- monta o panorama direto de
-    estrutura.json/entendimento.json."""
+    Isso nao e uma pergunta especifica. O roteador apenas reconhece que o
+    pedido exige contexto do projeto e envia tudo ao unico tipo publico
+    ``agente``; o proprio agente decide listar, buscar ou ler arquivos."""
     tokens = set(_RE_PALAVRA.findall(texto_norm))
     if not tokens:
         return False
@@ -258,7 +223,7 @@ def pede_auditoria_projeto(texto):
 # Atualizacao Agente / Fase 2 -- vocabulario que indica tarefa MULTI-PASSO
 # (algo que precisa de investigacao/execucao encadeada -- ler, editar,
 # rodar teste, ajustar de novo -- em vez de uma mudanca pontual de texto
-# unica que o pipeline 'engenharia' de sempre ja resolve bem). So importa
+# pontual. So importa
 # quando combinado com PALAVRAS_ENGENHARIA (ver classificar_pergunta) --
 # sozinho, "e depois" nao significa nada.
 PALAVRAS_MULTIPASSO = {
@@ -299,99 +264,31 @@ def classificar_modo_projeto(pergunta):
     return "analyze"
 
 
-def classificar_pergunta(pergunta, estrutura=None, entendimento=None, agent_habilitado=False):
-    """
-    Devolve ('chat' | 'agente', motivo) quando ``agent_habilitado=True``.
-    Com a flag desligada, preserva os tipos legados consulta/dicas/
-    visao_geral/engenharia como fallback compativel.
-    Heuristico e conservador: na duvida entre consulta/engenharia, prefere
-    engenharia (pipeline completo) para nao arriscar aplicar mudanca sem
-    o Analista/Verify. Na duvida entre chat/consulta, prefere consulta
-    quando ha match de arquivo/simbolo conhecido. 'dicas' fica entre
-    engenharia e consulta: pede opiniao/sugestao (nao aplica nada), mas
-    precisa ler codigo real (mais do que uma consulta simples) -- se a
-    mensagem tambem pede uma mudanca explicita (PALAVRAS_ENGENHARIA), essa
-    checagem roda primeiro e ganha.
+def classificar_pergunta(pergunta, estrutura=None, entendimento=None, agent_habilitado=True):
+    """Decide somente entre conversa livre e a unica Eyle agente.
 
-    agent_habilitado espelha config.json['agent']['enabled']. Na configuracao
-    2.4 fica True com apenas analyze/suggest em enabled_modes; edit entra no
-    mesmo ponto de entrada e usa fallback interno ate a Atualizacao 46.
+    A flag ``agent_habilitado`` permanece na assinatura por compatibilidade de
+    API, mas 2.7.4 nao possui pipeline alternativo para tarefas de projeto.
     """
-    texto_norm = _normalizar(pergunta)
+    texto_norm = _normalizar(pergunta or "")
 
     if _pede_analise_curta(texto_norm):
-        if agent_habilitado:
-            return (
-                "agente",
-                "pedido curto de analise encaminhado ao Agente Eyle no modo analyze",
-            )
-        return "visao_geral", "pedido curto de analise geral do projeto"
-
+        return "agente", "pedido curto de analise encaminhado a Eyle"
     if _contem_frase(texto_norm, PALAVRAS_ENGENHARIA):
-        if agent_habilitado:
-            return (
-                "agente",
-                "pedido sobre projeto encaminhado ao Agente Eyle no modo edit",
-            )
-        return "engenharia", "mensagem pede uma mudanca no codigo/projeto"
-
+        return "agente", "pedido de criacao ou edicao encaminhado a Eyle"
     if _contem_frase(texto_norm, PALAVRAS_DICAS):
-        if agent_habilitado:
-            return (
-                "agente",
-                "pedido sobre projeto encaminhado ao Agente Eyle no modo suggest",
-            )
-        return "dicas", "mensagem pede sugestao/opiniao sobre o projeto"
-
+        return "agente", "pedido de sugestao sobre o projeto encaminhado a Eyle"
     if _contem_frase(texto_norm, PALAVRAS_CONSULTA):
-        if agent_habilitado:
-            return (
-                "agente",
-                "pedido sobre projeto encaminhado ao Agente Eyle no modo analyze",
-            )
-        return "consulta", "mensagem pergunta sobre o projeto (leitura/explicacao)"
-
-    if _menciona_arquivo_ou_simbolo(texto_norm, estrutura, entendimento):
-        if agent_habilitado:
-            return (
-                "agente",
-                "arquivo/simbolo conhecido encaminhado ao Agente Eyle no modo analyze",
-            )
-        return "consulta", "mensagem menciona um arquivo/simbolo conhecido do projeto"
-
+        return "agente", "pedido de leitura ou explicacao encaminhado a Eyle"
+    if _menciona_arquivo_ou_simbolo(texto_norm, estrutura or {}, entendimento or {}):
+        return "agente", "arquivo ou simbolo conhecido encaminhado a Eyle"
     if _pede_inspecao_projeto(texto_norm):
-        if agent_habilitado:
-            return (
-                "agente",
-                "analise geral do projeto encaminhada ao Agente Eyle no modo analyze",
-            )
-        return "visao_geral", "mensagem pede uma olhada/analise geral do projeto (sem termo especifico pra buscar)"
+        return "agente", "pedido de inspecao encaminhado a Eyle"
 
-    # Atualizacao 13: rede de seguranca. Nenhuma categoria acima bateu, mas
-    # a mensagem menciona um substantivo de projeto (ex: "como melhorar o
-    # PROJETO", "3 caminhos para o CODIGO") -- sem verbo de inspecao
-    # reconhecido, entao nao virou "visao_geral" acima. Cair em "chat" aqui
-    # seria responder sem NENHUM contexto do projeto com a mesma confianca
-    # de uma resposta grounded -- foi exatamente isso que gerou a
-    # auto-descricao inventada do projeto (ver caso real documentado em
-    # Atual_Versao.md). Preferir "visao_geral" custa uma leitura de
-    # estrutura.json/entendimento.json a mais; "chat" errado aqui custa uma
-    # resposta fabricada que o usuario nao tem como distinguir de uma
-    # resposta real.
     tokens = set(_RE_PALAVRA.findall(texto_norm))
     if tokens and _bate_com_tolerancia(tokens, SUBSTANTIVOS_PROJETO):
-        if agent_habilitado:
-            return (
-                "agente",
-                "mencao ao projeto encaminhada ao Agente Eyle no modo analyze",
-            )
-        return (
-            "visao_geral",
-            "mensagem nao bateu em nenhuma categoria especifica, mas menciona o projeto -- "
-            "prefere dar contexto a arriscar resposta sem grounding (rede de seguranca)",
-        )
-
-    return "chat", "mensagem nao parece precisar do contexto do projeto"
+        return "agente", "mensagem menciona o projeto"
+    return "chat", "mensagem nao depende do projeto"
 
 
 # ---------------------------------------------------------------------------

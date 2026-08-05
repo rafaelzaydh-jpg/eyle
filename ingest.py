@@ -11,7 +11,7 @@ constrói a MEMORIA EXTERNA da Eyle:
     memory/historico.json   -> log de decisoes (criado vazio se nao existir)
 
 Nada disso entra na LLM de uma vez. E so o "HD" da inteligencia.
-A LLM so ve o que o retrieval/buscar.py selecionar depois.
+A Eyle usa o indice apenas como uma ferramenta de busca; conclusoes exigem leitura fresca.
 
 Uso:
     python ingest.py /caminho/do/projeto
@@ -32,7 +32,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-from engine.entender import gerar_entendimento_arquivos  # Atualizacao 3 -- Modelo Interno do Projeto
 from engine.seguranca import _resolver_caminho_seguro
 from engine.persistencia import salvar_json_atomico, salvar_jsonl_atomico
 from engine.config_schema import carregar_config_validada
@@ -309,25 +308,11 @@ def _coletar_arquivos_indexaveis(caminho_projeto, config=None):
 
 
 def _config_indexacao(config, chunk_max_tokens, chars_per_token):
-    config = config or {}
-    cfg_llm = config.get("llm", {})
-    cfg_entendimento = config.get("entendimento", {})
+    """Somente opcoes que alteram o indice deterministico."""
     return {
         "indexer_version": INDEXER_VERSION,
         "chunk_max_tokens": int(chunk_max_tokens),
         "chars_per_token": int(chars_per_token),
-        "entendimento": {
-            "gerar_via_llm": bool(cfg_entendimento.get("gerar_via_llm", True)),
-            "max_chars_por_arquivo": cfg_entendimento.get("max_chars_por_arquivo", 20000),
-        },
-        "llm": {
-            "provider": cfg_llm.get("provider", "ollama"),
-            "base_url": str(cfg_llm.get("base_url", "http://localhost:11434")).rstrip("/"),
-            "model": cfg_llm.get("model", "qwen2.5:7b-instruct-q4_0"),
-            "openai_compatible": bool(cfg_llm.get("openai_compatible", False)),
-            "temperature": cfg_llm.get("temperature", 0.2),
-            "max_tokens": cfg_llm.get("max_tokens", 700),
-        },
     }
 
 
@@ -774,15 +759,20 @@ def ingerir(caminho_projeto, nome_projeto, out_dir, chunk_max_tokens=400, chars_
     if os.path.exists(entendimento_path):
         with open(entendimento_path, "r", encoding="utf-8") as f:
             entendimento_existente = json.load(f)
-    # "componentes": resumo heuristico por pasta (sem LLM), como ja era -- preservado
+    # 2.7.4: memoria de navegacao totalmente deterministica. O ingest nao chama
+    # a LLM e nao tenta "entender" o projeto antecipadamente.
     entendimento_json = montar_entendimento(estrutura, caminho_projeto, entendimento_existente)
-    # "arquivos": Modelo Interno do Projeto (Atualizacao 3) -- um objeto por
-    # arquivo, gerado pela LLM lendo o arquivo inteiro, so regenerando o que
-    # mudou (via hash). Ver engine/entender.py.
-    entendimento_json["arquivos"] = gerar_entendimento_arquivos(
-        estrutura, caminho_projeto, config=config, entendimento_existente=entendimento_existente,
-    )
-    entendimento_json["version"] = "1.1"
+    arquivos_hint = {}
+    for caminho_rel, info in estrutura.items():
+        simbolos = list(info.get("funcoes_classes") or [])
+        resumo = ", ".join(simbolos[:8]) if simbolos else "sem simbolos extraidos"
+        arquivos_hint[caminho_rel] = {
+            "hash": info.get("hash"),
+            "responsabilidade": f"arquivo indexado; simbolos: {resumo}",
+            "fonte": "deterministic_index",
+        }
+    entendimento_json["arquivos"] = arquivos_hint
+    entendimento_json["version"] = "2.0"
     entendimento_json["updated"] = agora
     salvar_json_atomico(entendimento_path, entendimento_json)
 
@@ -815,7 +805,7 @@ def ingerir(caminho_projeto, nome_projeto, out_dir, chunk_max_tokens=400, chars_
     print(f"[ingest] Tokens estimados:  {total_tokens}  (memoria externa, fora da LLM)")
     print(f"[ingest] Ignorados com seguranca: {sum(ignorados.values())} {ignorados}")
     print(f"[ingest] Componentes (entendimento.json['componentes']): {len(entendimento_json['componentes'])}")
-    print(f"[ingest] Arquivos com entendimento (entendimento.json['arquivos']): {len(entendimento_json['arquivos'])}")
+    print(f"[ingest] Arquivos com pistas deterministicas: {len(entendimento_json['arquivos'])}")
     print(f"[ingest] Entidades (evidencias.json):      {len(evidencias_json['entidades'])}")
     print(f"[ingest] Saida em:          {out_dir}")
 
@@ -830,17 +820,10 @@ def main():
                          help="Pasta de saida da memoria (default: ./memory)")
     parser.add_argument("--chunk-max-tokens", type=int, default=400)
     parser.add_argument("--config", default=os.path.join(base_dir, "config.json"),
-                         help="config.json a usar (default: ./config.json) -- controla o endpoint da LLM "
-                              "usada para gerar entendimento.json['arquivos'] (Atualizacao 3)")
-    parser.add_argument("--pular-entendimento-llm", action="store_true",
-                         help="Ignora config.json['entendimento']['gerar_via_llm'] e forca ingest so-heuristico "
-                              "(sem chamar a LLM, sem precisar de servidor local rodando). Entradas antigas de "
-                              "entendimento.json['arquivos'] sao preservadas.")
+                         help="config.json a usar (default: ./config.json)")
     args = parser.parse_args()
 
     config = carregar_config_validada(args.config)
-    if args.pular_entendimento_llm:
-        config.setdefault("entendimento", {})["gerar_via_llm"] = False
 
     nome = args.nome or os.path.basename(os.path.normpath(args.caminho))
     ingerir(

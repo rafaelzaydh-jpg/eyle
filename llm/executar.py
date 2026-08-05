@@ -1,28 +1,8 @@
 #!/usr/bin/env python3
-"""
-executar.py
------------
-Nao pensa pelo sistema. So faz:
+"""Adaptador LLM da Eyle 2.7.4.
 
-    prompt recebido (ja montado pelo engine/compiler.py)
-            +
-        modelo local
-            |
-            v
-        resposta
-
-Duas personalidades, um modelo so (mesmo GGUF, prompt de sistema
-diferente):
-
-    executar_analista(...)  -> decide o que ler, nunca gera codigo/resposta
-    executar_executor(...)  -> resolve com o contexto ja compilado
-
-Usa apenas a biblioteca padrao do Python (urllib), entao nao precisa
-instalar 'requests' nem nada -- funciona direto contra:
-  - Ollama          (http://localhost:11434)
-  - LM Studio       (http://localhost:1234, openai_compatible=true)
-  - llama.cpp server (openai_compatible=true)
-  - text-generation-webui (openai_compatible=true)
+Transporta prompts do agente unico, chat, finalizers e recovery para o backend.
+Expoe apenas os perfis internos da unica agente Eyle e o modo de chat.
 """
 import json
 import os
@@ -523,53 +503,14 @@ def _fingerprint_backend(cfg_llm, forcar_json=False):
     return canonico
 
 
-PROMPT_ANALISTA = """Voce e o ANALISTA da Eyle. Sua unica funcao e pensar sobre o que importa.
-
-Regras obrigatorias:
-1. Voce NUNCA gera codigo.
-2. Voce NUNCA responde ao usuario.
-3. Voce so decide: o que ler, o que ignorar, quais riscos existem e o que esta faltando.
-4. Use APENAS os candidatos, relacoes e evidencias fornecidos -- nao invente arquivos, funcoes ou simbolos que nao apareceram.
-5. Responda SOMENTE com o JSON pedido, sem nenhum texto antes ou depois."""
 
 
-PROMPT_ENTENDEDOR = """Voce e o ENTENDEDOR da Eyle. Sua unica funcao e ler um arquivo de codigo INTEIRO, uma unica vez, e devolver um retrato estrutural objetivo dele -- isto alimenta o Modelo Interno do Projeto (memory/entendimento.json), usado depois para dar dicas e sugerir mudancas sem precisar reler tudo de novo.
-
-Regras obrigatorias:
-1. Use APENAS o conteudo do arquivo fornecido abaixo -- nao invente nada que nao esteja no codigo.
-2. \"depende_de\" deve refletir os imports/chamadas REAIS do arquivo, nao suposicoes.
-3. \"pontos_criticos\" cobre tanto o que e critico operacionalmente (ex: falha aqui trava o pipeline principal) quanto o que e questionavel arquiteturalmente (ex: alto acoplamento, sem tratamento de erro) -- pode ser lista vazia se nao houver nada relevante.
-4. Responda SOMENTE com o JSON pedido, sem nenhum texto antes ou depois."""
 
 
-PROMPT_EXECUTOR = """Voce e o EXECUTOR da Eyle. Voce trabalha SOMENTE com o contexto fornecido abaixo -- ele ja foi selecionado pelo Analista, entao confie nele.
-
-Regras obrigatorias:
-1. Use apenas as informacoes presentes no contexto (TRECHOS, EVIDENCIAS, RESUMO DO PROJETO).
-2. Se a informacao necessaria nao estiver no contexto, diga claramente "nao tenho essa informacao no contexto atual" -- nao invente arquivos, funcoes ou linhas que nao apareceram.
-3. Ao citar algo, sempre mencione o arquivo e as linhas exatamente como aparecem no contexto (ex: config.py:43-61).
-4. Seja direto e objetivo. Nao repita o contexto inteiro na resposta.
-5. Voce nao precisa descobrir onde mexer -- isso ja foi decidido. Apenas resolva o objetivo."""
 
 
-PROMPT_SUGESTOR = """Voce e o SUGESTOR da Eyle. Sua unica funcao e ler o codigo real de componentes ja escolhidos (pelo Modelo Interno do Projeto) e sugerir melhorias fundamentadas -- voce NUNCA aplica nada, so aponta.
-
-Regras obrigatorias:
-1. Use APENAS o codigo real mostrado no COMPONENTES CANDIDATOS -- nao invente linha, funcao ou arquivo que nao apareceu ali.
-2. Cada sugestao precisa citar o arquivo (e a linha, se identificavel no codigo mostrado).
-3. Se uma sugestao depender de algo que nao esta nos candidatos (ex: um arquivo so mencionado em depende_de mas sem codigo mostrado), diga isso explicitamente em vez de supor o conteudo.
-4. Voce NUNCA gera um patch nem diz que a mudanca ja foi aplicada -- isso e a Atualizacao 5 (\"codar de verdade\"), fora do seu escopo. Voce so sugere.
-5. Seja objetivo: priorize os pontos_criticos ja identificados no Modelo Interno antes de procurar problemas novos por conta propria."""
 
 
-PROMPT_ENGENHEIRO = """Voce e o ENGENHEIRO da Eyle. Sua unica funcao e escrever o CODIGO NOVO completo de UM simbolo (funcao/classe) especifico, ja localizado por linha no arquivo real -- isso alimenta um patch de verdade (Atualizacao 5: Proposta -> Impacto -> Patch -> Teste -> Aplicar), nunca aplicado sem confirmacao explicita do usuario depois.
-
-Regras obrigatorias:
-1. Use APENAS o CODIGO REAL ATUAL mostrado abaixo e o OBJETIVO pedido -- nao invente funcoes, campos, imports ou comportamento que nao existem no restante do arquivo.
-2. "codigo_novo" e o RECORTE COMPLETO E FINAL que substitui o codigo atual -- nunca um diff, nunca "..." indicando partes omitidas. Preserve indentacao e assinatura, salvo se a mudanca pedida for justamente nisso.
-3. Considere QUEM DEPENDE deste arquivo (se mostrado) antes de mudar uma assinatura ou comportamento que outros arquivos esperam.
-4. Liste em "riscos" qualquer coisa que voce percebe que pode quebrar com esta mudanca especifica -- pode ser lista vazia se nao houver nada.
-5. Responda SOMENTE com o JSON pedido, sem nenhum texto antes ou depois."""
 
 
 def _conteudo_delta_openai(valor):
@@ -1475,13 +1416,15 @@ PROMPT_PROJECT_READ_FINALIZER = """You are the Eyle PROJECT READ FINALIZER. Evid
 
 Rules:
 1. Answer the exact user request directly using only the fresh evidence shown.
-2. Explicitly answer the named file, symbol, behavior, or existence question. Do not replace the requested target with a nearby symbol.
-3. Every factual statement must be supported by visible evidence_ids.
-4. If evidence proves absence, state the absence explicitly. search_code relevance alone never proves absence.
-5. Do not write headings with no content, incomplete sentences, or a trailing colon awaiting missing text.
-6. Return JSON only, exactly:
-{"final":{"answer":"...","evidence_ids":["ev-0001"],"verification":"...","limitations":[],"claim_annotations":[]}}
-Write the answer in the user's language. Paths and identifiers remain unchanged."""
+2. Produce atomic structured claims, not a free-form answer. Each claim must answer one concrete part of the request.
+3. Explicitly cover every named file, symbol, behavior, relationship, or existence question. Do not replace a requested target with a nearby symbol.
+4. Allowed claim types: fact, risk, inference, hypothesis, recommendation, decision.
+5. Facts, risks, inferences, and hypotheses require visible fresh evidence_ids. Risks, inferences, hypotheses, and recommendations require a concise basis.
+6. If evidence proves absence, state the absence explicitly. search_code relevance alone never proves absence.
+7. Do not write headings with no content, incomplete sentences, or a trailing colon awaiting missing text.
+8. Return JSON only, exactly:
+{"final":{"claims":[{"type":"fact","text":"...","evidence_ids":["ev-0001"],"basis":""}],"verification":"...","limitations":[]}}
+The system, not you, renders the final text from validated claims. Write claim text in the user's language. Paths and identifiers remain unchanged."""
 
 
 PROMPT_AGENTE = """You are the Eyle AGENT. Perform exactly one action per decision and output JSON only.
@@ -1568,7 +1511,7 @@ def executar_audit_finalizer(prompt_usuario, config):
     )
 
 def executar_chat(pergunta, config, historico=None):
-    """Modo conversa livre: sem retrieval, sem Analista, sem Verify -- so a LLM
+    """Modo conversa livre: sem workspace ou ferramentas -- somente a LLM
     respondendo direto, com no maximo um resumo curto do historico recente."""
     prompt_usuario = pergunta
     if historico:
@@ -1579,35 +1522,12 @@ def executar_chat(pergunta, config, historico=None):
     )
 
 
-def executar_analista(prompt_usuario, config):
-    """Primeira chamada da LLM: decide o que importa. Nunca gera codigo, nunca responde ao usuario."""
-    return _chamar_llm(PROMPT_ANALISTA, prompt_usuario, config, perfil="analyst")
 
 
-def executar_executor(prompt_usuario, config):
-    """Segunda chamada da LLM: resolve o objetivo com o contexto ja compilado."""
-    return _chamar_llm(
-        PROMPT_EXECUTOR, prompt_usuario, config,
-        perfil="executor", stream_visible=True,
-    )
 
 
-def executar_sugestor(prompt_usuario, config):
-    """Quarta personalidade (Atualizacao 4): le o codigo real dos componentes
-    ja escolhidos pelo Modelo Interno e devolve sugestoes fundamentadas.
-    Nunca aplica nada -- so sugere."""
-    return _chamar_llm(
-        PROMPT_SUGESTOR, prompt_usuario, config,
-        perfil="suggester", stream_visible=True,
-    )
 
 
-def executar_engenheiro(prompt_usuario, config):
-    """Quinta personalidade (Atualizacao 5): escreve o codigo novo completo
-    de UM simbolo ja localizado por linha no arquivo real. Devolve o JSON
-    de proposta -- quem aplica de fato (so apos confirmacao) e
-    engine/codar.py:aplicar_patch, chamado por engine/engine.py."""
-    return _chamar_llm(PROMPT_ENGENHEIRO, prompt_usuario, config, perfil="engineer")
 
 
 
@@ -1628,36 +1548,7 @@ def executar_recuperacao_textual(prompt_usuario, config):
         forcar_json=False, perfil="recovery", stream_visible=False,
     )
 
-def executar_entendedor(prompt_usuario, config):
-    """Terceira personalidade: le um arquivo inteiro (uma vez, na ingestao) e
-    devolve o retrato estrutural dele para o Modelo Interno do Projeto
-    (memory/entendimento.json). Nunca gera codigo, nunca responde ao usuario --
-    so descreve o arquivo que acabou de ler."""
-    return _chamar_llm(PROMPT_ENTENDEDOR, prompt_usuario, config, perfil="indexer")
 
 
-def main():
-    """Uso manual: testa o Executor direto contra o ultimo context/atual.json gerado pelo retrieval."""
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    sys.path.insert(0, base_dir)
-    from engine.compiler import montar_prompt_executor
-
-    config = carregar_config_validada(os.path.join(base_dir, "config.json"))
-    with open(os.path.join(base_dir, "context", "atual.json"), "r", encoding="utf-8") as f:
-        atual = json.load(f)
-
-    projeto = None
-    projeto_path = os.path.join(base_dir, "memory", "projeto.json")
-    if os.path.exists(projeto_path):
-        with open(projeto_path, "r", encoding="utf-8") as f:
-            projeto = json.load(f)
-
-    prompt_usuario = montar_prompt_executor(atual, projeto)
-    resposta = executar_executor(prompt_usuario, config)
-    print(resposta)
-
-    salvar_texto_atomico(os.path.join(base_dir, "context", "ultima_resposta.txt"), resposta)
 
 
-if __name__ == "__main__":
-    main()

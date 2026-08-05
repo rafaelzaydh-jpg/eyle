@@ -29,8 +29,11 @@ def test_tools_de_leitura_usam_o_mesmo_envelope(monkeypatch):
     monkeypatch.setattr(tools_mod, "localizar_simbolo", lambda *a, **k: {
         "linha_inicio": 1, "linha_fim": 2, "codigo_original": "x = 1",
     })
-    monkeypatch.setattr(tools_mod, "ler_codigo_real", lambda *a, **k: {
-        "a.py": {"conteudo": "x = 1\n", "truncado": False},
+    monkeypatch.setattr(tools_mod, "ler_faixa_projeto", lambda *a, **k: {
+        "arquivo": "a.py", "linha_inicio": 1, "linha_fim": 1,
+        "total_linhas_arquivo": 1, "conteudo_raw": "x = 1\n",
+        "trecho_numerado": "     1 | x = 1", "content_hash": HASH,
+        "file_hash": HASH, "fim_ajustado_ao_arquivo": True,
     })
 
     chamadas = [
@@ -147,14 +150,13 @@ def test_catalogo_resolve_limites_da_config():
             "max_tree_depth": 3,
             "max_read_range_lines": 25,
         },
-        "dicas": {"max_chars_por_arquivo": 900},
     })
     por_nome = {item["name"]: item for item in catalogo}
     assert por_nome["list_tree"]["limits"] == {
         "max_entradas": 17, "max_profundidade": 3,
     }
     assert por_nome["read_range"]["limits"] == {"max_linhas": 25}
-    assert por_nome["read_file"]["limits"] == {"max_caracteres": 900}
+    assert por_nome["read_file"]["limits"] == {"max_linhas": 25}
 
 
 def test_validacao_central_rejeita_ausente_tipo_errado_e_chave_desconhecida(monkeypatch):
@@ -226,9 +228,6 @@ def test_cada_schema_aceita_uma_chamada_canonica(monkeypatch):
     })
     monkeypatch.setattr(tools_mod, "localizar_simbolo", lambda *a, **k: {
         "linha_inicio": 1, "linha_fim": 1, "codigo_original": "x = 1",
-    })
-    monkeypatch.setattr(tools_mod, "ler_codigo_real", lambda *a, **k: {
-        "a.py": {"conteudo": "x = 1", "truncado": False},
     })
     monkeypatch.setattr(tools_mod, "listar_arvore_projeto", lambda *a, **k: {
         "entradas": [], "ignorados_por_motivo": {}, "truncado": False,

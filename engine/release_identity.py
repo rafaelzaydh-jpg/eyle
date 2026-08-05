@@ -71,13 +71,23 @@ def validar_identidade_release(base_dir: os.PathLike[str] | str) -> Dict[str, st
         readme = (base / "README.md").read_text(encoding="utf-8")
     except FileNotFoundError as erro:
         raise ReleaseIdentityError("arquivo ausente: README.md") from erro
-    marcador = (
-        f"**Versão:** {identidade['app_version']} · "
-        f"**Schema:** {identidade['config_schema_version']} · "
-        f"**Revisão:** {identidade['revision']}"
+    marcadores = (
+        (
+            f"**Version:** {identidade['app_version']} · "
+            f"**Schema:** {identidade['config_schema_version']} · "
+            f"**Revision:** {identidade['revision']}"
+        ),
+        (
+            f"**Versão:** {identidade['app_version']} · "
+            f"**Schema:** {identidade['config_schema_version']} · "
+            f"**Revisão:** {identidade['revision']}"
+        ),
     )
-    if marcador not in readme:
-        divergencias.append(f"README.md nao contem o marcador: {marcador}")
+    if not any(marcador in readme for marcador in marcadores):
+        divergencias.append(
+            "README.md nao contem marcador de identidade em ingles ou portugues: "
+            + " | ".join(marcadores)
+        )
 
     if divergencias:
         raise ReleaseIdentityError(

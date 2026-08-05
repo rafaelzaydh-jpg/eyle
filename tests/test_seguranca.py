@@ -3,14 +3,13 @@
 import os
 
 from engine.agent_tools import executar_tool
-from engine.dicas import ler_codigo_real
 from engine.seguranca import _resolver_caminho_seguro
 
 
 def _ctx(raiz):
     return {
         "projeto": {"caminho_origem": str(raiz)},
-        "config": {"dicas": {"max_chars_por_arquivo": 20000}},
+        "config": {"agent": {"max_read_range_lines": 400}},
     }
 
 
@@ -42,7 +41,7 @@ def test_read_file_rejeita_travessia_sem_vazar_conteudo(tmp_path):
     )
 
     assert resultado["status"] == "failed"
-    assert resultado["error_code"] == "FILE_READ_REJECTED"
+    assert resultado["error_code"] == "UNSAFE_PATH"
     assert "caminho inseguro rejeitado" in resultado["detail"]
     assert "SEGREDO_QUE_NAO_PODE_VAZAR" not in str(resultado)
 
@@ -54,9 +53,11 @@ def test_caminho_absoluto_e_rejeitado_mesmo_quando_aponta_para_dentro(tmp_path):
     arquivo.write_text("interno", encoding="utf-8")
 
     assert _resolver_caminho_seguro(raiz, str(arquivo)) is None
-    resultado = ler_codigo_real([str(arquivo)], str(raiz))
-    assert "erro" in resultado[str(arquivo)]
-    assert "conteudo" not in resultado[str(arquivo)]
+    resultado = executar_tool(
+        "read_file", {"caminho_relativo": str(arquivo)}, _ctx(raiz),
+    )
+    assert resultado["status"] == "failed"
+    assert resultado["error_code"] in {"UNSAFE_PATH", "FILE_READ_REJECTED"}
 
 
 def test_symlink_para_fora_do_projeto_e_rejeitado(tmp_path):

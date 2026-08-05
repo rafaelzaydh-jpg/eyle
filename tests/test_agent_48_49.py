@@ -18,7 +18,6 @@ from engine.project_reader import ler_faixa_projeto  # noqa: E402
 def _config(**agent_overrides):
     agente = {
         "rollout_mode": "full",
-        "trusted_project_paths": ["/tmp"],
         "enabled_modes": ["analyze", "suggest", "edit"],
         "max_steps": 8,
         "max_no_progress_decisions": 2,
@@ -40,14 +39,13 @@ def _llm(*decisoes):
     return lambda *args, **kwargs: next(respostas)
 
 
-def test_rollout_tem_tres_modos_e_full_exige_projeto_confiavel():
-    validar_config({"agent": {"rollout_mode": "off", "trusted_project_paths": []}})
-    validar_config({"agent": {"rollout_mode": "read_only", "trusted_project_paths": []}})
-    validar_config({"agent": {"rollout_mode": "full", "trusted_project_paths": ["/tmp/projeto"]}})
+def test_rollout_tem_dois_modos_sem_allowlist_legada():
+    validar_config({"agent": {"rollout_mode": "read_only"}})
+    validar_config({"agent": {"rollout_mode": "full"}})
+    with pytest.raises(ConfigError, match="rollout_mode"):
+        validar_config({"agent": {"rollout_mode": "off"}})
     with pytest.raises(ConfigError, match="rollout_mode"):
         validar_config({"agent": {"rollout_mode": "talvez"}})
-    with pytest.raises(ConfigError, match="trusted_project_paths"):
-        validar_config({"agent": {"rollout_mode": "full", "trusted_project_paths": []}})
 
 
 def test_read_only_bloqueia_write_antes_da_execucao(tmp_path, monkeypatch):
@@ -249,14 +247,14 @@ def test_hash_de_evidencia_mudado_e_invalidado_na_retomada(tmp_path, monkeypatch
     assert "codigo_fresco_relevante" not in pendente2["estado"]["goal_state"]["evidence_needed"]
 
 
-def test_full_expresso_cai_para_read_only_fora_da_allowlist(tmp_path):
-    config = _config(trusted_project_paths=[str(tmp_path / "outro")])
+def test_full_expresso_permanece_full_sem_allowlist_legada(tmp_path):
+    config = _config()
     configurado, efetivo, causa = engine_mod._rollout_agente_efetivo(
         config, {"caminho_origem": str(tmp_path)},
     )
     assert configurado == "full"
-    assert efetivo == "read_only"
-    assert causa == "project_not_in_trusted_paths"
+    assert efetivo == "full"
+    assert causa is None
 
 
 def test_checkpoint_pos_acao_retoma_sem_repetir_a_leitura(tmp_path, monkeypatch):

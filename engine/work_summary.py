@@ -131,12 +131,8 @@ def _modo(resultado, detalhes, contexto):
         if isinstance(valor, str) and valor.strip():
             return valor.strip()
     tipo = str(roteador.get("tipo") or "").strip()
-    if tipo in {"visao_geral", "consulta", "agente", "agente_fallback_leitura"}:
+    if tipo == "agente":
         return "analyze"
-    if tipo == "dicas":
-        return "suggest"
-    if tipo == "engenharia":
-        return "edit"
     return tipo or "unknown"
 
 

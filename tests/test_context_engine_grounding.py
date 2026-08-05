@@ -262,7 +262,7 @@ def test_evidence_id_inexistente_e_rejeitada(tmp_path, monkeypatch):
     assert status == "success"
     assert "define `valor`" in texto
     assert detalhes["evidence_ids"] == ["ev-0001"]
-    assert detalhes["recovery_layer"] == "deterministic_analysis"
+    assert detalhes["recovery_layer"] == "deterministic_structured_claims"
 
 
 def test_citacao_fora_da_faixa_da_evidencia_e_rejeitada(tmp_path, monkeypatch):
@@ -298,4 +298,4 @@ def test_citacao_fora_da_faixa_da_evidencia_e_rejeitada(tmp_path, monkeypatch):
     assert status == "success"
     assert "Em audio.py:1" in texto
     assert detalhes["evidence_ids"] == ["ev-0001"]
-    assert detalhes["recovery_layer"] == "deterministic_analysis"
+    assert detalhes["recovery_layer"] == "deterministic_structured_claims"

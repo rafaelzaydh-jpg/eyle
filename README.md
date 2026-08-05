@@ -1,214 +1,82 @@
 <p align="center">
-  <img src="assets/eyle-banner.svg" alt="Eyle — local coding agent" width="100%">
+  <img src="assets/eyle-banner.svg" alt="Eyle — supervised coding agent" width="100%">
 </p>
 
-<p align="center">
-  <strong>A local-first supervised coding agent with external memory, BM25 retrieval, guarded edits, tests, rollback, and cycle protection.</strong>
-</p>
+<p align="center"><strong>One coding agent, one execution path.</strong></p>
 
 <p align="center">
   <a href="README.pt-BR.md">Português</a> ·
   <a href="docs/architecture.md">Architecture</a> ·
   <a href="docs/configuration.md">Configuration</a> ·
   <a href="docs/benchmark.md">Benchmark</a> ·
-  <a href="CHANGELOG.md">Changelog</a> ·
-  <a href="SECURITY.md">Security</a>
+  <a href="CHANGELOG.md">Changelog</a>
 </p>
 
 <p align="center">
   <img alt="Python 3.8+" src="https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white">
-  <img alt="Release 2.7.3" src="https://img.shields.io/badge/release-2.7.3-2563EB">
-  <img alt="Local execution" src="https://img.shields.io/badge/execution-local-16A34A">
-  <img alt="BM25 retrieval" src="https://img.shields.io/badge/retrieval-BM25-F59E0B">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-362%20passed-16A34A">
+  <img alt="Release 2.7.4" src="https://img.shields.io/badge/release-2.7.4-2563EB">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-307%20passed-16A34A">
 </p>
 
-**Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.22-project-read-orchestration-and-benchmark-truth
+**Version:** 2.7.4 · **Schema:** 2.7.4 · **Revision:** 3-target-coverage-fast-path
 
-## Overview
+## What changed in 2.7.4
 
-Eyle indexes a local repository, retrieves only relevant evidence, and uses a local LLM to answer questions or prepare guarded changes. The model proposes actions; deterministic code controls permissions, evidence freshness, confirmation, atomic writes, tests, rollback, deadlines, and completion.
+Eyle now has one project pipeline. The historical Retrieval → Analyst → Executor → Verify paths and their hidden fallbacks were removed. A project request either runs through the Eyle agent or returns a specific failure; it is never silently rerouted into another architecture.
 
-| | |
-|---|---|
-| **Release** | 2.7.3 |
-| **Default rollout** | `read_only` until the real-model benchmark is validated locally |
-| **Recommended model target** | LFM2.5-8B-A1B or a compatible quantization |
-| **Privacy** | Source code, indexes, traces, queue, and history remain on the local machine |
-| **Mutable state** | `workspace/`, `memory/`, and `context/` are ignored by Git |
-
-
-### Main capabilities
-
-- Local models through OpenAI-compatible servers, LM Studio, llama.cpp, and Ollama-style backends.
-- Persistent external memory for projects larger than the model context window.
-- Offline inverted-index BM25 retrieval with a bounded query LRU, without cloud embeddings or a vector database.
-- Typed grounding: observed facts require evidence, while inferences, hypotheses, decisions, and recommendations keep their proper freedom.
-- Unified response normalization for `content`, `reasoning_content`, streaming chunks, partial JSON, and plain text.
-- Utility gate and layered recovery prevent empty or receipt-only responses from being published as success.
-- A single Evidence Registry feeds reading, analysis, grounding, conclusions, and the public work summary.
-- A full structured project inventory survives the 500-character observation summaries and remains visible to every subsequent Agent decision.
-- General project audits use a deterministic role-based candidate catalog before model selection.
-- A dedicated Scout selects valid components, the system reads them automatically, a gap-review Scout inspects fresh code, and a tool-free Finalizer produces the grounded conclusion.
-- The audit Finalizer emits atomic structured claims; Eyle validates claim-level evidence, renders the final text deterministically, and blocks unsupported global health or test-status statements.
-- Indexed project memory is labeled as an untrusted navigation hint unless its stored file hash still matches disk; fresh Evidence Registry IDs remain mandatory for audit conclusions.
-- Every project audit publishes deterministic real-coverage metrics: complete inventory status, source files read, critical components reviewed, current test execution, documents actually used, and a `none`/`partial`/`targeted`/`complete` level.
-- The system adds an honest coverage disclosure after grounding and always states that the audit cannot guarantee universal absence of bugs.
-- Global project-health claims are denied; only explicitly scoped findings about reviewed components may proceed to grounding, and the latest test run is the sole source of test status.
-- `project_read` now separates evidence collection from a dedicated 1,400-token Finalizer, so tool planning no longer competes with the final explanation.
-- Provider completion metadata (`finish_reason`, resolved model, usage, and reasoning tokens) is preserved; token-limit truncation retries once with a larger budget and otherwise fails closed.
-- Exact symbol-existence questions route deterministically to `find_symbol`, while confirmed writes advance automatically through tests and a fresh post-write reread.
-- Benchmark v2 separates factual correctness, completion, grounding, workflow, safety, per-call LLM latency, and the actually resolved model.
-- Schema-validated tools and explicit `READ`, `EXEC`, and `WRITE` permissions.
-- Atomic patching, explicit confirmation, isolated tests, final reread, and rollback.
-- Shared deadlines, differentiated timeouts, retry backoff, rate limiting, and telemetry.
-- Short-cycle detection for repeated agent states and bounded queue reservation.
-- CLI, optional authenticated Flask interface, SQLite queue, checkpoints, and retention.
-
-## How it works
-
-```mermaid
-flowchart LR
-  A[Project in workspace] --> B[Index]
-  B --> C[External memory]
-  D[User request] --> E[Agent]
-  C --> F[BM25 retrieval]
-  F --> G[Context engine]
-  G --> E
-  E --> H[Validated project tools]
-  H --> I[Fresh evidence and hashes]
-  I --> E
-  E --> J[Answer or confirmed patch]
-  J --> K[Verification, tests, reread, rollback]
+```text
+User request
+→ Eyle agent
+→ validated tools
+→ fresh evidence
+→ guarded write confirmation when needed
+→ tests and reread
+→ validated answer
 ```
 
-See [architecture](docs/architecture.md) for the full design.
+BM25 remains available as a search **tool**, not as a separate decision pipeline. Indexed metadata is only a navigation hint; current claims still require fresh reads.
 
-## Quick installation
+Revision 2 also made normal project reads return structured `claims[]` before deterministic rendering. On Windows, tests may use the opt-in `trusted_local` backend, restricted by the command allowlist and executed in a temporary project snapshot.
+
+Revision 3 extracts a minimal target contract from the request, blocks incomplete conclusions, allows only one directed repair, and finalizes explicit reads without spending an intermediate call merely to return `ready_to_finalize`.
+
+## Core capabilities
+
+- Analyze repositories and explain files, symbols, relationships, risks, and project structure.
+- Create or edit code through validated tools and explicit write confirmation.
+- Atomic writes, hashes, dry-run, test execution, reread, and rollback.
+- Persistent task state, queue, checkpoints, CLI, and optional Flask UI.
+- OpenAI-compatible, Ollama-style, llama.cpp, and LM Studio backends.
+- Provider metadata including resolved model, token usage, reasoning usage, and finish reason.
+- Project audit coverage and structured claims for evidence-backed conclusions.
+
+## Quick start
 
 ```bash
-git clone https://github.com/rafaelzaydh-jpg/eyle.git
-cd eyle
-python -m venv .venv
+python ingest.py /path/to/project --nome "My project"
+python main.py status
+python main.py serve
 ```
 
-Activate the environment:
+For a direct CLI task:
 
 ```bash
-# Linux/macOS
-source .venv/bin/activate
-
-# Windows PowerShell
-.venv\Scripts\Activate.ps1
+python main.py agent "Analyze the project"
 ```
 
-Install dependencies:
-
-```bash
-# Web interface
-python -m pip install -r requirements.lock
-
-# Development and complete test environment
-python -m pip install -r requirements-dev.lock
-```
-
-## Configuration
-
-The release defaults to a local OpenAI-compatible endpoint and automatic model discovery:
+Writes remain supervised even when `agent.rollout_mode` is `full`:
 
 ```json
 {
-  "llm": {
-    "base_url": "http://127.0.0.1:8080",
-    "model": "auto",
-    "openai_compatible": true,
-    "max_tokens": 1500,
-    "context_window_tokens": 8192
-  },
   "agent": {
-    "rollout_mode": "read_only",
-    "trusted_project_paths": []
+    "rollout_mode": "full",
+    "require_confirmation_for_write": true
   }
 }
 ```
 
-Keep `read_only` while validating the real model. To enable supervised editing, use `rollout_mode: "full"`, explicitly trust the intended project root, and review the write/test policy first. See [docs/configuration.md](docs/configuration.md).
+## Design rule
 
-## Usage
+The model is the reasoning engine. Deterministic code controls permissions, tool schemas, file boundaries, evidence freshness, confirmation, atomic writes, tests, rollback, deadlines, and terminal status.
 
-Copy a project into `workspace/` and index it:
-
-```bash
-cp -r /path/to/project workspace/
-python main.py ingest
-```
-
-Then ask questions or run the agent:
-
-```bash
-python main.py perguntar "Where is authentication validated?"
-python main.py agente "Inspect the upload limit and propose a safe fix"
-python main.py status
-```
-
-Optional web interface:
-
-```bash
-python main.py serve
-```
-
-Open `http://127.0.0.1:5000`. The API token is printed at startup.
-
-## Agent rollout modes
-
-| Mode | Permissions |
-|---|---|
-| `off` | Uses the earlier pipelines without automatic agent routing. |
-| `read_only` | Allows reading, retrieval, analysis, and suggestions; blocks execution and writes. |
-| `full` | Allows the guarded edit cycle only for explicitly trusted project paths. |
-
-A real write still requires fresh evidence, exact ranges, hashes, dry run, explicit confirmation, atomic application, configured tests, and a final reread.
-
-## Validation
-
-```bash
-python engine/release_identity.py
-python -m compileall -q .
-python -m pytest -q
-python main.py benchmark
-```
-
-Release validation in the packaging environment:
-
-- **328/328 executable tests passed**;
-- **1 web test module was skipped** because Flask was not installed there;
-- the real-model benchmark remains environment-specific and must be run with the actual endpoint, model, quantization, hardware, and target repository.
-
-See [docs/benchmark.md](docs/benchmark.md).
-
-## Repository structure
-
-```text
-engine/      Agent, tools, grounding, state, patching, telemetry, worker, and queue
-llm/         Local model execution, retries, rate limiting, model detection, and cache
-retrieval/   Offline BM25 retrieval
-verify/      Answer and citation verification
-web/         Authenticated Flask interface
-tests/       Unit and regression tests
-workspace/   Projects under analysis — Git-ignored
-memory/      Generated external memory — Git-ignored
-context/     Cache, queue, traces, telemetry, and backups — Git-ignored
-docs/        Architecture, configuration, benchmark, releases, and history
-```
-
-## Documentation
-
-- [Architecture](docs/architecture.md)
-- [Configuration](docs/configuration.md)
-- [Benchmark and validation](docs/benchmark.md)
-- [Upgrading and publishing](docs/github-publishing.md)
-- [Detailed technical overview](docs/technical-overview.md)
-
-## License
-
-The repository is currently **all rights reserved**. Read [LICENSE.md](LICENSE.md) before copying, redistributing, or opening the project to unrestricted public reuse.
+See [Architecture](docs/architecture.md) for the runtime flow and [Configuration](docs/configuration.md) for the supported settings.

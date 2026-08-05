@@ -110,6 +110,7 @@ from engine.grounding import (  # noqa: E402
 from engine.project_reader import ErroLeituraProjeto, ler_faixa_projeto  # noqa: E402
 from engine.response_recovery import (  # noqa: E402
     recover_structured_audit_claims,
+    recover_structured_project_claims,
     recover_useful_response,
 )
 from engine.utility_gate import validate_response_utility  # noqa: E402
@@ -119,6 +120,12 @@ from engine.structured_claims import (  # noqa: E402
     normalize_structured_claims,
     render_claims,
     validate_health_claims,
+)
+from engine.task_contract import (  # noqa: E402
+    build_task_contract,
+    evaluate_target_coverage,
+    project_read_fast_path_ready,
+    render_target_feedback,
 )
 from engine.retencao import rotacionar_arquivo  # noqa: E402
 from engine.roteador import classificar_modo_projeto, pede_auditoria_projeto  # noqa: E402
@@ -333,12 +340,17 @@ def _atualizar_frescor_evidencias(estado, projeto):
 def _normalizar_conclusao(decisao, estado, task_type):
     """Converte o JSON da LLM no contrato interno.
 
-    Em ``project_audit`` a revisao 55.19 exige claims estruturadas. O texto
-    final e renderizado pelo sistema; o modelo nao fornece mais ``answer`` nem
-    ``claim_annotations`` separados para essa tarefa.
+    Em ``project_read`` e ``project_audit`` a resposta nasce como claims
+    estruturadas. O texto final e renderizado pelo sistema; o modelo nao
+    fornece ``answer`` nem ``claim_annotations`` separados nessas tarefas.
     """
     valor = decisao.get("final")
-    if task_type == "project_audit":
+    structured_project_read = (
+        task_type == "project_read"
+        and isinstance(valor, dict)
+        and ("claims" in valor or "afirmacoes" in valor)
+    )
+    if task_type == "project_audit" or structured_project_read:
         if not isinstance(valor, dict):
             return None, "final precisa ser um objeto com claims estruturadas"
         claims, claim_error = normalize_structured_claims(
@@ -1278,7 +1290,9 @@ def _preparar_recuperacao_stale(estado, arguments, resultado_tool):
     return mensagem
 
 
-def _finalizar_project_read(estado, objetivo, config):
+def _finalizar_project_read(
+    estado, objetivo, config, *, task_contract=None, repair_feedback="", prior_claims=None,
+):
     prompt = montar_prompt_finalizer_leitura(
         objetivo,
         goal_state=estado.goal_state,
@@ -1286,10 +1300,15 @@ def _finalizar_project_read(estado, objetivo, config):
         actions=estado.actions,
         config=config,
         system_prompt=PROMPT_PROJECT_READ_FINALIZER,
+        task_contract=task_contract or estado.goal_state.get("task_contract") or {},
+        repair_feedback=repair_feedback,
+        prior_claims=prior_claims or [],
     )
     decision, attempts, raw = _executar_perfil_json(
         executar_project_read_finalizer_llm, prompt, config, kind="project read finalizer",
     )
+    if isinstance(decision, dict):
+        decision["_system_project_read_finalizer"] = True
     return decision, attempts, raw
 
 
@@ -1394,19 +1413,74 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
     step = 0
     estado = None
     recuperacao_atual = {}
+    task_contract = build_task_contract(objetivo, task_type)
+    project_read_repair_used = False
+    project_read_finalizer_calls = 0
 
     def _checkpoint(payload):
         if checkpoint is not None:
             checkpoint(dict(payload))
 
-    def _recuperar_resposta(causa, resposta_anterior="", permitir_llm=True):
-        nonlocal recuperacao_atual
+    def _recuperar_resposta(
+        causa, resposta_anterior="", permitir_llm=True, *, feedback=None, prior_claims=None,
+    ):
+        """Uma única recuperação por leitura; outros tipos mantêm seu contrato atual."""
+        nonlocal recuperacao_atual, project_read_repair_used, project_read_finalizer_calls
         evidencias_frescas = estado.evidencias_frescas() if estado is not None else []
-        if task_type == "project_audit":
-            recuperacao = recover_structured_audit_claims(
+
+        if (
+            task_type == "project_read"
+            and bool(cfg_agente.get("project_read_single_repair_enabled", False))
+        ):
+            if project_read_repair_used or not evidencias_frescas or not permitir_llm:
+                recuperacao_atual = {
+                    "ok": False, "layer": "directed_project_read_finalizer",
+                    "attempts": [{"cause": causa, "skipped": "repair_already_used_or_unavailable"}],
+                }
+                return None
+            project_read_repair_used = True
+            repair_text = render_target_feedback(feedback or {})
+            if not repair_text:
+                repair_text = (
+                    "PROJECT READ REPAIR (system-owned):\n"
+                    f"- Cause: {causa}.\n"
+                    "- Repair only the rejected or missing claims from fresh evidence.\n"
+                    "- Return the complete structured claims envelope once."
+                )
+            try:
+                decision, attempts, raw = _finalizar_project_read(
+                    estado, objetivo, config, task_contract=task_contract,
+                    repair_feedback=repair_text, prior_claims=prior_claims or [],
+                )
+                project_read_finalizer_calls += attempts
+            except ErroLLM as error:
+                recuperacao_atual = {
+                    "ok": False, "layer": "directed_project_read_finalizer",
+                    "attempts": [{"cause": causa, "error": getattr(error, "error_code", None) or str(error)}],
+                }
+                return None
+            ok = isinstance(decision, dict) and "final" in decision
+            recuperacao_atual = {
+                "ok": ok,
+                "layer": "directed_project_read_finalizer",
+                "attempts": [{"cause": causa, "attempts": attempts, "valid": ok}],
+                "raw": str(raw or "")[:500],
+            }
+            _registrar_trace_estado(estado, {
+                "step": estado.acoes_executadas + 1,
+                "tipo": "response_recovery",
+                "cause": causa,
+                "layer": "directed_project_read_finalizer",
+                "ok": ok,
+                "attempts": recuperacao_atual["attempts"],
+            })
+            return decision if ok else None
+
+        if task_type in {"project_read", "project_audit"}:
+            recuperacao = recover_structured_project_claims(
                 objetivo, evidencias_frescas, config,
                 cause=causa, prior_answer=resposta_anterior,
-                allow_llm=permitir_llm,
+                allow_llm=permitir_llm, task_type=task_type,
             )
         else:
             recuperacao = recover_useful_response(
@@ -1425,7 +1499,7 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
         })
         if not recuperacao_atual.get("ok"):
             return None
-        if task_type == "project_audit":
+        if task_type in {"project_read", "project_audit"}:
             return {
                 "final": {
                     "claims": recuperacao_atual.get("claims", []),
@@ -1846,6 +1920,9 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
         estado.definir_objetivo(objetivo, task_type, modo=modo)
         _iniciar_trace(config)
 
+    if estado is not None:
+        estado.goal_state["task_contract"] = task_contract
+
     # Atualizacao 45: depois da ultima acao permitida ainda existe uma rodada
     # para a LLM devolver ``final``/``needs_user``. O gate abaixo impede uma
     # ferramenta adicional; formato invalido/final recusado usam a guarda
@@ -1886,6 +1963,51 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 "tipo": "evidencias_stale_por_hash",
                 "evidence_ids": invalidadas,
             })
+        decisao_project_read = None
+        if (
+            task_type == "project_read"
+            and bool(cfg_agente.get("project_read_fast_path_enabled", False))
+            and bool(cfg_agente.get("project_read_finalizer_enabled", False))
+            and project_read_finalizer_calls == 0
+            and project_read_fast_path_ready(task_contract, estado.evidencias_frescas())
+        ):
+            try:
+                decisao_project_read, attempts_fast, raw_fast = _finalizar_project_read(
+                    estado, objetivo, config, task_contract=task_contract,
+                )
+                project_read_finalizer_calls += attempts_fast
+            except ErroLLM as erro_llm:
+                return _retorno_agente(
+                    "failed",
+                    "O Finalizer da leitura falhou antes de produzir uma resposta estruturada.",
+                    None,
+                    {
+                        "task_type": task_type, "mode": modo,
+                        "goal_state": estado.goal_state,
+                        "failure_code": getattr(erro_llm, "error_code", None) or "PROJECT_READ_FINALIZER_LLM_FAILURE",
+                    },
+                    retornar_detalhes,
+                )
+            _registrar_trace_estado(estado, {
+                "step": step,
+                "tipo": "project_read_fast_path",
+                "attempts": attempts_fast,
+                "valid": bool(decisao_project_read and "final" in decisao_project_read),
+            })
+            if not isinstance(decisao_project_read, dict) or "final" not in decisao_project_read:
+                return _retorno_agente(
+                    "failed",
+                    "O Finalizer da leitura não devolveu o contrato JSON exigido.",
+                    None,
+                    {
+                        "task_type": task_type, "mode": modo,
+                        "goal_state": estado.goal_state,
+                        "failure_code": "PROJECT_READ_FINALIZER_INVALID_FORMAT",
+                        "finalizer_raw": str(raw_fast or "")[:500],
+                    },
+                    retornar_detalhes,
+                )
+
         decisao_pipeline = None
         if task_type == "project_audit":
             estado.atualizar_cobertura_auditoria()
@@ -1943,7 +2065,14 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
             decisao_forcada = _acao_recuperacao_deterministica(objetivo, estado)
             tipo_decisao_forcada = "recuperacao_deterministica"
 
-        if decisao_pipeline is not None:
+        if decisao_project_read is not None:
+            resultado_passo = {
+                "decisao": decisao_project_read,
+                "falhou": False,
+                "tentativas": 1,
+                "resposta_bruta": "",
+            }
+        elif decisao_pipeline is not None:
             resultado_passo = {
                 "decisao": decisao_pipeline,
                 "falhou": False,
@@ -2117,11 +2246,13 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 task_type == "project_read"
                 and estado.evidencias_frescas()
                 and bool(cfg_agente.get("project_read_finalizer_enabled", False))
+                and not decisao.get("_system_project_read_finalizer")
             ):
                 try:
                     decisao_finalizer, finalizer_attempts, finalizer_raw = _finalizar_project_read(
-                        estado, objetivo, config,
+                        estado, objetivo, config, task_contract=task_contract,
                     )
+                    project_read_finalizer_calls += finalizer_attempts
                 except ErroLLM as erro_finalizer:
                     return _retorno_agente(
                         "failed",
@@ -2241,6 +2372,79 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                         retornar_detalhes,
                     )
                 continue
+
+            if (
+                task_type == "project_read"
+                and bool(cfg_agente.get("target_coverage_enabled", False))
+            ):
+                target_coverage = evaluate_target_coverage(
+                    task_contract, conclusao.get("claims") or [],
+                    estado.evidencias_frescas(), conclusao.get("resposta") or "",
+                )
+                conclusao["target_coverage"] = target_coverage
+                if not target_coverage.get("ok", False):
+                    decisao_reparada = _recuperar_resposta(
+                        "target_coverage_failed",
+                        conclusao.get("resposta") or "",
+                        permitir_llm=True,
+                        feedback=target_coverage,
+                        prior_claims=conclusao.get("claims") or [],
+                    )
+                    if decisao_reparada is None:
+                        return _retorno_agente(
+                            "failed",
+                            "A resposta não cobriu todos os alvos obrigatórios do pedido.",
+                            None,
+                            {
+                                "task_type": task_type, "mode": modo,
+                                "goal_state": estado.goal_state,
+                                "failure_code": "ANSWER_TARGETS_NOT_COVERED",
+                                "task_contract": task_contract,
+                                "target_coverage": target_coverage,
+                                "recovery_attempts": recuperacao_atual.get("attempts", []),
+                            },
+                            retornar_detalhes,
+                        )
+                    conclusao_reparada, erro_reparo = _normalizar_conclusao(
+                        decisao_reparada, estado, task_type,
+                    )
+                    if erro_reparo:
+                        return _retorno_agente(
+                            "failed",
+                            "O reparo direcionado dos alvos devolveu uma conclusão inválida.",
+                            None,
+                            {
+                                "task_type": task_type, "mode": modo,
+                                "goal_state": estado.goal_state,
+                                "failure_code": "TARGET_REPAIR_INVALID_CONCLUSION",
+                                "target_coverage": target_coverage,
+                                "repair_error": erro_reparo,
+                            },
+                            retornar_detalhes,
+                        )
+                    repaired_coverage = evaluate_target_coverage(
+                        task_contract, conclusao_reparada.get("claims") or [],
+                        estado.evidencias_frescas(), conclusao_reparada.get("resposta") or "",
+                    )
+                    conclusao_reparada["target_coverage"] = repaired_coverage
+                    conclusao_reparada["recovery_layer"] = "directed_project_read_finalizer"
+                    if not repaired_coverage.get("ok", False):
+                        return _retorno_agente(
+                            "failed",
+                            "O reparo único ainda deixou alvos obrigatórios sem cobertura.",
+                            None,
+                            {
+                                "task_type": task_type, "mode": modo,
+                                "goal_state": estado.goal_state,
+                                "failure_code": "ANSWER_TARGETS_NOT_COVERED",
+                                "task_contract": task_contract,
+                                "target_coverage": repaired_coverage,
+                                "recovery_attempts": recuperacao_atual.get("attempts", []),
+                            },
+                            retornar_detalhes,
+                        )
+                    conclusao = conclusao_reparada
+
             if task_type == "project_audit":
                 cobertura_previa = estado.atualizar_cobertura_auditoria()
                 pendencias_estruturais = [
@@ -2687,7 +2891,7 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                             },
                             retornar_detalhes,
                         )
-                    if task_type == "project_audit":
+                    if task_type in {"project_read", "project_audit"}:
                         conclusao = conclusao_recuperada
                         evidencias_usadas = evidencias_recuperadas
                     else:
@@ -2808,6 +3012,9 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 "semantic_grounding_original": conclusao.get("semantic_grounding_original"),
                 "grounding_fallback_applied": bool(conclusao.get("grounding_fallback_applied")),
                 "utility_gate": conclusao.get("utility_gate"),
+                "task_contract": task_contract,
+                "target_coverage": conclusao.get("target_coverage"),
+                "project_read_finalizer_calls": project_read_finalizer_calls,
                 "recovery_layer": conclusao.get("recovery_layer") or recuperacao_atual.get("layer"),
                 "recovery_attempts": recuperacao_atual.get("attempts", []),
                 "fallback_cause": (

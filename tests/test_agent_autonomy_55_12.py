@@ -119,7 +119,7 @@ def test_grounding_esgotado_conclui_com_fallback_seguro_sem_pendencia(tmp_path, 
     assert "os.remove" not in text
     assert "define as funções `limitar_volume`" in text
     assert details["grounding_fallback_applied"] is True
-    assert details["fallback_cause"] == "response_recovery_deterministic_analysis"
+    assert details["fallback_cause"] == "response_recovery_deterministic_structured_claims"
     assert details["semantic_grounding"]["ok"] is True
     assert details["semantic_grounding_original"]["ok"] is False
     assert len(prompts) == 2

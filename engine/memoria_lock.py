@@ -2,8 +2,8 @@
 """
 memoria_lock.py
 ----------------
-Bug 2 do plano de correcao: engine/engine.py, verify/validar.py e
-llm/cache.py seguem todos o mesmo padrao pra persistir memoria --
+A interface web, o Worker e o agente podem persistir estado ao mesmo tempo.
+Este modulo serializa atualizacoes no mesmo arquivo para evitar lost update --
 ler o JSON inteiro, modificar em memoria, gravar o JSON inteiro de volta
 -- sem nenhuma trava. Isso e' seguro enquanto so uma coisa escreve por
 vez, mas main.py serve sobe o Flask (thread da requisicao) e o Worker

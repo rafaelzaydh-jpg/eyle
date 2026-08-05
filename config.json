@@ -8,19 +8,14 @@
     "timeout_seconds": 120,
     "max_tokens": 1500,
     "context_window_tokens": 8192,
-    "_comentario_context_window_tokens": "Janela usada pela Eyle. Inicie o llama-server com --ctx-size 10240 para manter folga de tokenizacao e resposta.",
-    "_comentario_max_tokens": "Teto de saida. 1500 permite agentes intermediarios/Thinking, enquanto o modo estruturado tenta desativar reasoning para decisoes curtas.",
     "cache": {
       "ativado": true,
       "max_entradas": 4096,
       "max_age_days": 30,
-      "_comentario": "Cache em duas camadas: LRU em memoria (sessao atual) + SQLite persistente por hash exato do prompt/backend. TTL absoluto padrao de 24h evita respostas antigas eternas; erros nunca sao armazenados.",
       "hit_flush_interval": 20,
       "memoria_max_entradas": 2048,
       "max_age_hours": 24
     },
-    "_comentario_provider": "use 'ollama' para Ollama nativo, ou defina openai_compatible=true para LM Studio / llama.cpp server / text-generation-webui (endpoint /v1/chat/completions)",
-    "_comentario_model": "nome do modelo/alias carregado. Em backend OpenAI-compatible/llama-server, a Eyle consulta /v1/models: se houver um unico modelo carregado, usa o ID reportado pelo servidor mesmo que este campo tenha ficado antigo; 'auto' tambem seleciona esse unico modelo. Com varios modelos, mantenha aqui o alias exato.",
     "connect_timeout_seconds": 5,
     "read_timeout_seconds": 120,
     "agent_timeout_seconds": 180,
@@ -29,38 +24,31 @@
     "model_discovery_negative_ttl_seconds": 60,
     "retry_max_attempts": 3,
     "agent_retry_max_attempts": 1,
-    "_comentario_agent_retries": "Decisoes estruturadas do Agente fazem uma tentativa de transporte por chamada; a correcao de formato ja controla a segunda geracao. Isso evita retries aninhados consumirem todo o prazo antes do fallback de leitura.",
     "retry_base_delay_seconds": 0.5,
     "retry_max_delay_seconds": 2.0,
     "retry_jitter_seconds": 0.2,
     "max_concurrent_requests": 1,
     "cooldown_seconds": 2.0,
-    "_comentario_timeouts_retries": "Revisao 51: connect/read e perfis possuem limites separados. Falhas transitorias 429/5xx/conexao usam ate 3 tentativas com backoff+jitter; 4xx permanentes nao repetem. timeout_seconds permanece apenas como fallback legado.",
     "agent_max_tokens": 512,
     "retry_read_timeouts": false,
-    "_comentario_agent_budget": "Revisao 55.4: decisoes estruturadas do Agente usam ate 512 tokens e 180s. Timeout de leitura nao repete a geracao inteira por padrao; conexao recusada/503 continuam com retry.",
     "stream_responses": true,
-    "_comentario_stream_responses": "Revisao 55.7: respostas textuais usam streaming no painel. Decisoes JSON do Agente continuam ocultas; o usuario ve apenas etapas operacionais, texto final parcial e tokens por segundo.",
     "audit_scout_max_tokens": 700,
     "audit_finalizer_max_tokens": 1600,
     "project_read_finalizer_max_tokens": 1400,
     "truncation_retry_multiplier": 2.0,
-    "truncation_retry_max_tokens": 2400,
-    "_comentario_55_22": "Revisao 55.22: project_read usa Finalizer separado; metadados finish_reason/usage/modelo resolvido sao preservados; saidas truncadas repetem uma vez com teto maior e nunca viram success."
+    "truncation_retry_max_tokens": 2400
   },
   "context": {
     "token_budget": 1500,
     "chars_per_token": 4,
     "small_project_full_read_max_files": 8,
     "small_project_full_read_max_lines": 600,
-    "small_project_full_read_max_chars": 16000,
-    "_comentario": "token_budget reserva espaço para trechos. Projetos pequenos (até os limites acima) têm o código real lido por completo na visão geral e também no fallback textual; projetos maiores continuam usando seleção por ferramentas/retrieval."
+    "small_project_full_read_max_chars": 16000
   },
   "context_engine": {
     "safety_margin_tokens": 500,
     "chars_per_token_fallback": 3,
-    "max_recent_observations": 4,
-    "_comentario": "Atualizacao 42: em cada passo do Agente, o saldo para evidencias e calculado como context_window_tokens - max_tokens - margem - prompt de sistema - objetivo/catalogo/acoes/observacoes. O conteudo completo fica no AgentState por evidence_id; somente a selecao relevante que cabe entra no prompt. A estimativa de 3 caracteres/token e conservadora para codigo + portugues quando o tokenizador exato nao esta disponivel."
+    "max_recent_observations": 4
   },
   "retrieval": {
     "chunk_max_tokens": 400,
@@ -68,29 +56,11 @@
     "bm25_k1": 1.5,
     "bm25_b": 0.75,
     "query_cache_ativado": true,
-    "query_cache_max_entradas": 256,
-    "_comentario_otimizacao": "Revisao 55: BM25 usa indice invertido e pontua apenas documentos que contem os termos. O cache LRU reutiliza selecoes para consultas lexicalmente equivalentes e e invalidado quando chunks.jsonl muda."
+    "query_cache_max_entradas": 256
   },
   "ingest": {
     "max_workers": 4,
-    "parallel_threshold": 8,
-    "_comentario": "Revisao 55: leitura, verificacao de segredo, hashes e geracao local de estrutura/chunks usam ate 4 threads a partir de 8 arquivos. executor.map preserva a ordem deterministica do indice."
-  },
-  "engine": {
-    "max_iteracoes_analista": 2,
-    "max_tentativas_executor": 2,
-    "atalho_analista_ativado": true,
-    "atalho_score_minimo": 3.0,
-    "atalho_score_ratio": 2.5,
-    "_comentario_max_iteracoes_analista": "quantas rodadas do ciclo Retrieval->Analista sao permitidas quando o Analista pede mais informacao (campo 'faltando')",
-    "_comentario_max_tentativas_executor": "quantas vezes o Executor pode tentar de novo se o Verify reprovar a resposta",
-    "_comentario_atalho": "se o vencedor do retrieval tiver score >= atalho_score_minimo E for atalho_score_ratio vezes maior que o 2o colocado (ou for o unico candidato), pula a chamada do Analista e usa o retrieval direto -- desative com atalho_analista_ativado=false se quiser o Analista julgando sempre",
-    "task_deadline_seconds": 900,
-    "_comentario_task_deadline": "Prazo total compartilhado por chat, retrieval, agente e executor. 900s permite varias decisoes locais lentas; cada chamada continua limitada pelo timeout do perfil e timeout de leitura nao e repetido cegamente.",
-    "executor_retry_base_delay_seconds": 0.5,
-    "executor_retry_max_delay_seconds": 2.0,
-    "executor_retry_jitter_seconds": 0.1,
-    "_comentario_retry_executor": "Backoff exponencial entre respostas recusadas pelo Verify. Evita disparar retries pesados em rajada; o prazo global continua prevalecendo."
+    "parallel_threshold": 8
   },
   "servidor": {
     "host": "127.0.0.1",
@@ -102,19 +72,7 @@
       "requests": 180,
       "auth_failures": 10,
       "window_seconds": 60
-    },
-    "_comentario": "Atualizacao 27: toda rota de dados exige Authorization: Bearer TOKEN (X-API-Token tambem e aceito). Defina EYLE_API_TOKEN, preencha api_token ou deixe null para gerar/persistir um segredo aleatorio em context/web_api_token.txt com permissao 0600. O painel pede o token e o guarda apenas na sessionStorage da aba. O limite geral e por IP; tentativas de autenticacao invalidas tem teto separado."
-  },
-  "entendimento": {
-    "gerar_via_llm": true,
-    "max_chars_por_arquivo": 20000,
-    "_comentario": "Atualizacao 3 (Modelo Interno do Projeto): durante o ingest, a LLM le cada arquivo INTEIRO uma vez e preenche memory/entendimento.json['arquivos'][caminho] com tipo/responsabilidade/entrada/saida/depende_de/funcoes_principais/pontos_criticos. So regenera o que mudou (por hash do arquivo, o mesmo de estrutura.json) -- arquivo sem mudanca reaproveita a entrada anterior sem gastar chamada de LLM. max_chars_por_arquivo trunca arquivos muito grandes antes de mandar pra LLM. Desative com gerar_via_llm=false para um ingest so-heuristico (sem LLM, sem servidor local necessario) -- as entradas antigas ficam preservadas."
-  },
-  "dicas": {
-    "max_componentes_candidatos": 5,
-    "profundidade_dependencia": 1,
-    "max_chars_por_arquivo": 20000,
-    "_comentario": "Atualizacao 4 (Dar dicas reais): quando o roteador classifica a pergunta como 'dicas', engine/dicas.py escolhe ate max_componentes_candidatos arquivos do Modelo Interno (entendimento.json['arquivos']) por match de tipo/responsabilidade/funcoes_principais/pontos_criticos, depois expande a lista seguindo 'depende_de' por profundidade_dependencia nivel(is) -- assim o Sugestor tambem ve do que os candidatos diretos dependem. max_chars_por_arquivo trunca arquivo muito grande antes de mandar pro Sugestor (mesmo limite conceitual do Entendedor, mas configuravel em separado porque o Sugestor pode receber varios arquivos na mesma chamada)."
+    }
   },
   "codar": {
     "ativado": true,
@@ -158,32 +116,26 @@
         "cpus": 1.0,
         "imagem_docker": null,
         "projetos": {},
-        "_comentario": "Atualizacao 28: toda suite real passa por sandbox. backend=auto prefere Bubblewrap no Linux; sem ele, usa Docker apenas quando imagem_docker estiver definida. Rede fica bloqueada por padrao e, sem backend capaz de cumprir isso, a execucao e recusada (nao cai silenciosamente no host). comandos_permitidos e allowlist de prefixos argv confiavel, definida aqui fora do repositorio. projetos aceita overrides por caminho absoluto real. CPU, memoria, processos, descritores, saida e timeout sao limitados. copiar_projeto=true executa sobre snapshot temporario gravavel, protegendo o projeto real de efeitos colaterais da suite; os dois limites seguintes evitam copia sem teto. No backend Docker, escolha uma imagem local que ja contenha as dependencias do projeto."
-      },
-      "_comentario": "Atualizacao 6 + 28: quando ativado=true, aplicar_patch roda a suite no PROJETO REAL logo apos escrever o patch. So roda se o projeto ja tiver pytest ou npm test configurado. A execucao sempre passa pelo sandbox configurado acima; se o sandbox recusar ou a suite falhar, o patch e revertido automaticamente. timeout_segundos continua sendo o limite de parede e e herdado pelo sandbox quando nao houver override interno."
-    },
-    "_comentario": "Atualizacao 5 (Codar de verdade -- engenheira assistente): quando o ciclo Retrieval->Analista converge num UNICO (arquivo, simbolo) alvo claro dentro do pipeline 'engenharia', a LLM Engenheiro propoe o codigo novo completo daquele simbolo. O ciclo e Proposta -> Impacto (depende_de invertido em entendimento.json) -> Patch (recorte exato por linha, lido fresco do disco em engine/codar.py) -> Teste (numa copia TEMPORARIA -- ast.parse() para .py; outras extensoes (.js/.html/.css) so confirmam arquivo/linha/patch aplicados, sem parser de sintaxe real -- deliberado, ver 'testes' abaixo pra verificacao real opt-in) -> Aplicar (SO na proxima mensagem, se o usuario responder 'sim'/'aplica'; 'nao'/'cancela' descarta). Nada e escrito no arquivo real sem essa confirmacao explicita. ativado=false desliga o ciclo inteiro (engenharia volta a so explicar em texto, como antes da Atualizacao 5). fazer_backup=true salva uma copia historica do arquivo original em context/backups/ antes da escrita real. Desde a Atualizacao 19, o rollback usa o conteudo original ja mantido em memoria e funciona mesmo com fazer_backup=false; a substituicao do arquivo real e atomica."
+        "allow_trusted_local": true
+      }
+    }
   },
   "confirmacoes": {
-    "expiracao_segundos": 3600,
-    "_comentario": "Atualizacao 22: propostas e tools WRITE pendentes recebem ID, horario de criacao, expiracao e hash da identidade do projeto. Com uma unica pendencia, 'sim' continua suficiente; com duas, use 'confirmar ID' ou 'cancelar ID'. Pendencia expirada ou criada para outro projeto e rejeitada sem executar nada."
+    "expiracao_segundos": 3600
   },
   "retention": {
     "historico_max_entradas": 1000,
     "trace_max_files": 5,
     "backups_max_files": 50,
     "backups_max_age_days": 30,
-    "backups_max_total_mb": 256,
-    "_comentario": "Atualizacao 36: historico e cache tem limite; traces sao rotacionados; backups antigos saem por idade, quantidade e tamanho total. Valor 0 conserva zero itens para limites de quantidade/tamanho e desliga somente o filtro de idade."
+    "backups_max_total_mb": 256
   },
   "benchmark": {
     "primary_model": null,
-    "baseline_model": null,
-    "_comentario": "Atualizacao 47: primary_model=null usa llm.model (LFM2 8B-A1B atual). baseline_model e opcional e deve receber o nome exato do Q4 4B carregado no servidor; ele nunca substitui o alvo principal. Rode python main.py benchmark."
+    "baseline_model": null
   },
   "agent": {
-    "rollout_mode": "read_only",
-    "trusted_project_paths": [],
+    "rollout_mode": "full",
     "enabled_modes": [
       "analyze",
       "suggest",
@@ -202,59 +154,36 @@
     "max_tree_entries": 200,
     "max_tree_depth": 6,
     "max_read_range_lines": 400,
-    "_comentario_48_49": "Atualizacoes 48-49: rollout_mode substitui a ativacao binaria (off/read_only/full). read_only e o padrao seguro e bloqueia WRITE/EXEC; full exige que o projeto esteja em trusted_project_paths. Toda tarefa recebe task_id e checkpoint duravel na tabela agent_tasks de context/fila.sqlite3; qualquer needs_user pode ser retomado e WRITE e revalidada apos reinicio antes de qualquer repeticao.",
-    "_comentario_46": "Atualizacao 46: edit esta ativo no Agente. Toda escrita exige read_range fresco da faixa exata, hashes do arquivo/faixa, dry-run correspondente e confirmacao. Depois de aplicar, run_tests roda com EXEC; falha reverte atomicamente e sucesso exige releitura final. executed=false nunca vira testes aprovados.",
-    "_comentario_44_45": "Atualizacoes 44-45: todo pedido sobre projeto entra no Agente Eyle e recebe modo analyze/suggest/edit. GoalState guarda objetivo, criterios, restricoes, plano de ate cinco passos, passo atual, bloqueios e evidencias faltantes. max_steps conta apenas ferramentas realmente executadas; max_no_progress_decisions interrompe repeticao de decisoes sem acao.",
-    "_comentario_42_43": "Atualizacoes 42-43: AgentState separa goal_state, evidence, actions e recent_observations. Leituras reais recebem evidence_id/faixa/hash; mudanca de arquivo invalida a evidencia. project_read/project_write so aceitam final depois de validar pelo menos uma evidencia fresca no disco. max_chars_por_observacao continua apenas para resumos operacionais, nunca para armazenar codigo-evidencia.",
-    "_comentario_40_41": "Atualizacoes 40-41: o catalogo de tools nasce do registro executavel e argumentos passam por schema central. list_tree respeita estes tetos de entradas/profundidade; read_range e os trechos frescos de search_code nunca ultrapassam max_read_range_lines.",
-    "_comentario_32_39": "Atualizacao 36 rotaciona traces. Atualizacao 39 separa EXEC: run_tests nao e READ; require_confirmation_for_exec controla seu gate sem alterar o gate WRITE.",
-    "_comentario_legado_ate_43": "Historico das configuracoes do Agente minimo ate a Atualizacao 43. A partir da 44, enabled=true ativa somente os modos declarados em enabled_modes. max_steps conta ferramentas executadas; max_no_progress_decisions limita repeticoes sem acao.",
     "task_deadline_seconds": 900,
     "max_llm_calls": 12,
     "max_total_generated_tokens": 12000,
     "semantic_repeat_overlap": 0.95,
     "max_secret_scan_bytes": 65536,
-    "_comentario_51_hardening": "Deadline global por execucao, teto de chamadas/tokens gerados, deteccao semantica de leituras/buscas redundantes e amostra limitada para varredura de segredos na arvore.",
     "semantic_grounding": {
       "enabled": true,
       "block_unsupported_anchors": true,
       "require_inline_citations": false,
       "min_claim_token_overlap": 0.12,
       "min_claim_tokens": 5,
-      "_comentario": "Grounding tipado: fatos observados exigem evidencia; inferencias exigem base; hipoteses permanecem incertas; decisoes e recomendacoes podem introduzir escolhas novas sem precisar existir previamente no projeto.",
       "require_inference_evidence": true,
       "warn_hypothesis_without_evidence": true
     },
     "cycle_min_repetitions": 3,
-    "_comentario_55_5": "Revisao 55.5: tres repeticoes completas sao exigidas antes de pausar por ciclo; o parser faz no maximo uma tentativa de correcao apos formato invalido.",
-    "response_recovery": {
-      "llm_enabled": true,
-      "unstructured_retry": true,
-      "evidence_short_generation": true,
-      "deterministic_fallback": true,
-      "_comentario": "Revisao 55.14: recuperacao em camadas sem success vazio."
-    },
-    "_comentario_55_16": "Revisao 55.16: o resultado completo retornado por list_tree e preservado em project_inventory, fora das observacoes de 500 caracteres. O compilador inclui todas as entradas no prompt e marca explicitamente inventarios parciais quando max_tree_entries, profundidade, filtro ou regras de exclusao limitam a cobertura.",
-    "_comentario_55_17": "Revisao 55.17: pedidos gerais de analise usam project_audit e so podem concluir apos cobertura minima deterministica de inventario, entrypoint, logica central, caminhos de erro, testes/configuracao, relatorio de cobertura e grounding. README, CHANGELOG e docs sao contexto, mas nunca satisfazem leitura fresca de codigo.",
     "audit_candidate_limit": 48,
     "audit_initial_read_limit": 6,
     "audit_gap_read_limit": 1,
-    "_comentario_55_18": "Revisao 55.18: project_audit usa catalogo deterministico por papel, Scout separado para escolher somente candidatos validos, fila automatica de leituras, revisao de lacunas e Finalizer exclusivo para a conclusao grounded.",
     "audit_health_claim_required_score": 1.0,
-    "_comentario_55_19": "Revisao 55.19: o Finalizer de project_audit retorna claims atomicas com type, text, evidence_ids e basis; o sistema renderiza a resposta, bloqueia declaracoes globais de saude sem cobertura e prova operacional, exige run_tests executado para afirmar testes passando e trata entendimento.json como pista nao confiavel salvo hash atual correspondente.",
-    "_comentario_55_20": "Revisao 55.20: project_audit mede cobertura real com inventario completo, arquivos de codigo lidos, componentes criticos selecionados pelo pipeline, execucao atual de testes, documentos usados e nivel none/partial/targeted/complete. A conclusao recebe divulgacao deterministica e nunca afirma ausencia total de bugs.",
-    "_comentario_55_21": "Revisao 55.21: declaracoes globais de saude sao bloqueadas mesmo com cobertura e testes; somente o ultimo run_tests define o estado atual; recovery de project_audit preserva claims estruturadas; idioma, metricas criticas, documentacao ativa e warnings SQLite foram corrigidos.",
     "project_read_finalizer_enabled": true,
     "deterministic_post_write_enabled": true,
-    "deterministic_symbol_lookup_enabled": true
+    "deterministic_symbol_lookup_enabled": true,
+    "project_read_fast_path_enabled": true,
+    "target_coverage_enabled": true,
+    "project_read_single_repair_enabled": true
   },
-  "version": "2.7.3",
-  "updated": "2026-08-05",
   "worker": {
     "heartbeat_interval_seconds": 5,
     "queue_error_backoff_seconds": 1,
     "max_invalid_jobs_per_reservation": 100,
-    "_comentario": "O supervisor limita consumidores pela capacidade real de llm.max_concurrent_requests. Com backend local serial, um job termina antes do proximo para preservar ordem, prazo e diagnostico.",
     "max_parallel_jobs": 1,
     "isolate_jobs": true,
     "job_deadline_seconds": 915,
@@ -262,13 +191,14 @@
     "head_of_line_blocked_seconds": 60,
     "multiprocessing_context": "spawn"
   },
-  "app_version": "2.7.3",
-  "config_schema_version": "2.7.3",
-  "revision": "55.22-project-read-orchestration-and-benchmark-truth",
   "telemetry": {
     "enabled": true,
     "window_seconds": 3600,
-    "max_entries": 10000,
-    "_comentario": "Metricas persistentes de jobs, tools e LLM em context/telemetry.sqlite3, com P50/P95/P99 expostos em /status."
-  }
+    "max_entries": 10000
+  },
+  "version": "2.7.4",
+  "updated": "2026-08-05",
+  "app_version": "2.7.4",
+  "config_schema_version": "2.7.4",
+  "revision": "3-target-coverage-fast-path"
 }

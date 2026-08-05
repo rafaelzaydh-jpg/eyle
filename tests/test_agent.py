@@ -25,7 +25,7 @@ que as Atualizacoes 1-5/Fase 3 ja definiam, mais os das Atualizacoes
      sobrevive ao corte de max_entradas que ja afeta observacoes
      normais
   9. Atualizacao 13 (roteador): pergunta que menciona o projeto mas nao
-     bate em nenhuma categoria especifica cai em "visao_geral" (com
+     bate em nenhuma categoria especifica cai em "agente" (com
      contexto), nao mais em "chat" (sem contexto nenhum) -- sem
      regressao pra mensagens realmente sem relacao com o projeto
 
@@ -33,7 +33,7 @@ A LLM e as tools estao SEMPRE mockadas -- nenhum teste aqui precisa de
 um modelo local rodando nem de um projeto indexado de verdade. So
 engine/agent.py, engine/agent_state.py e engine/roteador.py (criterio 9)
 sao exercitados (por isso o arquivo se chama test_agent.py, nao
-test_engine.py -- os pipelines chat/consulta/dicas/engenharia/Codar
+test_engine.py -- os adaptadores de chat e escrita
 ficam fora do escopo desta atualizacao, ver "Principios do plano" em
 Atualizacao_Agente.md).
 
@@ -440,14 +440,13 @@ def test_roteador_nao_deixa_pergunta_de_melhoria_cair_em_chat_sem_contexto():
     """Caso real que motivou a correcao: 'Como melhorar o projeto? Me de
     3 caminhos' nao batia em PALAVRAS_DICAS nem em nenhuma outra
     categoria, e caia direto em 'chat' (zero contexto do projeto) --
-    agora tem que cair em 'visao_geral' (que le estrutura.json/
-    entendimento.json antes de responder)."""
+    agora tem que cair no agente unico (que usa tools e evidencia)."""
     import engine.roteador as roteador_mod
 
     tipo, motivo = roteador_mod.classificar_pergunta(
         "Como melhorar o projeto? Me de 3 caminhos", estrutura={}, entendimento={},
     )
-    assert tipo == "visao_geral"
+    assert tipo == "agente"
 
 
 def test_roteador_mensagem_sem_nenhuma_relacao_com_projeto_continua_em_chat():

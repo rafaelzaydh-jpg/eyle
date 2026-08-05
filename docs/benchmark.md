@@ -1,52 +1,28 @@
-# Benchmark and validation
+# Benchmark — Eyle 2.7.4
 
-Eyle includes deterministic tests and a controlled real-agent benchmark. They answer different questions and both matter.
+The benchmark exercises the same public agent flow used in production. It records:
 
-## Automated tests
+- configured and resolved provider model;
+- per-call `finish_reason`, token usage, and latency;
+- factual correctness, completion, grounding, workflow, and safety separately;
+- confirmation, hashes, dry-run, rollback, tests, and post-write reread.
 
-```bash
-python -m pip install -r requirements-dev.lock
-python -m pytest -q
-```
-
-Packaging result for release 2.7.3 revision 55.22:
-
-- The complete executable test count is recorded in `release_manifest.json` after packaging;
-- web tests must be executed when the locked Flask dependency is available;
-- `python -m compileall -q .` is mandatory and its final result is recorded in the release manifest;
-- `python engine/release_identity.py` is mandatory and its final result is recorded in the release manifest.
-
-Installing `requirements-dev.lock` also installs the locked web dependencies through `requirements.lock`, allowing the web module to run in CI.
-
-## Real-model benchmark
+Run the complete release gate:
 
 ```bash
-python main.py benchmark
+python main.py benchmark --output context/benchmark_latest.json
 ```
 
-The report is written to `context/benchmark_latest.json` by default. Run it several times with the exact endpoint, model, quantization, hardware, configuration, and representative repository intended for production.
-
-The gate covers:
-
-- correct project reading;
-- factual correctness, response completion, and semantic grounding as separate metrics;
-- invented references and unsupported anchors;
-- false success states;
-- tool schema and permission behavior;
-- confirmation, hashes, dry run, atomic write, tests, rollback, and post-write reread;
-- configured and resolved model, provider finish reasons, token usage, actual LLM-call latency, and workflow phases;
-- queue/worker timing and telemetry where available.
-
-Deterministic tests prove orchestration properties; they do not prove that a particular model will always choose the correct tool sequence or meet a latency target. Do not claim a percentage speed improvement without measuring the final environment.
-
-## Recommended release check
+During development, run only the Rev3 smoke cases to avoid spending tokens on the full suite:
 
 ```bash
-python engine/release_identity.py
-python -m compileall -q .
-python -m pytest -q
-python main.py benchmark
-python main.py status
+python main.py benchmark \
+  --cases 01_audio_14_linhas,03_dois_arquivos,06_edicao_confirmada \
+  --output context/benchmark_smoke_rev3.json
 ```
 
-Review warnings, P50/P95/P99, retries, queue blocking, cache behavior, and any fallback causes before enabling `agent.rollout_mode: "full"`.
+A subset report is marked with `gate_scope=smoke`; all selected cases must pass. The ten-case report remains the release gate.
+
+A release gate should not be approved when any critical write-safety check fails, a false success is published, or the resolved model is missing for cases that called the LLM.
+
+The packaged test suite uses deterministic doubles. A real-model benchmark must still be run in the deployment environment because provider behavior, latency, reasoning-token accounting, and JSON conformance cannot be proven offline.

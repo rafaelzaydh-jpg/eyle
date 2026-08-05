@@ -11,8 +11,7 @@ Escopo original (Atualizacao 2): guardar o RESULTADO de cada tool ja
 resumido (nunca o resultado cru) em AgentState.observacoes, e deixar
 compiler.py:montar_prompt_agente fatiar so as ultimas 3-4 entradas na
 hora de montar o proximo prompt. Isso segue a mesma disciplina que
-retrieval/buscar.py e engine/dicas.py ja aplicam no resto da Eyle: nunca
-mandar tudo, mandar o que cabe e importa agora.
+a Eyle aplica em todo o fluxo: nunca mandar tudo, apenas o que cabe e importa agora.
 
 Atualizacao 3 (ordem de preferencia de ferramentas + guarda de chamada
 repetida): a ordem de preferencia em si e' so texto, vive em

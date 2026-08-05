@@ -26,7 +26,7 @@ Origem de cada tool (nenhuma logica de negocio nova):
     search_code         -> retrieval/buscar.py:buscar()
     find_symbol         -> engine/codar.py:localizar_simbolo()
     read_range          -> engine/project_reader.py:ler_faixa_projeto()
-    read_file           -> engine/dicas.py:ler_codigo_real()
+    read_file           -> engine/project_reader.py:ler_faixa_projeto()
     test_patch_dry_run  -> engine/codar.py:testar_patch_em_copia()
     run_tests           -> engine/codar.py:rodar_testes_projeto()
     apply_patch         -> engine/codar.py:aplicar_patch()  (permission=WRITE)
@@ -66,7 +66,6 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 from retrieval.buscar import buscar  # noqa: E402
-from engine.dicas import ler_codigo_real  # noqa: E402
 from engine.project_reader import (  # noqa: E402
     ErroLeituraProjeto,
     ler_faixa_projeto,
@@ -270,37 +269,21 @@ def _tool_read_file(arguments, ctx):
     caminho_relativo = arguments["caminho_relativo"]
 
     config = (ctx or {}).get("config") or {}
-    cfg_dicas = config.get("dicas", {})
-    max_chars = cfg_dicas.get("max_chars_por_arquivo", 20000)
-    codigos = ler_codigo_real([caminho_relativo], caminho_projeto, max_chars_por_arquivo=max_chars)
-    info = codigos.get(caminho_relativo)
-    if info is None:
-        return _falha(
-            "FILE_NOT_FOUND",
-            f"arquivo '{caminho_relativo}' nao encontrado no disco (removido desde o ultimo ingest?)",
-            executed=True,
-        )
-    if info.get("erro"):
-        return _falha("FILE_READ_REJECTED", info["erro"], executed=True)
-
     max_linhas = config.get("agent", {}).get("max_read_range_lines", 400)
     try:
         leitura = ler_faixa_projeto(
             caminho_projeto, caminho_relativo, 1, max_linhas,
             max_linhas=max_linhas,
         )
-    except ErroLeituraProjeto:
-        # Mantem a compatibilidade de mocks/estados antigos. Em um projeto real
-        # legivel, a chamada acima normalmente produz os hashes verificaveis.
-        return _sucesso(info)
+    except ErroLeituraProjeto as erro:
+        return _falha(erro.error_code, erro.detail, executed=True)
 
-    detalhe = dict(info)
-    detalhe.update(leitura)
-    detalhe["truncado"] = bool(
-        info.get("truncado")
-        or leitura.get("linha_fim", 0) < leitura.get("total_linhas_arquivo", 0)
+    leitura = dict(leitura)
+    leitura["conteudo"] = leitura.get("conteudo") or leitura.get("conteudo_raw") or leitura.get("trecho") or ""
+    leitura["truncado"] = bool(
+        leitura.get("linha_fim", 0) < leitura.get("total_linhas_arquivo", 0)
     )
-    return _sucesso(detalhe)
+    return _sucesso(leitura)
 
 
 def _tool_list_tree(arguments, ctx):
@@ -675,7 +658,7 @@ TOOLS["read_range"]["limits"] = {
     "max_linhas": {"config_key": "agent.max_read_range_lines", "default": 400},
 }
 TOOLS["read_file"]["limits"] = {
-    "max_caracteres": {"config_key": "dicas.max_chars_por_arquivo", "default": 20000},
+    "max_linhas": {"config_key": "agent.max_read_range_lines", "default": 400},
 }
 
 

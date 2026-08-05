@@ -72,3 +72,17 @@ def test_falha_antes_do_replace_nao_trunca_destino(monkeypatch, tmp_path):
 
     assert arquivo.read_bytes() == b"conteudo original"
     assert not list(tmp_path.glob(".dados.txt.eyle-*"))
+
+
+def test_escrita_atomica_nao_depende_de_fchmod(monkeypatch, tmp_path):
+    arquivo = tmp_path / "windows.txt"
+    arquivo.write_text("antes", encoding="utf-8")
+
+    monkeypatch.setattr(
+        codar_mod.shutil, "copymode",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("modo indisponivel")),
+    )
+    codar_mod._escrever_arquivo_atomico(str(arquivo), "depois")
+
+    assert arquivo.read_text(encoding="utf-8") == "depois"
+    assert not list(tmp_path.glob(".windows.txt.eyle-*"))

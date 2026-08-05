@@ -1,24 +1,37 @@
 #!/usr/bin/env python3
-"""
-compiler.py
------------
-Monta os dois prompts usados pelas duas personalidades da LLM
-(Analista e Executor) a partir da mesma memoria. Nao decide nada e
-nao chama a LLM -- so formata texto dentro do orcamento de contexto.
-Isso e o "Compilador de Contexto" do plano.
-
-    montar_prompt_analista(...)  -> pede pro Analista decidir o que ler
-    montar_prompt_executor(...)  -> monta o contexto final pro Executor
-"""
+"""Compilador de contexto do agente unico da Eyle 2.7.4."""
 import hashlib
 import json
 import os
 
-from engine.context_engine import (
-    calcular_orcamento_evidencias,
-    selecionar_evidencias,
-)
+from engine.context_engine import calcular_orcamento_evidencias, selecionar_evidencias
 
+_MODEL_STATE_TEXT = {
+    "resposta_direta": "direct_response",
+    "sem_ferramentas_de_projeto": "no_project_tools",
+    "Responder ao usuario": "Reply to the user",
+    "codigo_fresco_lido": "fresh_code_read",
+    "sugestoes_grounded": "grounded_suggestions",
+    "sem_escrita": "no_write",
+    "somente_leitura": "read_only",
+    "uma_acao_por_decisao": "one_action_per_decision",
+    "Ler o codigo fresco do alvo": "Read fresh code for the target",
+    "Propor melhorias com evidencias": "Propose improvements grounded in evidence",
+    "Localizar o componente relevante": "Locate the relevant component",
+    "Ler o codigo fresco necessario": "Read the required fresh code",
+    "codigo_fresco_relevante": "fresh_relevant_code",
+    "confirmacao_explicita": "explicit_confirmation",
+    "mudanca_verificada": "verified_change",
+    "escrita_confirmada": "confirmed_write",
+    "Localizar e ler o alvo": "Locate and read the target",
+    "Preparar a mudanca": "Prepare the change",
+    "Confirmar e aplicar": "Confirm and apply",
+    "Testar e reler o resultado": "Test and re-read the result",
+    "evidencia_pos_escrita": "post_write_evidence",
+    "resposta_grounded": "grounded_answer",
+    "Responder com evidencias": "Answer with evidence",
+    "Mapear o projeto com list_tree": "Map the project with list_tree",
+}
 
 def _compactar_catalogo_tools(catalogo_tools):
     """Projecao pequena do schema real, sem perder nome/tipo/limite/saida."""
@@ -49,35 +62,6 @@ def _compactar_catalogo_tools(catalogo_tools):
         })
     return compacto
 
-
-_MODEL_STATE_TEXT = {
-    "resposta_direta": "direct_response",
-    "sem_ferramentas_de_projeto": "no_project_tools",
-    "Responder ao usuario": "Reply to the user",
-    "codigo_fresco_lido": "fresh_code_read",
-    "sugestoes_grounded": "grounded_suggestions",
-    "sem_escrita": "no_write",
-    "somente_leitura": "read_only",
-    "uma_acao_por_decisao": "one_action_per_decision",
-    "Ler o codigo fresco do alvo": "Read fresh code for the target",
-    "Propor melhorias com evidencias": "Propose improvements grounded in evidence",
-    "Localizar o componente relevante": "Locate the relevant component",
-    "Ler o codigo fresco necessario": "Read the required fresh code",
-    "codigo_fresco_relevante": "fresh_relevant_code",
-    "confirmacao_explicita": "explicit_confirmation",
-    "mudanca_verificada": "verified_change",
-    "escrita_confirmada": "confirmed_write",
-    "Localizar e ler o alvo": "Locate and read the target",
-    "Preparar a mudanca": "Prepare the change",
-    "Confirmar e aplicar": "Confirm and apply",
-    "Testar e reler o resultado": "Test and re-read the result",
-    "evidencia_pos_escrita": "post_write_evidence",
-    "resposta_grounded": "grounded_answer",
-    "Responder com evidencias": "Answer with evidence",
-    "Mapear o projeto com list_tree": "Map the project with list_tree",
-}
-
-
 def _valor_para_modelo(valor):
     """Translate only deterministic state-machine text shown to the model.
 
@@ -92,7 +76,6 @@ def _valor_para_modelo(valor):
         return _MODEL_STATE_TEXT.get(valor, valor)
     return valor
 
-
 def _hash_curto_arquivo(caminho):
     h = hashlib.sha256()
     try:
@@ -102,7 +85,6 @@ def _hash_curto_arquivo(caminho):
     except OSError:
         return None
     return h.hexdigest()[:16]
-
 
 def _hash_entendimento_confere(caminho_relativo, item, projeto):
     raiz = (projeto or {}).get("caminho_origem") if isinstance(projeto, dict) else None
@@ -118,7 +100,6 @@ def _hash_entendimento_confere(caminho_relativo, item, projeto):
         return False
     atual = _hash_curto_arquivo(alvo)
     return bool(atual and atual == str(esperado))
-
 
 def bloco_entendimento(entendimento, projeto=None):
     """Renderiza memoria indexada somente como pista de navegacao.
@@ -157,459 +138,6 @@ def bloco_entendimento(entendimento, projeto=None):
             adicionou = True
 
     return partes if adicionou else []
-
-
-def montar_prompt_entendedor(caminho_relativo, conteudo, max_chars=20000):
-    """
-    Monta o prompt que pede pra LLM ler um arquivo INTEIRO (uma unica vez,
-    na ingestao) e devolver o retrato estrutural dele para o Modelo Interno
-    do Projeto. Usado por engine/entender.py.
-
-    Diferente de montar_prompt_analista/montar_prompt_executor (que rodam a
-    CADA pergunta, dentro do orcamento de contexto da conversa), este prompt
-    roda uma vez por ARQUIVO, na ingestao -- so de novo se o hash do arquivo
-    mudar. max_chars e um limite proprio (arquivo inteiro, nao trechos),
-    truncando arquivos muito grandes em vez de estourar o contexto da LLM.
-    """
-    truncado = False
-    if len(conteudo) > max_chars:
-        conteudo = conteudo[:max_chars]
-        truncado = True
-
-    partes = [
-        f"ARQUIVO: {caminho_relativo}",
-        "",
-        "CONTEUDO DO ARQUIVO:",
-        conteudo,
-    ]
-    if truncado:
-        partes.append(f"\n[arquivo truncado em {max_chars} caracteres para caber no contexto -- analise o que foi mostrado]")
-
-    partes.append(
-        "\nResponda APENAS com um JSON, sem texto antes ou depois, no formato exato:\n"
-        '{"tipo": "...", "responsabilidade": "...", "entrada": [...], "saida": [...], '
-        '"depende_de": [...], "funcoes_principais": [...], "pontos_criticos": [...]}\n'
-        "Regras:\n"
-        "- \"tipo\": categoria curta do arquivo (ex: \"orquestrador\", \"utilitario\", \"rota_web\", \"modelo_de_dados\", \"configuracao\").\n"
-        "- \"responsabilidade\": uma frase objetiva do que este arquivo faz.\n"
-        "- \"entrada\": o que este arquivo recebe (parametros, payloads, arquivos lidos) -- lista curta.\n"
-        "- \"saida\": o que este arquivo produz/retorna/escreve -- lista curta.\n"
-        "- \"depende_de\": outros arquivos/modulos que este arquivo importa ou usa diretamente, com base nos imports reais do codigo.\n"
-        "- \"funcoes_principais\": nomes das funcoes/classes mais importantes definidas aqui.\n"
-        "- \"pontos_criticos\": riscos operacionais (ex: \"controla o pipeline principal\") E questoes arquiteturais "
-        "(ex: \"alto acoplamento\", \"sem tratamento de erro\") -- pode ser lista vazia.\n"
-        "Nao invente nada que nao esteja no conteudo do arquivo mostrado acima."
-    )
-    return "\n".join(partes)
-
-
-def montar_prompt_visao_geral(pergunta, projeto=None, estrutura=None, entendimento=None,
-                               decisoes=None, token_budget=1500, chars_per_token=4,
-                               codigos_reais=None):
-    """Monta uma visao geral estrutural ou uma analise completa de projeto pequeno.
-
-    Quando ``codigos_reais`` esta presente, o Executor recebe o conteudo fresco
-    dos arquivos e deve analisar comportamento, fluxo, riscos e melhorias. Para
-    projetos maiores, conserva o panorama estrutural usado como fallback seguro.
-    """
-    partes = []
-    if projeto:
-        partes.append(
-            f"IDENTIFICACAO DO PROJETO: {projeto.get('projeto')} "
-            f"({projeto.get('arquivos')} arquivos, {projeto.get('tokens_estimados_totais')} tokens totais indexados)"
-        )
-
-    if entendimento:
-        bloco = bloco_entendimento(entendimento, projeto=projeto)
-        if bloco:
-            partes.append("")
-            partes.extend(bloco)
-
-    if decisoes:
-        partes.append("\nDECISOES ARQUITETURAIS CONHECIDAS:")
-        for d in decisoes[:10]:
-            partes.append(f"- {d.get('decisao')} (motivo: {d.get('motivo')})")
-
-    partes.append(f"\nOBJETIVO: {pergunta}\n")
-
-    orcamento_chars = token_budget * chars_per_token
-    usado = sum(len(p) for p in partes)
-
-    partes.append("MAPA DE ARQUIVOS DO PROJETO (arquivo (linhas): simbolos conhecidos):")
-    if estrutura:
-        omitidos = 0
-        for arquivo, info in estrutura.items():
-            info = info if isinstance(info, dict) else {}
-            simbolos = info.get("funcoes_classes", [])
-            linha = f"- {arquivo} ({info.get('linhas', '?')} linhas)"
-            if simbolos:
-                mostrados = simbolos[:12]
-                linha += ": " + ", ".join(mostrados)
-                if len(simbolos) > len(mostrados):
-                    linha += f", +{len(simbolos) - len(mostrados)}"
-            if usado + len(linha) > orcamento_chars:
-                omitidos += 1
-                continue
-            partes.append(linha)
-            usado += len(linha)
-        if omitidos:
-            partes.append(f"(+ {omitidos} arquivo(s) omitido(s) por orcamento de contexto)")
-    else:
-        partes.append("(projeto ainda nao foi indexado -- rode 'python main.py ingest <pasta>')")
-
-    codigos_reais = codigos_reais or {}
-    codigos_lidos = [
-        (arquivo, info) for arquivo, info in codigos_reais.items()
-        if isinstance(info, dict) and isinstance(info.get("conteudo"), str)
-    ]
-    if codigos_lidos:
-        partes.append(
-            "\nCODIGO REAL FRESCO DO PROJETO PEQUENO "
-            "(analise o conteudo abaixo; nao diga que ele esta indisponivel):"
-        )
-        for arquivo, info in codigos_lidos:
-            partes.append(f"\n--- {arquivo} ---")
-            linhas = info["conteudo"].splitlines()
-            partes.append("\n".join(
-                f"{numero:>6} | {linha}"
-                for numero, linha in enumerate(linhas, start=1)
-            ))
-            if info.get("truncado"):
-                partes.append(
-                    "[arquivo truncado pelo limite de contexto; analise o trecho mostrado "
-                    "e declare essa limitacao]"
-                )
-        partes.append(
-            "\nENTREGA OBRIGATORIA: explique o que o projeto faz, descreva o fluxo real, "
-            "aponte problemas/riscos encontrados no codigo e sugira correcoes praticas. "
-            "Nao reduza a resposta a contagem de arquivos ou linhas."
-        )
-    else:
-        partes.append(
-            "\nOBSERVACAO: isto e um panorama ESTRUTURAL (nomes de arquivo/funcao e contagem de "
-            "linhas), sem o conteudo linha a linha de cada trecho. Descreva o projeto em nivel de "
-            "arquivo/funcao. Nao invente numeros de linha especificos que nao foram dados aqui -- "
-            "se precisar citar uma faixa exata, diga que precisa consultar o arquivo especifico "
-            "primeiro."
-        )
-    return "\n".join(partes)
-
-
-def montar_prompt_dicas(pergunta, candidatos, codigos, projeto=None, entendimento=None):
-    """
-    Atualizacao 4 -- monta o prompt do Sugestor: pergunta + Modelo Interno
-    (por que cada candidato foi escolhido: match direto ou dependencia) +
-    CODIGO REAL (arquivo inteiro, nao chunk) de cada componente candidato.
-
-    candidatos: saida de engine/dicas.py:selecionar_componentes_candidatos
-                (lista de {"arquivo", "score", "motivo"})
-    codigos: saida de engine/dicas.py:ler_codigo_real
-             (dict "arquivo" -> {"conteudo", "truncado"})
-    """
-    partes = []
-    if projeto:
-        partes.append(
-            f"IDENTIFICACAO DO PROJETO: {projeto.get('projeto')} "
-            f"({projeto.get('arquivos')} arquivos, {projeto.get('tokens_estimados_totais')} tokens totais indexados)"
-        )
-
-    if entendimento:
-        bloco = bloco_entendimento(entendimento, projeto=projeto)
-        if bloco:
-            partes.append("")
-            partes.extend(bloco)
-
-    partes.append(f"\nOBJETIVO: {pergunta}\n")
-
-    arquivos_info = (entendimento or {}).get("arquivos", {})
-    partes.append(
-        "COMPONENTES CANDIDATOS (escolhidos pelo Modelo Interno do Projeto -- "
-        "tipo/responsabilidade/funcoes_principais/pontos_criticos, nao busca por palavra-chave):"
-    )
-    if not candidatos:
-        partes.append("(nenhum componente candidato encontrado no Modelo Interno para esta pergunta)")
-
-    for c in candidatos:
-        arquivo = c["arquivo"]
-        info = arquivos_info.get(arquivo, {})
-        cabecalho = f"\n--- {arquivo} ({c['motivo']}) ---"
-        partes.append(cabecalho)
-        if info.get("tipo") or info.get("responsabilidade"):
-            partes.append(f"tipo: {info.get('tipo', '?')} | responsabilidade: {info.get('responsabilidade', '?')}")
-        if info.get("depende_de"):
-            partes.append(f"depende_de: {', '.join(info['depende_de'])}")
-        if info.get("pontos_criticos"):
-            partes.append(f"pontos_criticos: {', '.join(info['pontos_criticos'])}")
-
-        codigo = codigos.get(arquivo)
-        if codigo and not codigo.get("erro"):
-            partes.append("CODIGO REAL:")
-            partes.append(codigo["conteudo"])
-            if codigo["truncado"]:
-                partes.append("[arquivo truncado para caber no contexto -- analise o que foi mostrado]")
-        elif codigo and codigo.get("erro"):
-            partes.append(f"(codigo nao lido por seguranca: {codigo['erro']})")
-        else:
-            partes.append("(codigo nao pode ser lido do disco -- arquivo pode ter sido removido desde o ultimo ingest)")
-
-    partes.append(
-        "\nResponda com sugestoes objetivas e fundamentadas SOMENTE no codigo real mostrado "
-        "acima. Para cada sugestao, cite o arquivo (e a linha, se identificavel no codigo "
-        "mostrado). Nao proponha nada que exija ver um arquivo que nao esta nos COMPONENTES "
-        "CANDIDATOS -- se a sugestao depender de algo que nao esta aqui, diga isso em vez de "
-        "supor. Voce esta SUGERINDO, nao aplicando nada -- nao gere um patch nem diga que a "
-        "mudanca ja foi feita."
-    )
-    return "\n".join(partes)
-
-
-def montar_prompt_engenheiro(pergunta, arquivo, simbolo, alvo, entendimento=None,
-                              decisoes=None, impacto=None):
-    """
-    Atualizacao 5 -- monta o prompt do Engenheiro: pede o CODIGO NOVO
-    COMPLETO de um simbolo (funcao/classe) especifico, ja localizado por
-    linha_inicio/linha_fim no arquivo real (engine/codar.py:localizar_simbolo).
-    Pede um recorte completo, nao um diff -- mais facil de aplicar
-    (substituicao direta de linhas) e mais facil de um modelo pequeno
-    gerar corretamente.
-
-    alvo: saida de engine/codar.py:localizar_simbolo
-          ({"linha_inicio", "linha_fim", "codigo_original", ...})
-    impacto: saida de engine/codar.py:calcular_impacto
-             (lista de {"arquivo", "responsabilidade"})
-    """
-    partes = []
-    if entendimento:
-        bloco = bloco_entendimento(entendimento)
-        if bloco:
-            partes.extend(bloco)
-            partes.append("")
-
-    info = (entendimento or {}).get("arquivos", {}).get(arquivo, {})
-    if info:
-        partes.append(f"MODELO INTERNO DE '{arquivo}':")
-        if info.get("tipo") or info.get("responsabilidade"):
-            partes.append(f"tipo: {info.get('tipo', '?')} | responsabilidade: {info.get('responsabilidade', '?')}")
-        if info.get("pontos_criticos"):
-            partes.append(f"pontos_criticos: {', '.join(info['pontos_criticos'])}")
-        partes.append("")
-
-    if impacto:
-        partes.append("QUEM DEPENDE DESTE ARQUIVO (cuidado ao mudar assinatura/comportamento existente):")
-        for i in impacto:
-            partes.append(f"- {i['arquivo']}: {i.get('responsabilidade', '')}")
-        partes.append("")
-
-    if decisoes:
-        partes.append("DECISOES ARQUITETURAIS CONHECIDAS:")
-        for d in decisoes[:10]:
-            partes.append(f"- {d.get('decisao')} (motivo: {d.get('motivo')})")
-        partes.append("")
-
-    partes.append(f"OBJETIVO: {pergunta}\n")
-    partes.append(f"ARQUIVO ALVO: {arquivo}")
-    partes.append(f"SIMBOLO ALVO: {simbolo} (linhas {alvo['linha_inicio']}-{alvo['linha_fim']} no arquivo atual)")
-    partes.append("\nCODIGO REAL ATUAL DESTE SIMBOLO (lido agora, direto do arquivo):")
-    partes.append(alvo["codigo_original"])
-
-    partes.append(
-        "\nResponda APENAS com um JSON, sem texto antes ou depois, no formato exato:\n"
-        '{"resumo": "...", "codigo_novo": "...", "riscos": [...]}\n'
-        "Regras:\n"
-        "- \"codigo_novo\": o RECORTE COMPLETO E FINAL que deve substituir o codigo atual mostrado acima "
-        "(a funcao/classe inteira, pronta para gravar no lugar -- NAO um diff, NAO \"...\" indicando partes "
-        "omitidas). Preserve a indentacao/assinatura salvo se a mudanca pedida for justamente nisso.\n"
-        "- \"resumo\": uma frase objetiva do que muda e por que.\n"
-        "- \"riscos\": riscos que voce percebe NESTA mudanca especifica (pode ser lista vazia).\n"
-        "Use APENAS o codigo real mostrado acima e o OBJETIVO pedido -- nao invente funcoes, campos ou "
-        "comportamento que nao existem no restante do arquivo."
-    )
-    return "\n".join(partes)
-
-
-def montar_texto_proposta(proposta):
-    """
-    Atualizacao 5 -- formata a proposta (Proposta + Impacto + Patch + Teste)
-    num texto legivel pro usuario, terminando com o pedido de confirmacao
-    explicita (se o teste passou) ou explicando por que nao pode ser
-    aplicada como esta (se o teste falhou).
-
-    proposta: dict montado em engine/engine.py:_tentar_gerar_proposta
-    """
-    p = proposta
-    partes = [
-        "PROPOSTA DE MUDANCA",
-        f"Arquivo: {p['arquivo']}",
-        f"Simbolo: {p['simbolo']} (linhas {p['linha_inicio']}-{p['linha_fim']})",
-        f"Resumo: {p['resumo'] or '(sem resumo)'}",
-    ]
-    if p.get("riscos"):
-        partes.append(f"Riscos apontados pelo Engenheiro: {', '.join(p['riscos'])}")
-
-    partes.append(f"\n--- CODIGO ATUAL ({p['arquivo']}:{p['linha_inicio']}-{p['linha_fim']}) ---")
-    partes.append(p["codigo_original"])
-    partes.append("\n+++ CODIGO PROPOSTO +++")
-    partes.append(p["codigo_novo"])
-
-    partes.append("\nIMPACTO (arquivos que dependem deste, via depende_de invertido no Modelo Interno):")
-    if p.get("impacto"):
-        for i in p["impacto"]:
-            partes.append(f"- {i['arquivo']}: {i.get('responsabilidade') or '(sem responsabilidade registrada)'}")
-    else:
-        partes.append("- nenhum arquivo do Modelo Interno declara depender deste (ou isso ainda nao foi mapeado)")
-
-    teste = p.get("teste") or {}
-    status_teste = "OK" if teste.get("ok") else "FALHOU"
-    partes.append("\nTESTE (numa copia temporaria -- o arquivo real NAO foi tocado):")
-    partes.append(f"[{status_teste}] {teste.get('detalhe', '(sem detalhe)')}")
-
-    if teste.get("ok"):
-        partes.append(
-            "\nQuer que eu aplique essa mudanca de verdade no arquivo? Responda \"sim\" ou \"aplica\" para "
-            "aplicar, ou mande qualquer outra mensagem para cancelar."
-        )
-    else:
-        partes.append(
-            "\nO teste na copia temporaria NAO passou, entao esta proposta nao fica pendente de confirmacao "
-            "-- nao vou aplicar isto como esta. Peca a mudanca de novo ou ajuste manualmente."
-        )
-
-    return "\n".join(partes)
-
-
-def montar_prompt_analista(pergunta, candidatos, estrutura=None, historico_relacionado=None,
-                            evidencias=None, entendimento=None, iteracao=1, respostas_anteriores=None):
-    """
-    candidatos: lista de trechos no mesmo formato de atual['trechos'] (saida do retrieval)
-    estrutura: dict "arquivo -> {linhas, funcoes_classes, ...}" de memory/estrutura.json
-    historico_relacionado: lista de decisoes antigas relacionadas (de memory/historico.json)
-    evidencias: lista de entidades relevantes de memory/evidencias.json
-    iteracao: numero da rodada do ciclo de investigacao (1 na primeira chamada)
-    respostas_anteriores: lista de decisoes (dict) do Analista em rodadas anteriores deste ciclo
-    """
-    partes = []
-    if entendimento:
-        bloco = bloco_entendimento(entendimento)
-        if bloco:
-            partes.extend(bloco)
-            partes.append("")
-
-    partes.append("OBJETIVO:")
-    partes.append(pergunta)
-
-    partes.append("\nCANDIDATOS (o retrieval encontrou isto; voce decide o que realmente importa):")
-    if candidatos:
-        for c in candidatos:
-            id_trecho = f"{c['arquivo']}:{c.get('linhas', '?')}"
-            cabecalho = f"- [{id_trecho}] {c['arquivo']}"
-            if c.get("simbolo"):
-                cabecalho += f" ({c['simbolo']})"
-            cabecalho += f" linhas {c.get('linhas', '?')}"
-            partes.append(cabecalho)
-    else:
-        partes.append("(nenhum candidato encontrado nesta rodada)")
-
-    if estrutura:
-        arquivos_candidatos = {c["arquivo"] for c in candidatos}
-        relacoes = [
-            f"- {arquivo}: {', '.join(estrutura[arquivo].get('funcoes_classes', []))}"
-            for arquivo in arquivos_candidatos
-            if arquivo in estrutura
-        ]
-        if relacoes:
-            partes.append("\nRELACOES ESTRUTURAIS (arquivo -> funcoes/classes conhecidas):")
-            partes.extend(relacoes)
-
-    if evidencias:
-        partes.append("\nEVIDENCIAS CONHECIDAS (entidade -> onde e definida/usada/validada):")
-        for e in evidencias:
-            partes.append(
-                f"- {e.get('entity')}: definido em {e.get('defined_in')}, "
-                f"usado por {e.get('used_by')}, validado por {e.get('validated_by')}"
-            )
-
-    if historico_relacionado:
-        partes.append("\nDECISOES ANTERIORES RELACIONADAS:")
-        for d in historico_relacionado:
-            partes.append(f"- {d.get('data', '?')}: {d.get('decisao')} (motivo: {d.get('motivo')})")
-
-    if iteracao > 1 and respostas_anteriores:
-        partes.append(f"\nESTA E A RODADA {iteracao} DO CICLO DE INVESTIGACAO.")
-        partes.append(
-            "Na rodada anterior voce apontou informacao faltando em 'faltando'. Um novo retrieval "
-            "direcionado ja rodou e os CANDIDATOS acima ja incluem o resultado dessa busca extra. "
-            "Decida agora se ja e suficiente ou se ainda falta algo."
-        )
-
-    partes.append(
-        "\nResponda APENAS com um JSON, sem texto antes ou depois, no formato:\n"
-        '{"ler": [...], "ignorar": [...], "faltando": [...], "riscos": [...], "motivo": "..."}\n'
-        "Regras:\n"
-        "- \"ler\": IDs [arquivo:linhas] da lista de candidatos que realmente importam para o objetivo.\n"
-        "- \"ignorar\": IDs [arquivo:linhas] da lista de candidatos que nao importam.\n"
-        "- \"faltando\": nomes de arquivos/simbolos que voce precisaria ver e NAO estao nos candidatos "
-        "(deixe vazio se ja tem o suficiente para decidir -- nao invente itens so para preencher).\n"
-        "- \"riscos\": riscos que voce percebe na mudanca pedida (pode ser lista vazia).\n"
-        "- \"motivo\": explicacao curta e objetiva da escolha.\n"
-        "Voce NUNCA gera codigo e NUNCA responde ao usuario aqui -- so decide o que importa."
-    )
-    return "\n".join(partes)
-
-
-def montar_prompt_executor(atual, projeto=None, evidencias=None, entendimento=None, decisoes=None):
-    """Monta o contexto final enviado ao Executor, ja reduzido pelo Analista + retrieval.
-    O Executor sempre recebe MEMORIA DO PROJETO (entendimento) + RESULTADO DO RETRIEVAL,
-    nunca so o retrieval bruto -- e assim que perguntas conceituais (\"o que e X\",
-    \"pra que serve Y\") deixam de cair em trechos de codigo sem relacao.
-    """
-    partes = []
-    if projeto:
-        partes.append(
-            f"IDENTIFICACAO DO PROJETO: {projeto.get('projeto')} "
-            f"({projeto.get('arquivos')} arquivos, {projeto.get('tokens_estimados_totais')} tokens totais indexados)"
-        )
-
-    if entendimento:
-        bloco = bloco_entendimento(entendimento, projeto=projeto)
-        if bloco:
-            partes.append("")
-            partes.extend(bloco)
-
-    if decisoes:
-        partes.append("\nDECISOES ARQUITETURAIS CONHECIDAS:")
-        for d in decisoes:
-            partes.append(f"- {d.get('decisao')} (motivo: {d.get('motivo')})")
-
-    partes.append(f"\nOBJETIVO: {atual['pergunta']}\n")
-    partes.append(f"TRECHOS RELEVANTES ({atual['tokens_usados']} tokens selecionados):")
-    for t in atual.get("trechos", []):
-        cabecalho = f"\n--- {t['arquivo']} (linhas {t['linhas']}"
-        if t.get("simbolo"):
-            cabecalho += f", simbolo: {t['simbolo']}"
-        cabecalho += f", relevancia: {t['score']}) ---"
-        partes.append(cabecalho)
-        partes.append(t["conteudo"])
-
-    if evidencias:
-        partes.append("\nEVIDENCIAS (relacoes ja conhecidas, nao precisa procurar de novo):")
-        for e in evidencias:
-            partes.append(
-                f"- {e.get('entity')}: definido em {e.get('defined_in')}, usado por {e.get('used_by')}"
-            )
-
-    if atual.get("historico_relacionado"):
-        partes.append("\nDECISOES ANTERIORES RELACIONADAS:")
-        for d in atual["historico_relacionado"]:
-            partes.append(f"- {d.get('data', '?')}: {d.get('decisao')} (motivo: {d.get('motivo')})")
-
-    if atual.get("restricoes"):
-        partes.append("\nRESTRICOES:")
-        for r in atual["restricoes"]:
-            partes.append(f"- {r}")
-
-    return "\n".join(partes)
-
-
 
 def _proxima_acao_edicao(goal_state, evidencias, actions, edit_state):
     """Resume o proximo gate deterministico do ciclo de edicao."""
@@ -694,7 +222,6 @@ def _renderizar_inventario_projeto(inventario):
         )
     return linhas
 
-
 def _renderizar_cobertura_auditoria(cobertura):
     if not isinstance(cobertura, dict) or cobertura.get("task_type") != "project_audit":
         return []
@@ -717,7 +244,6 @@ def _renderizar_cobertura_auditoria(cobertura):
         "Do not return final while any structural criterion is missing. Use the next candidate or another READ tool. "
         "The system will publish measured coverage separately; do not invent coverage percentages or claim universal bug absence.",
     ]
-
 
 def montar_prompt_agente(pergunta, observacoes=None, entendimento=None, max_entradas=4,
                          fatos_importantes=None, catalogo_tools=None,
@@ -860,7 +386,6 @@ def montar_prompt_agente(pergunta, observacoes=None, entendimento=None, max_entr
 
     return "\n".join(partes)
 
-
 def montar_prompt_scout_auditoria(
     pergunta,
     candidate_catalog,
@@ -944,7 +469,6 @@ def montar_prompt_scout_auditoria(
         "During gap_review, every additional path must test a named risk or close a concrete missing area.",
     ])
     return "\n".join(partes)
-
 
 def montar_prompt_finalizer_auditoria(
     pergunta,
@@ -1033,9 +557,9 @@ def montar_prompt_finalizer_auditoria(
     ])
     return "\n".join(partes)
 
-
 def montar_prompt_finalizer_leitura(
     pergunta, *, goal_state=None, evidencias=None, actions=None, config=None, system_prompt="",
+    task_contract=None, repair_feedback="", prior_claims=None,
 ):
     """Compila a resposta final de project_read sem catalogo de tools."""
     partes = [
@@ -1044,6 +568,9 @@ def montar_prompt_finalizer_leitura(
         "",
         "GOAL STATE (system-owned):",
         json.dumps(_valor_para_modelo(goal_state or {}), ensure_ascii=False, separators=(",", ":")),
+        "",
+        "TASK CONTRACT (system-owned; every required target must be covered):",
+        json.dumps(_valor_para_modelo(task_contract or {}), ensure_ascii=False, separators=(",", ":")),
         "",
         "EXECUTED ACTIONS (navigation metadata; facts still require evidence_ids):",
         json.dumps(_valor_para_modelo(actions or []), ensure_ascii=False, separators=(",", ":")),
@@ -1071,11 +598,20 @@ def montar_prompt_finalizer_leitura(
         partes.extend(["", item["bloco"]])
     if not selecao.get("selecionadas"):
         partes.append("(no fresh evidence fits; do not invent an answer)")
+    if prior_claims:
+        partes.extend([
+            "",
+            "PRIOR VALIDATED/REJECTED CLAIMS (repair context only):",
+            json.dumps(_valor_para_modelo(prior_claims), ensure_ascii=False, separators=(",", ":")),
+        ])
+    if repair_feedback:
+        partes.extend(["", str(repair_feedback)])
     partes.extend([
         "",
         "FINALIZER CONTRACT:",
         "- No tools are available.",
         "- Answer the exact target in the original request.",
+        "- Cover every TASK CONTRACT required_target; include evidence-derived literal values when requested.",
         "- A negative find_symbol observation proves explicit absence; BM25/search_code alone does not.",
         "- Return only the required JSON final envelope.",
         "CONTEXT BUDGET: window={} tokens; reserved response={}; safety margin={}.".format(

@@ -10,13 +10,10 @@ Fluxo principal da Eyle:
   Memoria externa (memory/, sem limite pratico)
             |
             v
-  Retrieval seletivo (BM25) -> LLM Analista -> (ciclo de investigacao)
+  Eyle Agent -> tools -> evidence -> finalizer -> validation
             |
             v
-  Compilador de Contexto (~1-2k tokens) -> LLM Executor -> Verify
-            |
-            v
-  Atualiza memoria (historico.json) e conversa (conversa.json)
+  Atualiza tarefa persistente e conversa
 
 Comandos:
     python main.py ingest <pasta_do_projeto> [--nome NOME]
@@ -87,8 +84,6 @@ def cmd_ingest(args):
         sys.exit(1)
     nome = args.nome or _nome_projeto_padrao(caminho)
     config = carregar_config()
-    if getattr(args, "pular_entendimento_llm", False):
-        config.setdefault("entendimento", {})["gerar_via_llm"] = False
     ingerir(
         caminho, nome, MEMORY_DIR,
         chunk_max_tokens=args.chunk_max_tokens,
@@ -98,10 +93,7 @@ def cmd_ingest(args):
 
 
 def cmd_perguntar(args):
-    # main.py so chama o engine -- exatamente o mesmo caminho que o worker
-    # usa quando o pedido vem do navegador (web/routes.py). Isso serve pra
-    # testar Retrieval->Analista->Compilador->Executor->Verify sem precisar
-    # subir o Flask.
+    # Mesmo caminho usado pelo Worker e pelo painel web.
     from engine.engine import processar
 
     projeto = carregar_projeto()
@@ -122,30 +114,21 @@ def cmd_perguntar(args):
     roteador = resultado.get("roteador", {})
     print(f"[main] Pipeline: {roteador.get('tipo')} ({roteador.get('motivo')})")
 
-    if roteador.get("tipo") == "engenharia":
-        print(f"[main] Analista concluiu em {resultado['iteracoes_analista']} iteracao(oes).")
-        for i, decisao in enumerate(resultado["decisoes_analista"], start=1):
-            print(f"[analista][rodada {i}] motivo: {decisao.get('motivo')}")
-            if decisao.get("riscos"):
-                print(f"[analista][rodada {i}] riscos: {decisao['riscos']}")
-            if decisao.get("faltando"):
-                print(f"[analista][rodada {i}] pediu mais informacao: {decisao['faltando']}")
-
     print("\n" + "=" * 60)
     print("RESPOSTA")
     print("=" * 60)
     print(resultado["resposta"])
     print("=" * 60)
 
-    metricas_verify = {
+    metricas_validacao = {
         nome: resultado.get(nome)
         for nome in ("citation_validity", "coverage", "grounding")
         if resultado.get(nome) is not None
     }
-    if metricas_verify:
-        print("\n[verify] " + " | ".join(f"{nome}: {valor}" for nome, valor in metricas_verify.items()))
+    if metricas_validacao:
+        print("\n[validation] " + " | ".join(f"{nome}: {valor}" for nome, valor in metricas_validacao.items()))
         for aviso in resultado.get("avisos", []):
-            print(f"[verify][AVISO] {aviso}")
+            print(f"[validation][AVISO] {aviso}")
     conclusao_agente = resultado.get("agente_conclusao") or {}
     if conclusao_agente:
         gate = (conclusao_agente.get("completion_gate") or {}).get("code")
@@ -165,17 +148,7 @@ def cmd_agente(args):
     from engine.engine import processar
 
     config = carregar_config()
-    rollout = config.get("agent", {}).get("rollout_mode")
-    if rollout is None:
-        rollout = "full" if config.get("agent", {}).get("enabled", False) else "off"
-    if rollout == "off":
-        print(
-            "[main] Aviso: agent.rollout_mode esta 'off'. A CLI explicita roda em read_only "
-            "com trace para diagnostico; o roteamento automatico continua no pipeline anterior."
-        )
-    else:
-        print(f"[main] Rollout do Agente: {rollout}")
-
+    rollout = config.get("agent", {}).get("rollout_mode", "full")
     projeto = carregar_projeto()
     if projeto is None:
         print(
@@ -264,14 +237,17 @@ def cmd_benchmark(args):
     output = args.output or os.path.join(BASE_DIR, "context", "benchmark_latest.json")
     relatorio = rodar_benchmark(
         carregar_config(), baseline_model=args.baseline_model, output_path=output,
+        case_ids=args.cases,
     )
     for execucao in relatorio["runs"]:
         metricas = execucao["metricas"]
         gate = "APROVADO" if metricas["gate_aprovado"] else "REPROVADO"
+        total = metricas.get("total_casos", 10)
         print(
-            f"[benchmark] {execucao['papel']} | {execucao['modelo']} | gate={gate} | "
-            f"leitura={metricas['tarefas_com_uso_correto_de_leitura']}/10 | "
-            f"factual={metricas['respostas_factuais_corretas']}/10 | "
+            f"[benchmark] {execucao['papel']} | {execucao['modelo']} | gate={gate} "
+            f"({metricas.get('gate_scope', 'full')}) | "
+            f"leitura={metricas['tarefas_com_uso_correto_de_leitura']}/{total} | "
+            f"factual={metricas['respostas_factuais_corretas']}/{total} | "
             f"escrita={metricas['checks_escrita_aprovados']}/5 | "
             f"P50={metricas['latencia_p50_ms']}ms | P95={metricas['latencia_p95_ms']}ms | "
             f"P99={metricas['latencia_p99_ms']}ms"
@@ -332,7 +308,7 @@ def cmd_serve(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Eyle - memoria externa + retrieval seletivo para LLMs locais pequenas")
+    parser = argparse.ArgumentParser(description="Eyle - agente unico para analisar, criar e editar projetos")
     sub = parser.add_subparsers(dest="comando", required=True)
 
     p_ingest = sub.add_parser("ingest", help="Indexa uma pasta de projeto na memoria")
@@ -340,9 +316,6 @@ def main():
                            help="Pasta do projeto a indexar (default: workspace/)")
     p_ingest.add_argument("--nome", default=None)
     p_ingest.add_argument("--chunk-max-tokens", type=int, default=400)
-    p_ingest.add_argument("--pular-entendimento-llm", action="store_true",
-                           help="Ingest so-heuristico: nao chama a LLM para gerar entendimento.json['arquivos'] "
-                                "(Atualizacao 3) -- util sem servidor local rodando. Entradas antigas sao preservadas.")
     p_ingest.set_defaults(func=cmd_ingest)
 
     p_perguntar = sub.add_parser("perguntar", help="Conversa ou executa o Agente Eyle conforme o pedido")
@@ -360,7 +333,7 @@ def main():
     p_status.set_defaults(func=cmd_status)
 
     p_benchmark = sub.add_parser(
-        "benchmark", help="Roda os 10 cenarios controlados do gate de utilidade real",
+        "benchmark", help="Roda a suite completa ou um smoke subset do gate de utilidade",
     )
     p_benchmark.add_argument(
         "--baseline-model", default=None,
@@ -369,6 +342,13 @@ def main():
     p_benchmark.add_argument(
         "--output", default=None,
         help="Caminho do relatorio JSON (default: context/benchmark_latest.json)",
+    )
+    p_benchmark.add_argument(
+        "--cases", default=None,
+        help=(
+            "IDs separados por vírgula para smoke test, por exemplo "
+            "01_audio_14_linhas,03_dois_arquivos,06_edicao_confirmada"
+        ),
     )
     p_benchmark.set_defaults(func=cmd_benchmark)
 

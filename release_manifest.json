@@ -1,317 +1,57 @@
 {
-  "release": "2.7.3",
-  "app_version": "2.7.3",
-  "config_schema_version": "2.7.3",
-  "revision": "55.22-project-read-orchestration-and-benchmark-truth",
-  "updated": "2026-08-05",
-  "installation": "overlay_safe",
-  "preserve_on_update": [
-    "memory/**",
-    "context/**",
-    "workspace/**"
-  ],
-  "included_runtime_state": false,
-  "validation": {
-    "compileall_passed": true,
-    "tests_passed": 362,
-    "tests_total_executable": 362,
-    "tests_skipped": 1,
-    "web_tests_executed": false,
-    "javascript_syntax_passed": true,
-    "real_llm_benchmark_executed": false,
-    "notes": [
-      "362/362 testes executaveis passaram, inclusive com warnings tratados como erro.",
-      "Metadados de termino do provider, retry de truncamento e Finalizer separado de project_read foram cobertos por testes deterministas.",
-      "Busca exata de simbolo e transicoes pos-write deterministicas foram validadas por regressao.",
-      "Benchmark v2 separa factualidade completude grounding workflow seguranca e latencia por chamada LLM.",
-      "Um modulo dependente de Flask foi ignorado porque Flask nao estava instalado no ambiente de empacotamento.",
-      "O benchmark real do Qwen 3.8 MAX precisa ser repetido com a revisao 55.22 no endpoint final.",
-      "O pacote final nao inclui bancos SQLite traces caches ou checkpoints de runtime."
-    ]
+  "release": "2.7.4",
+  "app_version": "2.7.4",
+  "config_schema_version": "2.7.4",
+  "revision": "3-target-coverage-fast-path",
+  "released_at": "2026-08-05",
+  "title": "Target coverage, single repair, and project-read fast path",
+  "architecture": {
+    "project_pipelines": [
+      "agent"
+    ],
+    "chat_path": true,
+    "legacy_fallbacks": false,
+    "llm_ingest": false,
+    "bm25_role": "optional agent search tool"
   },
-  "hardening_52": [
-    "semantic grounding deterministico por afirmacao e evidencia",
-    "watchdog de parede com processo filho terminavel",
-    "consumidores paralelos e diagnostico de head-of-line blocking",
-    "orcamento LLM central em todos os pipelines",
-    "limite LLM entre processos com lease recuperavel",
-    "cache LLM SQLite com migracao automatica",
-    "telemetria persistente com P50 P95 P99",
-    "fallbacks explicitos e warnings operacionais",
-    "testes de 429 timeout connection reset watchdog cache e recovery"
+  "removed": [
+    "consulta pipeline",
+    "dicas pipeline",
+    "visao_geral pipeline",
+    "engenharia pipeline",
+    "Analyst and Executor wrappers",
+    "engine/dicas.py",
+    "engine/entender.py",
+    "verify package",
+    "trusted-project legacy rollout"
   ],
-  "hardening_53": [
-    "schema exclusivo e parser de fallback escolhe a ultima autocorrecao JSON valida",
-    "invalidacao de envelopes de erro estruturados no cache e publicacao somente apos validar o orcamento",
-    "detector de ciclos por fingerprint de estado e resultado com repeticao minima configuravel",
-    "teto de reserva da fila mesmo sob conflito permanente",
-    "cache de retrieval por ciclo e early exit para lacunas ou buscas repetidas",
-    "backoff exponencial entre retries reprovados pelo Verify",
-    "falhas de permissao do token web registradas em telemetria"
+  "safety": [
+    "explicit write confirmation",
+    "fresh file and range hashes",
+    "dry-run before patch",
+    "cross-platform atomic replacement",
+    "tests and post-write reread",
+    "rollback",
+    "bounded task and LLM budgets"
   ],
-  "external_validation_required": [
-    "executar testes web com Flask==3.0.3 no ambiente final",
-    "repetir o benchmark 55.22 pelo menos tres vezes com o endpoint Qwen 3.8 MAX de producao",
-    "validar o fluxo de confirmacao pela API web fila Worker e polling alem do contrato direto do agente",
-    "medir retrieval e ingest em um repositorio grande real no armazenamento final"
-  ],
+  "validation": {
+    "tests_passed": 307,
+    "tests_skipped": 1,
+    "skip_reason": "Flask is not installed in the packaging environment",
+    "real_model_benchmark_run": false
+  },
   "known_limits": [
-    "grounding tipado deterministico nao constitui prova universal de entailment ou qualidade da decisao em linguagem natural",
-    "BM25 continua lexical e nao substitui busca semantica por embeddings",
-    "ganho do ingest paralelo depende de arquivos armazenamento CPU e custo do entendimento via LLM",
-    "desempenho real depende do hardware backend modelo e projeto do usuario",
-    "grounding tipado deterministico reduz alucinacoes mas nao prova entailment semantico universal",
-    "projetos acima dos limites do fallback legado falham com PROJECT_NOT_READ em vez de forcar leitura integral fora do orcamento",
-    "jobs salvos por versoes anteriores sem queue_instance_id sao descartados uma vez porque nao existe identidade historica confiavel para migra-los",
-    "o inventario preserva integralmente as entradas retornadas por list_tree, mas a varredura continua limitada por agent.max_tree_entries, agent.max_tree_depth, filtro, gitignore e regras de segredo; inventarios parciais sao sinalizados",
-    "a classificacao de entrypoint logica central caminhos de erro e testes usa heuristicas deterministicas de nomes caminhos e extensoes; layouts incomuns podem exigir ampliacao das regras",
-    "projetos com apenas um arquivo de codigo usam uma excecao explicita de fonte unica porque nao existe um segundo arquivo central para ler; a cobertura reporta essa condicao",
-    "project_audit garante cobertura minima estrutural e grounding mas nao prova ausencia universal de bugs",
-    "a selecao deterministica usa nomes caminhos extensoes e correlacao lexical; layouts exoticos podem exigir novas regras de classificacao",
-    "o catalogo enviado ao Scout e limitado por agent.audit_candidate_limit; candidatos fora do teto permanecem no inventario mas nao entram na primeira selecao",
-    "a revisao 55.18 le por padrao seis candidatos iniciais e uma lacuna adicional para caber no teto de passos; auditorias mais profundas ainda dependem de configuracao e iteracoes futuras",
-    "o endpoint real do Qwen 3.8 MAX nao estava disponivel no ambiente de empacotamento; o comportamento de selecao e finalizacao foi validado com doubles deterministas e testes integrados",
-    "project_audit permanece somente leitura por padrao; por isso afirmacoes de testes passando ficam bloqueadas ate uma execucao run_tests autorizada e registrada",
-    "hash correspondente em entendimento.json comprova frescor da versao do arquivo mas nao perfeicao semantica do resumo indexado; claims finais ainda exigem evidencia fresca",
-    "cobertura real mede alcance observado e componentes selecionados, mas nao constitui cobertura de branches, execucao de todos os caminhos ou prova universal de ausencia de bugs",
-    "o retry de truncamento depende de o provider informar finish_reason; servidores que omitem esse campo exigem validacao por completude e testes de conformidade adicionais",
-    "a consulta deterministica de simbolo exige caminho explicito e um simbolo reconhecivel no pedido; consultas vagas continuam sob planejamento do agente",
-    "o benchmark 55.22 retoma confirmacoes pelo contrato direto do agente; o caminho completo web fila Worker ainda requer teste de integracao no ambiente final",
-    "o benchmark real da revisao 55.22 nao foi executado no ambiente de empacotamento porque o endpoint Qwen de producao nao estava acessivel"
+    "The real Qwen benchmark must be rerun against revision 3.",
+    "trusted_local is allowlisted and snapshot-based but does not isolate network access or provide kernel-level sandboxing.",
+    "The optional Flask interface requires its runtime dependency in the final environment."
   ],
-  "internal_protocol_language": "English",
-  "user_language_behavior": "Preserva o pedido original e responde no idioma do usuario; portugues continua portugues.",
-  "hardening_54": [
-    "LRU em memoria com 2048 entradas antes do SQLite",
-    "cache persistente SQLite com 4096 entradas e TTL absoluto de 24 horas",
-    "isolamento do LRU por banco e fingerprint completo do backend",
-    "prompt web informa terminal e context/web_api_token.txt",
-    "botao de retry e troca do token sem recarregar",
-    "entrada direta web/routes.py inicia Worker e imprime token/caminho"
-  ],
-  "hardening_55": [
-    "indice invertido BM25 com postings por termo",
-    "Top-K exato por heap sem ordenar todos os candidatos",
-    "LRU de retrieval com 256 entradas e invalidacao por fingerprint do indice",
-    "historico relacionado relido mesmo em cache hit",
-    "leitura verificacao de segredo hashes AST simbolos e chunks paralelos no ingest",
-    "ordem deterministica preservada entre ingest serial e paralelo",
-    "configuracao e testes de regressao da revisao 55"
-  ],
-  "hardening_55_1": [
-    "probe de PID centralizado e sem sinais no Windows via OpenProcess e WaitForSingleObject",
-    "fast-path do PID atual para impedir autoencerramento em /status e no limiter",
-    "queue.py e process_limiter.py removidos do uso direto de os.kill(pid, 0)",
-    "timestamps legados sem timezone tratados como UTC",
-    "heartbeat invalido recuperado como job interrompido em vez de ficar preso",
-    "PID fora da faixa nao derruba health checks em POSIX",
-    "225 testes executaveis aprovados"
-  ],
-  "hardening_55_2": [
-    "status failed do Engine nao vira mais completed no Worker",
-    "resultado estruturado de falha preservado sem contaminar conversa",
-    "diagnostico redigido exposto por GET /jobs/<id>",
-    "aviso de falha visivel no navegador",
-    "polling de conversa independente de falha temporaria no polling de jobs",
-    "cache de IDs renderizados corrigido apos exclusao",
-    "preflight do backend LLM na inicializacao",
-    "provider padrao alinhado ao modo OpenAI-compatible",
-    "229 testes executaveis aprovados"
-  ],
-  "hardening_55_3": [
-    "timeout HTTP de geracao usa read_timeout_seconds em vez do connect timeout de 5s",
-    "respostas nao-streaming do llama-server deixam de ser canceladas antes dos cabecalhos",
-    "backend padrao alinhado ao bind IPv4 127.0.0.1:8080",
-    "teste com servidor OpenAI compativel real e resposta atrasada",
-    "231 testes executaveis aprovados"
-  ],
-  "hardening_55_4": [
-    "primeira transicao list_tree derivada deterministicamente do GoalState em toda analise geral",
-    "teto llm.agent_max_tokens separado do max_tokens global",
-    "READ_TIMEOUT separado de TRANSPORT_ERROR",
-    "retry de timeout de leitura desativado por padrao no pacote",
-    "deadline compartilhado ampliado com timeout individual preservado",
-    "fluxo integrado list_tree read_file final coberto por regressao",
-    "237 testes executaveis aprovados"
-  ],
-  "hardening_55_5": [
-    "paralelismo efetivo do Worker limitado por llm.max_concurrent_requests",
-    "ordem observavel preservada para backend local serial",
-    "falha web associada a mensagem de origem sem expor payload completo",
-    "tres repeticoes completas antes de pausar por ciclo",
-    "JSON Schema com oneOf e arguments obrigatorio em tool calls",
-    "ultima decisao JSON valida usada como autocorrecao final",
-    "uma unica tentativa adicional para reparar formato invalido",
-    "243 testes executaveis aprovados"
-  ],
-  "hardening_55_6": [
-    "agent_retry_max_attempts separado do retry geral da LLM",
-    "fim de retries aninhados entre transporte e correcao de formato",
-    "fallback read-only para consulta dicas ou visao_geral",
-    "fallback bloqueado para pedidos de edicao",
-    "causa invalid_agent_json preservada no checkpoint duravel",
-    "runtime SQLite traces caches e checkpoints removidos do ZIP",
-    "248 testes executaveis aprovados"
-  ],
-  "hardening_55_7": [
-    "progresso operacional persistido por job e exibido durante a execucao",
-    "streaming da resposta textual para backends Ollama e OpenAI-compatible",
-    "tokens por segundo e contagem estimada durante a geracao",
-    "reasoning_content e decisoes JSON internas nunca sao publicados no painel",
-    "jobs completed/failed antigos removidos do sessionStorage no carregamento",
-    "254 testes executaveis aprovados"
-  ],
-  "hardening_55_8": [
-    "normalizacao segura de tool_calls tool_call action action_input e answer",
-    "fallback READ reconhecido por causa codigo e texto redundantes",
-    "mensagem terminal de formato invalido bloqueada em analise de projeto",
-    "tarefas de edicao permanecem fail-closed",
-    "pedido curto Faça a analise usa o contexto do projeto",
-    "263 testes executaveis aprovados"
-  ],
-  "hardening_55_9": [
-    "polling ativo limitado a dois jobs por ciclo e 1,2 segundo entre ciclos",
-    "backoff global baseado em Retry-After para respostas 429",
-    "requests de status sem sobreposicao e sem falso worker offline durante rate limit",
-    "assets estaticos revalidados para evitar app.js antigo apos atualizacao",
-    "visao geral de projetos pequenos recebe codigo real fresco completo dentro de limites configuraveis",
-    "fallback textual de analise pequena deixa de responder apenas com nomes e contagem de linhas",
-    "267 testes executaveis aprovados"
-  ],
-  "hardening_55_10": [
-    "resumo operacional estruturado e persistente por job",
-    "quatro etapas publicas: entendimento leitura analise conclusao",
-    "duracao final formatada no painel como XmYYs",
-    "bloco HTML details expansivel inserido na conversa",
-    "arquivos faixas e leitura completa derivados de evidencias reais",
-    "fallback validacao e limitacoes declarados sem chain-of-thought",
-    "sanitizacao e limites antes de publicar GET /jobs/<id>",
-    "272 testes executaveis aprovados"
-  ],
-  "hardening_55_11": [
-    "cancelamento de job vinculado a mensagem removida sem afetar mensagens diferentes",
-    "processo filho terminavel para interromper chamadas LLM bloqueantes no painel web",
-    "purga de resposta tardia produzida por job cancelado",
-    "streaming desativado em decisoes estruturadas do Agent",
-    "intencao estruturada preservada quando response_format e rejeitado",
-    "JSON recuperado de reasoning_content no fallback por prompt",
-    "reasoning_content permanece privado em chamadas textuais comuns",
-    "279 testes executaveis aprovados"
-  ],
-  "hardening_55_12": [
-    "feedback de grounding informa claims rejeitadas motivos ancoras e evidencias mapeadas",
-    "autocorrecao permanece interna e nunca transfere falha semantica ao usuario",
-    "fallback conservador preserva claims aceitas e remove claims sem suporte",
-    "resposta minima baseada em faixas verificadas quando nenhuma claim original sobrevive",
-    "falha terminal SEMANTIC_GROUNDING_FAILED somente se o fallback seguro tambem for rejeitado",
-    "mesma pendencia humana conserva o ID durante a retomada valida",
-    "cinco novos testes de regressao e 284 testes executaveis aprovados"
-  ],
-  "hardening_55_13": [
-    "classificacao epistemica em fact inference hypothesis decision recommendation",
-    "claim_annotations opcionais no protocolo estruturado do Agente",
-    "fatos objetivos permanecem bloqueados sem evidencia",
-    "inferencias exigem base observada",
-    "hipoteses podem introduzir possibilidades novas com linguagem incerta",
-    "decisoes e recomendacoes podem introduzir novos valores arquivos e designs",
-    "fallback tipado preserva raciocinio valido e remove apenas claims rejeitadas",
-    "mesma politica de autonomia para projetos pequenos e grandes"
-  ],
-  "hardening_55_14": [
-    "adaptador unico para content reasoning_content streaming JSON parcial e texto puro",
-    "erro EMPTY_MODEL_RESPONSE para payload realmente vazio",
-    "pipeline separado de geracao utilidade grounding reparo validacao e publicacao",
-    "gate de utilidade impede success com recibo tecnico",
-    "fallback em camadas com analise deterministica final",
-    "grounding executado somente apos conteudo util",
-    "EvidenceRegistry canonico em todas as etapas",
-    "resultados persisted false-success reabertos pelo gate atual",
-    "302 testes executaveis aprovados"
-  ],
-  "hardening_55_15": [
-    "gate fail-closed para projeto sem evidencia fresca",
-    "grounding tipado obrigatorio nos pipelines legados de consulta dicas e visao geral",
-    "PROJECT_NOT_READ e UNGROUNDED_PROJECT_ANALYSIS propagados como falhas estruturadas",
-    "agente_status failed reconhecido pelo Worker",
-    "REQUEST_CONTEXT_MISMATCH para task_id reutilizado por outro pedido",
-    "queue_instance_id persistente para invalidar sessionStorage de outro banco",
-    "novo job no painel nunca herda status progresso ou resumo de ID numerico antigo",
-    "evidencia negativa para find_symbol executado sem correspondencia",
-    "309 testes executaveis aprovados"
-  ],
-  "hardening_55_16": [
-    "project_inventory estruturado e persistente fora das observacoes resumidas",
-    "todas as entradas retornadas por list_tree presentes em cada decisao seguinte do Agente",
-    "hash deterministico do inventario e contagens por tipo/extensao",
-    "cobertura completa ou parcial declarada explicitamente no prompt",
-    "regressao com arvore de 143 entradas e persistencia por checkpoint"
-  ],
-  "hardening_55_17": [
-    "novo task_type project_audit para pedidos gerais de analise",
-    "sete criterios minimos de cobertura controlados por codigo deterministico",
-    "selecao obrigatoria de entrypoint logica central caminhos de erro e testes ou configuracao",
-    "documentacao classificada como contexto auxiliar e nunca como codigo fresco",
-    "SOURCE_CODE_NOT_ANALYZED para evidencia composta apenas por documentacao",
-    "PROJECT_AUDIT_COVERAGE_INCOMPLETE para cobertura estrutural insuficiente",
-    "fallback legado bloqueado para impedir bypass dos gates",
-    "relatorio publico de cobertura e 322 testes executaveis aprovados"
-  ],
-  "hardening_55_18": [
-    "catalogo deterministico de candidatos por entrypoint orquestracao estado persistencia grounding recovery validacao testes e configuracao",
-    "documentacao excluida do catalogo de codigo da auditoria",
-    "Scout separado que seleciona somente caminhos validos do catalogo",
-    "slots minimos do sistema preservados mesmo quando o Scout retorna selecao vazia incompleta ou inventada",
-    "fila automatica de leituras iniciais com checkpoint duravel",
-    "segunda passagem do Scout recebe evidencias de codigo fresco para identificar riscos e lacunas reais",
-    "teste relacionado priorizado na cobertura adicional quando disponivel",
-    "Finalizer separado sem ferramentas e com contexto limitado a objetivo cobertura pipeline inventario e evidencias",
-    "project_audit deixa de usar o Agente monolitico para planejar e concluir na mesma chamada",
-    "pipeline publico Scout leituras revisao de lacunas Finalizer no resumo operacional",
-    "328 testes executaveis aprovados"
-  ],
-  "hardening_55_19": [
-    "contrato claims[] atomico para o Finalizer de project_audit",
-    "renderizacao deterministica da resposta a partir de claims validadas",
-    "evidence_ids e basis acoplados a cada claim",
-    "risk adaptado internamente para grounding de inferencia sem perder o tipo publico",
-    "TEST_STATUS_NOT_VERIFIED sem run_tests executado com sucesso",
-    "UNSUPPORTED_HEALTH_CLAIM para declaracoes globais sem cobertura e prova operacional",
-    "entendimento.json marcado como UNTRUSTED_NAVIGATION_HINT",
-    "HASH_VERIFIED_NAVIGATION_FACT somente quando o hash persistido corresponde ao disco",
-    "336 testes executaveis aprovados"
-  ],
-  "hardening_55_20": [
-    "schema coverage com inventory_complete code_files_total code_files_read critical_components_read tests_executed docs_used e level",
-    "niveis none partial targeted e complete calculados por codigo deterministico",
-    "componentes criticos derivados da selecao Scout slots obrigatorios e fallback auditavel",
-    "docs_used contabiliza apenas documentacao realmente referenciada pelas claims finais",
-    "tests_executed e tests_passed dependem de run_tests executado na tarefa atual",
-    "divulgacao publica informa alcance arquivos lidos execucao de testes e impossibilidade de garantir ausencia total de bugs",
-    "release antiga pode ser citada como historico documental sem provar o estado atual",
-    "nove testes novos cobrem a matriz obrigatoria e 345 testes executaveis foram aprovados"
-  ],
-  "hardening_55_21": [
-    "declaracoes globais de saude recusadas mesmo com cobertura direcionada e testes aprovados",
-    "conclusoes limitadas aos componentes revisados podem seguir para grounding",
-    "ultima execucao run_tests como unica fonte do estado atual dos testes",
-    "recovery estruturado claims[] para project_audit sem retorno ao contrato legado",
-    "revalidacao de evidencias grounding health gate utilidade e cobertura apos recovery",
-    "roteamento de auditoria e divulgacao de cobertura corrigidos para ingles",
-    "componentes criticos filtrados por papeis criticos do catalogo",
-    "documentacao ativa atualizada e conexoes SQLite de testes fechadas explicitamente",
-    "353 testes executaveis aprovados com warnings como erro"
-  ],
-  "hardening_55_22": [
-    "finish_reason uso de tokens reasoning tokens modelo resolvido response id e latencia preservados na fronteira LLM",
-    "retry unico e limitado para finish_reason de truncamento com MODEL_OUTPUT_TRUNCATED fail closed apos nova falha",
-    "Finalizer separado de 1400 tokens para project_read sem acesso a tools",
-    "sinal ready_to_finalize separa decisao de ferramenta da redacao final em project_read",
-    "consultas exatas de existencia de simbolo roteadas deterministicamente para find_symbol",
-    "evidencia negativa estruturada para simbolo ausente sem usar BM25 como prova de ausencia",
-    "transicao pos-write deterministica apply_patch confirmado run_tests releitura fresca e finalizacao",
-    "benchmark v2 separa factualidade completude grounding workflow e seguranca",
-    "modelo configurado e resolvido finish reasons chamadas e latencia LLM real registrados por caso",
-    "continuacoes de escrita percorridas ate estado terminal com limite de seguranca",
-    "362 testes executaveis aprovados com warnings como erro"
-  ]
+  "features": {
+    "project_read_contract": "structured claims",
+    "project_read_rendering": "deterministic",
+    "windows_test_backend": "trusted_local opt-in",
+    "request_contract": "minimal deterministic required_targets",
+    "target_coverage_gate": "enabled",
+    "project_read_recovery": "one directed Finalizer repair",
+    "project_read_fast_path": "enabled for explicit files"
+  }
 }

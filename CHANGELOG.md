@@ -1,5 +1,60 @@
 # Changelog
 
+## 2.7.4 — 2026-08-05
+
+### Revision 3 — Target coverage and lean project-read finalization
+
+- Added a minimal deterministic task contract with explicit files, symbols, relationships, full-file scope, and evidence-derived literal-value targets.
+- Added the `ANSWER_TARGETS_NOT_COVERED` completion gate so a grounded but incomplete answer cannot be published as success.
+- Added one directed project-read repair that receives only the missing targets, prior claims, and fresh evidence; a second recovery attempt is not allowed.
+- Added a project-read fast path that invokes the Finalizer as soon as all explicit files have fresh evidence, removing the intermediate `ready_to_finalize` model call.
+- Kept the new behavior explicitly enabled in the release configuration while preserving compatibility for older embedded configurations that do not declare the Rev3 flags.
+- Added regression coverage for prefix literal values, cross-file target coverage, single repair, and reduced Finalizer handoff calls.
+
+### Validation
+
+- 307 runtime and regression tests passed locally.
+- One Flask integration test remains environment-dependent when Flask is not installed.
+- Python compilation and release identity validation passed.
+- The real Qwen smoke benchmark must be rerun against revision 3.
+
+### Revision 2 — Structured project reads and trusted local tests
+
+- Changed the `project_read` Finalizer contract from free-form `answer + claim_annotations` to atomic `claims[]` with explicit `type`, `text`, `evidence_ids`, and `basis`.
+- Rendered project-read answers deterministically from validated claims, keeping evidence bindings intact across multi-file explanations.
+- Kept typed grounding as the blocker for unsupported anchors and missing evidence while structured claims prevent false rejection of legitimate cross-file relationships.
+- Changed project-read recovery to structured deterministic claims instead of loose text recovery.
+- Added the explicitly opt-in `trusted_local` test backend for Windows: allowlisted argv only, `shell=False`, temporary project snapshot, filtered environment, timeout, bounded output, and no claim of network isolation.
+- Made `backend=auto` select `trusted_local` on Windows only when `sandbox.allow_trusted_local=true`.
+- Added regression tests for multi-file structured claims, evidence requirements, trusted-local authorization, snapshot isolation, and real pytest execution.
+
+### Validation
+
+- 307 runtime and regression tests passed locally.
+- The suite also passed with warnings promoted to errors.
+- One Flask integration test remains environment-dependent when Flask is not installed.
+- A real `pytest -q` run passed through the `trusted_local` backend in a copied workspace.
+- The real Qwen benchmark must be rerun against revision 2.
+
+### Revision 1 — Core reset: single agent
+
+- Removed the historical `consulta`, `dicas`, `visao_geral`, and `engenharia` project pipelines.
+- Removed the separate Analyst, Executor, Suggestor, Engineer, and Understander LLM wrappers and prompts.
+- Removed `engine/dicas.py`, `engine/entender.py`, and the `verify/` package.
+- Replaced silent legacy fallbacks with explicit agent failures.
+- Reduced `engine/engine.py` to the chat/agent public entry paths.
+- Made ingest deterministic; it no longer calls an LLM to describe files.
+- Kept BM25 only as a search tool available to the single agent.
+- Simplified the release configuration and made `full` the default rollout while retaining explicit write confirmation.
+- Added cross-platform atomic writes that do not depend on `os.fchmod`.
+- Added regression tests proving that legacy modules, prompt builders, and routing paths are absent.
+
+### Validation
+
+- 297 runtime and regression tests passed locally.
+- One Flask integration test remains environment-dependent when Flask is not installed.
+- The real Qwen benchmark must be rerun against the deployment endpoint.
+
 All notable changes to Eyle are documented here.
 
 ## Unreleased

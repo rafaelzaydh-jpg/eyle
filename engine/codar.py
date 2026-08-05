@@ -189,13 +189,18 @@ def _escrever_arquivo_atomico(caminho, conteudo):
     modo_original = stat.S_IMODE(os.stat(caminho).st_mode) if os.path.exists(caminho) else None
     fd, caminho_temporario = tempfile.mkstemp(prefix=f".{nome}.eyle-", dir=diretorio)
     try:
-        if modo_original is not None:
-            os.fchmod(fd, modo_original)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             fd = None
             f.write(conteudo)
             f.flush()
             os.fsync(f.fileno())
+        if modo_original is not None:
+            try:
+                shutil.copymode(caminho, caminho_temporario)
+            except OSError:
+                # Alguns filesystems nao conseguem representar as mesmas permissoes.
+                # A atomicidade da troca continua sendo a garantia principal.
+                pass
         os.replace(caminho_temporario, caminho)
     finally:
         if fd is not None:

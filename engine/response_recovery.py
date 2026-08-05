@@ -307,18 +307,19 @@ def build_deterministic_structured_claims(objective, evidence):
     return ([] if error else normalized), error
 
 
-def recover_structured_audit_claims(
+def recover_structured_project_claims(
     objective, evidence, config, *, cause, prior_answer="", allow_llm=True,
+    task_type="project_read",
 ):
-    """Recovery seguro de ``project_audit`` que sempre devolve ``claims[]``.
+    """Recovery seguro de tarefas de projeto que sempre devolve ``claims[]``.
 
-    O retry textual antigo nao e usado: texto solto nao pode ser convertido em
-    claims por adivinhacao. A camada deterministica usa somente o Evidence Registry.
+    Texto solto nao e convertido em claims por adivinhacao. A camada
+    deterministica usa somente evidencias frescas do Evidence Registry.
     """
     claims, error = build_deterministic_structured_claims(objective, evidence)
     answer = render_claims(claims) if claims else ""
     gate = validate_response_utility(
-        answer, objective, task_type="project_audit", evidence=evidence,
+        answer, objective, task_type=task_type, evidence=evidence,
     )
     attempt = {
         "layer": "deterministic_structured_claims",
@@ -345,6 +346,16 @@ def recover_structured_audit_claims(
         "utility_gate": gate,
         "failure_code": "NO_USEFUL_STRUCTURED_RESPONSE",
     }
+
+def recover_structured_audit_claims(
+    objective, evidence, config, *, cause, prior_answer="", allow_llm=True,
+):
+    """Compatibilidade: auditorias usam o recovery estruturado comum."""
+    return recover_structured_project_claims(
+        objective, evidence, config, cause=cause, prior_answer=prior_answer,
+        allow_llm=allow_llm, task_type="project_audit",
+    )
+
 
 def recover_useful_response(objective, evidence, config, *, cause, prior_answer="", allow_llm=True, task_type="project_read"):
     """Executa retry textual, retry curto e fallback deterministico."""

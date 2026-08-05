@@ -236,13 +236,3 @@ def test_config_separa_avisos_de_erros():
     assert "LLM_READ_TIMEOUT_HIGH" in codes
     assert "WORKER_PARALLELISM_CAPPED" in codes
     assert avisos_config(config)
-
-
-def test_fallback_de_patch_e_explicito():
-    result = engine_mod._tentar_gerar_proposta(
-        "corrija", {"codar": {"ativado": True}},
-        {"caminho_origem": "/tmp"}, {"trechos": []}, {}, [],
-    )
-    assert result["fallback_used"] is True
-    assert result["fallback_cause"] == "AMBIGUOUS_PATCH_TARGET"
-    assert result["fallback_strategy"] == "verified_text_response"

@@ -6,9 +6,10 @@ comum quando a politica exige rede bloqueada: sem Bubblewrap (Linux) ou uma
 imagem Docker explicitamente configurada, a execucao falha fechada.
 
 O projeto continua gravavel porque suites de teste costumam criar caches e
-artefatos. O restante do host e somente leitura no Bubblewrap; Docker usa
-rootfs somente leitura. Ambos recebem /tmp efemero, rede desligada por padrao,
-limites de CPU/memoria/processos/arquivos e uma allowlist de argv.
+artefatos. Bubblewrap/Docker oferecem isolamento forte. Em Windows, um modo
+``trusted_local`` explicitamente autorizado pode executar somente comandos da
+allowlist, sem shell, em snapshot temporario, com timeout e ambiente filtrado.
+Esse modo nao promete isolamento de rede nem limites de kernel.
 """
 import os
 import shlex
@@ -237,6 +238,28 @@ def _comando_docker(caminho_projeto, argv, cfg, limites):
     return comando, (docker, nome)
 
 
+def _ambiente_trusted_local():
+    """Ambiente minimo para subprocesso local explicitamente confiado."""
+    permitidas = (
+        "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC",
+        "TEMP", "TMP", "USERPROFILE", "HOME", "LANG", "LC_ALL",
+        "VIRTUAL_ENV",
+    )
+    env = {chave: os.environ[chave] for chave in permitidas if os.environ.get(chave)}
+    env["EYLE_SANDBOX"] = "trusted_local"
+    env["PYTHONUNBUFFERED"] = "1"
+    return env
+
+
+def _comando_trusted_local(caminho_projeto, argv, cfg, limites):
+    if cfg.get("allow_trusted_local") is not True:
+        raise ErroSandbox(
+            "backend trusted_local exige sandbox.allow_trusted_local=true"
+        )
+    # argv ja passou pela allowlist e sempre sera executado com shell=False.
+    return list(argv), None
+
+
 def _comando_processo(caminho_projeto, argv, cfg, limites):
     if cfg.get("bloquear_rede", True):
         raise ErroSandbox(
@@ -283,11 +306,14 @@ def executar_no_sandbox(caminho_projeto, comando, cfg_sandbox=None):
                 backend = "bwrap"
             elif shutil.which("docker") and cfg.get("imagem_docker"):
                 backend = "docker"
+            elif os.name == "nt" and cfg.get("allow_trusted_local") is True:
+                backend = "trusted_local"
             elif cfg.get("bloquear_rede", True) is False:
                 backend = "processo"
             else:
                 raise ErroSandbox(
-                    "nenhum backend seguro disponivel (instale Bubblewrap ou configure Docker)"
+                    "nenhum backend seguro disponivel (instale Bubblewrap/configure Docker "
+                    "ou autorize trusted_local no Windows)"
                 )
 
         if backend == "bwrap":
@@ -296,6 +322,11 @@ def executar_no_sandbox(caminho_projeto, comando, cfg_sandbox=None):
             argv_exec, limpeza_docker = _comando_docker(caminho_execucao, argv, cfg, limites)
         elif backend in ("process", "processo"):
             argv_exec, limpeza_docker = _comando_processo(caminho_execucao, argv, cfg, limites)
+        elif backend in ("trusted_local", "local_confiavel"):
+            backend = "trusted_local"
+            argv_exec, limpeza_docker = _comando_trusted_local(
+                caminho_execucao, argv, cfg, limites,
+            )
         else:
             raise ErroSandbox(f"backend de sandbox desconhecido: {backend}")
     except ErroSandbox as erro:
@@ -317,6 +348,7 @@ def executar_no_sandbox(caminho_projeto, comando, cfg_sandbox=None):
             stderr=subprocess.STDOUT,
             start_new_session=True,
             shell=False,
+            env=_ambiente_trusted_local() if backend == "trusted_local" else None,
         )
         try:
             codigo = processo.wait(timeout=timeout)
@@ -357,6 +389,9 @@ def executar_no_sandbox(caminho_projeto, comando, cfg_sandbox=None):
 
     if excedeu_timeout:
         return {"executado": True, "ok": False, "codigo": codigo,
-                "saida": saida, "erro": f"timeout de {timeout}s excedido", "backend": backend}
+                "saida": saida, "erro": f"timeout de {timeout}s excedido",
+                "backend": backend,
+                "network_isolated": backend in {"bwrap", "docker"}}
     return {"executado": True, "ok": codigo == 0, "codigo": codigo,
-            "saida": saida, "erro": None, "backend": backend}
+            "saida": saida, "erro": None, "backend": backend,
+            "network_isolated": backend in {"bwrap", "docker"}}

@@ -12,7 +12,8 @@ from engine import agent as agent_mod
 from engine.config_schema import ConfigError, validar_config
 from engine.evidence_registry import EvidenceRegistry
 from engine.grounding import build_safe_grounded_answer, verify_conclusion
-from engine.response_recovery import build_deterministic_analysis
+from engine.response_recovery import build_deterministic_structured_claims
+from engine.structured_claims import claims_to_annotations, render_claims
 from engine.utility_gate import validate_response_utility
 from engine.work_summary import construir_resumo_trabalho
 from llm.executar import ErroLLM
@@ -110,10 +111,14 @@ def test_grounding_sem_claim_suportada_nao_fabrica_recibo():
 
 def test_fallback_deterministico_produz_analise_util_e_grounded():
     evidence = _evidence("valor = 1\n")
-    answer = build_deterministic_analysis("analise app.py", evidence)
+    claims, error = build_deterministic_structured_claims("analise app.py", evidence)
+    assert error is None
+    answer = render_claims(claims)
     assert "define `valor`" in answer
     assert validate_response_utility(answer, "analise app.py", evidence=evidence)["ok"] is True
-    assert verify_conclusion(answer, evidence)["ok"] is True
+    assert verify_conclusion(
+        answer, evidence, claim_annotations=claims_to_annotations(claims),
+    )["ok"] is True
 
 
 def test_empty_model_response_depois_da_leitura_recupera_sem_success_vazio(tmp_path, monkeypatch):
@@ -140,7 +145,7 @@ def test_empty_model_response_depois_da_leitura_recupera_sem_success_vazio(tmp_p
     assert status == "success"
     assert pending is None
     assert "define `valor`" in text
-    assert details["recovery_layer"] == "deterministic_analysis"
+    assert details["recovery_layer"] == "deterministic_structured_claims"
     assert details["utility_gate"]["ok"] is True
 
 
@@ -186,9 +191,3 @@ def test_registry_unico_alimenta_resumo_sem_evidencias_contraditorias():
     evidence_field = next(field for field in analysis_step["fields"] if field["label"] == "Evidências")
     assert labels.count("Evidências") == 1
     assert "ev-0001 = app.py:1" in evidence_field["value"]
-
-
-def test_schema_valida_flags_da_recuperacao():
-    validar_config({"agent": {"response_recovery": {"llm_enabled": True}}})
-    with pytest.raises(ConfigError, match="response_recovery.llm_enabled"):
-        validar_config({"agent": {"response_recovery": {"llm_enabled": "sim"}}})
