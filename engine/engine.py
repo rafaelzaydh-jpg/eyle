@@ -50,6 +50,7 @@ from engine.config_schema import carregar_config_validada
 from engine import queue as fila_persistente
 from engine import progress as job_progress
 from engine.utility_gate import validate_response_utility
+from engine.grounding import verify_conclusion
 
 MEMORY_DIR = os.path.join(BASE_DIR, "memory")
 CONTEXT_DIR = os.path.join(BASE_DIR, "context")
@@ -1279,6 +1280,128 @@ def _campos_validacao(resultado_validacao):
     }
 
 
+def _faixa_linhas(valor, conteudo):
+    inicio = 1
+    fim = max(1, len(str(conteudo or "").splitlines()))
+    if isinstance(valor, str):
+        match = re.match(r"^\s*(\d+)\s*(?:-\s*(\d+))?\s*$", valor)
+        if match:
+            inicio = max(1, int(match.group(1)))
+            fim = max(inicio, int(match.group(2) or inicio))
+    return inicio, fim
+
+
+def _evidencias_de_trechos(atual):
+    evidencias = []
+    for indice, trecho in enumerate((atual or {}).get("trechos") or [], 1):
+        if not isinstance(trecho, dict):
+            continue
+        arquivo = str(trecho.get("arquivo") or "").strip()
+        conteudo = str(trecho.get("conteudo") or "")
+        if not arquivo or not conteudo.strip():
+            continue
+        inicio, fim = _faixa_linhas(trecho.get("linhas"), conteudo)
+        digest = hashlib.sha256(conteudo.encode("utf-8", errors="replace")).hexdigest()
+        evidencias.append({
+            "id": f"legacy-retrieval-{indice:04d}",
+            "source_tool": "retrieval_read",
+            "arquivo": arquivo,
+            "linha_inicio": inicio,
+            "linha_fim": fim,
+            "total_linhas_arquivo": None,
+            "leitura_completa": False,
+            "truncado": True,
+            "conteudo_raw": conteudo,
+            "conteudo": conteudo,
+            "content_hash": digest,
+            "file_hash": None,
+            "estado": "fresh",
+        })
+    return evidencias
+
+
+def _evidencias_de_codigos(codigos, source_tool="read_file"):
+    evidencias = []
+    for indice, (arquivo, info) in enumerate((codigos or {}).items(), 1):
+        if not isinstance(info, dict):
+            continue
+        conteudo = info.get("conteudo")
+        if not isinstance(conteudo, str) or not conteudo.strip():
+            continue
+        total_linhas = max(1, len(conteudo.splitlines()))
+        digest = hashlib.sha256(conteudo.encode("utf-8", errors="replace")).hexdigest()
+        evidencias.append({
+            "id": f"legacy-read-{indice:04d}",
+            "source_tool": source_tool,
+            "arquivo": str(arquivo),
+            "linha_inicio": int(info.get("linha_inicio") or 1),
+            "linha_fim": int(info.get("linha_fim") or total_linhas),
+            "total_linhas_arquivo": int(info.get("total_linhas_arquivo") or total_linhas),
+            "leitura_completa": bool(info.get("leitura_completa", not info.get("truncado"))),
+            "truncado": bool(info.get("truncado")),
+            "conteudo_raw": conteudo,
+            "conteudo": conteudo,
+            "content_hash": digest,
+            "file_hash": digest if not info.get("truncado") else None,
+            "estado": "fresh",
+        })
+    return evidencias
+
+
+def _validar_saida_projeto_legada(resposta, pergunta, evidencias, config):
+    gate = validate_response_utility(
+        resposta, pergunta, task_type="project_read", evidence=evidencias,
+    )
+    if not gate.get("ok", False):
+        codigo = "PROJECT_NOT_READ" if "project_not_read" in gate.get("errors", []) else "NO_USEFUL_RESPONSE"
+        return False, codigo, gate, None
+    grounding = verify_conclusion(
+        resposta,
+        evidencias,
+        ((config or {}).get("agent") or {}).get("semantic_grounding", {}),
+    )
+    if not grounding.get("ok", False):
+        return False, "UNGROUNDED_PROJECT_ANALYSIS", gate, grounding
+    return True, None, gate, grounding
+
+
+def _resultado_falha_projeto(tipo, motivo_roteador, codigo, mensagem, *, evidencias=None, gate=None, grounding=None, ferramentas=None, limitacoes=None):
+    evidencias = list(evidencias or [])
+    return {
+        "status": "failed",
+        "error_code": codigo,
+        "resposta": mensagem,
+        "roteador": {"tipo": tipo, "motivo": motivo_roteador},
+        "iteracoes_analista": 0,
+        "decisoes_analista": [],
+        "confianca": None,
+        "citation_validity": False if grounding else None,
+        "coverage": (grounding or {}).get("coverage") if isinstance(grounding, dict) else None,
+        "grounding": False if grounding else None,
+        "avisos": list(limitacoes or []),
+        "trabalho_contexto": {
+            "modo": "analyze",
+            "ferramentas": list(ferramentas or []),
+            "arquivos_lidos": [
+                {
+                    "arquivo": item.get("arquivo"),
+                    "linha_inicio": item.get("linha_inicio"),
+                    "linha_fim": item.get("linha_fim"),
+                    "total_linhas_arquivo": item.get("total_linhas_arquivo"),
+                    "truncado": item.get("truncado"),
+                    "leitura_completa": item.get("leitura_completa"),
+                }
+                for item in evidencias
+            ],
+            "evidence_ids": [item.get("id") for item in evidencias if item.get("id")],
+            "evidencias": evidencias,
+            "utility_gate": gate,
+            "semantic_grounding": grounding,
+            "limitacoes": list(limitacoes or []),
+        },
+    }
+
+
 def _resultado_falha_llm(tipo, motivo_roteador, erro, **extras):
     """Converte ErroLLM em estado de pipeline, nunca em fala do assistente.
 
@@ -1324,96 +1447,114 @@ def _processar_chat(pergunta, config, motivo_roteador, historico_snapshot=None):
 
 
 def _processar_consulta(pergunta, config, projeto, estrutura, entendimento, motivo_roteador):
-    """Pipeline 'consulta': Retrieval + Executor direto, sem Analista e sem retry --
-    a pergunta so precisa de leitura/explicacao, nao de uma decisao de risco."""
-    atual = buscar(pergunta, memory_dir=MEMORY_DIR, config=config,
-                    out_path=os.path.join(CONTEXT_DIR, "atual.json"))
-
-    tem_entendimento = any(
-        item.get("funcao") for item in entendimento.get("componentes", {}).values()
+    """Consulta legada com evidência real, utility gate e grounding obrigatório."""
+    atual = buscar(
+        pergunta, memory_dir=MEMORY_DIR, config=config,
+        out_path=os.path.join(CONTEXT_DIR, "atual.json"),
     )
+    evidencias = _evidencias_de_trechos(atual)
+    if not evidencias:
+        return _resultado_falha_projeto(
+            "consulta", motivo_roteador, "PROJECT_NOT_READ",
+            "Nenhum trecho real do projeto foi lido; a consulta não pode ser publicada como análise.",
+            ferramentas=["retrieval_read"],
+            limitacoes=["retrieval não retornou conteúdo observável do projeto"],
+        )
 
-    if not atual.get("trechos") and not tem_entendimento:
-        resposta = "Nao encontrei nada relevante na memoria indexada para essa pergunta."
-        registrar_mensagem("assistant", resposta)
-        return {
-            "resposta": resposta,
-            "roteador": {"tipo": "consulta", "motivo": motivo_roteador},
-            "iteracoes_analista": 0,
-            "decisoes_analista": [],
-            "confianca": None,
-            "avisos": [],
-        }
-
-    evidencias = carregar_evidencias().get("entidades", [])
     prompt_executor = montar_prompt_executor(
-        atual, projeto=projeto, evidencias=evidencias, entendimento=entendimento,
+        atual,
+        projeto=projeto,
+        evidencias=carregar_evidencias().get("entidades", []),
+        entendimento=entendimento,
     )
     try:
         resposta = executar_executor(prompt_executor, config)
     except ErroLLM as erro:
         return _resultado_falha_llm("consulta", motivo_roteador, erro)
 
+    valido, codigo, gate, grounding_tipado = _validar_saida_projeto_legada(
+        resposta, pergunta, evidencias, config,
+    )
+    if not valido:
+        mensagem = (
+            "A consulta leu o projeto, mas a conclusão contém afirmações sem suporte nas evidências."
+            if codigo == "UNGROUNDED_PROJECT_ANALYSIS"
+            else "A consulta terminou sem uma conclusão útil e verificável."
+        )
+        return _resultado_falha_projeto(
+            "consulta", motivo_roteador, codigo, mensagem,
+            evidencias=evidencias, gate=gate, grounding=grounding_tipado,
+            ferramentas=["retrieval_read"],
+        )
+
     salvar_texto_atomico(os.path.join(CONTEXT_DIR, "ultima_resposta.txt"), resposta)
-
-    resultado_validacao = validar_resposta(resposta, MEMORY_DIR, atual.get("arquivos_relevantes"))
-    registrar_historico(MEMORY_DIR, pergunta, atual.get("arquivos_relevantes", []), resultado_validacao,
-                         resumo_decisao="consulta respondida sem Analista (roteador)")
+    resultado_validacao = validar_resposta(
+        resposta, MEMORY_DIR, atual.get("arquivos_relevantes"),
+    )
+    registrar_historico(
+        MEMORY_DIR, pergunta, atual.get("arquivos_relevantes", []), resultado_validacao,
+        resumo_decisao="consulta legada validada com evidência e grounding tipado",
+    )
     registrar_mensagem("assistant", resposta)
-
     return {
+        "status": "success",
         "resposta": resposta,
         "roteador": {"tipo": "consulta", "motivo": motivo_roteador},
         "iteracoes_analista": 0,
         "decisoes_analista": [],
+        "trabalho_contexto": {
+            "modo": "analyze",
+            "ferramentas": ["retrieval_read"],
+            "arquivos_lidos": [
+                {
+                    "arquivo": item.get("arquivo"),
+                    "linha_inicio": item.get("linha_inicio"),
+                    "linha_fim": item.get("linha_fim"),
+                    "total_linhas_arquivo": item.get("total_linhas_arquivo"),
+                    "truncado": item.get("truncado"),
+                    "leitura_completa": item.get("leitura_completa"),
+                }
+                for item in evidencias
+            ],
+            "evidence_ids": [item["id"] for item in evidencias],
+            "evidencias": evidencias,
+            "utility_gate": gate,
+            "semantic_grounding": grounding_tipado,
+            "limitacoes": ["trechos vieram do índice BM25 e podem não cobrir o projeto inteiro"],
+        },
         **_campos_validacao(resultado_validacao),
     }
 
 
 def _processar_dicas(pergunta, config, projeto, entendimento, motivo_roteador):
-    """Pipeline 'dicas' (Atualizacao 4): NAO usa retrieval/buscar.py (BM25 sobre
-    chunks) -- usa o Modelo Interno do Projeto (entendimento.json['arquivos'])
-    para escolher componentes candidatos por tipo/responsabilidade/depende_de/
-    pontos_criticos (engine/dicas.py), le o CODIGO REAL desses componentes
-    (arquivo inteiro, nao chunk) e manda pro Sugestor. Sem Analista (nao ha
-    decisao de risco a tomar, e so sugestao) e sem retry (e uma opiniao
-    fundamentada no codigo, nao um fato verificavel linha a linha como no
-    Executor de engenharia)."""
+    """Sugestões legadas só são publicadas depois de leitura e grounding reais."""
     arquivos_entendidos = (entendimento or {}).get("arquivos", {})
     if not arquivos_entendidos:
-        resposta = (
-            "Ainda nao tenho o Modelo Interno do Projeto (entendimento.json['arquivos']) "
-            "para dar uma dica fundamentada no codigo real. Rode 'python main.py ingest' "
-            "sem a flag --pular-entendimento-llm para gerar isso primeiro."
+        return _resultado_falha_projeto(
+            "dicas", motivo_roteador, "PROJECT_NOT_READ",
+            "O modelo interno do projeto não está disponível; nenhuma sugestão fundamentada foi publicada.",
+            limitacoes=["entendimento.json não contém arquivos analisáveis"],
         )
-        registrar_mensagem("assistant", resposta)
-        return {
-            "resposta": resposta,
-            "roteador": {"tipo": "dicas", "motivo": motivo_roteador},
-            "iteracoes_analista": 0,
-            "decisoes_analista": [],
-            "confianca": None,
-            "avisos": [],
-        }
 
     caminho_projeto = (projeto or {}).get("caminho_origem")
-    candidatos, codigos = preparar_dicas(pergunta, entendimento, caminho_projeto, config=config)
-
+    candidatos, codigos = preparar_dicas(
+        pergunta, entendimento, caminho_projeto, config=config,
+    )
     if not candidatos:
-        resposta = (
-            "Nao encontrei nenhum componente do Modelo Interno que bata com essa pergunta "
-            "(tipo/responsabilidade/funcoes_principais/pontos_criticos). Tente ser mais "
-            "especifico sobre que parte do projeto voce quer sugestao."
+        return _resultado_falha_projeto(
+            "dicas", motivo_roteador, "PROJECT_NOT_READ",
+            "Nenhum componente relevante foi selecionado para leitura; a sugestão foi interrompida.",
+            ferramentas=["select_components"],
         )
-        registrar_mensagem("assistant", resposta)
-        return {
-            "resposta": resposta,
-            "roteador": {"tipo": "dicas", "motivo": motivo_roteador},
-            "iteracoes_analista": 0,
-            "decisoes_analista": [],
-            "confianca": None,
-            "avisos": [],
-        }
+
+    evidencias = _evidencias_de_codigos(codigos, source_tool="read_file")
+    if not evidencias:
+        return _resultado_falha_projeto(
+            "dicas", motivo_roteador, "PROJECT_NOT_READ",
+            "Os componentes foram selecionados, mas nenhum arquivo real pôde ser lido.",
+            ferramentas=["select_components", "read_file"],
+            limitacoes=["arquivos ausentes, ilegíveis ou rejeitados pela segurança de caminho"],
+        )
 
     prompt_sugestor = montar_prompt_dicas(
         pergunta, candidatos, codigos, projeto=projeto, entendimento=entendimento,
@@ -1423,21 +1564,58 @@ def _processar_dicas(pergunta, config, projeto, entendimento, motivo_roteador):
     except ErroLLM as erro:
         return _resultado_falha_llm("dicas", motivo_roteador, erro)
 
-    salvar_texto_atomico(os.path.join(CONTEXT_DIR, "ultima_resposta.txt"), resposta)
+    valido, codigo, gate, grounding_tipado = _validar_saida_projeto_legada(
+        resposta, pergunta, evidencias, config,
+    )
+    if not valido:
+        mensagem = (
+            "A sugestão contém afirmações sobre o projeto sem suporte nas leituras realizadas."
+            if codigo == "UNGROUNDED_PROJECT_ANALYSIS"
+            else "A sugestão terminou sem conteúdo útil e verificável."
+        )
+        return _resultado_falha_projeto(
+            "dicas", motivo_roteador, codigo, mensagem,
+            evidencias=evidencias, gate=gate, grounding=grounding_tipado,
+            ferramentas=["select_components", "read_file"],
+        )
 
+    salvar_texto_atomico(os.path.join(CONTEXT_DIR, "ultima_resposta.txt"), resposta)
     arquivos_relevantes = [c["arquivo"] for c in candidatos]
     resultado_validacao = validar_resposta(resposta, MEMORY_DIR, arquivos_relevantes)
     registrar_historico(
         MEMORY_DIR, pergunta, arquivos_relevantes, resultado_validacao,
-        resumo_decisao="dicas geradas a partir do Modelo Interno + codigo real (Sugestor)",
+        resumo_decisao="dicas validadas a partir de código real e grounding tipado",
     )
     registrar_mensagem("assistant", resposta)
-
     return {
+        "status": "success",
         "resposta": resposta,
         "roteador": {"tipo": "dicas", "motivo": motivo_roteador},
         "iteracoes_analista": 0,
         "decisoes_analista": [],
+        "trabalho_contexto": {
+            "modo": "suggest",
+            "ferramentas": ["select_components", "read_file"],
+            "arquivos_lidos": [
+                {
+                    "arquivo": item.get("arquivo"),
+                    "linha_inicio": item.get("linha_inicio"),
+                    "linha_fim": item.get("linha_fim"),
+                    "total_linhas_arquivo": item.get("total_linhas_arquivo"),
+                    "truncado": item.get("truncado"),
+                    "leitura_completa": item.get("leitura_completa"),
+                }
+                for item in evidencias
+            ],
+            "evidence_ids": [item["id"] for item in evidencias],
+            "evidencias": evidencias,
+            "utility_gate": gate,
+            "semantic_grounding": grounding_tipado,
+            "limitacoes": [
+                "leitura truncada pelo orçamento de contexto"
+                for item in evidencias if item.get("truncado")
+            ],
+        },
         **_campos_validacao(resultado_validacao),
     }
 
@@ -1517,17 +1695,19 @@ def _codigos_reais_projeto_pequeno(config, projeto, estrutura):
 
 
 def _processar_visao_geral(pergunta, config, projeto, estrutura, entendimento, motivo_roteador):
-    """Pipeline 'visao_geral': pedido generico tipo 'da uma olhada no projeto',
-    'confere o codigo' -- NAO roda retrieval (a pergunta nao tem vocabulario em
-    comum com o codigo, BM25 so acharia ruido). Monta o panorama direto de
-    estrutura.json + entendimento.json + decisoes.json e manda pro Executor.
-    Sem Analista (e so leitura, nao ha risco de mudanca) e sem retry."""
+    """Visão geral legada com leitura obrigatória e publicação somente após grounding."""
     ctx_cfg = config.get("context", {})
     decisoes = carregar_decisoes()
+    codigos_reais = _codigos_reais_projeto_pequeno(config, projeto, estrutura)
+    evidencias = _evidencias_de_codigos(codigos_reais, source_tool="read_file")
+    if not evidencias:
+        return _resultado_falha_projeto(
+            "visao_geral", motivo_roteador, "PROJECT_NOT_READ",
+            "Nenhum arquivo real foi lido; não existem evidências suficientes para analisar o projeto.",
+            ferramentas=["list_tree", "read_file"],
+            limitacoes=["o projeto excedeu os limites de leitura integral ou a leitura falhou"],
+        )
 
-    codigos_reais = _codigos_reais_projeto_pequeno(
-        config, projeto, estrutura,
-    )
     prompt_executor = montar_prompt_visao_geral(
         pergunta, projeto=projeto, estrutura=estrutura, entendimento=entendimento,
         decisoes=decisoes, token_budget=ctx_cfg.get("token_budget", 1500),
@@ -1539,47 +1719,56 @@ def _processar_visao_geral(pergunta, config, projeto, estrutura, entendimento, m
     except ErroLLM as erro:
         return _resultado_falha_llm("visao_geral", motivo_roteador, erro)
 
-    salvar_texto_atomico(os.path.join(CONTEXT_DIR, "ultima_resposta.txt"), resposta)
+    valido, codigo, gate, grounding_tipado = _validar_saida_projeto_legada(
+        resposta, pergunta, evidencias, config,
+    )
+    if not valido:
+        mensagem = (
+            "A análise contém afirmações sobre o projeto sem suporte nas leituras realizadas."
+            if codigo == "UNGROUNDED_PROJECT_ANALYSIS"
+            else "A análise terminou sem uma conclusão útil e verificável."
+        )
+        return _resultado_falha_projeto(
+            "visao_geral", motivo_roteador, codigo, mensagem,
+            evidencias=evidencias, gate=gate, grounding=grounding_tipado,
+            ferramentas=["list_tree", "read_file"],
+        )
 
+    salvar_texto_atomico(os.path.join(CONTEXT_DIR, "ultima_resposta.txt"), resposta)
     arquivos_no_mapa = list(estrutura.keys()) if estrutura else []
     resultado_validacao = validar_resposta(resposta, MEMORY_DIR, arquivos_no_mapa)
     registrar_historico(
         MEMORY_DIR, pergunta, arquivos_no_mapa, resultado_validacao,
-        resumo_decisao=(
-            "visao geral com codigo real completo de projeto pequeno"
-            if codigos_reais else "visao geral estrutural do projeto"
-        ),
+        resumo_decisao="visão geral validada com código real e grounding tipado",
     )
     registrar_mensagem("assistant", resposta)
-
-    arquivos_lidos = [
-        {
-            "arquivo": arquivo,
-            "linha_inicio": info.get("linha_inicio"),
-            "linha_fim": info.get("linha_fim"),
-            "total_linhas_arquivo": info.get("total_linhas_arquivo"),
-            "truncado": info.get("truncado"),
-            "leitura_completa": info.get("leitura_completa"),
-        }
-        for arquivo, info in codigos_reais.items()
-        if isinstance(info, dict)
-    ]
     return {
+        "status": "success",
         "resposta": resposta,
         "roteador": {"tipo": "visao_geral", "motivo": motivo_roteador},
         "iteracoes_analista": 0,
         "decisoes_analista": [],
         "trabalho_contexto": {
             "modo": "analyze",
-            "ferramentas": (
-                ["list_tree", "read_file"] if arquivos_lidos else ["list_tree"]
-            ),
-            "arquivos_lidos": arquivos_lidos,
-            "evidence_ids": [],
+            "ferramentas": ["list_tree", "read_file"],
+            "arquivos_lidos": [
+                {
+                    "arquivo": item.get("arquivo"),
+                    "linha_inicio": item.get("linha_inicio"),
+                    "linha_fim": item.get("linha_fim"),
+                    "total_linhas_arquivo": item.get("total_linhas_arquivo"),
+                    "truncado": item.get("truncado"),
+                    "leitura_completa": item.get("leitura_completa"),
+                }
+                for item in evidencias
+            ],
+            "evidence_ids": [item["id"] for item in evidencias],
+            "evidencias": evidencias,
+            "utility_gate": gate,
+            "semantic_grounding": grounding_tipado,
             "limitacoes": [
                 "leitura integral limitada pelo orçamento de contexto"
-                for info in codigos_reais.values()
-                if isinstance(info, dict) and info.get("truncado")
+                for item in evidencias if item.get("truncado")
             ],
         },
         **_campos_validacao(resultado_validacao),
@@ -1635,33 +1824,63 @@ def _fallback_leitura_legado(
     resposta_fallback = (resultado or {}).get("resposta") if isinstance(resultado, dict) else ""
     contexto_fallback = (resultado or {}).get("trabalho_contexto") if isinstance(resultado, dict) else {}
     contexto_fallback = contexto_fallback if isinstance(contexto_fallback, dict) else {}
-    gate_utilidade = validate_response_utility(
+    evidencias_fallback = contexto_fallback.get("evidencias") or []
+    gate_utilidade = contexto_fallback.get("utility_gate") or validate_response_utility(
         resposta_fallback, pergunta, task_type="project_read",
-        evidence=contexto_fallback.get("arquivos_lidos") or [],
+        evidence=evidencias_fallback,
     )
-    falhou = (
-        isinstance(resultado, dict) and resultado.get("status") == "failed"
-    ) or not gate_utilidade.get("ok", False)
-    if falhou and isinstance(resultado, dict) and not gate_utilidade.get("ok", False):
-        resultado["resposta"] = (
-            "A recuperação textual terminou sem uma conclusão útil validada."
+    grounding_fallback = contexto_fallback.get("semantic_grounding")
+    status_resultado = str((resultado or {}).get("status") or "").strip().lower() if isinstance(resultado, dict) else "failed"
+    falhou = status_resultado == "failed" or not gate_utilidade.get("ok", False)
+    if not falhou and not isinstance(grounding_fallback, dict):
+        grounding_fallback = verify_conclusion(
+            resposta_fallback,
+            evidencias_fallback,
+            ((config or {}).get("agent") or {}).get("semantic_grounding", {}),
         )
-        resposta_fallback = resultado["resposta"]
+    if not falhou and not grounding_fallback.get("ok", False):
+        falhou = True
+        if isinstance(resultado, dict):
+            resultado["status"] = "failed"
+            resultado["error_code"] = "UNGROUNDED_PROJECT_ANALYSIS"
+            resultado["resposta"] = (
+                "A recuperação textual gerou afirmações sem suporte nas evidências lidas."
+            )
+            resposta_fallback = resultado["resposta"]
+    if falhou and isinstance(resultado, dict):
+        # Adaptadores/mocks antigos podem devolver apenas texto, sem status e
+        # sem evidência. Nesse contrato incompleto, substitua a fala não
+        # validada por um diagnóstico seguro; falhas modernas preservam a
+        # mensagem específica produzida pelo próprio pipeline.
+        if status_resultado != "failed" and not gate_utilidade.get("ok", False):
+            resultado["resposta"] = "A recuperação textual terminou sem uma conclusão útil validada."
+            resposta_fallback = resultado["resposta"]
         resultado["status"] = "failed"
+        resultado.setdefault(
+            "error_code",
+            "PROJECT_NOT_READ" if "project_not_read" in gate_utilidade.get("errors", []) else "NO_USEFUL_RESPONSE",
+        )
+    codigo_gate = (
+        (resultado or {}).get("error_code")
+        if falhou and isinstance(resultado, dict)
+        else "legacy_read_fallback"
+    )
+    ids_evidencia = [item.get("id") for item in evidencias_fallback if isinstance(item, dict) and item.get("id")]
     detalhes = {
         "task_id": task_id,
         "task_type": "project_read",
         "mode": classificar_modo_projeto(pergunta),
         "response": resposta_fallback,
         "completion_gate": {
-            "code": "legacy_read_fallback_failed" if falhou else "legacy_read_fallback",
+            "code": codigo_gate or "legacy_read_fallback_failed",
             "passed": not falhou,
         },
         "fallback_cause": causa,
         "fallback_pipeline": tipo_legado,
-        "evidence_ids": [],
-        "evidencias_usadas": [],
+        "evidence_ids": ids_evidencia,
+        "evidencias_usadas": evidencias_fallback,
         "utility_gate": gate_utilidade,
+        "semantic_grounding": grounding_fallback,
     }
     fila_persistente.atualizar_tarefa_agente(
         task_id,
@@ -1784,13 +2003,42 @@ def _processar_agente(pergunta, config, projeto, entendimento, motivo_roteador,
     job_progress.publicar(
         config_execucao, "agent", "Agente iniciado; preparando o primeiro passo",
     )
-    tarefa = fila_persistente.criar_tarefa_agente(
-        pergunta,
-        modo,
-        projeto_hash=_hash_projeto(projeto),
-        task_id=task_id,
-        source_job_id=source_job_id,
-    )
+    try:
+        tarefa = fila_persistente.criar_tarefa_agente(
+            pergunta,
+            modo,
+            projeto_hash=_hash_projeto(projeto),
+            task_id=task_id,
+            source_job_id=source_job_id,
+        )
+    except fila_persistente.AgentTaskContextMismatch as erro:
+        return {
+            "status": "failed",
+            "error_code": "REQUEST_CONTEXT_MISMATCH",
+            "resposta": (
+                "A tarefa persistida pertence a outro pedido e foi recusada para evitar mistura de contexto."
+            ),
+            "roteador": {
+                "tipo": "agente", "motivo": motivo_roteador, "modo": modo,
+                "rollout": rollout_efetivo, "task_id": task_id,
+            },
+            "iteracoes_analista": 0,
+            "decisoes_analista": [],
+            "confianca": None,
+            "avisos": [str(erro)],
+            "agente_status": "failed",
+            "agente_conclusao": {
+                "task_id": task_id,
+                "task_type": "project_write" if modo == "edit" else "project_read",
+                "mode": modo,
+                "failure_code": "REQUEST_CONTEXT_MISMATCH",
+                "completion_gate": {
+                    "code": "REQUEST_CONTEXT_MISMATCH", "passed": False,
+                },
+                "evidence_ids": [],
+                "evidencias_usadas": [],
+            },
+        }
     task_id = tarefa["task_id"]
 
     if tarefa.get("status") == "completed" and isinstance(tarefa.get("resultado"), dict):

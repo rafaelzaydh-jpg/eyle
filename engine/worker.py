@@ -42,10 +42,10 @@ class RemoteJobError(RuntimeError):
 
 
 def _resultado_indica_falha(resultado):
-    return (
-        isinstance(resultado, dict)
-        and str(resultado.get("status") or "").strip().lower() == "failed"
-    )
+    if not isinstance(resultado, dict):
+        return False
+    status = resultado.get("status") or resultado.get("agente_status") or ""
+    return str(status).strip().lower() == "failed"
 
 
 def _resumo_publico(evento, resultado, duracao_segundos, status_job):

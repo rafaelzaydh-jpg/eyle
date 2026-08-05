@@ -245,7 +245,7 @@
   },
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "55.14-unified-response-recovery-pipeline",
+  "revision": "55.15-evidence-integrity-and-job-identity",
   "telemetry": {
     "enabled": true,
     "window_seconds": 3600,

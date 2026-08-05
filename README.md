@@ -20,10 +20,10 @@
   <img alt="Release 2.7.3" src="https://img.shields.io/badge/release-2.7.3-2563EB">
   <img alt="Local execution" src="https://img.shields.io/badge/execution-local-16A34A">
   <img alt="BM25 retrieval" src="https://img.shields.io/badge/retrieval-BM25-F59E0B">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-302%20passed-16A34A">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-309%20passed-16A34A">
 </p>
 
-**Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.14-unified-response-recovery-pipeline
+**Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.15-evidence-integrity-and-job-identity
 
 ## Overview
 

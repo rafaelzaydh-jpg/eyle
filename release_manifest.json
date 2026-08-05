@@ -2,7 +2,7 @@
   "release": "2.7.3",
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "55.14-unified-response-recovery-pipeline",
+  "revision": "55.15-evidence-integrity-and-job-identity",
   "updated": "2026-08-05",
   "installation": "overlay_safe",
   "preserve_on_update": [
@@ -13,22 +13,22 @@
   "included_runtime_state": false,
   "validation": {
     "compileall_passed": true,
-    "tests_passed": 302,
-    "tests_total_executable": 302,
+    "tests_passed": 309,
+    "tests_total_executable": 309,
     "tests_skipped": 1,
     "web_tests_executed": false,
     "javascript_syntax_passed": true,
     "real_llm_benchmark_executed": false,
     "notes": [
-      "302/302 testes executaveis passaram.",
+      "309/309 testes executaveis passaram.",
       "Um modulo dependente de Flask foi ignorado porque Flask nao estava instalado no ambiente de empacotamento.",
       "node --check web/static/app.js passou.",
-      "Respostas do servidor sao normalizadas antes de qualquer analise.",
-      "EMPTY_MODEL_RESPONSE substitui sucesso vazio ou envelopes sem conteudo.",
-      "Gate de utilidade bloqueia recibos tecnicos listas de arquivos e faixas isoladas.",
-      "Recuperacao em camadas termina em analise deterministica baseada somente em evidencias.",
-      "Grounding tipado roda somente depois de existir conteudo util e repara apenas claims rejeitadas.",
-      "EvidenceRegistry unico alimenta leitura analise grounding conclusao persistencia e interface.",
+      "PROJECT_NOT_READ bloqueia qualquer sucesso de projeto sem evidencia observada e fresca.",
+      "Pipelines legados agora executam utility gate e grounding tipado antes de publicar.",
+      "O Worker trata status e agente_status failed de forma equivalente.",
+      "task_id idempotente e recusado quando objetivo modo projeto ou job de origem divergem.",
+      "A identidade persistente do SQLite invalida jobs antigos guardados no sessionStorage.",
+      "Buscas find_symbol sem resultado registram evidencia negativa executada.",
       "O pacote final nao inclui bancos SQLite traces caches ou checkpoints de runtime."
     ]
   },
@@ -61,7 +61,10 @@
     "grounding tipado deterministico nao constitui prova universal de entailment ou qualidade da decisao em linguagem natural",
     "BM25 continua lexical e nao substitui busca semantica por embeddings",
     "ganho do ingest paralelo depende de arquivos armazenamento CPU e custo do entendimento via LLM",
-    "desempenho real depende do hardware backend modelo e projeto do usuario"
+    "desempenho real depende do hardware backend modelo e projeto do usuario",
+    "grounding tipado deterministico reduz alucinacoes mas nao prova entailment semantico universal",
+    "projetos acima dos limites do fallback legado falham com PROJECT_NOT_READ em vez de forcar leitura integral fora do orcamento",
+    "jobs salvos por versoes anteriores sem queue_instance_id sao descartados uma vez porque nao existe identidade historica confiavel para migra-los"
   ],
   "internal_protocol_language": "English",
   "user_language_behavior": "Preserva o pedido original e responde no idioma do usuario; portugues continua portugues.",
@@ -211,5 +214,16 @@
     "EvidenceRegistry canonico em todas as etapas",
     "resultados persisted false-success reabertos pelo gate atual",
     "302 testes executaveis aprovados"
+  ],
+  "hardening_55_15": [
+    "gate fail-closed para projeto sem evidencia fresca",
+    "grounding tipado obrigatorio nos pipelines legados de consulta dicas e visao geral",
+    "PROJECT_NOT_READ e UNGROUNDED_PROJECT_ANALYSIS propagados como falhas estruturadas",
+    "agente_status failed reconhecido pelo Worker",
+    "REQUEST_CONTEXT_MISMATCH para task_id reutilizado por outro pedido",
+    "queue_instance_id persistente para invalidar sessionStorage de outro banco",
+    "novo job no painel nunca herda status progresso ou resumo de ID numerico antigo",
+    "evidencia negativa para find_symbol executado sem correspondencia",
+    "309 testes executaveis aprovados"
   ]
 }

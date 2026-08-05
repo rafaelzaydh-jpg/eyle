@@ -464,6 +464,7 @@ def status():
         if telemetry_cfg.get("enabled", True) else {"enabled": False}
     )
     return jsonify({
+        "queue_instance_id": queue.database_instance_id(),
         "projeto": projeto_publico,
         "eventos_na_fila": queue.tamanho(),
         "fila": fila,

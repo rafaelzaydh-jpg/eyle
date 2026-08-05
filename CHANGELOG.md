@@ -6,6 +6,23 @@ All notable changes to Eyle are documented here.
 
 ## 2.7.3 — 2026-08-04
 
+### Revision 55.15 — Evidence integrity and job identity
+
+- Required observed fresh evidence before any project task can pass the utility gate.
+- Added typed grounding to legacy consultation, suggestion, overview, and read-fallback paths.
+- Added structured `PROJECT_NOT_READ`, `UNGROUNDED_PROJECT_ANALYSIS`, and `REQUEST_CONTEXT_MISMATCH` failures.
+- Fixed Worker handling of `agente_status=failed`.
+- Added persistent SQLite queue identity and browser invalidation of stale session jobs.
+- Prevented a newly submitted job from inheriting status or summaries from an old numeric job ID.
+- Registered executed symbol misses as negative evidence.
+
+### Validation
+
+- `python -m compileall -q .` passed.
+- `node --check web/static/app.js` passed.
+- 309/309 executable tests passed.
+- One Flask-dependent module remained skipped because Flask was unavailable in the packaging environment.
+
 ### Revision 55.14 — Unified Response Recovery Pipeline
 
 - Added one server-response adapter for `content`, `reasoning_content`, streaming chunks, partial JSON envelopes, and plain text. Truly empty payloads now raise `EMPTY_MODEL_RESPONSE`.

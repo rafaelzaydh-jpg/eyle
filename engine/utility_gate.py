@@ -58,6 +58,40 @@ def _meaningful_lines(answer):
     return lines
 
 
+def _fresh_project_evidence(evidence):
+    """Filtra somente observacoes reais e ainda validas do projeto.
+
+    Um nome de arquivo solto nao prova leitura. A evidencia precisa carregar
+    conteudo observado ou hashes/range produzidos por uma tool de leitura.
+    Snapshots persistidos podem omitir o conteudo bruto, por isso hashes validos
+    tambem contam como prova de leitura anterior da mesma tarefa.
+    """
+    fresh = []
+    for item in evidence or []:
+        if not isinstance(item, dict) or item.get("estado") == "stale":
+            continue
+        arquivo = str(item.get("arquivo") or "").strip()
+        if not arquivo:
+            continue
+        has_content = any(
+            isinstance(item.get(key), str) and item.get(key).strip()
+            for key in ("conteudo_raw", "conteudo")
+        )
+        has_hash = any(
+            isinstance(item.get(key), str) and len(item.get(key).strip()) >= 16
+            for key in ("content_hash", "file_hash")
+        )
+        has_range = (
+            isinstance(item.get("linha_inicio"), int)
+            and isinstance(item.get("linha_fim"), int)
+            and item.get("linha_inicio") >= 1
+            and item.get("linha_fim") >= item.get("linha_inicio")
+        )
+        if has_content or (has_hash and has_range):
+            fresh.append(item)
+    return fresh
+
+
 def _evidence_tokens(evidence):
     tokens = set()
     for item in evidence or []:
@@ -87,6 +121,9 @@ def validate_response_utility(answer, objective, *, task_type="project_read", ev
     if not text:
         errors.append("empty_answer")
     if task_type in ("project_read", "project_write"):
+        fresh_evidence = _fresh_project_evidence(evidence)
+        if not fresh_evidence:
+            errors.append("project_not_read")
         if not meaningful:
             errors.append("technical_receipt_only")
         if len(meaningful_text) < 24 or len(tokens) < 2:
@@ -99,7 +136,7 @@ def validate_response_utility(answer, objective, *, task_type="project_read", ev
             if token not in _STOPWORDS and len(token) >= 3
         }
         answer_tokens = set(tokens)
-        evidence_tokens = _evidence_tokens(evidence)
+        evidence_tokens = _evidence_tokens(fresh_evidence)
         objective_overlap = answer_tokens & objective_tokens
         evidence_overlap = answer_tokens & evidence_tokens
         if objective_tokens and not objective_overlap and not evidence_overlap:
@@ -118,7 +155,7 @@ def validate_response_utility(answer, objective, *, task_type="project_read", ev
         "meaningful_chars": len(meaningful_text),
         "content_tokens": len(tokens),
         "summary": (
-            "response contains a real, request-related conclusion"
-            if not errors else "response is empty, receipt-only, too thin, or unrelated"
+            "response contains a real, request-related conclusion grounded in observed project evidence"
+            if not errors else "response is empty, ungrounded, receipt-only, too thin, or unrelated"
         ),
     }

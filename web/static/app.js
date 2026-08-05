@@ -18,6 +18,7 @@
   const STATUS_POLL = 6000;
   const MAX_JOBS_PER_POLL = 2;
   const JOBS_STORAGE_KEY = "eyleTrackedJobs";
+  const INSTANCE_STORAGE_KEY = "eyleQueueInstanceId";
 
   let renderedIds = new Set();
   let pending = false;
@@ -29,10 +30,17 @@
   let jobPollCursor = 0;
   let apiToken = sessionStorage.getItem("eyleApiToken") || "";
   let tokenPromptCancelado = false;
+  let queueInstanceId = sessionStorage.getItem(INSTANCE_STORAGE_KEY) || "";
   let trackedJobs = carregarJobsAcompanhados();
 
   function carregarJobsAcompanhados() {
     try {
+      // Revisões anteriores não guardavam a identidade do SQLite. Descartar
+      // esse estado uma vez evita colar um job #1 antigo em um banco recriado.
+      if (!sessionStorage.getItem(INSTANCE_STORAGE_KEY)) {
+        sessionStorage.removeItem(JOBS_STORAGE_KEY);
+        return [];
+      }
       const dados = JSON.parse(sessionStorage.getItem(JOBS_STORAGE_KEY) || "[]");
       if (!Array.isArray(dados)) return [];
 
@@ -60,15 +68,30 @@
   function acompanharJob(id, tipo, metadados = {}) {
     const numerico = Number(id);
     if (!Number.isInteger(numerico)) return;
-    const anterior = trackedJobs.find((job) => job.id === numerico) || {};
+    // Uma nova resposta de /enviar sempre nasce limpa. Nunca herda status,
+    // progresso ou work_summary de outro job que reutilizou o mesmo número.
     trackedJobs = trackedJobs.filter((job) => job.id !== numerico);
     trackedJobs.push({
-      ...anterior,
       id: numerico,
       tipo,
-      status: anterior.status || "pending",
+      status: "pending",
       ...metadados,
     });
+    salvarJobsAcompanhados();
+    updatePendingState();
+  }
+
+  function sincronizarInstanciaFila(novaInstancia) {
+    const normalizada = String(novaInstancia || "").trim();
+    if (!normalizada) return;
+    if (queueInstanceId && queueInstanceId !== normalizada) {
+      trackedJobs = [];
+      sessionStorage.removeItem(JOBS_STORAGE_KEY);
+      Array.from(logEl.querySelectorAll(".work-summary, .job-notice, .live-response")).forEach((el) => el.remove());
+      renderedIds = new Set();
+    }
+    queueInstanceId = normalizada;
+    sessionStorage.setItem(INSTANCE_STORAGE_KEY, normalizada);
     salvarJobsAcompanhados();
     updatePendingState();
   }
@@ -529,6 +552,7 @@
       const res = await apiFetch("/status");
       if (!res.ok) throw new Error("status " + res.status);
       const data = await res.json();
+      sincronizarInstanciaFila(data.queue_instance_id);
       renderProjectInfo(data);
     } catch (err) {
       if (!(err instanceof RateLimitError)) {

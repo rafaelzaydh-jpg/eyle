@@ -33,6 +33,12 @@ _AGENT_STATUS = ("running", "waiting_user", "completed", "blocked", "failed")
 _NAO_INFORMADO = object()
 
 
+class AgentTaskContextMismatch(RuntimeError):
+    error_code = "REQUEST_CONTEXT_MISMATCH"
+
+
+
+
 def _parse_utc(valor):
     if not valor:
         return None
@@ -128,6 +134,18 @@ def _inicializar_schema(conexao, caminho_banco):
         )
         conexao.execute(
             """
+            CREATE TABLE IF NOT EXISTS runtime_meta (
+                chave TEXT PRIMARY KEY,
+                valor TEXT NOT NULL
+            )
+            """
+        )
+        conexao.execute(
+            "INSERT OR IGNORE INTO runtime_meta (chave, valor) VALUES ('queue_instance_id', ?)",
+            (uuid.uuid4().hex,),
+        )
+        conexao.execute(
+            """
             CREATE TABLE IF NOT EXISTS worker_heartbeat (
                 worker_id TEXT PRIMARY KEY,
                 status TEXT NOT NULL,
@@ -184,6 +202,19 @@ def _abrir_conexao():
         yield conexao
     finally:
         conexao.close()
+
+
+def database_instance_id():
+    """Identidade persistente do arquivo SQLite atual.
+
+    Muda quando o banco e recriado, impedindo o navegador de associar um job
+    numerico novo a um resumo antigo guardado em sessionStorage.
+    """
+    with _abrir_conexao() as conexao:
+        linha = conexao.execute(
+            "SELECT valor FROM runtime_meta WHERE chave = 'queue_instance_id'"
+        ).fetchone()
+    return str(linha["valor"]) if linha is not None else ""
 
 
 def registrar_heartbeat(worker_id, status="idle", job_id=None, detalhe=None, pid=None):
@@ -804,18 +835,20 @@ def _tarefa_agente_publica(linha):
 
 
 def criar_tarefa_agente(objetivo, modo, projeto_hash=None, task_id=None, source_job_id=None):
-    """Cria uma tarefa duravel ou devolve a tarefa idempotente ja existente."""
+    """Cria tarefa durável ou reutiliza somente o mesmo contexto idempotente.
+
+    Um ``task_id`` existente nunca pode ser silenciosamente ligado a outro
+    objetivo/job/projeto. Isso impediria o resumo e o resultado de uma mensagem
+    antiga de aparecerem como conclusão da solicitação atual.
+    """
     task_id = str(task_id or uuid.uuid4().hex)
-    objetivo = str(objetivo or "")
-    modo = str(modo or "analyze")
+    objetivo = str(objetivo or "").strip()
+    modo = str(modo or "analyze").strip()
+    source_job_id = int(source_job_id) if source_job_id is not None else None
     agora = _agora_utc()
-    evento = {
-        "em": agora,
-        "tipo": "task_created",
-        "status": "running",
-    }
+    evento = {"em": agora, "tipo": "task_created", "status": "running"}
     with _abrir_conexao() as conexao:
-        conexao.execute(
+        cursor = conexao.execute(
             """
             INSERT OR IGNORE INTO agent_tasks (
                 task_id, objetivo, modo, status, projeto_hash, source_job_id,
@@ -823,14 +856,32 @@ def criar_tarefa_agente(objetivo, modo, projeto_hash=None, task_id=None, source_
             ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)
             """,
             (
-                task_id, objetivo, modo, projeto_hash,
-                int(source_job_id) if source_job_id is not None else None,
+                task_id, objetivo, modo, projeto_hash, source_job_id,
                 _serializar([evento]), agora, agora,
             ),
         )
         linha = conexao.execute(
             "SELECT * FROM agent_tasks WHERE task_id = ?", (task_id,),
         ).fetchone()
+
+    if linha is None:
+        raise RuntimeError("agent task was not created")
+    if cursor.rowcount == 0:
+        conflitos = []
+        if str(linha["objetivo"] or "").strip() != objetivo:
+            conflitos.append("objective")
+        if str(linha["modo"] or "").strip() != modo:
+            conflitos.append("mode")
+        existente_hash = linha["projeto_hash"]
+        if existente_hash and projeto_hash and str(existente_hash) != str(projeto_hash):
+            conflitos.append("project_hash")
+        existente_job = linha["source_job_id"]
+        if existente_job is not None and source_job_id is not None and int(existente_job) != source_job_id:
+            conflitos.append("source_job_id")
+        if conflitos:
+            raise AgentTaskContextMismatch(
+                f"task_id {task_id!r} already belongs to another request: {', '.join(conflitos)}"
+            )
     return _tarefa_agente_publica(linha)
 
 

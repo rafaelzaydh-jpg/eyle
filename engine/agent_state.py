@@ -670,6 +670,49 @@ class AgentState:
             self._proximo_evidence_id += 1
         return evidencia.get("id")
 
+    def _registrar_evidencia_negativa(self, tool, arguments, resultado):
+        """Registra buscas executadas que provaram a ausência de um símbolo.
+
+        Ausência observada também é evidência. Sem este registro, uma busca
+        ``find_symbol`` realmente executada terminava com registry vazio e o
+        gate 55.15 confundia "não encontrado" com "projeto não lido".
+        """
+        if not isinstance(resultado, dict) or not resultado.get("executed"):
+            return None
+        if tool != "find_symbol" or resultado.get("error_code") != "SYMBOL_NOT_FOUND":
+            return None
+        arguments = arguments if isinstance(arguments, dict) else {}
+        arquivo = str(arguments.get("caminho_relativo") or "").strip()
+        simbolo = str(arguments.get("simbolo") or "").strip()
+        detalhe = str(resultado.get("detail") or "").strip()
+        if not arquivo or not simbolo or not detalhe:
+            return None
+        conteudo = f"Busca executada por simbolo `{simbolo}` em `{arquivo}`: {detalhe}"
+        digest = hashlib.sha256(conteudo.encode("utf-8", errors="replace")).hexdigest()
+        payload = {
+            "arquivo": arquivo,
+            "linha_inicio": 1,
+            "linha_fim": 1,
+            "total_linhas_arquivo": None,
+            "truncado": False,
+            "leitura_completa": False,
+            "conteudo": conteudo,
+            "conteudo_raw": conteudo,
+            "content_hash": digest,
+            "file_hash": None,
+            "estado": "fresh",
+            "negative_observation": True,
+            "simbolo": simbolo,
+        }
+        provisoria = f"ev-{self._proximo_evidence_id:04d}"
+        evidencia, criada = self.evidence_registry.register(
+            payload, evidence_id=provisoria, source_tool="find_symbol_negative",
+        )
+        if criada:
+            self._proximo_evidence_id += 1
+        return evidencia.get("id")
+
+
     def registrar_acao(self, tool, arguments, resultado, contar_execucao=False):
         """Registra a acao compacta e extrai evidencias objetivas do envelope."""
         detalhe = resultado.get("detail") if isinstance(resultado, dict) else None
@@ -686,6 +729,10 @@ class AgentState:
                     identificador = self._registrar_evidencia(tool, item)
                     if identificador:
                         evidence_ids.append(identificador)
+        elif isinstance(resultado, dict):
+            identificador = self._registrar_evidencia_negativa(tool, arguments, resultado)
+            if identificador:
+                evidence_ids.append(identificador)
 
         acao = {
             "id": self._novo_action_id(),
