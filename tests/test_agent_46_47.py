@@ -110,7 +110,7 @@ def test_ciclo_edit_confirmado_testa_rele_e_conclui(tmp_path, monkeypatch):
         }),
         json.dumps({
             "final": {
-                "resposta": "a.py:1 alterado e verificado",
+                "resposta": "Em a.py:1, a alteração define `valor` como `2`; a releitura confirmou o novo conteúdo.",
                 "evidence_ids": ["ev-0002"],
                 "verificacao": "suite executada e faixa relida",
                 "limitacoes": [],
@@ -130,7 +130,7 @@ def test_ciclo_edit_confirmado_testa_rele_e_conclui(tmp_path, monkeypatch):
     )
 
     assert status == "success"
-    assert texto.endswith("verificado")
+    assert "`valor` como `2`" in texto
     assert arquivo.read_text(encoding="utf-8") == "valor = 2\n"
     assert detalhes["edit_state"]["status"] == "tests_passed"
     assert detalhes["edit_state"]["post_write_evidence_id"] == "ev-0002"
@@ -187,7 +187,7 @@ def test_suite_indisponivel_nao_vira_testes_passaram(tmp_path, monkeypatch):
         "altere a.py", _config(), projeto={"caminho_origem": str(tmp_path)},
         retomar=pendente, retornar_detalhes=True, modo="edit",
     )
-    assert status == "needs_user"
+    assert status == "failed"
     assert "executed=false" in texto
     assert "passaram" not in texto.lower()
     assert detalhes["edit_state"]["status"] == "applied_without_suite"
@@ -218,7 +218,7 @@ def test_read_file_enriquecido_satisfaz_grounding(tmp_path, monkeypatch):
     (tmp_path / "a.py").write_text("valor = 1\n", encoding="utf-8")
     respostas = iter([
         '{"tool":"read_file","arguments":{"caminho_relativo":"a.py"}}',
-        '{"final":{"resposta":"a.py:1 contem valor 1","evidence_ids":["ev-0001"],"verificacao":"lido","limitacoes":[]}}',
+        '{"final":{"resposta":"Em a.py:1, o trecho define `valor` com o valor `1`.","evidence_ids":["ev-0001"],"verificacao":"lido","limitacoes":[]}}',
     ])
     monkeypatch.setattr(agent_mod, "executar_agente_llm", lambda *args: next(respostas))
 
@@ -228,7 +228,7 @@ def test_read_file_enriquecido_satisfaz_grounding(tmp_path, monkeypatch):
     )
 
     assert status == "success"
-    assert texto == "a.py:1 contem valor 1"
+    assert texto == "Em a.py:1, o trecho define `valor` com o valor `1`."
     assert detalhes["read_status"] == "read"
     assert detalhes["tools_called"] == ["read_file"]
     assert detalhes["evidencias_usadas"][0]["arquivo"] == "a.py"

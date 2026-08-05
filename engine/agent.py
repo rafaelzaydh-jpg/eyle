@@ -84,6 +84,7 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 from llm.executar import (  # noqa: E402
+    ErroLLM,
     PROMPT_AGENTE,
     executar_agente as executar_agente_llm,
 )
@@ -96,6 +97,8 @@ from engine.grounding import (  # noqa: E402
     verify_conclusion,
 )
 from engine.project_reader import ErroLeituraProjeto, ler_faixa_projeto  # noqa: E402
+from engine.response_recovery import recover_useful_response  # noqa: E402
+from engine.utility_gate import validate_response_utility  # noqa: E402
 from engine.retencao import rotacionar_arquivo  # noqa: E402
 from engine.roteador import classificar_modo_projeto  # noqa: E402
 from engine.seguranca import _resolver_caminho_seguro  # noqa: E402
@@ -926,6 +929,41 @@ def _deve_recuperar_sem_llm(estado):
     )
 
 
+
+
+def _proxima_leitura_fallback_projeto(projeto, estado):
+    """Seleciona deterministicamente um arquivo de codigo ainda nao lido."""
+    raiz = (projeto or {}).get("caminho_origem")
+    if not isinstance(raiz, str) or not os.path.isdir(raiz):
+        return None
+    tentados = {
+        str((item.get("arguments") or {}).get("caminho_relativo") or "").replace("\\", "/")
+        for item in estado.actions
+        if item.get("tool") in ("read_file", "read_range")
+    }
+    ignorados = {".git", ".venv", "venv", "node_modules", "__pycache__", "dist", "build"}
+    candidatos = []
+    extensoes = {".py", ".js", ".ts", ".tsx", ".jsx", ".json", ".html", ".css", ".yml", ".yaml"}
+    for atual, dirs, files in os.walk(raiz):
+        dirs[:] = [nome for nome in dirs if nome not in ignorados and not nome.startswith(".")]
+        for nome in files:
+            if os.path.splitext(nome)[1].lower() not in extensoes:
+                continue
+            caminho = os.path.join(atual, nome)
+            relativo = os.path.relpath(caminho, raiz).replace("\\", "/")
+            if relativo in tentados:
+                continue
+            prioridade = 0 if nome in {"app.py", "main.py", "index.js", "index.ts"} else 1
+            try:
+                tamanho = os.path.getsize(caminho)
+            except OSError:
+                tamanho = 10**12
+            candidatos.append((prioridade, tamanho, relativo))
+    if not candidatos:
+        return None
+    _, _, relativo = sorted(candidatos)[0]
+    return {"tool": "read_file", "arguments": {"caminho_relativo": relativo}}
+
 def _preparar_recuperacao_stale(estado, arguments, resultado_tool):
     """Transforma STALE_PATCH em releitura/reconfirmacao, nao em beco sem saida."""
     arquivo = (arguments or {}).get("caminho_relativo")
@@ -1046,10 +1084,40 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
 
     step = 0
     estado = None
+    recuperacao_atual = {}
 
     def _checkpoint(payload):
         if checkpoint is not None:
             checkpoint(dict(payload))
+
+    def _recuperar_resposta(causa, resposta_anterior="", permitir_llm=True):
+        nonlocal recuperacao_atual
+        evidencias_frescas = estado.evidencias_frescas() if estado is not None else []
+        recuperacao = recover_useful_response(
+            objetivo, evidencias_frescas, config,
+            cause=causa, prior_answer=resposta_anterior,
+            allow_llm=permitir_llm, task_type=task_type,
+        )
+        recuperacao_atual = dict(recuperacao or {})
+        _registrar_trace_estado(estado, {
+            "step": estado.acoes_executadas + 1 if estado is not None else 0,
+            "tipo": "response_recovery",
+            "cause": causa,
+            "layer": recuperacao_atual.get("layer"),
+            "ok": recuperacao_atual.get("ok", False),
+            "attempts": recuperacao_atual.get("attempts", []),
+        })
+        if not recuperacao_atual.get("ok"):
+            return None
+        return {
+            "final": {
+                "answer": recuperacao_atual.get("answer", ""),
+                "evidence_ids": [item.get("id") for item in evidencias_frescas if item.get("id")],
+                "verification": f"response recovery layer: {recuperacao_atual.get('layer')}",
+                "limitations": [],
+                "claim_annotations": [],
+            }
+        }
 
     def _retorno_agente(status, texto, estado_pendente, detalhes, retornar_detalhes_local):
         """Fecha qualquer saida com continuacao e auditoria estruturada."""
@@ -1057,6 +1125,18 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
         estado_serializado = estado.to_dict() if estado is not None else {}
         acoes = list(estado.actions) if estado is not None else []
         evidencias = list(estado.evidence) if estado is not None else []
+        if status == "success":
+            utility_gate = detalhes.get("utility_gate")
+            if not isinstance(utility_gate, dict):
+                utility_gate = validate_response_utility(
+                    texto, objetivo, task_type=task_type, evidence=evidencias,
+                )
+            detalhes["utility_gate"] = utility_gate
+            if not utility_gate.get("ok", False):
+                status = "failed"
+                texto = "A tarefa terminou sem uma conclusão útil validada."
+                detalhes["failure_code"] = "NO_USEFUL_RESPONSE"
+                detalhes["fallback_cause"] = "utility_gate_failed"
         codigos_gate = {
             "success": "goal_satisfied",
             "needs_user": "user_input_required",
@@ -1103,6 +1183,10 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
         detalhes.setdefault(
             "evidence_ids", [item.get("id") for item in evidencias if item.get("id")],
         )
+        if estado is not None:
+            detalhes["evidence_registry"] = estado.snapshot_evidencias(
+                detalhes.get("evidence_ids") or None,
+            )
 
         if status == "needs_user":
             if estado_pendente is None:
@@ -1272,8 +1356,9 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 "motivo": motivo_transicao,
             })
             return _retorno_agente(
-                "needs_user", motivo_transicao, None,
-                {"task_type": task_type, "mode": modo, "goal_state": estado.goal_state},
+                "failed", motivo_transicao, None,
+                {"task_type": task_type, "mode": modo, "goal_state": estado.goal_state,
+                 "failure_code": "INVALID_GOAL_TRANSITION"},
                 retornar_detalhes,
             )
 
@@ -1422,8 +1507,9 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
             )
             _registrar_trace_estado(estado, {"step": step, "tipo": "circuit_breaker", "erros_consecutivos": estado.erros_consecutivos})
             return _retorno_agente(
-                "needs_user", pergunta, None,
-                {"task_type": task_type, "goal_state": estado.goal_state},
+                "failed", pergunta, None,
+                {"task_type": task_type, "goal_state": estado.goal_state,
+                 "failure_code": "TOOL_CIRCUIT_BREAKER"},
                 retornar_detalhes,
             )
     else:
@@ -1502,7 +1588,42 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 config=config,
                 system_prompt=PROMPT_AGENTE,
             )
-            resultado_passo = decidir_passo(prompt, config)
+            try:
+                resultado_passo = decidir_passo(prompt, config)
+            except ErroLLM as erro_llm:
+                codigo = getattr(erro_llm, "error_code", None) or "LLM_FAILURE"
+                decisao_recuperada = None
+                if task_type == "project_read":
+                    if estado.evidencias_frescas():
+                        decisao_recuperada = _recuperar_resposta(
+                            f"agent_llm_{str(codigo).lower()}",
+                            permitir_llm=True,
+                        )
+                    else:
+                        decisao_recuperada = _proxima_leitura_fallback_projeto(
+                            projeto, estado,
+                        )
+                if decisao_recuperada is None:
+                    return _retorno_agente(
+                        "failed",
+                        "A LLM falhou e o pipeline de recuperação não conseguiu produzir uma conclusão útil.",
+                        None,
+                        {
+                            "task_type": task_type,
+                            "mode": modo,
+                            "goal_state": estado.goal_state,
+                            "failure_code": codigo,
+                            "fallback_cause": "response_recovery_failed",
+                            "recovery_attempts": recuperacao_atual.get("attempts", []),
+                        },
+                        retornar_detalhes,
+                    )
+                resultado_passo = {
+                    "decisao": decisao_recuperada,
+                    "falhou": False,
+                    "tentativas": 0,
+                    "resposta_bruta": "",
+                }
         decisao = resultado_passo["decisao"]
 
         if resultado_passo.get("budget_exhausted"):
@@ -1535,19 +1656,33 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 "tentativas": resultado_passo["tentativas"],
                 "resposta_bruta": (resultado_passo["resposta_bruta"] or "")[:300],
             })
-            return _retorno_agente(
-                "failed",
-                "O agente nao conseguiu decidir o proximo passo (formato invalido apos as tentativas configuradas).",
-                None,
-                {
-                    "task_type": task_type,
-                    "mode": modo,
-                    "goal_state": estado.goal_state,
-                    "failure_code": "AGENT_INVALID_DECISION_FORMAT",
-                    "fallback_cause": "invalid_agent_json",
-                },
-                retornar_detalhes,
-            )
+            decisao_recuperada = None
+            if task_type == "project_read":
+                if estado.evidencias_frescas():
+                    decisao_recuperada = _recuperar_resposta(
+                        "invalid_agent_json",
+                        resposta_anterior=resultado_passo.get("resposta_bruta") or "",
+                        permitir_llm=True,
+                    )
+                else:
+                    decisao_recuperada = _proxima_leitura_fallback_projeto(projeto, estado)
+            if decisao_recuperada is not None:
+                decisao = decisao_recuperada
+            else:
+                return _retorno_agente(
+                    "failed",
+                    "O agente não conseguiu produzir uma decisão ou conclusão útil após a recuperação automática.",
+                    None,
+                    {
+                        "task_type": task_type,
+                        "mode": modo,
+                        "goal_state": estado.goal_state,
+                        "failure_code": "AGENT_INVALID_DECISION_FORMAT",
+                        "fallback_cause": "response_recovery_failed",
+                        "recovery_attempts": recuperacao_atual.get("attempts", []),
+                    },
+                    retornar_detalhes,
+                )
 
         # Atualizacao 12: fato_importante e' opcional e pode vir junto de
         # qualquer uma das tres decisoes (tool_call, final ou needs_user)
@@ -1567,7 +1702,7 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 "replanejamento_rejeitado", erro_replanejamento,
             ):
                 return _retorno_agente(
-                    "needs_user",
+                    "failed",
                     "O agente nao conseguiu produzir uma transicao valida do plano e parou para nao divagar.",
                     None,
                     {"task_type": task_type, "mode": modo, "goal_state": estado.goal_state},
@@ -1601,7 +1736,7 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                     "final_recusado_sem_releitura", "falta evidencia pos-escrita",
                 ):
                     return _retorno_agente(
-                        "needs_user", "A alteracao foi aplicada sem suite, mas faltou releitura final.",
+                        "failed", "A alteracao foi aplicada sem suite, mas faltou releitura final.",
                         None,
                         {"task_type": task_type, "mode": modo,
                          "goal_state": estado.goal_state, "edit_state": _edit_state_publico(estado)},
@@ -1617,7 +1752,7 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
             ):
                 estado.goal_state["status"] = "blocked"
                 return _retorno_agente(
-                    "needs_user",
+                    "failed",
                     "Alteracao aplicada e relida, mas nenhuma suite estava disponivel. "
                     "Nenhum teste foi executado (executed=false); a mudanca permanece sem verificacao de suite.",
                     None,
@@ -1633,7 +1768,7 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                     "escrita sem run_tests executado com sucesso",
                 ):
                     return _retorno_agente(
-                        "needs_user",
+                        "failed",
                         "A conclusao foi recusada repetidamente porque a escrita ainda nao foi verificada.",
                         None,
                         {"task_type": task_type, "mode": modo, "goal_state": estado.goal_state},
@@ -1648,12 +1783,74 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                     "final_recusado_contrato", erro_conclusao,
                 ):
                     return _retorno_agente(
-                        "needs_user", "O agente repetiu uma conclusao invalida e foi pausado.",
+                        "failed", "O agente repetiu uma conclusao invalida e foi pausado.",
                         None,
                         {"task_type": task_type, "mode": modo, "goal_state": estado.goal_state},
                         retornar_detalhes,
                     )
                 continue
+            utility_gate = validate_response_utility(
+                conclusao.get("resposta"), objetivo,
+                task_type=task_type, evidence=estado.evidencias_frescas(),
+            )
+            if not utility_gate.get("ok", False):
+                estado.observar("utility_gate", {
+                    "status": "failed", "ok": False, "executed": False,
+                    "changed": False, "error_code": "NO_USEFUL_RESPONSE",
+                    "detail": utility_gate,
+                })
+                # Em tarefa de projeto, uma conclusao prematura sem qualquer
+                # evidencia nao e falha de recuperacao: o pipeline ainda deve
+                # cumprir a etapa de leitura antes de tentar gerar novamente.
+                if task_type in ("project_read", "project_write") and not estado.evidencias_frescas():
+                    estado.observar_final_sem_grounding(
+                        "final recusado sem grounding: nenhuma evidencia fresca foi lida"
+                    )
+                    continue
+                decisao_recuperada = _recuperar_resposta(
+                    "utility_gate_failed",
+                    resposta_anterior=conclusao.get("resposta") or "",
+                    permitir_llm=True,
+                )
+                if decisao_recuperada is None:
+                    return _retorno_agente(
+                        "failed",
+                        "A resposta gerada não continha uma conclusão útil e a recuperação automática falhou.",
+                        None,
+                        {
+                            "task_type": task_type,
+                            "mode": modo,
+                            "goal_state": estado.goal_state,
+                            "failure_code": "NO_USEFUL_RESPONSE",
+                            "fallback_cause": "utility_gate_failed",
+                            "utility_gate": utility_gate,
+                            "recovery_attempts": recuperacao_atual.get("attempts", []),
+                        },
+                        retornar_detalhes,
+                    )
+                conclusao, erro_recuperacao = _normalizar_conclusao(
+                    decisao_recuperada, estado, task_type,
+                )
+                if erro_recuperacao:
+                    return _retorno_agente(
+                        "failed",
+                        "A recuperação produziu uma conclusão inválida.",
+                        None,
+                        {
+                            "task_type": task_type,
+                            "mode": modo,
+                            "goal_state": estado.goal_state,
+                            "failure_code": "RECOVERY_INVALID_CONCLUSION",
+                            "fallback_cause": "response_recovery_failed",
+                        },
+                        retornar_detalhes,
+                    )
+                utility_gate = recuperacao_atual.get("utility_gate") or validate_response_utility(
+                    conclusao.get("resposta"), objetivo,
+                    task_type=task_type, evidence=estado.evidencias_frescas(),
+                )
+            conclusao["utility_gate"] = utility_gate
+
             evidencias_usadas = []
             if task_type in ("project_read", "project_write"):
                 valido, motivo, evidencias_usadas = _validar_conclusao_projeto(
@@ -1661,18 +1858,64 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 )
                 if not valido:
                     estado.observar_final_sem_grounding(motivo)
-                    atingiu_limite = _sem_progresso(
-                        estado, max_sem_progresso, step,
-                        "final_recusado_sem_grounding", motivo,
+                    # Evidencia stale exige nova leitura, nao geracao em cima do
+                    # registro antigo. O GoalState ja marcou file_changed e vai
+                    # escolher a releitura no proximo passo.
+                    if not estado.evidencias_frescas():
+                        continue
+                    decisao_recuperada = _recuperar_resposta(
+                        "grounding_contract_failed",
+                        resposta_anterior=conclusao.get("resposta") or "",
+                        permitir_llm=True,
                     )
-                    if atingiu_limite:
+                    if decisao_recuperada is None:
                         return _retorno_agente(
-                            "needs_user", "A conclusao continuou sem evidencia valida e foi pausada.",
+                            "failed",
+                            "A conclusão não usou evidências válidas e a recuperação automática falhou.",
                             None,
-                            {"task_type": task_type, "mode": modo, "goal_state": estado.goal_state},
+                            {
+                                "task_type": task_type, "mode": modo,
+                                "goal_state": estado.goal_state,
+                                "failure_code": "INVALID_EVIDENCE_GROUNDING",
+                                "fallback_cause": "grounding_contract_failed",
+                                "grounding_error": motivo,
+                                "recovery_attempts": recuperacao_atual.get("attempts", []),
+                            },
                             retornar_detalhes,
                         )
-                    continue
+                    conclusao, erro_recuperacao = _normalizar_conclusao(
+                        decisao_recuperada, estado, task_type,
+                    )
+                    if erro_recuperacao:
+                        return _retorno_agente(
+                            "failed", "A recuperação gerou uma conclusão inválida.", None,
+                            {
+                                "task_type": task_type, "mode": modo,
+                                "goal_state": estado.goal_state,
+                                "failure_code": "RECOVERY_INVALID_CONCLUSION",
+                                "fallback_cause": "grounding_contract_failed",
+                            },
+                            retornar_detalhes,
+                        )
+                    valido, motivo, evidencias_usadas = _validar_conclusao_projeto(
+                        conclusao, estado, projeto,
+                    )
+                    if not valido:
+                        return _retorno_agente(
+                            "failed",
+                            "A recuperação não conseguiu vincular a conclusão às evidências frescas.",
+                            None,
+                            {
+                                "task_type": task_type, "mode": modo,
+                                "goal_state": estado.goal_state,
+                                "failure_code": "INVALID_EVIDENCE_GROUNDING",
+                                "fallback_cause": "grounding_recovery_failed",
+                                "grounding_error": motivo,
+                            },
+                            retornar_detalhes,
+                        )
+                    conclusao["recovery_layer"] = recuperacao_atual.get("layer")
+                    conclusao["utility_gate"] = recuperacao_atual.get("utility_gate")
                 conclusao["verificacao_sistema"] = motivo
                 verificacao_semantica = verify_conclusion(
                     conclusao.get("resposta"),
@@ -1682,54 +1925,214 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 )
                 conclusao["semantic_grounding"] = verificacao_semantica
                 if not verificacao_semantica.get("ok", False):
-                    resumo_semantico = verificacao_semantica.get("summary") or (
-                        "a conclusao contem afirmacoes objetivas sem suporte nas evidencias"
-                    )
                     feedback_semantico = format_grounding_feedback(verificacao_semantica)
                     estado.observar_final_sem_grounding(feedback_semantico)
-                    if _sem_progresso(
-                        estado, max_sem_progresso, step,
-                        "final_recusado_semantica", resumo_semantico,
-                    ):
-                        resposta_original = conclusao.get("resposta") or ""
-                        resposta_segura = build_safe_grounded_answer(
-                            resposta_original,
-                            verificacao_semantica,
-                            evidencias_usadas,
+                    verificacao_original = verificacao_semantica
+                    conclusao_recuperada = None
+                    verificacao_recuperada = None
+                    camada_reparo = None
+                    gate_reparo = None
+
+                    # Primeiro repara somente as claims rejeitadas. Se restar
+                    # uma recomendacao/inferencia util e grounded, preserva-a;
+                    # se nao restar nada, segue para a recuperacao em camadas.
+                    resposta_reparada = build_safe_grounded_answer(
+                        conclusao.get("resposta") or "",
+                        verificacao_semantica,
+                        evidencias_usadas,
+                    )
+                    if resposta_reparada:
+                        gate_candidata = validate_response_utility(
+                            resposta_reparada, objetivo,
+                            task_type=task_type, evidence=evidencias_usadas,
                         )
-                        verificacao_fallback = verify_conclusion(
-                            resposta_segura,
-                            evidencias_usadas,
+                        # Uma claim valida pode perder o contexto lexical quando
+                        # a claim factual rejeitada era a unica que nomeava o
+                        # arquivo. Acrescenta apenas a origem verificada, sem
+                        # fabricar uma nova conclusao sobre o codigo.
+                        if (
+                            not gate_candidata.get("ok", False)
+                            and gate_candidata.get("errors") == ["unrelated_to_request"]
+                            and evidencias_usadas
+                        ):
+                            origem = evidencias_usadas[0]
+                            arquivo_origem = str(origem.get("arquivo") or "").strip()
+                            inicio_origem = origem.get("linha_inicio")
+                            fim_origem = origem.get("linha_fim")
+                            if arquivo_origem and inicio_origem:
+                                faixa_origem = (
+                                    f"{arquivo_origem}:{inicio_origem}-{fim_origem}"
+                                    if fim_origem and fim_origem != inicio_origem
+                                    else f"{arquivo_origem}:{inicio_origem}"
+                                )
+                                resposta_reparada = f"Com base em {faixa_origem}, {resposta_reparada}"
+                                gate_candidata = validate_response_utility(
+                                    resposta_reparada, objetivo,
+                                    task_type=task_type, evidence=evidencias_usadas,
+                                )
+                        grounding_candidato = verify_conclusion(
+                            resposta_reparada, evidencias_usadas,
                             config.get("agent", {}).get("semantic_grounding", {}),
                             claim_annotations=conclusao.get("claim_annotations"),
                         )
-                        if not verificacao_fallback.get("ok", False):
-                            return _retorno_agente(
-                                "failed",
-                                "O agente nao conseguiu produzir uma conclusao grounded "
-                                "mesmo apos reduzir automaticamente a resposta.",
-                                None,
-                                {
-                                    "task_type": task_type,
-                                    "mode": modo,
-                                    "goal_state": estado.goal_state,
-                                    "failure_code": "SEMANTIC_GROUNDING_FAILED",
-                                    "fallback_cause": "semantic_grounding_failed",
-                                    "semantic_grounding": verificacao_semantica,
-                                    "semantic_grounding_fallback": verificacao_fallback,
-                                },
-                                retornar_detalhes,
-                            )
-                        conclusao["resposta"] = resposta_segura
-                        conclusao["semantic_grounding_original"] = verificacao_semantica
-                        conclusao["semantic_grounding"] = verificacao_fallback
-                        conclusao["grounding_fallback_applied"] = True
-                        conclusao.setdefault("limitacoes", []).append(
-                            "A resposta foi reduzida automaticamente para remover "
-                            "afirmacoes sem suporte verificavel."
+                        if gate_candidata.get("ok", False) and grounding_candidato.get("ok", False):
+                            conclusao_recuperada = dict(conclusao)
+                            conclusao_recuperada["resposta"] = resposta_reparada
+                            verificacao_recuperada = grounding_candidato
+                            camada_reparo = "typed_grounding_repair"
+                            gate_reparo = gate_candidata
+
+                    decisao_recuperada = None
+                    if conclusao_recuperada is None:
+                        decisao_recuperada = _recuperar_resposta(
+                            "semantic_grounding_failed",
+                            resposta_anterior=conclusao.get("resposta") or "",
+                            permitir_llm=True,
                         )
-                    else:
-                        continue
+                    if decisao_recuperada is not None:
+                        candidata, erro_recuperacao = _normalizar_conclusao(
+                            decisao_recuperada, estado, task_type,
+                        )
+                        if not erro_recuperacao:
+                            valido_rec, motivo_rec, evidencias_rec = _validar_conclusao_projeto(
+                                candidata, estado, projeto,
+                            )
+                            if valido_rec:
+                                tentativa_grounding = verify_conclusion(
+                                    candidata.get("resposta"), evidencias_rec,
+                                    config.get("agent", {}).get("semantic_grounding", {}),
+                                    claim_annotations=candidata.get("claim_annotations"),
+                                )
+                                if tentativa_grounding.get("ok", False):
+                                    conclusao_recuperada = candidata
+                                    verificacao_recuperada = tentativa_grounding
+                                    evidencias_usadas = evidencias_rec
+                                    motivo = motivo_rec
+                                    camada_reparo = recuperacao_atual.get("layer")
+                                    gate_reparo = recuperacao_atual.get("utility_gate")
+                    # A recuperação textual pode continuar inventando. A última
+                    # camada é sempre determinística e usa apenas o registry.
+                    if conclusao_recuperada is None and recuperacao_atual.get("layer") != "deterministic_analysis":
+                        decisao_recuperada = _recuperar_resposta(
+                            "semantic_grounding_failed_deterministic",
+                            resposta_anterior=conclusao.get("resposta") or "",
+                            permitir_llm=False,
+                        )
+                        if decisao_recuperada is not None:
+                            candidata, erro_recuperacao = _normalizar_conclusao(
+                                decisao_recuperada, estado, task_type,
+                            )
+                            if not erro_recuperacao:
+                                valido_rec, motivo_rec, evidencias_rec = _validar_conclusao_projeto(
+                                    candidata, estado, projeto,
+                                )
+                                if valido_rec:
+                                    tentativa_grounding = verify_conclusion(
+                                        candidata.get("resposta"), evidencias_rec,
+                                        config.get("agent", {}).get("semantic_grounding", {}),
+                                        claim_annotations=candidata.get("claim_annotations"),
+                                    )
+                                    if tentativa_grounding.get("ok", False):
+                                        conclusao_recuperada = candidata
+                                        verificacao_recuperada = tentativa_grounding
+                                        evidencias_usadas = evidencias_rec
+                                        motivo = motivo_rec
+                    if conclusao_recuperada is None:
+                        return _retorno_agente(
+                            "failed",
+                            "O grounding tipado rejeitou a conclusão e nenhuma camada de recuperação produziu conteúdo verificável.",
+                            None,
+                            {
+                                "task_type": task_type, "mode": modo,
+                                "goal_state": estado.goal_state,
+                                "failure_code": "SEMANTIC_GROUNDING_FAILED",
+                                "fallback_cause": "grounding_recovery_failed",
+                                "semantic_grounding": verificacao_original,
+                                "recovery_attempts": recuperacao_atual.get("attempts", []),
+                            },
+                            retornar_detalhes,
+                        )
+                    conclusao = conclusao_recuperada
+                    conclusao["semantic_grounding_original"] = verificacao_original
+                    conclusao["semantic_grounding"] = verificacao_recuperada
+                    conclusao["recovery_layer"] = camada_reparo or recuperacao_atual.get("layer")
+                    conclusao["utility_gate"] = gate_reparo or recuperacao_atual.get("utility_gate")
+                    conclusao["grounding_fallback_applied"] = True
+                    conclusao.setdefault("limitacoes", []).append(
+                        "A conclusão foi reparada automaticamente após falhar no grounding tipado."
+                    )
+                    conclusao["verificacao_sistema"] = motivo
+                final_utility_gate = validate_response_utility(
+                    conclusao.get("resposta"), objetivo,
+                    task_type=task_type, evidence=evidencias_usadas,
+                )
+                if not final_utility_gate.get("ok", False):
+                    decisao_recuperada = _recuperar_resposta(
+                        "grounded_answer_failed_utility_gate",
+                        resposta_anterior=conclusao.get("resposta") or "",
+                        permitir_llm=False,
+                    )
+                    if decisao_recuperada is None:
+                        return _retorno_agente(
+                            "failed",
+                            "O grounding removeu o conteúdo sem suporte, mas não restou uma conclusão útil.",
+                            None,
+                            {
+                                "task_type": task_type,
+                                "mode": modo,
+                                "goal_state": estado.goal_state,
+                                "failure_code": "NO_USEFUL_GROUNDED_RESPONSE",
+                                "fallback_cause": "grounding_utility_failed",
+                                "utility_gate": final_utility_gate,
+                                "semantic_grounding": conclusao.get("semantic_grounding"),
+                                "recovery_attempts": recuperacao_atual.get("attempts", []),
+                            },
+                            retornar_detalhes,
+                        )
+                    conclusao_recuperada, erro_recuperacao = _normalizar_conclusao(
+                        decisao_recuperada, estado, task_type,
+                    )
+                    if erro_recuperacao:
+                        return _retorno_agente(
+                            "failed", "A recuperação determinística gerou uma conclusão inválida.", None,
+                            {
+                                "task_type": task_type, "mode": modo,
+                                "goal_state": estado.goal_state,
+                                "failure_code": "RECOVERY_INVALID_CONCLUSION",
+                                "fallback_cause": "grounding_utility_failed",
+                            },
+                            retornar_detalhes,
+                        )
+                    verificacao_recuperada = verify_conclusion(
+                        conclusao_recuperada.get("resposta"),
+                        evidencias_usadas,
+                        config.get("agent", {}).get("semantic_grounding", {}),
+                        claim_annotations=conclusao_recuperada.get("claim_annotations"),
+                    )
+                    if not verificacao_recuperada.get("ok", False):
+                        return _retorno_agente(
+                            "failed",
+                            "A recuperação determinística não passou pelo grounding tipado.",
+                            None,
+                            {
+                                "task_type": task_type, "mode": modo,
+                                "goal_state": estado.goal_state,
+                                "failure_code": "SEMANTIC_GROUNDING_FAILED",
+                                "fallback_cause": "grounding_recovery_failed",
+                                "semantic_grounding": verificacao_recuperada,
+                            },
+                            retornar_detalhes,
+                        )
+                    conclusao["resposta"] = conclusao_recuperada["resposta"]
+                    conclusao["semantic_grounding"] = verificacao_recuperada
+                    conclusao["utility_gate"] = recuperacao_atual.get("utility_gate") or final_utility_gate
+                    conclusao["recovery_layer"] = recuperacao_atual.get("layer")
+                    conclusao.setdefault("limitacoes", []).append(
+                        "A conclusão final foi regenerada deterministicamente após o grounding remover conteúdo sem suporte."
+                    )
+                else:
+                    conclusao["utility_gate"] = final_utility_gate
+
                 if task_type == "project_write":
                     edit_valido, motivo_edit = estado.validar_conclusao_edicao(
                         conclusao.get("evidence_ids") or [],
@@ -1741,7 +2144,7 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                             "final_recusado_ciclo_edicao", motivo_edit,
                         ):
                             return _retorno_agente(
-                                "needs_user", motivo_edit, None,
+                                "failed", motivo_edit, None,
                                 {"task_type": task_type, "mode": modo,
                                  "goal_state": estado.goal_state,
                                  "edit_state": _edit_state_publico(estado)},
@@ -1776,8 +2179,13 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 "semantic_grounding": conclusao.get("semantic_grounding"),
                 "semantic_grounding_original": conclusao.get("semantic_grounding_original"),
                 "grounding_fallback_applied": bool(conclusao.get("grounding_fallback_applied")),
+                "utility_gate": conclusao.get("utility_gate"),
+                "recovery_layer": conclusao.get("recovery_layer") or recuperacao_atual.get("layer"),
+                "recovery_attempts": recuperacao_atual.get("attempts", []),
                 "fallback_cause": (
-                    "semantic_grounding_safe_fallback"
+                    f"response_recovery_{conclusao.get('recovery_layer') or recuperacao_atual.get('layer')}"
+                    if (conclusao.get("recovery_layer") or recuperacao_atual.get("layer"))
+                    else "semantic_grounding_safe_fallback"
                     if conclusao.get("grounding_fallback_applied") else None
                 ),
                 "limitacoes": conclusao.get("limitacoes", []),
@@ -1829,7 +2237,7 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                     "needs_user_recusado_sem_leitura", detalhe_prematuro,
                 ):
                     return _retorno_agente(
-                        "needs_user",
+                        "failed",
                         "O agente nao conseguiu iniciar uma leitura valida do projeto e foi pausado.",
                         None,
                         {"task_type": task_type, "mode": modo,
@@ -1877,8 +2285,9 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                     "e parou para evitar insistir num caminho que nao esta funcionando."
                 )
                 return _retorno_agente(
-                    "needs_user", pergunta, None,
-                    {"task_type": task_type, "mode": modo, "goal_state": estado.goal_state},
+                    "failed", pergunta, None,
+                    {"task_type": task_type, "mode": modo, "goal_state": estado.goal_state,
+                     "failure_code": "TOOL_CIRCUIT_BREAKER"},
                     retornar_detalhes,
                 )
             if _sem_progresso(
@@ -1886,7 +2295,7 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 "tool_call_invalida_repetida", erro_argumentos.get("detail"),
             ):
                 return _retorno_agente(
-                    "needs_user", "O agente repetiu decisoes sem executar uma acao valida e foi pausado.",
+                    "failed", "O agente repetiu decisoes sem executar uma acao valida e foi pausado.",
                     None,
                     {"task_type": task_type, "mode": modo, "goal_state": estado.goal_state},
                     retornar_detalhes,
@@ -1920,8 +2329,9 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 "transicao_rejeitada", motivo_transicao,
             ):
                 return _retorno_agente(
-                    "needs_user", motivo_transicao, None,
-                    {"task_type": task_type, "mode": modo, "goal_state": estado.goal_state},
+                    "failed", motivo_transicao, None,
+                    {"task_type": task_type, "mode": modo, "goal_state": estado.goal_state,
+                     "failure_code": "INVALID_GOAL_TRANSITION"},
                     retornar_detalhes,
                 )
             continue
@@ -1941,7 +2351,7 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                     "patch_sem_leitura_ou_dry_run", motivo_precondicao,
                 ):
                     return _retorno_agente(
-                        "needs_user", motivo_precondicao, None,
+                        "failed", motivo_precondicao, None,
                         {"task_type": task_type, "mode": modo, "goal_state": estado.goal_state},
                         retornar_detalhes,
                     )
@@ -2002,7 +2412,7 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 "chamada_repetida", f"{tool} com os mesmos argumentos",
             ):
                 return _retorno_agente(
-                    "needs_user", "O agente repetiu a mesma acao sem progresso e foi pausado.",
+                    "failed", "O agente repetiu a mesma acao sem progresso e foi pausado.",
                     None,
                     {"task_type": task_type, "mode": modo, "goal_state": estado.goal_state},
                     retornar_detalhes,
@@ -2106,7 +2516,7 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 "fingerprint": ciclo.get("fingerprint"),
             })
             return _retorno_agente(
-                "needs_user",
+                "failed",
                 "O agente voltou ao mesmo estado observavel em um ciclo curto e foi pausado antes de gastar mais chamadas.",
                 None,
                 {
@@ -2161,7 +2571,8 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
             )
             _registrar_trace_estado(estado, {"step": step, "tipo": "circuit_breaker", "erros_consecutivos": estado.erros_consecutivos})
             return _retorno_agente(
-                "needs_user", pergunta, None,
-                {"task_type": task_type, "mode": modo, "goal_state": estado.goal_state},
+                "failed", pergunta, None,
+                {"task_type": task_type, "mode": modo, "goal_state": estado.goal_state,
+                 "failure_code": "TOOL_CIRCUIT_BREAKER"},
                 retornar_detalhes,
             )

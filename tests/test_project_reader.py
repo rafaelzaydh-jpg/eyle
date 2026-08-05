@@ -126,6 +126,7 @@ def test_agente_recebe_audio_inteiro_antes_de_finalizar(tmp_path, monkeypatch):
     )
 
     assert status == "success"
-    assert "14 linhas reais" in texto
+    assert "14 atribuições" in texto
+    assert "`valor_1` a `valor_14`" in texto
     assert pendente is None
     assert len(chamadas) == 2

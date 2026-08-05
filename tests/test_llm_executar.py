@@ -476,7 +476,7 @@ def test_openai_textual_nao_expoe_reasoning_content(monkeypatch):
     with pytest.raises(llm_mod.ErroLLM) as erro:
         llm_mod._chamar_llm("s", "u", _config(openai_compatible=True))
 
-    assert erro.value.error_code == "EMPTY_RESPONSE"
+    assert erro.value.error_code == "EMPTY_MODEL_RESPONSE"
 
 
 def test_chamada_estruturada_ignora_cache_envenenado(monkeypatch):

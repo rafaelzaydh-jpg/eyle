@@ -2,7 +2,7 @@
   "release": "2.7.3",
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "55.13-typed-grounding-autonomy",
+  "revision": "55.14-unified-response-recovery-pipeline",
   "updated": "2026-08-05",
   "installation": "overlay_safe",
   "preserve_on_update": [
@@ -13,22 +13,22 @@
   "included_runtime_state": false,
   "validation": {
     "compileall_passed": true,
-    "tests_passed": 294,
-    "tests_total_executable": 294,
+    "tests_passed": 302,
+    "tests_total_executable": 302,
     "tests_skipped": 1,
     "web_tests_executed": false,
     "javascript_syntax_passed": true,
     "real_llm_benchmark_executed": false,
     "notes": [
-      "294/294 testes executaveis passaram.",
+      "302/302 testes executaveis passaram.",
       "Um modulo dependente de Flask foi ignorado porque Flask nao estava instalado no ambiente de empacotamento.",
       "node --check web/static/app.js passou.",
-      "Grounding tipado separa fatos inferencias hipoteses decisoes e recomendacoes.",
-      "Fatos objetivos continuam exigindo evidencia fresca.",
-      "Decisoes e recomendacoes podem introduzir novos valores arquivos e abordagens sem preexistir no projeto.",
-      "Inferencias exigem base observada e hipoteses permanecem explicitamente incertas.",
-      "O fallback remove apenas claims rejeitadas e preserva raciocinio nao factual valido.",
-      "Falhas internas de grounding nao criam needs_user.",
+      "Respostas do servidor sao normalizadas antes de qualquer analise.",
+      "EMPTY_MODEL_RESPONSE substitui sucesso vazio ou envelopes sem conteudo.",
+      "Gate de utilidade bloqueia recibos tecnicos listas de arquivos e faixas isoladas.",
+      "Recuperacao em camadas termina em analise deterministica baseada somente em evidencias.",
+      "Grounding tipado roda somente depois de existir conteudo util e repara apenas claims rejeitadas.",
+      "EvidenceRegistry unico alimenta leitura analise grounding conclusao persistencia e interface.",
       "O pacote final nao inclui bancos SQLite traces caches ou checkpoints de runtime."
     ]
   },
@@ -200,5 +200,16 @@
     "decisoes e recomendacoes podem introduzir novos valores arquivos e designs",
     "fallback tipado preserva raciocinio valido e remove apenas claims rejeitadas",
     "mesma politica de autonomia para projetos pequenos e grandes"
+  ],
+  "hardening_55_14": [
+    "adaptador unico para content reasoning_content streaming JSON parcial e texto puro",
+    "erro EMPTY_MODEL_RESPONSE para payload realmente vazio",
+    "pipeline separado de geracao utilidade grounding reparo validacao e publicacao",
+    "gate de utilidade impede success com recibo tecnico",
+    "fallback em camadas com analise deterministica final",
+    "grounding executado somente apos conteudo util",
+    "EvidenceRegistry canonico em todas as etapas",
+    "resultados persisted false-success reabertos pelo gate atual",
+    "302 testes executaveis aprovados"
   ]
 }

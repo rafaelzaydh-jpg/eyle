@@ -220,7 +220,14 @@
       "warn_hypothesis_without_evidence": true
     },
     "cycle_min_repetitions": 3,
-    "_comentario_55_5": "Revisao 55.5: tres repeticoes completas sao exigidas antes de pausar por ciclo; o parser faz no maximo uma tentativa de correcao apos formato invalido."
+    "_comentario_55_5": "Revisao 55.5: tres repeticoes completas sao exigidas antes de pausar por ciclo; o parser faz no maximo uma tentativa de correcao apos formato invalido.",
+    "response_recovery": {
+      "llm_enabled": true,
+      "unstructured_retry": true,
+      "evidence_short_generation": true,
+      "deterministic_fallback": true,
+      "_comentario": "Revisao 55.14: recuperacao em camadas sem success vazio."
+    }
   },
   "version": "2.7.3",
   "updated": "2026-08-05",
@@ -238,7 +245,7 @@
   },
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "55.13-typed-grounding-autonomy",
+  "revision": "55.14-unified-response-recovery-pipeline",
   "telemetry": {
     "enabled": true,
     "window_seconds": 3600,

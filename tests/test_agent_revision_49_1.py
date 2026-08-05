@@ -72,7 +72,7 @@ def test_analise_geral_nao_aceita_sem_contexto_e_le_o_projeto(tmp_path, monkeypa
     )
 
     assert status == "success"
-    assert texto == "audio.py:1 foi analisado"
+    assert "define `valor`" in texto
     assert pendente is None
     assert detalhes["tools_called"] == ["list_tree", "read_range"]
     assert detalhes["read_status"] == "read"
@@ -106,7 +106,7 @@ def test_arquivo_explicito_tambem_exige_tentativa_de_leitura(tmp_path, monkeypat
     )
 
     assert status == "success"
-    assert texto == "ok audio.py:1"
+    assert "define `valor`" in texto
     assert detalhes["tools_called"] == ["read_range"]
 
 

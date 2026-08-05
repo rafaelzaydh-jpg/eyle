@@ -54,8 +54,3 @@ config.local.json
 *.bak
 *.swp
 *~
-.env
-.env.*
-!.env.example
-!env.example
-!env.exemple

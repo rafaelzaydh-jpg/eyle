@@ -172,3 +172,14 @@ The following directories are intentionally ignored by Git:
 - `context/`: cache, queue, traces, tokens, confirmations, telemetry, and backups.
 
 Never publish their contents without reviewing them for source code, credentials, private conversations, and local paths.
+
+## Response recovery pipeline
+
+`agent.response_recovery` controls the layered recovery path introduced in revision 55.14:
+
+- `llm_enabled`: allows textual recovery calls when a backend is configured.
+- `unstructured_retry`: retries without structured output constraints.
+- `evidence_short_generation`: requests a compact answer using only fresh evidence.
+- `deterministic_fallback`: generates a conservative analysis directly from the Evidence Registry.
+
+All four values are booleans. A response can be published as `success` only after the utility and grounding gates pass.

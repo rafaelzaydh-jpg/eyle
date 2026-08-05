@@ -76,10 +76,10 @@ def test_read_only_bloqueia_write_antes_da_execucao(tmp_path, monkeypatch):
         modo="edit",
     )
 
-    assert status == "needs_user"
+    assert status == "failed"
     assert "read_only" in texto
     assert executadas == []
-    assert pendente["continuation_kind"] == "user_input"
+    assert pendente is None
 
 
 def test_needs_user_livre_retoma_o_mesmo_objetivo_e_orcamento(monkeypatch):

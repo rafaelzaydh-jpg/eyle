@@ -26,7 +26,7 @@ def calcular_orcamento_evidencias(config, prompt_sistema, prompt_sem_evidencias)
     config = config or {}
     cfg_llm = config.get("llm", {})
     cfg_contexto = config.get("context_engine", {})
-    janela = int(cfg_llm.get("context_window_tokens", 2048) or 2048)
+    janela = int(cfg_llm.get("context_window_tokens", 8192) or 8192)
     resposta = int(cfg_llm.get("max_tokens", 0) or 0)
     margem = int(cfg_contexto.get("safety_margin_tokens", 256) or 0)
     chars_por_token = int(cfg_contexto.get("chars_per_token_fallback", 3) or 3)

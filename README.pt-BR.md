@@ -20,10 +20,10 @@
   <img alt="Versão 2.7.3" src="https://img.shields.io/badge/versão-2.7.3-2563EB">
   <img alt="Execução local" src="https://img.shields.io/badge/execução-local-16A34A">
   <img alt="Retrieval BM25" src="https://img.shields.io/badge/retrieval-BM25-F59E0B">
-  <img alt="Testes" src="https://img.shields.io/badge/testes-294%20aprovados-16A34A">
+  <img alt="Testes" src="https://img.shields.io/badge/testes-302%20aprovados-16A34A">
 </p>
 
-**Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.13-typed-grounding-autonomy
+**Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.14-unified-response-recovery-pipeline
 
 ## Visão geral
 
@@ -44,6 +44,9 @@ A Eyle indexa um repositório local, recupera apenas as evidências relevantes e
 - Memória externa persistente para projetos maiores que a janela de contexto.
 - Retrieval BM25 com índice invertido e cache LRU de consultas, sem embeddings em nuvem ou banco vetorial.
 - Grounding tipado: fatos observados exigem evidência, enquanto inferências, hipóteses, decisões e recomendações mantêm a liberdade adequada.
+- Normalização unificada de respostas com `content`, `reasoning_content`, streaming, JSON parcial e texto puro.
+- Gate de utilidade e recuperação em camadas impedem resposta vazia ou recibo técnico de virar sucesso.
+- Um único Evidence Registry alimenta leitura, análise, grounding, conclusão e resumo público.
 - Tools validadas por schema e permissões explícitas `READ`, `EXEC` e `WRITE`.
 - Patches atômicos, confirmação explícita, testes isolados, releitura final e rollback.
 - Deadline compartilhado, timeouts separados, backoff, rate limiting e telemetria.

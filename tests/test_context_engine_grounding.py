@@ -163,7 +163,7 @@ def test_metadados_sozinhos_nao_passam_como_analise_de_codigo(tmp_path, monkeypa
             "tool": "read_range",
             "arguments": {"caminho_relativo": "audio.py", "linha_inicio": 1, "linha_fim": 1},
         }),
-        '{"final":"agora li audio.py:1"}',
+        '{"final":{"resposta":"Em audio.py:1, o trecho define `valor` com o valor `1`.","evidence_ids":["ev-0001"],"verificacao":"lido","limitacoes":[]}}',
     ])
     monkeypatch.setattr(agent_mod, "executar_agente_llm", lambda *args: next(respostas))
 
@@ -175,7 +175,7 @@ def test_metadados_sozinhos_nao_passam_como_analise_de_codigo(tmp_path, monkeypa
     )
 
     assert status == "success"
-    assert texto == "agora li audio.py:1"
+    assert texto == "Em audio.py:1, o trecho define `valor` com o valor `1`."
     assert detalhes["evidence_ids"] == ["ev-0001"]
 
 
@@ -189,7 +189,7 @@ def test_hash_antigo_e_rejeitado_e_a_mesma_faixa_pode_ser_relida(tmp_path, monke
         }),
         json.dumps({
             "final": {
-                "resposta": "hash velho",
+                "resposta": "Em audio.py:1, o trecho define `valor` com o valor `1`.",
                 "evidence_ids": ["ev-0001"],
                 "verificacao": "nenhuma",
                 "limitacoes": [],
@@ -201,7 +201,7 @@ def test_hash_antigo_e_rejeitado_e_a_mesma_faixa_pode_ser_relida(tmp_path, monke
         }),
         json.dumps({
             "final": {
-                "resposta": "audio.py:1 relido",
+                "resposta": "Em audio.py:1, o trecho define `valor` com o valor `2`.",
                 "evidence_ids": ["ev-0002"],
                 "verificacao": "hash fresco",
                 "limitacoes": [],
@@ -224,7 +224,7 @@ def test_hash_antigo_e_rejeitado_e_a_mesma_faixa_pode_ser_relida(tmp_path, monke
     )
 
     assert status == "success"
-    assert texto == "audio.py:1 relido"
+    assert texto == "Em audio.py:1, o trecho define `valor` com o valor `2`."
     assert detalhes["evidence_ids"] == ["ev-0002"]
     assert chamada["numero"] == 4
 
@@ -238,7 +238,7 @@ def test_evidence_id_inexistente_e_rejeitada(tmp_path, monkeypatch):
         }),
         json.dumps({
             "final": {
-                "resposta": "inventei um ID",
+                "resposta": "Em audio.py:1, o trecho define `valor` com o valor `1`.",
                 "evidence_ids": ["ev-9999"],
                 "verificacao": "nenhuma",
                 "limitacoes": [],
@@ -260,8 +260,9 @@ def test_evidence_id_inexistente_e_rejeitada(tmp_path, monkeypatch):
         retornar_detalhes=True,
     )
     assert status == "success"
-    assert texto.endswith("ID valido")
+    assert "define `valor`" in texto
     assert detalhes["evidence_ids"] == ["ev-0001"]
+    assert detalhes["recovery_layer"] == "deterministic_analysis"
 
 
 def test_citacao_fora_da_faixa_da_evidencia_e_rejeitada(tmp_path, monkeypatch):
@@ -273,7 +274,7 @@ def test_citacao_fora_da_faixa_da_evidencia_e_rejeitada(tmp_path, monkeypatch):
         }),
         json.dumps({
             "final": {
-                "resposta": "a resposta estaria em audio.py:99",
+                "resposta": "Em audio.py:99, o trecho define `valor` com o valor `1`.",
                 "evidence_ids": ["ev-0001"],
                 "verificacao": "hash fresco",
                 "limitacoes": [],
@@ -295,5 +296,6 @@ def test_citacao_fora_da_faixa_da_evidencia_e_rejeitada(tmp_path, monkeypatch):
         retornar_detalhes=True,
     )
     assert status == "success"
-    assert texto.endswith("audio.py:1")
+    assert "Em audio.py:1" in texto
     assert detalhes["evidence_ids"] == ["ev-0001"]
+    assert detalhes["recovery_layer"] == "deterministic_analysis"

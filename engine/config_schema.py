@@ -72,6 +72,7 @@ class AgentConfig(TypedDict, total=False):
     semantic_repeat_overlap: float
     max_secret_scan_bytes: int
     semantic_grounding: Dict[str, Any]
+    response_recovery: Dict[str, Any]
 
 
 class BenchmarkConfig(TypedDict, total=False):
@@ -185,6 +186,10 @@ def validar_config(config) -> ConfigEyle:
         "agent.semantic_grounding.require_inline_citations",
         "agent.semantic_grounding.require_inference_evidence",
         "agent.semantic_grounding.warn_hypothesis_without_evidence",
+        "agent.response_recovery.llm_enabled",
+        "agent.response_recovery.unstructured_retry",
+        "agent.response_recovery.evidence_short_generation",
+        "agent.response_recovery.deterministic_fallback",
         "llm.retry_read_timeouts", "llm.stream_responses",
         "telemetry.enabled",
     ):

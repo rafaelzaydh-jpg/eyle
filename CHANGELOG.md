@@ -6,6 +6,24 @@ All notable changes to Eyle are documented here.
 
 ## 2.7.3 — 2026-08-04
 
+### Revision 55.14 — Unified Response Recovery Pipeline
+
+- Added one server-response adapter for `content`, `reasoning_content`, streaming chunks, partial JSON envelopes, and plain text. Truly empty payloads now raise `EMPTY_MODEL_RESPONSE`.
+- Split generation, utility validation, typed grounding, selective repair, final utility validation, and publication into explicit stages.
+- Added a deterministic utility gate that rejects file lists, line ranges, evidence receipts, and other conclusion-free outputs.
+- Added layered recovery: unstructured retry, short evidence-only generation, deterministic code analysis, then `failed` if no useful answer survives.
+- Grounding now runs only after useful content exists and repairs only rejected claims while preserving valid recommendations, decisions, hypotheses, and inferences.
+- Added a canonical `EvidenceRegistry` shared by reading, analysis, grounding, conclusion metadata, persistence, and the public work summary.
+- Rejected persisted legacy `completed` tasks whose saved response fails the new utility gate, reopening them through the current pipeline.
+- Aligned terminal states: recoverable issues retry internally; technical failures are `failed`; genuine user decisions remain `needs_user`; only useful grounded answers are `success`.
+
+### Validation
+
+- `python -m compileall -q .` passed.
+- `node --check web/static/app.js` passed.
+- 302/302 executable tests passed.
+- One Flask-dependent module remained skipped because Flask was unavailable in the packaging environment.
+
 ### Revision 55.13 — typed grounding autonomy
 
 - Replaced binary semantic grounding with typed claim handling for facts, inferences, hypotheses, decisions, and recommendations.

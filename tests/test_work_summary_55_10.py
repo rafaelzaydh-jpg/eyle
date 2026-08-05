@@ -48,7 +48,7 @@ def test_resumo_operacional_reflete_trabalho_real_do_agente():
     assert _valor(resumo, 2, "Leitura completa") == "sim"
     assert _valor(resumo, 3, "Modo") == "analyze"
     assert _valor(resumo, 3, "Ferramentas utilizadas") == "list_tree, read_file"
-    assert _valor(resumo, 3, "Evidências coletadas") == "E1, E2"
+    assert _valor(resumo, 3, "Evidências") == "E1, E2"
     assert _valor(resumo, 4, "Status") == "success"
     assert _valor(resumo, 4, "Fallback utilizado") == "não"
     assert _valor(resumo, 4, "Validação") == "aprovada"

@@ -51,6 +51,7 @@ from engine.config_schema import carregar_config_validada  # noqa: E402
 from engine import telemetry  # noqa: E402
 from engine import process_limiter  # noqa: E402
 from engine import progress as job_progress  # noqa: E402
+from llm.response_adapter import normalize_model_response  # noqa: E402
 
 
 class ErroLLM(RuntimeError):
@@ -546,19 +547,13 @@ Regras obrigatorias:
 
 
 def _conteudo_delta_openai(valor):
-    if isinstance(valor, str):
-        return valor
-    if isinstance(valor, list):
-        partes = []
-        for item in valor:
-            if isinstance(item, str):
-                partes.append(item)
-            elif isinstance(item, dict):
-                texto = item.get("text") or item.get("content")
-                if isinstance(texto, str):
-                    partes.append(texto)
-        return "".join(partes)
-    return ""
+    """Compatibilidade interna; a normalizacao canonica vive no adapter."""
+    return normalize_model_response({"content": valor}).content
+
+
+def _texto_normalizado_backend(valor, *, permitir_raciocinio=False, streaming=False):
+    normalizada = normalize_model_response(valor, streaming=streaming)
+    return normalizada.usable_text(allow_reasoning=permitir_raciocinio)
 
 
 def _chamar_ollama(
@@ -584,8 +579,14 @@ def _chamar_ollama(
     req = urllib.request.Request(url, data=dados, headers={"Content-Type": "application/json"})
     with _abrir_url(req, timeout, read_timeout or timeout) as resp:
         if on_chunk is None:
-            corpo = json.loads(resp.read().decode("utf-8"))
-            return corpo.get("message", {}).get("content", "")
+            bruto = resp.read().decode("utf-8", errors="replace")
+            try:
+                corpo = json.loads(bruto)
+            except json.JSONDecodeError:
+                corpo = bruto
+            return _texto_normalizado_backend(
+                corpo, permitir_raciocinio=bool(forcar_json),
+            )
 
         partes = []
         ultimo = {}
@@ -593,12 +594,12 @@ def _chamar_ollama(
             linha = linha_bruta.decode("utf-8", errors="replace").strip()
             if not linha:
                 continue
-            corpo = json.loads(linha)
-            ultimo = corpo if isinstance(corpo, dict) else {}
-            delta = _conteudo_delta_openai(
-                (corpo.get("message") or {}).get("content")
-                if isinstance(corpo, dict) else ""
-            )
+            try:
+                corpo = json.loads(linha)
+            except json.JSONDecodeError:
+                corpo = linha
+            ultimo = corpo if isinstance(corpo, dict) else ultimo
+            delta = _texto_normalizado_backend(corpo, streaming=True)
             if delta:
                 partes.append(delta)
             on_chunk(delta, ultimo, bool(ultimo.get("done")))
@@ -659,41 +660,30 @@ def _chamar_openai_compatible(
                 if linha == "[DONE]":
                     terminou = True
                     break
-                if not linha.startswith("{"):
-                    continue
-                corpo = json.loads(linha)
-                ultimo = corpo if isinstance(corpo, dict) else {}
-                escolhas = ultimo.get("choices") or []
-                delta = ""
-                if escolhas and isinstance(escolhas[0], dict):
-                    bloco = escolhas[0].get("delta") or escolhas[0].get("message") or {}
-                    # reasoning_content e deliberadamente ignorado: progresso
-                    # publico nao e chain-of-thought.
-                    delta = _conteudo_delta_openai(bloco.get("content"))
+                try:
+                    corpo = json.loads(linha)
+                except json.JSONDecodeError:
+                    corpo = linha
+                ultimo = corpo if isinstance(corpo, dict) else ultimo
+                # O adapter reconhece content e reasoning_content. Como este
+                # caminho so e usado para resposta textual visivel, raciocinio
+                # permanece privado e nunca entra no callback publico.
+                delta = _texto_normalizado_backend(corpo, streaming=True)
                 if delta:
                     partes.append(delta)
                 on_chunk(delta, ultimo, False)
             on_chunk("", ultimo, True)
             return "".join(partes)
 
-        corpo = json.loads(resp.read().decode("utf-8"))
-    mensagem = corpo["choices"][0]["message"]
-    conteudo = mensagem.get("content")
-    if isinstance(conteudo, str) and conteudo.strip():
-        return conteudo
-    if isinstance(conteudo, list):
-        combinado = _conteudo_delta_openai(conteudo).strip()
-        if combinado:
-            return combinado
-    # Em chamadas estruturadas, alguns backends colocam o JSON somente em
-    # reasoning_content. A recuperacao precisa continuar ativa mesmo quando o
-    # response_format foi removido por compatibilidade. Chamadas textuais
-    # comuns mantêm esse campo privado.
-    if forcar_json or recuperar_reasoning_content:
-        raciocinio = mensagem.get("reasoning_content")
-        if isinstance(raciocinio, str) and raciocinio.strip():
-            return raciocinio
-    return ""
+        bruto = resp.read().decode("utf-8", errors="replace")
+        try:
+            corpo = json.loads(bruto)
+        except json.JSONDecodeError:
+            corpo = bruto
+    return _texto_normalizado_backend(
+        corpo,
+        permitir_raciocinio=bool(forcar_json or recuperar_reasoning_content),
+    )
 
 
 def _chamar_openai_com_fallback(
@@ -1133,7 +1123,7 @@ def _chamar_llm_impl(
                 if not isinstance(resposta, str) or not resposta.strip():
                     raise ErroLLM(
                         "O backend respondeu sem conteúdo utilizável.",
-                        transient=True, error_code="EMPTY_RESPONSE",
+                        transient=True, error_code="EMPTY_MODEL_RESPONSE",
                     )
                 ultimo_erro = None
                 break
@@ -1404,6 +1394,24 @@ def executar_engenheiro(prompt_usuario, config):
     engine/codar.py:aplicar_patch, chamado por engine/engine.py."""
     return _chamar_llm(PROMPT_ENGENHEIRO, prompt_usuario, config, perfil="engineer")
 
+
+
+
+PROMPT_RECOVERY = """You are the response recovery stage of Eyle.
+
+Return plain natural-language text only, never JSON. Use only the supplied fresh evidence.
+Produce a real conclusion related to the user's request: describe at least one observed behavior, inference, risk, or recommendation.
+Do not output a file list, evidence receipt, execution log, or status summary as the answer.
+Do not invent files, symbols, behavior, tests, or results. Keep citations exactly within the supplied file ranges.
+Answer in the user's language."""
+
+
+def executar_recuperacao_textual(prompt_usuario, config):
+    """Retry textual sem response_format para recuperar uma conclusao util."""
+    return _chamar_llm(
+        PROMPT_RECOVERY, prompt_usuario, config,
+        forcar_json=False, perfil="recovery", stream_visible=False,
+    )
 
 def executar_entendedor(prompt_usuario, config):
     """Terceira personalidade: le um arquivo inteiro (uma vez, na ingestao) e

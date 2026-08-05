@@ -47,6 +47,37 @@ def _etapa(numero, titulo, campos):
     }
 
 
+
+
+def _itens_registry(detalhes):
+    registry = detalhes.get("evidence_registry")
+    if not isinstance(registry, dict):
+        return []
+    items = registry.get("items")
+    return [item for item in (items or []) if isinstance(item, dict)]
+
+
+def _rotulos_evidencia(detalhes, contexto):
+    items = _itens_registry(detalhes)
+    if items:
+        rotulos = []
+        for item in items[:_MAX_FILES * 4]:
+            evidence_id = _texto(item.get("id"), 80)
+            arquivo = _texto(item.get("arquivo"), 300)
+            inicio = item.get("linha_inicio")
+            fim = item.get("linha_fim")
+            faixa = ""
+            if arquivo and isinstance(inicio, int) and isinstance(fim, int):
+                faixa = f"{arquivo}:{inicio}-{fim}" if inicio != fim else f"{arquivo}:{inicio}"
+            estado = _texto(item.get("estado"), 40)
+            base = " = ".join(valor for valor in (evidence_id, faixa) if valor)
+            if base and estado and estado != "fresh":
+                base += f" ({estado})"
+            if base:
+                rotulos.append(base)
+        return _unicos(rotulos)
+    return _unicos(detalhes.get("evidence_ids") or contexto.get("evidence_ids"))
+
 def _modo(resultado, detalhes, contexto):
     roteador = resultado.get("roteador") if isinstance(resultado, dict) else {}
     roteador = roteador if isinstance(roteador, dict) else {}
@@ -66,7 +97,9 @@ def _modo(resultado, detalhes, contexto):
 
 
 def _leituras(detalhes, contexto):
-    evidencias = detalhes.get("evidencias_usadas")
+    evidencias = _itens_registry(detalhes)
+    if not evidencias:
+        evidencias = detalhes.get("evidencias_usadas")
     if not isinstance(evidencias, list) or not evidencias:
         evidencias = contexto.get("arquivos_lidos")
     if not isinstance(evidencias, list):
@@ -184,7 +217,7 @@ def construir_resumo_trabalho(evento, resultado, duracao_segundos, projeto=None,
 
     objetivo = _texto(evento.get("texto"), 1000) or "objetivo não registrado"
     ferramentas = _unicos(detalhes.get("tools_called") or contexto.get("ferramentas"))
-    evidencias = _unicos(detalhes.get("evidence_ids") or contexto.get("evidence_ids"))
+    evidencias = _rotulos_evidencia(detalhes, contexto)
     leituras = _leituras(detalhes, contexto)
 
     agente_status = resultado.get("agente_status")
@@ -217,7 +250,7 @@ def construir_resumo_trabalho(evento, resultado, duracao_segundos, projeto=None,
         duracao = 0.0
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "title": "Trabalho concluído" if status_job == "completed" else "Trabalho interrompido",
         "duration_seconds": duracao,
         "steps": [
@@ -228,7 +261,7 @@ def construir_resumo_trabalho(evento, resultado, duracao_segundos, projeto=None,
             _etapa(3, "Análise", [
                 _campo("Modo", _modo(resultado, detalhes, contexto)),
                 _campo("Ferramentas utilizadas", ", ".join(ferramentas) or "nenhuma registrada"),
-                _campo("Evidências coletadas", ", ".join(evidencias) or "nenhuma registrada"),
+                _campo("Evidências", ", ".join(evidencias) or "nenhuma registrada"),
             ]),
             _etapa(4, "Conclusão", [
                 _campo("Status", agente_status),

@@ -78,11 +78,11 @@ def test_fallback_de_leitura_usa_visao_geral_sem_json(monkeypatch):
         "invalid_agent_json",
     )
 
-    assert resultado["resposta"] == "analise pronta"
-    assert resultado["agente_status"] == "success"
+    assert resultado["resposta"] == "A recuperação textual terminou sem uma conclusão útil validada."
+    assert resultado["agente_status"] == "failed"
     assert resultado["roteador"]["tipo"] == "agente_fallback_leitura"
     assert resultado["roteador"]["fallback_pipeline"] == "visao_geral"
-    assert atualizacoes[-1][1]["status"] == "completed"
+    assert atualizacoes[-1][1]["status"] == "failed"
 
 
 def test_fallback_de_leitura_nunca_assume_edicao(monkeypatch):

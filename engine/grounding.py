@@ -421,38 +421,12 @@ def build_safe_grounded_answer(answer, result, evidences, max_claims=8):
             break
 
     if supported:
-        body = "\n".join(f"- {claim}" for claim in supported)
-        kinds = ", ".join(sorted(set(rejected_types))) or "factual"
-        limitation = (
-            "Limitação: afirmações rejeitadas pelo grounding tipado "
-            f"({kinds}) foram removidas automaticamente; inferências, hipóteses, "
-            "decisões e recomendações válidas foram preservadas."
-        )
-        return f"{body}\n\n{limitation}"
+        # Retorna somente as claims que ja passaram pelo verificador. Incluir
+        # uma explicacao tecnica aqui criaria uma nova claim nao anotada e
+        # poderia fazer o proprio reparo falhar no segundo passe de grounding.
+        return "\n".join(supported)
 
-    ranges = []
-    seen = set()
-    for evidence in evidences or []:
-        if not isinstance(evidence, dict):
-            continue
-        filename = str(evidence.get("arquivo") or "").replace("\\", "/")
-        start = evidence.get("linha_inicio")
-        end = evidence.get("linha_fim")
-        if not filename or not isinstance(start, int) or not isinstance(end, int):
-            continue
-        citation = f"{filename}:{start}-{end}" if end != start else f"{filename}:{start}"
-        if citation not in seen:
-            seen.add(citation)
-            ranges.append(citation)
-        if len(ranges) >= 8:
-            break
-
-    if ranges:
-        body = "Evidências verificadas: " + ", ".join(ranges) + "."
-    else:
-        body = "A conclusão detalhada não pôde ser publicada com segurança."
-    limitation = (
-        "Limitação: nenhuma afirmação da conclusão original passou pela política "
-        "de grounding tipado; o agente publicou apenas o estado observado."
-    )
-    return f"{body}\n\n{limitation}"
+    # Sem claim suportada, nao fabrica um recibo tecnico. A camada de
+    # recuperacao deve gerar uma nova analise util a partir das evidencias; se
+    # isso tambem falhar, o status correto e ``failed``.
+    return ""

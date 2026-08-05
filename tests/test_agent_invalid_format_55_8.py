@@ -160,5 +160,6 @@ def test_fallback_read_nao_depende_do_roteador_legado_reconhecer_a_frase(monkeyp
         "task-55-8",
         "invalid_agent_json",
     )
-    assert resultado["resposta"] == "panorama seguro"
+    assert resultado["resposta"] == "A recuperação textual terminou sem uma conclusão útil validada."
+    assert resultado["agente_status"] == "failed"
     assert resultado["roteador"]["fallback_pipeline"] == "visao_geral"

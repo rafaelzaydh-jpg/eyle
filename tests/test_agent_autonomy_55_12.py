@@ -117,13 +117,12 @@ def test_grounding_esgotado_conclui_com_fallback_seguro_sem_pendencia(tmp_path, 
     assert status == "success"
     assert pending is None
     assert "os.remove" not in text
-    assert "Evidências verificadas: audio.py:1-2" in text
+    assert "define as funções `limitar_volume`" in text
     assert details["grounding_fallback_applied"] is True
-    assert details["fallback_cause"] == "semantic_grounding_safe_fallback"
+    assert details["fallback_cause"] == "response_recovery_deterministic_analysis"
     assert details["semantic_grounding"]["ok"] is True
     assert details["semantic_grounding_original"]["ok"] is False
-    assert "os.remove" in prompts[2]
-    assert "Do not ask the user" in prompts[2]
+    assert len(prompts) == 2
 
 
 def test_fallback_preserva_claims_aceitas_e_remove_as_rejeitadas():

@@ -49,6 +49,7 @@ from engine.persistencia import salvar_json_atomico, salvar_texto_atomico
 from engine.config_schema import carregar_config_validada
 from engine import queue as fila_persistente
 from engine import progress as job_progress
+from engine.utility_gate import validate_response_utility
 
 MEMORY_DIR = os.path.join(BASE_DIR, "memory")
 CONTEXT_DIR = os.path.join(BASE_DIR, "context")
@@ -1631,12 +1632,27 @@ def _fallback_leitura_legado(
             pergunta, config, projeto, estrutura, entendimento, motivo_fallback,
         )
 
-    falhou = isinstance(resultado, dict) and resultado.get("status") == "failed"
+    resposta_fallback = (resultado or {}).get("resposta") if isinstance(resultado, dict) else ""
+    contexto_fallback = (resultado or {}).get("trabalho_contexto") if isinstance(resultado, dict) else {}
+    contexto_fallback = contexto_fallback if isinstance(contexto_fallback, dict) else {}
+    gate_utilidade = validate_response_utility(
+        resposta_fallback, pergunta, task_type="project_read",
+        evidence=contexto_fallback.get("arquivos_lidos") or [],
+    )
+    falhou = (
+        isinstance(resultado, dict) and resultado.get("status") == "failed"
+    ) or not gate_utilidade.get("ok", False)
+    if falhou and isinstance(resultado, dict) and not gate_utilidade.get("ok", False):
+        resultado["resposta"] = (
+            "A recuperação textual terminou sem uma conclusão útil validada."
+        )
+        resposta_fallback = resultado["resposta"]
+        resultado["status"] = "failed"
     detalhes = {
         "task_id": task_id,
         "task_type": "project_read",
         "mode": classificar_modo_projeto(pergunta),
-        "response": (resultado or {}).get("resposta") if isinstance(resultado, dict) else None,
+        "response": resposta_fallback,
         "completion_gate": {
             "code": "legacy_read_fallback_failed" if falhou else "legacy_read_fallback",
             "passed": not falhou,
@@ -1645,6 +1661,7 @@ def _fallback_leitura_legado(
         "fallback_pipeline": tipo_legado,
         "evidence_ids": [],
         "evidencias_usadas": [],
+        "utility_gate": gate_utilidade,
     }
     fila_persistente.atualizar_tarefa_agente(
         task_id,
@@ -1778,21 +1795,43 @@ def _processar_agente(pergunta, config, projeto, entendimento, motivo_roteador,
 
     if tarefa.get("status") == "completed" and isinstance(tarefa.get("resultado"), dict):
         detalhes_salvos = tarefa["resultado"]
-        texto_salvo = detalhes_salvos.get("response") or "Tarefa ja concluida."
-        registrar_mensagem_se_nova("assistant", texto_salvo)
-        return {
-            "resposta": texto_salvo,
-            "roteador": {
-                "tipo": "agente", "motivo": "resultado idempotente ja persistido",
-                "modo": modo, "rollout": rollout_efetivo, "task_id": task_id,
+        texto_salvo = detalhes_salvos.get("response") or ""
+        registry_salvo = detalhes_salvos.get("evidence_registry")
+        registry_salvo = registry_salvo if isinstance(registry_salvo, dict) else {}
+        evidencias_salvas = registry_salvo.get("items") or detalhes_salvos.get("evidencias_usadas") or []
+        gate_salvo = validate_response_utility(
+            texto_salvo, pergunta,
+            task_type=detalhes_salvos.get("task_type") or "project_read",
+            evidence=evidencias_salvas,
+        )
+        if gate_salvo.get("ok", False):
+            registrar_mensagem_se_nova("assistant", texto_salvo)
+            return {
+                "resposta": texto_salvo,
+                "roteador": {
+                    "tipo": "agente", "motivo": "resultado idempotente ja persistido",
+                    "modo": modo, "rollout": rollout_efetivo, "task_id": task_id,
+                },
+                "iteracoes_analista": 0,
+                "decisoes_analista": [],
+                "confianca": None,
+                "avisos": [],
+                "agente_status": "success",
+                "agente_conclusao": detalhes_salvos,
+            }
+        # Resultados de revisoes antigas podem estar marcados como completed
+        # mesmo contendo apenas recibos de evidencia. Reabre a mesma tarefa
+        # idempotente e passa novamente pelo pipeline atual.
+        fila_persistente.atualizar_tarefa_agente(
+            task_id, status="running", resultado=None, continuacao=None,
+            acao_pendente=None, pergunta=None, causa_fallback="persisted_utility_gate_failed",
+            evento={
+                "tipo": "persisted_result_rejected",
+                "utility_gate": gate_salvo,
             },
-            "iteracoes_analista": 0,
-            "decisoes_analista": [],
-            "confianca": None,
-            "avisos": [],
-            "agente_status": "success",
-            "agente_conclusao": detalhes_salvos,
-        }
+        )
+        tarefa = dict(tarefa)
+        tarefa.update({"status": "running", "resultado": None, "continuacao": None})
 
     if tarefa.get("status") == "waiting_user" and tarefa.get("continuacao"):
         texto_espera = tarefa.get("pergunta") or "A tarefa ainda aguarda sua resposta."

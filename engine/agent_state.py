@@ -81,6 +81,7 @@ import json
 import re
 
 from engine.text_hash import hash_faixa, normalizar_quebras
+from engine.evidence_registry import EvidenceRegistry
 
 
 class GoalState:
@@ -429,7 +430,7 @@ class AgentState:
         # Atualizacao 42: quatro blocos com papeis distintos. O alias
         # ``observacoes`` abaixo preserva consumidores anteriores.
         self.goal_state = {}
-        self.evidence = []
+        self._evidence_registry = EvidenceRegistry()
         self.actions = []
         self.recent_observations = []
         self._proximo_evidence_id = 1
@@ -446,6 +447,19 @@ class AgentState:
         # ciclos A-B-A-B ou chamadas cosmeticamente diferentes que devolvem
         # exatamente o mesmo estado observavel.
         self.fingerprints_ciclo = []
+
+    @property
+    def evidence(self):
+        """Alias compativel para a colecao canonica do EvidenceRegistry."""
+        return self._evidence_registry.items
+
+    @evidence.setter
+    def evidence(self, valor):
+        self._evidence_registry = EvidenceRegistry(valor or [])
+
+    @property
+    def evidence_registry(self):
+        return self._evidence_registry
 
     @property
     def observacoes(self):
@@ -622,22 +636,9 @@ class AgentState:
         ):
             return None
 
-        for evidencia in self.evidence:
-            if (
-                evidencia.get("arquivo") == arquivo
-                and evidencia.get("linha_inicio") == linha_inicio
-                and evidencia.get("linha_fim") == linha_fim
-                and evidencia.get("content_hash") == content_hash
-                and evidencia.get("file_hash") == file_hash
-            ):
-                evidencia["estado"] = "fresh"
-                return evidencia["id"]
-
         total_linhas = item.get("total_linhas_arquivo")
         truncado = bool(item.get("truncado") or item.get("faixa_truncada_pelo_limite"))
-        evidencia = {
-            "id": self._novo_evidence_id(),
-            "source_tool": source_tool,
+        payload = {
             "arquivo": arquivo,
             "linha_inicio": linha_inicio,
             "linha_fim": linha_fim,
@@ -660,8 +661,14 @@ class AgentState:
             "file_hash": file_hash,
             "estado": "fresh",
         }
-        self.evidence.append(evidencia)
-        return evidencia["id"]
+        # O ID so e consumido se a faixa/hash ainda nao existir.
+        provisoria = f"ev-{self._proximo_evidence_id:04d}"
+        evidencia, criada = self.evidence_registry.register(
+            payload, evidence_id=provisoria, source_tool=source_tool,
+        )
+        if criada:
+            self._proximo_evidence_id += 1
+        return evidencia.get("id")
 
     def registrar_acao(self, tool, arguments, resultado, contar_execucao=False):
         """Registra a acao compacta e extrai evidencias objetivas do envelope."""
@@ -954,13 +961,13 @@ class AgentState:
         )
 
     def evidencia_por_id(self, evidence_id):
-        for evidencia in self.evidence:
-            if evidencia.get("id") == evidence_id:
-                return evidencia
-        return None
+        return self.evidence_registry.get(evidence_id)
 
     def evidencias_frescas(self):
-        return [item for item in self.evidence if item.get("estado") == "fresh"]
+        return self.evidence_registry.fresh()
+
+    def snapshot_evidencias(self, selected_ids=None):
+        return self.evidence_registry.public_snapshot(selected_ids=selected_ids)
 
     def observar(self, tool, resultado):
         """
@@ -1280,7 +1287,8 @@ class AgentState:
         guarda agora -- pronto para o checkpoint duravel da tarefa."""
         return {
             "goal_state": self.goal_state,
-            "evidence": self.evidence,
+            "evidence": self.evidence_registry.export(),
+            "evidence_registry_schema": self.evidence_registry.SCHEMA_VERSION,
             "actions": self.actions,
             "recent_observations": self.recent_observations,
             "assinaturas_chamadas": [list(assinatura) for assinatura in self.assinaturas_chamadas],

@@ -343,7 +343,7 @@ def test_regressao_sem_agent_tools_cai_no_stub_sem_quebrar(monkeypatch):
 def test_circuit_breaker_para_apos_n_erros_consecutivos(monkeypatch):
     """3 erros de tool SEGUIDOS (tools/argumentos diferentes entre si, pra
     nao esbarrar na guarda de repeticao da Atualizacao 3) tem que parar o
-    loop em 'needs_user' -- mesmo a LLM tendo "passos" sobrando no
+    loop em 'failed' -- mesmo a LLM tendo "passos" sobrando no
     max_steps configurado."""
     monkeypatch.setattr(agent_mod, "TOOLS", {"search_code": {"permission": "READ"}})
     monkeypatch.setattr(agent_mod, "executar_agente_llm", _sequencia_llm([
@@ -358,12 +358,9 @@ def test_circuit_breaker_para_apos_n_erros_consecutivos(monkeypatch):
         "tarefa com erro persistente", _config(max_steps=8, max_erros_consecutivos=3),
     )
 
-    assert status == "needs_user"
+    assert status == "failed"
     assert "3 erro" in texto
-    # Atualizacao 49: todo needs_user, inclusive circuit breaker, conserva
-    # uma continuacao retomavel em vez de obrigar o usuario a recomecar.
-    assert pendente["continuation_kind"] == "user_input"
-    assert pendente["estado"]["erros_consecutivos"] == 3
+    assert pendente is None
 
 
 def test_circuit_breaker_zera_apos_sucesso_no_meio(monkeypatch):
@@ -522,8 +519,9 @@ def test_circuit_breaker_conta_ok_false_mesmo_sem_chave_erro(monkeypatch):
         "aplica um patch", _config(max_erros_consecutivos=3), retomar=json.loads(json.dumps(pendente)),
     )
 
-    assert status == "needs_user"
+    assert status == "failed"
     assert "3 erro" in texto
+    assert pendente is None
 
 
 # ---------------------------------------------------------------------------
