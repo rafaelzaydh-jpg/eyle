@@ -6,6 +6,21 @@ All notable changes to Eyle are documented here.
 
 ## 2.7.3 — 2026-08-04
 
+### Revision 55.13 — typed grounding autonomy
+
+- Replaced binary semantic grounding with typed claim handling for facts, inferences, hypotheses, decisions, and recommendations.
+- Kept objective facts tied to fresh evidence while allowing the Agent to introduce justified deductions, testable possibilities, technical choices, new values, files, and designs.
+- Added optional `claim_annotations` to project finals, including claim type, evidence IDs, and a compact basis.
+- Preserved valid non-factual reasoning during automatic fallback instead of deleting every statement that was not literally present in the project.
+- Kept one behavior for projects of every size: project size changes evidence collection, not the autonomy policy.
+
+### Validation
+
+- `python -m compileall -q .` passed.
+- `node --check web/static/app.js` passed.
+- 294/294 executable tests passed.
+- One Flask-dependent module remained skipped because Flask was unavailable in the packaging environment.
+
 ### Revision 55.11 — cancellation-safe messages and structured reasoning fallback
 
 - Message deletion now cancels only the job created by that message. If a different message is already frozen in an active job context, its deletion is deferred until that response ends; new jobs exclude it immediately. Question jobs from the web panel run in a terminable child process so cancellation interrupts blocking local-LLM calls, and any late assistant response from the cancelled job is purged.

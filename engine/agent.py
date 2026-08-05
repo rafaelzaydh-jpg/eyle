@@ -90,7 +90,11 @@ from llm.executar import (  # noqa: E402
 from engine.agent_state import AgentState, GoalState  # noqa: E402
 from engine.text_hash import hash_texto, normalizar_quebras  # noqa: E402
 from engine.compiler import montar_prompt_agente  # noqa: E402
-from engine.grounding import verify_conclusion  # noqa: E402
+from engine.grounding import (  # noqa: E402
+    build_safe_grounded_answer,
+    format_grounding_feedback,
+    verify_conclusion,
+)
 from engine.project_reader import ErroLeituraProjeto, ler_faixa_projeto  # noqa: E402
 from engine.retencao import rotacionar_arquivo  # noqa: E402
 from engine.roteador import classificar_modo_projeto  # noqa: E402
@@ -289,16 +293,28 @@ def _normalizar_conclusao(decisao, estado, task_type):
         evidence_ids = valor.get("evidence_ids")
         verificacao = valor.get("verification", valor.get("verificacao"))
         limitacoes = valor.get("limitations", valor.get("limitacoes", []))
+        claim_annotations = valor.get(
+            "claim_annotations", valor.get("anotacoes_afirmacoes", [])
+        )
     else:
         resposta = valor
         evidence_ids = decisao.get("evidence_ids")
         verificacao = decisao.get("verification", decisao.get("verificacao"))
         limitacoes = decisao.get("limitations", decisao.get("limitacoes", []))
+        claim_annotations = decisao.get(
+            "claim_annotations", decisao.get("anotacoes_afirmacoes", [])
+        )
 
     if not isinstance(resposta, str) or not resposta.strip():
         return None, "o campo final.resposta precisa ser texto nao vazio"
     if not isinstance(limitacoes, list) or not all(isinstance(item, str) for item in limitacoes):
         return None, "final.limitacoes precisa ser uma lista de textos"
+    if claim_annotations is None:
+        claim_annotations = []
+    if not isinstance(claim_annotations, list) or not all(
+        isinstance(item, dict) for item in claim_annotations
+    ):
+        return None, "final.claim_annotations precisa ser uma lista de objetos"
 
     # Compatibilidade com respostas antigas: depois de uma leitura real,
     # uma string final e normalizada internamente com todas as evidencias
@@ -315,6 +331,7 @@ def _normalizar_conclusao(decisao, estado, task_type):
         "evidence_ids": list(dict.fromkeys(evidence_ids)),
         "verificacao": verificacao,
         "limitacoes": limitacoes,
+        "claim_annotations": claim_annotations,
         "task_type": task_type,
     }, None
 
@@ -582,7 +599,7 @@ def prompt_reforco_formato(prompt, resposta_llm):
         "Return ONLY one allowed JSON object, with no text before or after it: "
         "{\"tool\":\"...\",\"arguments\":{...}} or "
         "{\"final\":{\"answer\":\"...\",\"evidence_ids\":[],"
-        "\"verification\":\"...\",\"limitations\":[]}} or "
+        "\"verification\":\"...\",\"limitations\":[],\"claim_annotations\":[]}} or "
         "{\"final\":\"...\"} or {\"needs_user\":\"...\"}. "
         "Previous response (possibly truncated): "
         f"{(resposta_llm or '').strip()[:300]}"
@@ -1106,6 +1123,15 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 estado_pendente = dict(estado_pendente)
                 estado_pendente.setdefault("estado", estado_serializado)
                 estado_pendente.setdefault("continuation_kind", "confirmation")
+            if (
+                isinstance(retomar, dict)
+                and str(retomar.get("task_id") or "") == task_id
+            ):
+                for chave in (
+                    "id", "tipo_pendencia", "criado_em", "expira_em", "projeto_hash",
+                ):
+                    if retomar.get(chave) is not None:
+                        estado_pendente.setdefault(chave, retomar[chave])
             estado_pendente.update({
                 "task_id": task_id,
                 "modo": modo,
@@ -1652,30 +1678,58 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                     conclusao.get("resposta"),
                     evidencias_usadas,
                     config.get("agent", {}).get("semantic_grounding", {}),
+                    claim_annotations=conclusao.get("claim_annotations"),
                 )
                 conclusao["semantic_grounding"] = verificacao_semantica
                 if not verificacao_semantica.get("ok", False):
                     resumo_semantico = verificacao_semantica.get("summary") or (
                         "a conclusao contem afirmacoes objetivas sem suporte nas evidencias"
                     )
-                    estado.observar_final_sem_grounding(resumo_semantico)
+                    feedback_semantico = format_grounding_feedback(verificacao_semantica)
+                    estado.observar_final_sem_grounding(feedback_semantico)
                     if _sem_progresso(
                         estado, max_sem_progresso, step,
                         "final_recusado_semantica", resumo_semantico,
                     ):
-                        return _retorno_agente(
-                            "needs_user",
-                            "A conclusao foi pausada porque ainda contem afirmacoes "
-                            "objetivas que nao aparecem nas evidencias declaradas.",
-                            None,
-                            {
-                                "task_type": task_type, "mode": modo,
-                                "goal_state": estado.goal_state,
-                                "semantic_grounding": verificacao_semantica,
-                            },
-                            retornar_detalhes,
+                        resposta_original = conclusao.get("resposta") or ""
+                        resposta_segura = build_safe_grounded_answer(
+                            resposta_original,
+                            verificacao_semantica,
+                            evidencias_usadas,
                         )
-                    continue
+                        verificacao_fallback = verify_conclusion(
+                            resposta_segura,
+                            evidencias_usadas,
+                            config.get("agent", {}).get("semantic_grounding", {}),
+                            claim_annotations=conclusao.get("claim_annotations"),
+                        )
+                        if not verificacao_fallback.get("ok", False):
+                            return _retorno_agente(
+                                "failed",
+                                "O agente nao conseguiu produzir uma conclusao grounded "
+                                "mesmo apos reduzir automaticamente a resposta.",
+                                None,
+                                {
+                                    "task_type": task_type,
+                                    "mode": modo,
+                                    "goal_state": estado.goal_state,
+                                    "failure_code": "SEMANTIC_GROUNDING_FAILED",
+                                    "fallback_cause": "semantic_grounding_failed",
+                                    "semantic_grounding": verificacao_semantica,
+                                    "semantic_grounding_fallback": verificacao_fallback,
+                                },
+                                retornar_detalhes,
+                            )
+                        conclusao["resposta"] = resposta_segura
+                        conclusao["semantic_grounding_original"] = verificacao_semantica
+                        conclusao["semantic_grounding"] = verificacao_fallback
+                        conclusao["grounding_fallback_applied"] = True
+                        conclusao.setdefault("limitacoes", []).append(
+                            "A resposta foi reduzida automaticamente para remover "
+                            "afirmacoes sem suporte verificavel."
+                        )
+                    else:
+                        continue
                 if task_type == "project_write":
                     edit_valido, motivo_edit = estado.validar_conclusao_edicao(
                         conclusao.get("evidence_ids") or [],
@@ -1720,6 +1774,12 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 "verificacao": conclusao.get("verificacao"),
                 "verificacao_sistema": conclusao.get("verificacao_sistema"),
                 "semantic_grounding": conclusao.get("semantic_grounding"),
+                "semantic_grounding_original": conclusao.get("semantic_grounding_original"),
+                "grounding_fallback_applied": bool(conclusao.get("grounding_fallback_applied")),
+                "fallback_cause": (
+                    "semantic_grounding_safe_fallback"
+                    if conclusao.get("grounding_fallback_applied") else None
+                ),
                 "limitacoes": conclusao.get("limitacoes", []),
                 "edit_state": _edit_state_publico(estado),
             }

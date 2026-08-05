@@ -183,6 +183,8 @@ def validar_config(config) -> ConfigEyle:
         "agent.semantic_grounding.enabled",
         "agent.semantic_grounding.block_unsupported_anchors",
         "agent.semantic_grounding.require_inline_citations",
+        "agent.semantic_grounding.require_inference_evidence",
+        "agent.semantic_grounding.warn_hypothesis_without_evidence",
         "llm.retry_read_timeouts", "llm.stream_responses",
         "telemetry.enabled",
     ):

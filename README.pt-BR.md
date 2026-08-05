@@ -20,8 +20,10 @@
   <img alt="Versão 2.7.3" src="https://img.shields.io/badge/versão-2.7.3-2563EB">
   <img alt="Execução local" src="https://img.shields.io/badge/execução-local-16A34A">
   <img alt="Retrieval BM25" src="https://img.shields.io/badge/retrieval-BM25-F59E0B">
-  <img alt="Testes" src="https://img.shields.io/badge/testes-276%20aprovados-16A34A">
+  <img alt="Testes" src="https://img.shields.io/badge/testes-294%20aprovados-16A34A">
 </p>
+
+**Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.13-typed-grounding-autonomy
 
 ## Visão geral
 
@@ -41,7 +43,7 @@ A Eyle indexa um repositório local, recupera apenas as evidências relevantes e
 - Modelos locais via servidores compatíveis com OpenAI, LM Studio, llama.cpp e backends no estilo Ollama.
 - Memória externa persistente para projetos maiores que a janela de contexto.
 - Retrieval BM25 com índice invertido e cache LRU de consultas, sem embeddings em nuvem ou banco vetorial.
-- Respostas ligadas a arquivos, faixas, hashes e IDs de evidência frescos.
+- Grounding tipado: fatos observados exigem evidência, enquanto inferências, hipóteses, decisões e recomendações mantêm a liberdade adequada.
 - Tools validadas por schema e permissões explícitas `READ`, `EXEC` e `WRITE`.
 - Patches atômicos, confirmação explícita, testes isolados, releitura final e rollback.
 - Deadline compartilhado, timeouts separados, backoff, rate limiting e telemetria.

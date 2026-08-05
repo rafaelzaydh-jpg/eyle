@@ -215,13 +215,15 @@
       "require_inline_citations": false,
       "min_claim_token_overlap": 0.12,
       "min_claim_tokens": 5,
-      "_comentario": "Bloqueia afirmacoes com identificadores, caminhos, numeros ou literais objetivos ausentes das evidencias. Baixa sobreposicao lexical vira aviso para nao punir parafrases validas."
+      "_comentario": "Grounding tipado: fatos observados exigem evidencia; inferencias exigem base; hipoteses permanecem incertas; decisoes e recomendacoes podem introduzir escolhas novas sem precisar existir previamente no projeto.",
+      "require_inference_evidence": true,
+      "warn_hypothesis_without_evidence": true
     },
     "cycle_min_repetitions": 3,
     "_comentario_55_5": "Revisao 55.5: tres repeticoes completas sao exigidas antes de pausar por ciclo; o parser faz no maximo uma tentativa de correcao apos formato invalido."
   },
   "version": "2.7.3",
-  "updated": "2026-08-04",
+  "updated": "2026-08-05",
   "worker": {
     "heartbeat_interval_seconds": 5,
     "queue_error_backoff_seconds": 1,
@@ -236,7 +238,7 @@
   },
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "55.11-cancellation-reasoning-fallback",
+  "revision": "55.13-typed-grounding-autonomy",
   "telemetry": {
     "enabled": true,
     "window_seconds": 3600,

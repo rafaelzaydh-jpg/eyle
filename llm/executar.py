@@ -103,6 +103,30 @@ _SCHEMA_DECISAO_AGENTE = {
                             "type": "array",
                             "items": {"type": "string"},
                         },
+                        "claim_annotations": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "claim": {"type": "string"},
+                                    "claim_index": {"type": "integer"},
+                                    "type": {
+                                        "type": "string",
+                                        "enum": [
+                                            "fact", "inference", "hypothesis",
+                                            "decision", "recommendation",
+                                        ],
+                                    },
+                                    "evidence_ids": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                    "basis": {"type": "string"},
+                                },
+                                "required": ["type"],
+                                "additionalProperties": True,
+                            },
+                        },
                         # Legacy keys remain accepted during migration.
                         "resposta": {"type": "string"},
                         "verificacao": {"type": "string"},
@@ -1289,7 +1313,7 @@ Language contract:
 
 Allowed JSON formats:
 - tool action: {"tool":"tool_name","arguments":{...}}
-- project final: {"final":{"answer":"...","evidence_ids":["ev-0001"],"verification":"...","limitations":[]}}
+- project final: {"final":{"answer":"...","evidence_ids":["ev-0001"],"verification":"...","limitations":[],"claim_annotations":[]}}
 - chat final: {"final":"..."}
 - real blocker/question: {"needs_user":"..."}
 - optional memory note: add "important_fact":"..." to any allowed object.
@@ -1308,6 +1332,13 @@ Mandatory rules:
    - If the prompt contains `MANDATORY NEXT EDIT ACTION`, execute exactly that step.
 5. `project_read` and `project_write` may finish only with fresh code evidence. Tree, metadata, observations, and `important_fact` are not evidence. Stale evidence or an old hash requires a new read.
 6. Use only visible `evidence_ids`. Every `file:line` citation must be covered by those evidence ranges. Report real limitations.
+   The project is observed state, not universal truth. You may reason beyond what is literally written, but keep epistemic types honest:
+   - unannotated assertive statements are treated as observed `fact` and must be grounded;
+   - annotate exact non-factual sentences in `claim_annotations` as `inference`, `hypothesis`, `decision`, or `recommendation`;
+   - an `inference` should identify supporting `evidence_ids` or a short `basis`;
+   - a `hypothesis` must use uncertain wording and should be tested when a READ tool can test it;
+   - `decision` and `recommendation` may introduce new values, files, designs, or approaches that do not yet exist in the project;
+   - never relabel an observed factual assertion merely to bypass grounding.
 7. After a WRITE with `changed=true`, `run_tests` must execute and pass, then the final changed range must be read again. If `executed=false`, say that no test suite ran; never claim tests passed.
 8. `important_fact` is optional, brief, and never replaces evidence.
 9. Replan only when fresh evidence disproves the hypothesis. Add this to the tool action:

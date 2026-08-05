@@ -1,5 +1,7 @@
 # Release hardening reports
 
+- [2.7.3 — revision 55.13 typed grounding autonomy](2.7.3-revision-55.13.md)
+- [2.7.3 — revision 55.12 autonomous grounding recovery](2.7.3-revision-55.12.md)
 - [2.7.3 — revision 55.10 expandable work summary](2.7.3-revision-55.10.md)
 - [2.7.3 — revision 55.9 polling and small projects](2.7.3-revision-55.9.md)
 - [2.7.1 — revision 51](2.7.1-hardening.md)

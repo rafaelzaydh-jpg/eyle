@@ -2,8 +2,8 @@
   "release": "2.7.3",
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "55.11-cancellation-reasoning-fallback",
-  "updated": "2026-08-04",
+  "revision": "55.13-typed-grounding-autonomy",
+  "updated": "2026-08-05",
   "installation": "overlay_safe",
   "preserve_on_update": [
     "memory/**",
@@ -13,21 +13,23 @@
   "included_runtime_state": false,
   "validation": {
     "compileall_passed": true,
-    "tests_passed": 279,
-    "tests_total_executable": 279,
+    "tests_passed": 294,
+    "tests_total_executable": 294,
     "tests_skipped": 1,
     "web_tests_executed": false,
     "javascript_syntax_passed": true,
     "real_llm_benchmark_executed": false,
     "notes": [
-      "279/279 testes executaveis passaram.",
+      "294/294 testes executaveis passaram.",
       "Um modulo dependente de Flask foi ignorado porque Flask nao estava instalado no ambiente de empacotamento.",
       "node --check web/static/app.js passou.",
-      "Exclusao de mensagem cancela somente o job originado por ela e remove respostas tardias do job cancelado.",
-      "Chamadas estruturadas permanecem nao-streaming para nao publicar reasoning_content.",
-      "Quando response_format e rejeitado, o fallback por prompt preserva a recuperacao de JSON em reasoning_content.",
-      "Chamadas textuais comuns continuam sem expor reasoning_content.",
-      "O pacote final nao inclui bancos SQLite, traces, caches ou checkpoints de runtime."
+      "Grounding tipado separa fatos inferencias hipoteses decisoes e recomendacoes.",
+      "Fatos objetivos continuam exigindo evidencia fresca.",
+      "Decisoes e recomendacoes podem introduzir novos valores arquivos e abordagens sem preexistir no projeto.",
+      "Inferencias exigem base observada e hipoteses permanecem explicitamente incertas.",
+      "O fallback remove apenas claims rejeitadas e preserva raciocinio nao factual valido.",
+      "Falhas internas de grounding nao criam needs_user.",
+      "O pacote final nao inclui bancos SQLite traces caches ou checkpoints de runtime."
     ]
   },
   "hardening_52": [
@@ -56,7 +58,7 @@
     "medir retrieval e ingest em um repositorio grande real no armazenamento final"
   ],
   "known_limits": [
-    "grounding deterministico e conservador nao constitui prova universal de entailment em linguagem natural",
+    "grounding tipado deterministico nao constitui prova universal de entailment ou qualidade da decisao em linguagem natural",
     "BM25 continua lexical e nao substitui busca semantica por embeddings",
     "ganho do ingest paralelo depende de arquivos armazenamento CPU e custo do entendimento via LLM",
     "desempenho real depende do hardware backend modelo e projeto do usuario"
@@ -179,5 +181,24 @@
     "JSON recuperado de reasoning_content no fallback por prompt",
     "reasoning_content permanece privado em chamadas textuais comuns",
     "279 testes executaveis aprovados"
+  ],
+  "hardening_55_12": [
+    "feedback de grounding informa claims rejeitadas motivos ancoras e evidencias mapeadas",
+    "autocorrecao permanece interna e nunca transfere falha semantica ao usuario",
+    "fallback conservador preserva claims aceitas e remove claims sem suporte",
+    "resposta minima baseada em faixas verificadas quando nenhuma claim original sobrevive",
+    "falha terminal SEMANTIC_GROUNDING_FAILED somente se o fallback seguro tambem for rejeitado",
+    "mesma pendencia humana conserva o ID durante a retomada valida",
+    "cinco novos testes de regressao e 284 testes executaveis aprovados"
+  ],
+  "hardening_55_13": [
+    "classificacao epistemica em fact inference hypothesis decision recommendation",
+    "claim_annotations opcionais no protocolo estruturado do Agente",
+    "fatos objetivos permanecem bloqueados sem evidencia",
+    "inferencias exigem base observada",
+    "hipoteses podem introduzir possibilidades novas com linguagem incerta",
+    "decisoes e recomendacoes podem introduzir novos valores arquivos e designs",
+    "fallback tipado preserva raciocinio valido e remove apenas claims rejeitadas",
+    "mesma politica de autonomia para projetos pequenos e grandes"
   ]
 }

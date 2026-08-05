@@ -452,13 +452,31 @@ def _preparar_pendencia(dados, tipo, projeto, config=None):
         ttl = max(1, int(cfg.get("expiracao_segundos", _TTL_PENDENCIA_DEFAULT)))
     except (TypeError, ValueError):
         ttl = _TTL_PENDENCIA_DEFAULT
-    criado = _agora_utc()
+
+    agora = _agora_utc()
+    projeto_hash = _hash_projeto(projeto)
+    id_existente = str(dados.get("id") or "").upper()
+    expiracao_existente = _parse_data_utc(dados.get("expira_em"))
+    reutilizar = (
+        re.fullmatch(r"[0-9A-F]{4}", id_existente) is not None
+        and dados.get("tipo_pendencia") == tipo
+        and dados.get("projeto_hash") == projeto_hash
+        and expiracao_existente is not None
+        and agora < expiracao_existente
+    )
+
+    if reutilizar:
+        # A mesma tarefa retomada conserva a identidade da pendencia. Isso
+        # evita IDs em cascata quando existe uma segunda pergunta humana real.
+        dados["id"] = id_existente
+        return dados
+
     dados.update({
         "id": _novo_id_pendencia(),
         "tipo_pendencia": tipo,
-        "criado_em": _formatar_data_utc(criado),
-        "expira_em": _formatar_data_utc(criado + timedelta(seconds=ttl)),
-        "projeto_hash": _hash_projeto(projeto),
+        "criado_em": _formatar_data_utc(agora),
+        "expira_em": _formatar_data_utc(agora + timedelta(seconds=ttl)),
+        "projeto_hash": projeto_hash,
     })
     return dados
 
