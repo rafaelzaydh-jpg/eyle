@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/eyle-banner.svg" alt="Eyle — supervised coding agent" width="100%">
+  <img src="assets/eyle-banner.svg" alt="Eyle — autonomous code agent" width="100%">
 </p>
 
-<p align="center"><strong>One coding agent, one execution path.</strong></p>
+<p align="center"><strong>One autonomous code agent, one execution path. Writes remain supervised.</strong></p>
 
 <p align="center">
   <a href="README.pt-BR.md">Português</a> ·
@@ -15,12 +15,14 @@
 <p align="center">
   <img alt="Python 3.8+" src="https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white">
   <img alt="Release 2.7.4" src="https://img.shields.io/badge/release-2.7.4-2563EB">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-307%20passed-16A34A">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-336%20passed-16A34A">
 </p>
 
-**Version:** 2.7.4 · **Schema:** 2.7.4 · **Revision:** 3-target-coverage-fast-path
+**Version:** 2.7.4 · **Schema:** 2.7.4 · **Revision:** 4.3-human-readable-code-analysis
 
 ## What changed in 2.7.4
+
+Rev4.3 makes code analysis understandable before it becomes technical: the main answer now explains what the project is, what it does, its principal components and their relationships, then closes with verified limitations. Audit coverage remains available in the expandable execution details instead of being prepended to the answer.
 
 Eyle now has one project pipeline. The historical Retrieval → Analyst → Executor → Verify paths and their hidden fallbacks were removed. A project request either runs through the Eyle agent or returns a specific failure; it is never silently rerouted into another architecture.
 
@@ -39,6 +41,10 @@ BM25 remains available as a search **tool**, not as a separate decision pipeline
 Revision 2 also made normal project reads return structured `claims[]` before deterministic rendering. On Windows, tests may use the opt-in `trusted_local` backend, restricted by the command allowlist and executed in a temporary project snapshot.
 
 Revision 3 extracts a minimal target contract from the request, blocks incomplete conclusions, allows only one directed repair, and finalizes explicit reads without spending an intermediate call merely to return `ready_to_finalize`.
+
+Revision 4 makes Eyle explicitly a single autonomous code agent. A deterministic task intent selects the response profile (`analyze`, `explain`, `review`, `suggest`, `investigate`, `discuss`, or `edit`), blocks unsolicited recommendations, gives absence claims an explicit reviewed scope, and produces the final write receipt directly from verified patch/test/reread state without another model call.
+
+Revision 4.1 hardens that contract against real-model failures: natural-language nouns such as “creation” no longer trigger editing, whole-project improvement requests keep audit coverage, exact recommendation counts are enforced without requiring an unrequested problem section, tool failures expose their real code/detail/retry policy, and a confirmed write with no available suite finishes as applied with partial verification after a fresh reread.
 
 ## Core capabilities
 

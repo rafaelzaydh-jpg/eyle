@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/eyle-banner.svg" alt="Eyle — agente supervisionada de programação" width="100%">
+  <img src="assets/eyle-banner.svg" alt="Eyle — agente autônoma de código" width="100%">
 </p>
 
-<p align="center"><strong>Uma agente de programação, um único caminho de execução.</strong></p>
+<p align="center"><strong>Uma agente autônoma de código, um único caminho de execução. Escritas continuam supervisionadas.</strong></p>
 
 <p align="center">
   <a href="README.md">English</a> ·
@@ -15,12 +15,14 @@
 <p align="center">
   <img alt="Python 3.8+" src="https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white">
   <img alt="Versão 2.7.4" src="https://img.shields.io/badge/versão-2.7.4-2563EB">
-  <img alt="Testes" src="https://img.shields.io/badge/testes-307%20aprovados-16A34A">
+  <img alt="Testes" src="https://img.shields.io/badge/testes-336%20aprovados-16A34A">
 </p>
 
-**Versão:** 2.7.4 · **Schema:** 2.7.4 · **Revisão:** 3-target-coverage-fast-path
+**Versão:** 2.7.4 · **Schema:** 2.7.4 · **Revisão:** 4.3-human-readable-code-analysis
 
 ## O que mudou na 2.7.4
+
+A Rev4.3 faz a análise de código ser compreensível antes de ser técnica: a resposta principal explica o que o projeto é, o que faz, seus componentes principais e como eles se relacionam, encerrando com limitações verificadas. A cobertura de auditoria continua disponível nos detalhes expansíveis, sem ser colocada no início da resposta.
 
 A Eyle agora possui um único pipeline de projeto. Os caminhos históricos Retrieval → Analista → Executor → Verify e seus fallbacks ocultos foram removidos. Um pedido sobre o projeto passa pela agente Eyle ou termina com uma falha específica; nunca é redirecionado silenciosamente para outra arquitetura.
 
@@ -39,6 +41,10 @@ O BM25 permanece disponível como **ferramenta de busca**, não como pipeline de
 Na revisão 2, leituras comuns passaram a terminar em `claims[]` estruturadas antes da resposta ser renderizada. Em Windows, testes podem usar o modo opt-in `trusted_local`, limitado à allowlist e executado em cópia temporária do projeto.
 
 Na revisão 3, a Eyle extrai um contrato mínimo de alvos do pedido, bloqueia conclusões incompletas, permite somente um reparo direcionado e finaliza leituras explícitas sem gastar uma chamada intermediária apenas para dizer `ready_to_finalize`.
+
+Na revisão 4, a Eyle assume explicitamente a identidade de uma única agente autônoma de código. Uma intenção determinística escolhe o perfil da resposta (`analyze`, `explain`, `review`, `suggest`, `investigate`, `discuss` ou `edit`), bloqueia recomendações não solicitadas, exige escopo explícito em claims de ausência e monta o recibo final de escrita diretamente do estado verificado de patch/testes/releitura, sem outra chamada ao modelo.
+
+Na revisão 4.1, esse contrato foi endurecido com base nos testes reais: substantivos naturais como “criação” não acionam mais edição, pedidos de melhorias sobre o projeto inteiro mantêm a auditoria completa, quantidades exatas de recomendações são validadas sem exigir uma seção de problemas não solicitada, falhas de ferramenta exibem código/detalhe/política de retry e uma escrita confirmada sem suíte termina aplicada com verificação parcial após releitura fresca.
 
 ## Capacidades centrais
 

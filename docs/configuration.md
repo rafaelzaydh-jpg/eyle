@@ -48,6 +48,8 @@ There is no `off` mode with a fallback into an older pipeline.
 - `agent.target_coverage_enabled`: require every deterministic request target before success.
 - `agent.project_read_single_repair_enabled`: permit one directed Finalizer repair and no more.
 - `agent.project_read_fast_path_enabled`: finalize as soon as all explicit files have fresh evidence.
+- `agent.intent_output_gate_enabled`: require the response to match the detected code-task profile and reject unsolicited recommendations.
+- `agent.deterministic_write_receipt_enabled`: finish a verified write from patch/test/reread state without an extra model summary call.
 - `worker.max_parallel_jobs`: queue worker concurrency.
 
 The schema rejects invalid types, non-positive operational limits, ports above 65535, ingest worker counts above 32, and response budgets that consume the whole context window.

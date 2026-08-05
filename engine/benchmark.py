@@ -632,7 +632,7 @@ def rodar_benchmark(config, baseline_model=None, output_path=None, case_ids=None
     relatorio = {
         "version": "2.0",
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "suite": "Eyle 2.7.4 Rev3 - target coverage, fast path e workflow",
+        "suite": "Eyle 2.7.4 Rev4 - task intent, target coverage e workflow",
         "selected_cases": [item["id"] for item in casos],
         "runs": [rodar_modelo(config, modelo_principal, papel="principal", casos=casos)],
     }

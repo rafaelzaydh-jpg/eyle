@@ -13,12 +13,12 @@ Run the complete release gate:
 python main.py benchmark --output context/benchmark_latest.json
 ```
 
-During development, run only the Rev3 smoke cases to avoid spending tokens on the full suite:
+During development, run only the focused smoke cases to avoid spending tokens on the full suite:
 
 ```bash
 python main.py benchmark \
   --cases 01_audio_14_linhas,03_dois_arquivos,06_edicao_confirmada \
-  --output context/benchmark_smoke_rev3.json
+  --output context/benchmark_smoke_rev4.json
 ```
 
 A subset report is marked with `gate_scope=smoke`; all selected cases must pass. The ten-case report remains the release gate.

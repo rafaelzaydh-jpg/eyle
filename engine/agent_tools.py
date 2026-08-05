@@ -361,7 +361,7 @@ def _tool_test_patch_dry_run(arguments, ctx):
         return _falha("PROJECT_NOT_INDEXED", "nenhum projeto indexado (memory/projeto.json sem caminho_origem)")
 
     obrigatorios = ("caminho_relativo", "linha_inicio", "linha_fim", "codigo_novo")
-    faltando = [c for c in obrigatorios if arguments.get(c) in (None, "")]
+    faltando = [campo for campo in obrigatorios if arguments.get(campo) in (None, "")]
     if faltando:
         return _falha("INVALID_ARGUMENT", f"argumentos obrigatorios faltando: {', '.join(faltando)}")
 
@@ -435,9 +435,15 @@ def _tool_apply_patch(arguments, ctx):
         "codigo_original_esperado", "codigo_novo",
         "file_hash_esperado", "range_hash_esperado",
     )
-    faltando = [c for c in obrigatorios if arguments.get(c) in (None, "")]
+    faltando = [
+        campo for campo in obrigatorios
+        if campo not in arguments or arguments.get(campo) is None
+        or (campo != "codigo_original_esperado" and arguments.get(campo) == "")
+    ]
     if faltando:
         return _falha("INVALID_ARGUMENT", f"argumentos obrigatorios faltando: {', '.join(faltando)}")
+    if not isinstance(arguments.get("codigo_original_esperado"), str):
+        return _falha("INVALID_ARGUMENT", "'codigo_original_esperado' precisa ser texto")
 
     try:
         linha_inicio = int(arguments["linha_inicio"])
@@ -510,6 +516,7 @@ _CAMINHO = {
 }
 _LINHA = {"type": "integer", "minimum": 1}
 _CODIGO = {"type": "string", "minLength": 1}
+_CODIGO_ORIGINAL = {"type": "string", "minLength": 0}
 _HASH = {
     "type": "string", "minLength": 64, "maxLength": 64,
     "pattern": "^[0-9a-f]{64}$",
@@ -628,7 +635,7 @@ TOOLS = {
             "caminho_relativo": _CAMINHO,
             "linha_inicio": _LINHA,
             "linha_fim": _LINHA,
-            "codigo_original_esperado": _CODIGO,
+            "codigo_original_esperado": _CODIGO_ORIGINAL,
             "codigo_novo": _CODIGO,
             "file_hash_esperado": _HASH,
             "range_hash_esperado": _HASH,

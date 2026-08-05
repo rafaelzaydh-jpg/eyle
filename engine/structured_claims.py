@@ -14,10 +14,13 @@ import unicodedata
 from engine.test_execution import latest_test_execution, successful_test_run
 
 ALLOWED_CLAIM_TYPES = {
-    "fact", "risk", "inference", "hypothesis", "recommendation", "decision",
+    "fact", "absence", "risk", "inference", "hypothesis", "recommendation", "decision",
 }
 _TYPE_ALIASES = {
     "fato": "fact",
+    "absence": "absence",
+    "ausência": "absence",
+    "ausencia": "absence",
     "risco": "risk",
     "inferência": "inference",
     "inferencia": "inference",
@@ -30,6 +33,7 @@ _TYPE_ALIASES = {
 }
 _GROUNDING_TYPE = {
     "fact": "fact",
+    "absence": "absence",
     "risk": "inference",
     "inference": "inference",
     "hypothesis": "hypothesis",
@@ -160,17 +164,41 @@ def normalize_structured_claims(value):
             return None, f"final.claims[{index}].basis precisa ser texto"
         basis = basis.strip()
 
-        if claim_type in {"fact", "risk", "inference", "hypothesis"} and not evidence_ids:
+        output = item.get("output", item.get("requested_output", ""))
+        if output is None:
+            output = ""
+        if isinstance(output, list):
+            output = [str(value).strip() for value in output if str(value).strip()]
+        elif isinstance(output, str):
+            output = output.strip()
+        else:
+            return None, f"final.claims[{index}].output precisa ser texto ou lista de textos"
+
+        scope = item.get("scope", item.get("escopo", ""))
+        if scope is None:
+            scope = ""
+        if not isinstance(scope, str):
+            return None, f"final.claims[{index}].scope precisa ser texto"
+        scope = scope.strip()
+
+        if claim_type in {"fact", "absence", "risk", "inference", "hypothesis"} and not evidence_ids:
             return None, f"final.claims[{index}] do tipo {claim_type} exige evidence_ids"
         if claim_type in {"risk", "inference", "hypothesis", "recommendation"} and not basis:
             return None, f"final.claims[{index}] do tipo {claim_type} exige basis"
+        if claim_type == "absence" and not scope:
+            return None, f"final.claims[{index}] do tipo absence exige scope"
 
-        claims.append({
+        claim = {
             "type": claim_type,
             "text": text,
             "evidence_ids": evidence_ids,
             "basis": basis,
-        })
+        }
+        if output:
+            claim["output"] = output
+        if scope:
+            claim["scope"] = scope
+        claims.append(claim)
     return claims, None
 
 
@@ -188,6 +216,8 @@ def claims_to_annotations(claims):
             "type": _GROUNDING_TYPE.get(claim.get("type"), "fact"),
             "evidence_ids": list(claim.get("evidence_ids") or []),
             "basis": claim.get("basis") or "",
+            "scope": claim.get("scope") or "",
+            "output": claim.get("output") or "",
         }
         for index, claim in enumerate(claims or [], start=1)
     ]

@@ -11,7 +11,7 @@ eyle
 **Description**
 
 ```text
-Local-first supervised coding agent with external memory, BM25 retrieval, grounded answers, guarded patches, tests, rollback, telemetry and cycle protection.
+Local-first autonomous code agent with supervised writes with external memory, BM25 retrieval, grounded answers, guarded patches, tests, rollback, telemetry and cycle protection.
 ```
 
 **Topics**

@@ -1,6 +1,6 @@
 # Technical overview — Eyle 2.7.4
 
-**Versão:** 2.7.4 · **Schema:** 2.7.4 · **Revisão:** 2-structured-read-claims-trusted-local
+**Versão:** 2.7.4 · **Schema:** 2.7.4 · **Revisão:** 4.3-human-readable-code-analysis
 
 ## Single-agent core
 
@@ -17,9 +17,11 @@ Every project request is represented by one persisted Eyle task. The same task m
 
 Ingest does not call an LLM. Indexed text is not accepted as current source evidence; the agent rereads the file from disk before using it in a conclusion.
 
-## Evidence and answers
+## Task intent, evidence, and answers
 
-Fresh reads create evidence IDs with file/range hashes. Structured claims and project-audit coverage are validated before publication. A failure stays a failure; there is no legacy response path that can convert it into a success.
+A compact deterministic task intent records the code-domain intent, response profile, requested outputs, write permission, and whether recommendations were actually requested. It guides the same Eyle agent; it does not create separate agents.
+
+Fresh reads create evidence IDs with file/range hashes. Structured claims and project-audit coverage are validated before publication. `absence` claims require an explicit reviewed scope, and inferences require an observed basis. A failure stays a failure; there is no legacy response path that can convert it into a success.
 
 ## Editing
 
@@ -33,7 +35,7 @@ read target
 → atomic replace
 → run configured tests
 → reread changed range
-→ finalize
+→ deterministic verified write receipt
 ```
 
 Atomic replacement uses a temporary file in the destination directory, `fsync`, best-effort permission copying, and `os.replace`. The implementation does not depend on `os.fchmod`, so it works on Windows as well as POSIX systems.

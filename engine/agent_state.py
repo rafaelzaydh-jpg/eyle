@@ -860,6 +860,12 @@ class AgentState:
             "error_code": resultado.get("error_code") if isinstance(resultado, dict) else None,
             "evidence_ids": evidence_ids,
         }
+        if isinstance(resultado, dict) and resultado.get("ok") is False:
+            acao["error_detail"] = _resumir_texto(resultado.get("detail"), 500)
+            if resultado.get("retryable") is not None:
+                acao["retryable"] = bool(resultado.get("retryable"))
+            if resultado.get("terminal") is not None:
+                acao["terminal"] = bool(resultado.get("terminal"))
         if tool == "list_tree" and self.project_inventory:
             acao["project_inventory_hash"] = self.project_inventory.get("inventory_hash")
             acao["project_inventory_entries"] = self.project_inventory.get("total_retornado")
@@ -938,17 +944,41 @@ class AgentState:
             key=lambda item: item.get("linha_fim") - item.get("linha_inicio"),
         )
 
-    def completar_argumentos_patch(self, tool, arguments):
-        """Deriva hashes/original da evidencia; a LLM nao precisa copia-los.
+    def _ultimo_patch_dry_run_aprovado(self):
+        return next((
+            item for item in reversed(self.actions)
+            if item.get("tool") == "test_patch_dry_run"
+            and item.get("ok") is True
+            and item.get("executed") is True
+            and isinstance(item.get("patch_spec"), dict)
+        ), None)
 
-        O modelo continua decidindo arquivo, faixa e codigo novo. Os dados de
-        concorrencia (hashes) e o codigo original sao propriedade do sistema,
-        evitando ``STALE_PATCH`` falso quando a leitura cobriu o arquivo inteiro
-        mas o patch altera apenas algumas linhas.
+    def completar_argumentos_patch(self, tool, arguments):
+        """Deriva o patch canonico da leitura e do dry-run aprovado.
+
+        A LLM decide a proposta no ``test_patch_dry_run``. Depois disso,
+        ``apply_patch`` nao confia em uma segunda copia produzida pelo modelo:
+        reutiliza arquivo, faixa, codigo novo e hashes do ultimo dry-run exato,
+        e deriva o codigo original da evidencia fresca. Isso elimina chamadas
+        de escrita com ``codigo_original_esperado`` vazio ou divergente.
         """
         argumentos = dict(arguments or {}) if isinstance(arguments, dict) else arguments
         if tool not in ("test_patch_dry_run", "apply_patch") or not isinstance(argumentos, dict):
             return argumentos
+
+        if tool == "apply_patch":
+            dry_run = self._ultimo_patch_dry_run_aprovado()
+            if dry_run is not None:
+                spec = dry_run.get("patch_spec") or {}
+                # O dry-run aprovado e a fonte canonica da proposta. Campos
+                # repetidos pela LLM sao deliberadamente sobrescritos.
+                for chave in (
+                    "caminho_relativo", "linha_inicio", "linha_fim",
+                    "codigo_novo", "file_hash_esperado", "range_hash_esperado",
+                ):
+                    if chave in spec:
+                        argumentos[chave] = spec.get(chave)
+
         try:
             inicio = int(argumentos.get("linha_inicio"))
             fim = int(argumentos.get("linha_fim"))
@@ -1024,6 +1054,8 @@ class AgentState:
             "file_hash_depois": detalhe.get("file_hash_depois"),
             "range_hash_antes": detalhe.get("range_hash_antes"),
             "rollback_snapshot": detalhe.get("rollback_snapshot"),
+            "codigo_novo_preview": str((arguments or {}).get("codigo_novo") or "")[:1200],
+            "linhas_novas": len(str((arguments or {}).get("codigo_novo") or "").splitlines()),
             "test": None,
             "post_write_evidence_id": None,
         }
@@ -1045,13 +1077,11 @@ class AgentState:
         if not self.edit_state:
             return False, "nenhuma edicao confirmada foi aplicada"
         status = self.edit_state.get("status")
-        if status == "applied_without_suite":
-            return False, "alteracao aplicada sem suite disponivel"
         if status == "reverted":
             return False, "alteracao revertida por falha de teste"
         if status == "rollback_failed":
             return False, "teste falhou e o rollback tambem falhou"
-        if status != "tests_passed":
+        if status not in ("tests_passed", "applied_without_suite"):
             return False, "alteracao aplicada ainda aguarda verificacao real"
         evidence_id = self.edit_state.get("post_write_evidence_id")
         if not evidence_id or evidence_id not in (evidence_ids or []):
@@ -1061,6 +1091,8 @@ class AgentState:
             return False, "a evidencia pos-escrita nao esta fresca"
         if evidencia.get("arquivo") != self.edit_state.get("arquivo"):
             return False, "a releitura final pertence a outro arquivo"
+        if status == "applied_without_suite":
+            return True, "patch aplicado e releitura final conferida; nenhuma suite disponivel"
         return True, "patch, teste executado e releitura final conferidos"
 
     def _avancar_plano_apos_acao(self, tool, resultado):

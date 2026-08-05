@@ -163,7 +163,7 @@ def test_falha_de_teste_reverte_conteudo_original(tmp_path, monkeypatch):
     assert detalhes["edit_state"]["status"] == "reverted"
 
 
-def test_suite_indisponivel_nao_vira_testes_passaram(tmp_path, monkeypatch):
+def test_suite_indisponivel_vira_sucesso_com_verificacao_parcial(tmp_path, monkeypatch):
     arquivo = tmp_path / "a.py"
     arquivo.write_text("valor = 1\n", encoding="utf-8")
     leitura = ler_faixa_projeto(tmp_path, "a.py", 1, 1)
@@ -187,10 +187,10 @@ def test_suite_indisponivel_nao_vira_testes_passaram(tmp_path, monkeypatch):
         "altere a.py", _config(), projeto={"caminho_origem": str(tmp_path)},
         retomar=pendente, retornar_detalhes=True, modo="edit",
     )
-    assert status == "failed"
-    assert "executed=false" in texto
+    assert status == "success"
     assert "passaram" not in texto.lower()
     assert detalhes["edit_state"]["status"] == "applied_without_suite"
+    assert detalhes["edit_state"]["post_write_evidence_id"] == "ev-0002"
 
 
 def test_benchmark_declara_10_casos_e_gate_5_checks_de_escrita():

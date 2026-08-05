@@ -178,7 +178,9 @@
     "deterministic_symbol_lookup_enabled": true,
     "project_read_fast_path_enabled": true,
     "target_coverage_enabled": true,
-    "project_read_single_repair_enabled": true
+    "project_read_single_repair_enabled": true,
+    "intent_output_gate_enabled": true,
+    "deterministic_write_receipt_enabled": true
   },
   "worker": {
     "heartbeat_interval_seconds": 5,
@@ -200,5 +202,5 @@
   "updated": "2026-08-05",
   "app_version": "2.7.4",
   "config_schema_version": "2.7.4",
-  "revision": "3-target-coverage-fast-path"
+  "revision": "4.3-human-readable-code-analysis"
 }

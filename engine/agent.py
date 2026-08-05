@@ -123,8 +123,12 @@ from engine.structured_claims import (  # noqa: E402
 )
 from engine.task_contract import (  # noqa: E402
     build_task_contract,
+    evaluate_intent_coverage,
     evaluate_target_coverage,
     project_read_fast_path_ready,
+    render_claims_for_response,
+    order_claims_for_response,
+    render_intent_feedback,
     render_target_feedback,
 )
 from engine.retencao import rotacionar_arquivo  # noqa: E402
@@ -206,10 +210,58 @@ def _publicar_tool(config, tool, step=None, concluida=False):
     )
 
 _RE_INTENCAO_ESCRITA = re.compile(
-    r"\b(implement|alter|corrig|consert|edit|modific|cri|adicion|remov|apag|"
-    r"substitu|atualiz|refator|patch|fix)\w*\b",
+    r"\b(?:implement\w*|alter\w*|corrig\w*|consert\w*|edit\w*|"
+    r"modific\w*|cri(?:ar|e|a|am|ando|ado|ada|ados|adas)|adicion\w*|"
+    r"remov\w*|apag\w*|substitu\w*|atualiz\w*|refator\w*|patch|fix\w*)\b",
     re.IGNORECASE,
 )
+
+
+_TERMINAL_TOOL_ERRORS = {
+    "TOOL_NOT_FOUND", "TOOL_REGISTRY_UNAVAILABLE", "PROJECT_NOT_INDEXED",
+    "PERMISSION_DENIED", "UNSAFE_PATH", "PATH_OUTSIDE_PROJECT",
+}
+
+
+def _tool_error_policy(error_code):
+    code = str(error_code or "TOOL_FAILED")
+    terminal = code in _TERMINAL_TOOL_ERRORS
+    return {"error_code": code, "terminal": terminal, "retryable": not terminal}
+
+
+def _tool_failure_report(estado, limit=3):
+    """Expõe o erro real em vez de esconder tudo atrás do circuit breaker."""
+    failures = []
+    for item in reversed(list(getattr(estado, "actions", []) or [])):
+        if item.get("ok") is True:
+            break
+        if item.get("error_code") or item.get("error_detail"):
+            failures.append(item)
+        if len(failures) >= limit:
+            break
+    failures.reverse()
+    if not failures:
+        return "Nenhum detalhe estruturado de ferramenta foi registrado."
+    lines = []
+    for index, item in enumerate(failures, start=1):
+        policy = _tool_error_policy(item.get("error_code"))
+        detail = str(item.get("error_detail") or "sem detalhe").strip()
+        lines.append(
+            f"{index}. ferramenta={item.get('tool') or 'desconhecida'}; "
+            f"erro={policy['error_code']}; retryable={'sim' if policy['retryable'] else 'não'}; "
+            f"detalhe={detail}"
+        )
+    return "\n".join(lines)
+
+
+def _circuit_breaker_message(estado, prefix=""):
+    intro = (
+        f"O agente encontrou {estado.erros_consecutivos} erro(s) de ferramenta seguido(s) "
+        "e parou para evitar insistir num caminho que não está funcionando."
+    )
+    if prefix:
+        intro += " " + prefix.strip()
+    return intro + "\n\nErros observados:\n" + _tool_failure_report(estado)
 
 
 def _decisao_estruturalmente_valida(dados):
@@ -286,7 +338,10 @@ def classificar_tarefa_agente(objetivo, projeto=None, modo=None):
     modo = modo or classificar_modo_projeto(objetivo)
     if modo == "edit" or _RE_INTENCAO_ESCRITA.search(objetivo or ""):
         return "project_write"
-    if modo == "analyze" and pede_auditoria_projeto(objetivo):
+    # Sugestões sobre o projeto inteiro ainda exigem inventário e cobertura de
+    # auditoria. O modo ``suggest`` muda o perfil da resposta, não reduz a
+    # leitura para uma consulta pontual.
+    if modo in ("analyze", "suggest") and pede_auditoria_projeto(objetivo):
         return "project_audit"
     return "project_read"
 
@@ -335,6 +390,40 @@ def _atualizar_frescor_evidencias(estado, projeto):
             f"evidencias {invalidadas} mudaram no disco",
         )
     return invalidadas
+
+
+def _filtrar_conclusao_estruturada_por_grounding(conclusao, verificacao):
+    """Preserva claims estruturadas aprovadas sem voltar a texto livre.
+
+    Uma unica inferencia ruim nao deve destruir toda a analise. O filtro usa
+    os indices do grounding tipado, reconstrói evidence_ids/anotacoes e deixa
+    os gates de utilidade, intenção e cobertura decidirem se o restante ainda
+    atende ao pedido.
+    """
+    claims = list((conclusao or {}).get("claims") or [])
+    reports = [
+        item for item in ((verificacao or {}).get("claims") or [])
+        if isinstance(item, dict)
+    ]
+    if not claims or not reports:
+        return None
+    approved = {
+        int(item.get("claim_index"))
+        for item in reports
+        if item.get("claim_index") is not None and not item.get("errors")
+    }
+    kept = [claim for index, claim in enumerate(claims, start=1) if index in approved]
+    if not kept:
+        return None
+    candidata = dict(conclusao)
+    candidata["claims"] = kept
+    candidata["resposta"] = render_claims(kept)
+    candidata["evidence_ids"] = claim_evidence_ids(kept)
+    candidata["claim_annotations"] = claims_to_annotations(kept)
+    candidata.setdefault("limitacoes", []).append(
+        "Claims sem suporte suficiente foram removidas antes da publicação."
+    )
+    return candidata
 
 
 def _normalizar_conclusao(decisao, estado, task_type):
@@ -834,6 +923,58 @@ def _edit_state_publico(estado):
     }
 
 
+def _conclusao_deterministica_edicao(estado):
+    """Monta o recibo final a partir do estado verificado, sem nova LLM."""
+    edit = estado.edit_state or {}
+    arquivo = str(edit.get("arquivo") or "arquivo alterado")
+    inicio = edit.get("linha_inicio")
+    fim = edit.get("linha_fim_final") or edit.get("linha_fim_original")
+    preview = str(edit.get("codigo_novo_preview") or "")
+    simbolos = re.findall(
+        r"(?m)^\s*(?:async\s+def|def|class|function)\s+([A-Za-z_$][A-Za-z0-9_$]*)",
+        preview,
+    )
+    if simbolos:
+        mudanca = "Símbolo alterado: " + ", ".join(dict.fromkeys(simbolos)) + "."
+    elif isinstance(inicio, int) and isinstance(fim, int):
+        mudanca = f"Trecho atualizado: linhas {inicio}–{fim}."
+    else:
+        mudanca = "O trecho solicitado foi atualizado."
+
+    test = edit.get("test") or {}
+    test_detail = test.get("detail")
+    if isinstance(test_detail, dict):
+        test_detail = test_detail.get("detail") or test_detail.get("command") or str(test_detail)
+    test_detail = str(test_detail or "").strip()
+    if len(test_detail) > 500:
+        test_detail = test_detail[:497].rstrip() + "..."
+
+    tests_executed = test.get("executed") is True
+    tests_ok = tests_executed and test.get("ok") is True
+    lines = [
+        f"Alteração aplicada em {arquivo}.",
+        mudanca,
+        "",
+        "Verificação:",
+        "- dry-run aprovado;",
+        "- patch aplicado;",
+    ]
+    if tests_ok:
+        lines.append("- testes executados e aprovados;")
+    else:
+        lines.append("- nenhuma suíte de testes disponível; a alteração não foi validada automaticamente;")
+    lines.append("- arquivo relido após a alteração.")
+    if test_detail:
+        lines.append(f"- detalhe da verificação: {test_detail}")
+    final_status = (
+        "Status final: concluído."
+        if tests_ok else
+        "Status final: alteração aplicada com verificação parcial."
+    )
+    lines.extend(["", final_status])
+    return "\n".join(lines)
+
+
 def _inspecionar_write_pendente(arguments, projeto):
     """Distingue escrita ainda nao aplicada, ja aplicada e estado divergente.
 
@@ -950,6 +1091,27 @@ def _acao_obrigatoria_goal_state(estado, objetivo=None, config=None):
                         "linha_fim": fim,
                     },
                 }
+        if (
+            status in ("tests_passed", "applied_without_suite")
+            and edit_state.get("post_write_evidence_id")
+            and bool((config or {}).get("agent", {}).get("deterministic_write_receipt_enabled", False))
+        ):
+            return {
+                "final": {
+                    "answer": _conclusao_deterministica_edicao(estado),
+                    "evidence_ids": [edit_state["post_write_evidence_id"]],
+                    "verification": (
+                        "patch, teste executado e releitura final conferidos"
+                        if status == "tests_passed"
+                        else "patch aplicado e releitura final conferida; nenhuma suite disponivel"
+                    ),
+                    "limitations": (
+                        [] if status == "tests_passed" else
+                        ["Nenhuma suíte de testes estava disponível; a alteração não foi validada automaticamente."]
+                    ),
+                },
+                "_system_deterministic_write_final": True,
+            }
 
     if task_type == "project_read" and bool((config or {}).get("agent", {}).get("deterministic_symbol_lookup_enabled", False)):
         arquivos = _arquivos_explicitos_objetivo(objetivo)
@@ -1130,6 +1292,7 @@ def _pipeline_auditoria_preparar(estado, objetivo, config):
             analysis_coverage=public_coverage_report(estado.analysis_coverage),
             project_inventory=estado.project_inventory,
             audit_pipeline=public_pipeline_state(pipeline),
+            task_contract=estado.goal_state.get("task_contract") or {},
             evidencias=estado.evidence,
             config=config,
             system_prompt=PROMPT_AUDIT_FINALIZER,
@@ -1439,7 +1602,10 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 }
                 return None
             project_read_repair_used = True
-            repair_text = render_target_feedback(feedback or {})
+            repair_text = (
+                str(feedback) if isinstance(feedback, str)
+                else render_target_feedback(feedback or {})
+            )
             if not repair_text:
                 repair_text = (
                     "PROJECT READ REPAIR (system-owned):\n"
@@ -1525,6 +1691,15 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
         runtime_llm = config.get("_runtime_agent_budget") or {}
         detalhes.setdefault("llm_responses", list(runtime_llm.get("llm_responses") or []))
         detalhes.setdefault("resolved_model", (runtime_llm.get("last_llm_response") or {}).get("resolved_model"))
+        detalhes.setdefault("task_contract", task_contract)
+        detalhes.setdefault("task_intent", {
+            key: task_contract.get(key)
+            for key in (
+                "intent", "domain", "response_profile", "write_allowed",
+                "requested_outputs", "recommendations_requested",
+                "recommendation_count", "issue_detection_requested",
+            )
+        })
         estado_serializado = estado.to_dict() if estado is not None else {}
         acoes = list(estado.actions) if estado is not None else []
         evidencias = list(estado.evidence) if estado is not None else []
@@ -1831,6 +2006,9 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
         acao_realmente_executada = bool(
             isinstance(resultado_tool, dict) and resultado_tool.get("executed") is True
         ) or write_recuperada
+        if isinstance(resultado_tool, dict) and resultado_tool.get("ok") is False:
+            resultado_tool = dict(resultado_tool)
+            resultado_tool.update(_tool_error_policy(resultado_tool.get("error_code")))
         if acao_realmente_executada:
             estado.registrar_chamada(tool_confirmada, arguments_confirmados)
         estado.registrar_resultado_tool(resultado_tool)  # Atualizacao 11
@@ -1868,6 +2046,19 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
             "resumo": entrada_observada["resumo"],
         })
         _checkpoint_acao(None, "action_completed")
+        if resultado_tool.get("terminal") is True:
+            mensagem_terminal = (
+                "A ferramenta encontrou um erro terminal e a tarefa foi interrompida sem repetir a mesma operação."
+                "\n\nErro observado:\n" + _tool_failure_report(estado, limit=1)
+            )
+            return _retorno_agente(
+                "failed", mensagem_terminal, None,
+                {"task_type": task_type, "mode": modo, "goal_state": estado.goal_state,
+                 "failure_code": resultado_tool.get("error_code") or "TERMINAL_TOOL_ERROR",
+                 "tool_errors": [item for item in estado.actions if item.get("error_code")]},
+                retornar_detalhes,
+            )
+
         if resultado_tool.get("error_code") == "SYMBOL_NOT_FOUND":
             detalhe_simbolo = resultado_tool.get("detail")
             if not isinstance(detalhe_simbolo, str):
@@ -1903,16 +2094,15 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 retornar_detalhes,
             )
         if estado.erros_consecutivos >= max_erros_consecutivos:  # Atualizacao 11
-            pergunta = (
-                f"O agente encontrou {estado.erros_consecutivos} erro(s) de ferramenta seguido(s) "
-                "(a ultima logo apos retomar uma escrita confirmada) e parou para evitar insistir "
-                "num caminho que nao esta funcionando."
+            pergunta = _circuit_breaker_message(
+                estado, "A última falha ocorreu logo após retomar uma escrita confirmada."
             )
             _registrar_trace_estado(estado, {"step": step, "tipo": "circuit_breaker", "erros_consecutivos": estado.erros_consecutivos})
             return _retorno_agente(
                 "failed", pergunta, None,
                 {"task_type": task_type, "goal_state": estado.goal_state,
-                 "failure_code": "TOOL_CIRCUIT_BREAKER"},
+                 "failure_code": "TOOL_CIRCUIT_BREAKER",
+                 "tool_errors": [item for item in estado.actions if item.get("error_code")]},
                 retornar_detalhes,
             )
     else:
@@ -1922,6 +2112,14 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
 
     if estado is not None:
         estado.goal_state["task_contract"] = task_contract
+        estado.goal_state["task_intent"] = {
+            key: task_contract.get(key)
+            for key in (
+                "intent", "domain", "response_profile", "write_allowed",
+                "requested_outputs", "recommendations_requested",
+                "recommendation_count", "issue_detection_requested",
+            )
+        }
 
     # Atualizacao 45: depois da ultima acao permitida ainda existe uma rodada
     # para a LLM devolver ``final``/``needs_user``. O gate abaixo impede uma
@@ -2330,20 +2528,8 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 exigir_testes_apos_escrita
                 and estado.houve_escrita
                 and not estado.testes_ok_apos_escrita
-                and estado.edit_state.get("status") == "applied_without_suite"
-                and estado.edit_state.get("post_write_evidence_id")
+                and estado.edit_state.get("status") != "applied_without_suite"
             ):
-                estado.goal_state["status"] = "blocked"
-                return _retorno_agente(
-                    "failed",
-                    "Alteracao aplicada e relida, mas nenhuma suite estava disponivel. "
-                    "Nenhum teste foi executado (executed=false); a mudanca permanece sem verificacao de suite.",
-                    None,
-                    {"task_type": task_type, "mode": modo, "goal_state": estado.goal_state,
-                     "edit_state": _edit_state_publico(estado)},
-                    retornar_detalhes,
-                )
-            if exigir_testes_apos_escrita and estado.houve_escrita and not estado.testes_ok_apos_escrita:
                 estado.observar_final_sem_verificacao()
                 if _sem_progresso(
                     estado, max_sem_progresso, step,
@@ -2372,6 +2558,9 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                         retornar_detalhes,
                     )
                 continue
+
+            if isinstance(decisao, dict) and decisao.get("_system_deterministic_write_final") is True:
+                conclusao["system_generated_write_receipt"] = True
 
             if (
                 task_type == "project_read"
@@ -2444,6 +2633,59 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                             retornar_detalhes,
                         )
                     conclusao = conclusao_reparada
+
+            if (
+                task_type in {"project_read", "project_audit"}
+                and bool(cfg_agente.get("intent_output_gate_enabled", False))
+            ):
+                intent_coverage = evaluate_intent_coverage(
+                    task_contract, conclusao.get("claims") or [],
+                    conclusao.get("limitacoes") or [],
+                )
+                conclusao["intent_coverage"] = intent_coverage
+                if not intent_coverage.get("ok", False):
+                    if task_type == "project_read":
+                        decisao_reparada = _recuperar_resposta(
+                            "intent_output_coverage_failed",
+                            conclusao.get("resposta") or "",
+                            permitir_llm=True,
+                            feedback=render_intent_feedback(intent_coverage),
+                            prior_claims=conclusao.get("claims") or [],
+                        )
+                        if decisao_reparada is not None:
+                            candidata, erro_candidata = _normalizar_conclusao(
+                                decisao_reparada, estado, task_type,
+                            )
+                            if not erro_candidata:
+                                target_again = evaluate_target_coverage(
+                                    task_contract, candidata.get("claims") or [],
+                                    estado.evidencias_frescas(), candidata.get("resposta") or "",
+                                )
+                                intent_again = evaluate_intent_coverage(
+                                    task_contract, candidata.get("claims") or [],
+                                    candidata.get("limitacoes") or [],
+                                )
+                                candidata["target_coverage"] = target_again
+                                candidata["intent_coverage"] = intent_again
+                                candidata["recovery_layer"] = "directed_project_read_finalizer"
+                                if target_again.get("ok") and intent_again.get("ok"):
+                                    conclusao = candidata
+                                    intent_coverage = intent_again
+                    if not intent_coverage.get("ok", False):
+                        return _retorno_agente(
+                            "failed",
+                            "A resposta não respeitou o perfil solicitado pelo usuário.",
+                            None,
+                            {
+                                "task_type": task_type, "mode": modo,
+                                "goal_state": estado.goal_state,
+                                "failure_code": intent_coverage.get("failure_code") or "INTENT_OUTPUTS_NOT_COVERED",
+                                "task_contract": task_contract,
+                                "intent_coverage": intent_coverage,
+                                "recovery_attempts": recuperacao_atual.get("attempts", []),
+                            },
+                            retornar_detalhes,
+                        )
 
             if task_type == "project_audit":
                 cobertura_previa = estado.atualizar_cobertura_auditoria()
@@ -2664,12 +2906,29 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                             retornar_detalhes,
                         )
                     continue
-                verificacao_semantica = verify_conclusion(
-                    conclusao.get("resposta"),
-                    evidencias_usadas,
-                    config.get("agent", {}).get("semantic_grounding", {}),
-                    claim_annotations=conclusao.get("claim_annotations"),
-                )
+                if (
+                    task_type == "project_write"
+                    and conclusao.get("system_generated_write_receipt") is True
+                ):
+                    verificacao_semantica = {
+                        "ok": True,
+                        "enabled": True,
+                        "typed": True,
+                        "system_attested": True,
+                        "errors": [],
+                        "warnings": [],
+                        "reason": (
+                            "write receipt derived from system-verified patch, test, "
+                            "and post-write reread state"
+                        ),
+                    }
+                else:
+                    verificacao_semantica = verify_conclusion(
+                        conclusao.get("resposta"),
+                        evidencias_usadas,
+                        config.get("agent", {}).get("semantic_grounding", {}),
+                        claim_annotations=conclusao.get("claim_annotations"),
+                    )
                 conclusao["semantic_grounding"] = verificacao_semantica
                 if not verificacao_semantica.get("ok", False):
                     feedback_semantico = format_grounding_feedback(verificacao_semantica)
@@ -2680,11 +2939,32 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                     camada_reparo = None
                     gate_reparo = None
 
-                    # Primeiro repara somente as claims rejeitadas. Se restar
-                    # uma recomendacao/inferencia util e grounded, preserva-a;
-                    # se nao restar nada, segue para a recuperacao em camadas.
+                    # Primeiro preserva as claims estruturadas que ja passaram.
+                    # Auditorias nao devem falhar por inteiro porque uma unica
+                    # inferencia ou frase adicional foi rejeitada.
+                    candidata_estruturada = _filtrar_conclusao_estruturada_por_grounding(
+                        conclusao, verificacao_semantica,
+                    )
+                    if candidata_estruturada is not None:
+                        grounding_candidato = verify_conclusion(
+                            candidata_estruturada.get("resposta"), evidencias_usadas,
+                            config.get("agent", {}).get("semantic_grounding", {}),
+                            claim_annotations=candidata_estruturada.get("claim_annotations"),
+                        )
+                        gate_candidata = validate_response_utility(
+                            candidata_estruturada.get("resposta"), objetivo,
+                            task_type=task_type, evidence=evidencias_usadas,
+                        )
+                        if gate_candidata.get("ok", False) and grounding_candidato.get("ok", False):
+                            conclusao_recuperada = candidata_estruturada
+                            verificacao_recuperada = grounding_candidato
+                            camada_reparo = "structured_claim_filter"
+                            gate_reparo = gate_candidata
+
+                    # Compatibilidade com respostas de texto livre fora do
+                    # contrato estruturado.
                     resposta_reparada = ""
-                    if task_type != "project_audit":
+                    if conclusao_recuperada is None and not conclusao.get("claims"):
                         resposta_reparada = build_safe_grounded_answer(
                             conclusao.get("resposta") or "",
                             verificacao_semantica,
@@ -2905,6 +3185,16 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 else:
                     conclusao["utility_gate"] = final_utility_gate
 
+                if task_type in {"project_read", "project_audit"} and conclusao.get("claims"):
+                    conclusao["claims"] = order_claims_for_response(
+                        task_contract, conclusao.get("claims") or [],
+                    )
+                    conclusao["resposta"] = render_claims_for_response(
+                        task_contract, conclusao.get("claims") or [],
+                    )
+                    conclusao["evidence_ids"] = claim_evidence_ids(conclusao["claims"])
+                    conclusao["claim_annotations"] = claims_to_annotations(conclusao["claims"])
+
                 if task_type == "project_audit":
                     health_gate_final = validate_health_claims(
                         conclusao.get("claims") or [],
@@ -2955,11 +3245,28 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                         cobertura_final,
                         language_sample=f"{objetivo}\n{conclusao.get('resposta') or ''}",
                     )
-                    if conclusao["coverage_disclosure"]:
-                        conclusao["resposta"] = (
-                            conclusao["coverage_disclosure"].strip()
-                            + "\n\n"
-                            + conclusao["resposta"].strip()
+                if (
+                    task_type in {"project_read", "project_audit"}
+                    and bool(cfg_agente.get("intent_output_gate_enabled", False))
+                ):
+                    intent_final = evaluate_intent_coverage(
+                        task_contract, conclusao.get("claims") or [],
+                        conclusao.get("limitacoes") or [],
+                    )
+                    conclusao["intent_coverage"] = intent_final
+                    if not intent_final.get("ok", False):
+                        return _retorno_agente(
+                            "failed",
+                            "A conclusão final perdeu a aderência à intenção solicitada.",
+                            None,
+                            {
+                                "task_type": task_type, "mode": modo,
+                                "goal_state": estado.goal_state,
+                                "failure_code": intent_final.get("failure_code") or "INTENT_OUTPUTS_NOT_COVERED",
+                                "task_contract": task_contract,
+                                "intent_coverage": intent_final,
+                            },
+                            retornar_detalhes,
                         )
 
                 if task_type == "project_write":
@@ -2981,6 +3288,16 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                             )
                         continue
                     conclusao["verificacao_sistema"] = motivo_edit
+                    if (
+                        bool(cfg_agente.get("deterministic_write_receipt_enabled", False))
+                        or estado.edit_state.get("status") == "applied_without_suite"
+                    ):
+                        conclusao["resposta"] = _conclusao_deterministica_edicao(estado)
+                        conclusao["system_generated_write_receipt"] = True
+                        conclusao["verification_status"] = (
+                            "verified" if estado.edit_state.get("status") == "tests_passed"
+                            else "unverified_no_suite"
+                        )
 
             if task_type == "project_audit":
                 estado.audit_pipeline["phase"] = "completed"
@@ -3014,6 +3331,9 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 "utility_gate": conclusao.get("utility_gate"),
                 "task_contract": task_contract,
                 "target_coverage": conclusao.get("target_coverage"),
+                "intent_coverage": conclusao.get("intent_coverage"),
+                "task_intent": estado.goal_state.get("task_intent") or {},
+                "system_generated_write_receipt": bool(conclusao.get("system_generated_write_receipt")),
                 "project_read_finalizer_calls": project_read_finalizer_calls,
                 "recovery_layer": conclusao.get("recovery_layer") or recuperacao_atual.get("layer"),
                 "recovery_attempts": recuperacao_atual.get("attempts", []),
@@ -3111,6 +3431,8 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
             tool, arguments_brutos, registro=TOOLS,
         )
         if erro_argumentos is not None:
+            erro_argumentos = dict(erro_argumentos)
+            erro_argumentos.update(_tool_error_policy(erro_argumentos.get("error_code")))
             estado.registrar_resultado_tool(erro_argumentos)
             estado.registrar_acao(tool or "tool_invalida", arguments_brutos, erro_argumentos)
             entrada_observada = estado.observar(tool or "tool_invalida", erro_argumentos)
@@ -3123,14 +3445,12 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 "resumo": entrada_observada["resumo"],
             })
             if estado.erros_consecutivos >= max_erros_consecutivos:
-                pergunta = (
-                    f"O agente encontrou {estado.erros_consecutivos} erro(s) de ferramenta seguido(s) "
-                    "e parou para evitar insistir num caminho que nao esta funcionando."
-                )
+                pergunta = _circuit_breaker_message(estado)
                 return _retorno_agente(
                     "failed", pergunta, None,
                     {"task_type": task_type, "mode": modo, "goal_state": estado.goal_state,
-                     "failure_code": "TOOL_CIRCUIT_BREAKER"},
+                     "failure_code": "TOOL_CIRCUIT_BREAKER",
+                     "tool_errors": [item for item in estado.actions if item.get("error_code")]},
                     retornar_detalhes,
                 )
             if _sem_progresso(
@@ -3317,6 +3637,9 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
             },
         )
         _publicar_tool(config, tool, step=step, concluida=True)
+        if isinstance(resultado_tool, dict) and resultado_tool.get("ok") is False:
+            resultado_tool = dict(resultado_tool)
+            resultado_tool.update(_tool_error_policy(resultado_tool.get("error_code")))
         estado.registrar_chamada(tool, arguments)
         estado.registrar_resultado_tool(resultado_tool)  # Atualizacao 11
         estado.registrar_acao(tool, arguments, resultado_tool, contar_execucao=True)
@@ -3408,14 +3731,12 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
             )
 
         if estado.erros_consecutivos >= max_erros_consecutivos:  # Atualizacao 11
-            pergunta = (
-                f"O agente encontrou {estado.erros_consecutivos} erro(s) de ferramenta seguido(s) "
-                "e parou para evitar insistir num caminho que nao esta funcionando."
-            )
+            pergunta = _circuit_breaker_message(estado)
             _registrar_trace_estado(estado, {"step": step, "tipo": "circuit_breaker", "erros_consecutivos": estado.erros_consecutivos})
             return _retorno_agente(
                 "failed", pergunta, None,
                 {"task_type": task_type, "mode": modo, "goal_state": estado.goal_state,
-                 "failure_code": "TOOL_CIRCUIT_BREAKER"},
+                 "failure_code": "TOOL_CIRCUIT_BREAKER",
+                 "tool_errors": [item for item in estado.actions if item.get("error_code")]},
                 retornar_detalhes,
             )

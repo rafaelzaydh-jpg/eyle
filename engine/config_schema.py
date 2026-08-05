@@ -81,6 +81,8 @@ class AgentConfig(TypedDict, total=False):
     project_read_single_repair_enabled: bool
     deterministic_post_write_enabled: bool
     deterministic_symbol_lookup_enabled: bool
+    intent_output_gate_enabled: bool
+    deterministic_write_receipt_enabled: bool
     semantic_grounding: Dict[str, Any]
 
 
@@ -174,6 +176,7 @@ def validar_config(config) -> ConfigEyle:
         "agent.project_read_fast_path_enabled",
         "agent.target_coverage_enabled", "agent.project_read_single_repair_enabled",
         "agent.deterministic_post_write_enabled", "agent.deterministic_symbol_lookup_enabled",
+        "agent.intent_output_gate_enabled", "agent.deterministic_write_receipt_enabled",
         "agent.semantic_grounding.enabled", "agent.semantic_grounding.block_unsupported_anchors",
         "agent.semantic_grounding.require_inline_citations",
         "agent.semantic_grounding.require_inference_evidence",

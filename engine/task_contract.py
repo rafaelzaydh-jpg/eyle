@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Contrato mínimo e cobertura de alvos para tarefas da Eyle.
 
-A Rev3 não cria um planejador paralelo. Este módulo somente transforma partes
+A Rev4 não cria um planejador ou agente paralelo. Este módulo somente transforma partes
 literais do pedido em obrigações verificáveis e confere se as claims finais
 cobriram essas obrigações usando evidências frescas.
 """
@@ -34,6 +34,147 @@ _STOPWORDS = {
 }
 
 
+
+
+_RECOMMENDATION_RE = re.compile(
+    r"\b(?:sugir|sugest|recomend|melhorias?|como melhorar|refator|otimiz)\w*\b",
+    re.IGNORECASE,
+)
+_ISSUE_RE = re.compile(
+    r"\b(?:problemas?|bugs?|falhas?|riscos?|vulnerabil|revis[aã]o cr[ií]tica|code review|audite?)\w*\b",
+    re.IGNORECASE,
+)
+_INVESTIGATE_RE = re.compile(
+    r"\b(?:investig|diagnostic|por que|porque|causa|erro|bug|falha)\w*\b",
+    re.IGNORECASE,
+)
+_DISCUSS_RE = re.compile(
+    r"\b(?:convers|discut|debater|o que acha|vamos falar|talk about|discuss)\w*\b",
+    re.IGNORECASE,
+)
+_PLAN_RE = re.compile(r"\b(?:planej|plano|roadmap|estrat[eé]gia)\w*\b", re.IGNORECASE)
+_CREATE_RE = re.compile(r"\b(?:cri|constru|implemente do zero|novo projeto|new project)\w*\b", re.IGNORECASE)
+_RECOMMENDATION_COUNT_RE = re.compile(
+    r"\b(\d{1,2})\s+(?:melhorias?|sugest(?:o|õ)es|recomenda(?:c|ç)(?:a|ã)oes?)\b",
+    re.IGNORECASE,
+)
+_RECOMMENDATION_LANGUAGE_RE = re.compile(
+    r"\b(?:recomendo|sugiro|deveria(?:mos)?|seria melhor|ideal seria|recommend|suggest|should)\b",
+    re.IGNORECASE,
+)
+
+
+_RESPONSE_SECTION_ORDER = {
+    "code_analysis": [
+        "plain_language_summary",
+        "main_behavior",
+        "important_components",
+        "component_relationships",
+        "verified_limitations",
+    ],
+    "code_explanation": ["explanation", "verified_limitations"],
+    "code_conversation": ["grounded_discussion", "verified_limitations"],
+    "code_review": ["analysis", "problems", "recommendations", "verified_limitations"],
+    "code_investigation": ["investigation_result", "verified_limitations"],
+    "code_plan": ["plan", "verified_limitations"],
+    "code_change": [
+        "analysis", "problems", "implemented_change", "verification_result",
+        "final_state", "explanation",
+    ],
+}
+
+
+def _classify_task_intent(objective, task_type):
+    text = str(objective or "")
+    normalized = _norm(text)
+    recommendations_requested = bool(_RECOMMENDATION_RE.search(text))
+    issue_detection_requested = bool(_ISSUE_RE.search(text))
+
+    count_match = _RECOMMENDATION_COUNT_RE.search(text)
+    recommendation_count = int(count_match.group(1)) if count_match else None
+
+    if task_type == "chat":
+        intent = "chat"
+        profile = "code_conversation"
+        outputs = ["grounded_discussion"]
+        write_allowed = False
+    elif task_type == "project_write":
+        intent = "create" if _CREATE_RE.search(text) else "edit"
+        profile = "code_change"
+        outputs = []
+        if "analis" in normalized or "analy" in normalized:
+            outputs.append("analysis")
+        if issue_detection_requested:
+            outputs.append("problems")
+        outputs.extend(["implemented_change", "verification_result", "final_state"])
+        if re.search(r"\b(?:explique|explicar|explain)\w*\b", text, re.IGNORECASE):
+            outputs.append("explanation")
+        write_allowed = True
+    elif recommendations_requested and (issue_detection_requested or "analis" in normalized or "review" in normalized):
+        intent = "review"
+        profile = "code_review"
+        # Analise + melhorias nao implica automaticamente uma secao de
+        # problemas. ``problems`` so e obrigatorio quando o usuario pediu
+        # explicitamente falhas, riscos, bugs ou revisao critica.
+        outputs = ["analysis"]
+        if issue_detection_requested:
+            outputs.append("problems")
+        outputs.append("recommendations")
+        write_allowed = False
+    elif recommendations_requested:
+        intent = "suggest"
+        profile = "code_review"
+        outputs = ["recommendations"]
+        write_allowed = False
+    elif _DISCUSS_RE.search(text):
+        intent = "discuss"
+        profile = "code_conversation"
+        outputs = ["grounded_discussion"]
+        write_allowed = False
+    elif _PLAN_RE.search(text):
+        intent = "plan"
+        profile = "code_plan"
+        outputs = ["plan"]
+        write_allowed = False
+    elif _INVESTIGATE_RE.search(text) and task_type != "project_audit":
+        intent = "investigate"
+        profile = "code_investigation"
+        outputs = ["investigation_result", "verified_limitations"]
+        write_allowed = False
+    elif task_type == "project_audit":
+        intent = "review" if issue_detection_requested else "analyze"
+        profile = "code_review" if issue_detection_requested else "code_analysis"
+        outputs = (
+            ["analysis", "problems", "verified_limitations"]
+            if issue_detection_requested
+            else [
+                "plain_language_summary",
+                "main_behavior",
+                "important_components",
+                "component_relationships",
+                "verified_limitations",
+            ]
+        )
+        write_allowed = False
+    else:
+        intent = "explain"
+        profile = "code_explanation"
+        outputs = ["explanation"]
+        write_allowed = False
+
+    return {
+        "intent": intent,
+        "domain": "code",
+        "response_profile": profile,
+        "write_allowed": write_allowed,
+        "requested_outputs": outputs,
+        "response_sections": list(_RESPONSE_SECTION_ORDER.get(profile, outputs)),
+        "recommendations_requested": recommendations_requested,
+        "recommendation_count": recommendation_count,
+        "issue_detection_requested": issue_detection_requested,
+    }
+
+
 def _norm(value):
     text = unicodedata.normalize("NFKD", str(value or ""))
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
@@ -58,15 +199,27 @@ def _symbol_candidates(objective):
     )
     candidates.extend(pattern.findall(text))
 
-    # Segmentos de explicação costumam listar funções: "explique tocar e limitar_volume".
+    # Identificadores marcados explicitamente como codigo.
+    candidates.extend(re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`", text))
+    candidates.extend(re.findall(r"(?<![A-Za-z0-9_])([A-Z][A-Z0-9_]{1,})(?![A-Za-z0-9_])", text))
+
+    # Lista curta e inequívoca: "explique tocar e limitar_volume". Exigimos
+    # ao menos um identificador forte (underscore/backtick/constante) para nao
+    # transformar linguagem natural como "criação e inicialização" em símbolos.
     for match in re.finditer(
-        r"\b(?:explique|explain|analise|analyze)\s+(.+?)(?:\s+com\s+(?:cita|codigo|código)|[.;]|$)",
+        r"\b(?:explique|explain)\s+([A-Za-z_][A-Za-z0-9_]*)\s+(?:e|and)\s+([A-Za-z_][A-Za-z0-9_]*)",
         text,
         re.IGNORECASE,
     ):
-        for token in _IDENTIFIER_RE.findall(match.group(1)):
-            if _norm(token) not in {_norm(item) for item in _STOPWORDS}:
-                candidates.append(token)
+        left, right = match.groups()
+        trecho = match.group(0)
+        strong = (
+            "_" in left or "_" in right
+            or f"`{left}`" in trecho or f"`{right}`" in trecho
+            or left.isupper() or right.isupper()
+        )
+        if strong:
+            candidates.extend((left, right))
 
     # "comportamento real de validar_token" e formas equivalentes.
     for match in re.finditer(
@@ -149,11 +302,12 @@ def build_task_contract(objective, task_type="project_read"):
             "label": "entregar uma análise útil relacionada ao pedido",
         })
 
+    task_intent = _classify_task_intent(objective_text, task_type)
     return {
-        "version": 1,
+        "version": 2,
         "task_type": task_type,
         "original_request": objective_text,
-        "intent": "explain" if task_type == "project_read" else task_type,
+        **task_intent,
         "explicit_files": files,
         "explicit_symbols": symbols,
         "required_targets": targets,
@@ -279,6 +433,174 @@ def evaluate_target_coverage(contract, claims, evidence, answer=""):
         "covered_count": len(results) - len(missing),
         "required_count": len(results),
     }
+
+
+def _claim_output_tags(claim):
+    declared = claim.get("output", claim.get("requested_output"))
+    if isinstance(declared, str) and declared.strip():
+        return {declared.strip()}
+    if isinstance(declared, list):
+        return {str(item).strip() for item in declared if str(item).strip()}
+
+    claim_type = str(claim.get("type") or "")
+    text = _norm(claim.get("text") or "")
+    tags = set()
+    if claim_type == "recommendation":
+        tags.add("recommendations")
+    if claim_type == "risk":
+        tags.update(("problems", "analysis"))
+    if claim_type == "absence":
+        tags.update(("verified_limitations", "analysis"))
+    if claim_type in {"fact", "inference", "hypothesis"}:
+        tags.add("analysis")
+        if any(term in text for term in (
+            "projeto e", "projeto é", "consiste", "aplicacao e", "aplicação é",
+            "sistema e", "sistema é", "servico web", "serviço web",
+            "project is", "application is", "consists of",
+        )):
+            tags.add("plain_language_summary")
+        if any(term in text for term in ("retorna", "chama", "usa", "utiliza", "inicia", "define", "importa", "responde", "expoe", "expõe", "return", "calls", "uses", "starts", "defines", "imports", "responds", "exposes")):
+            tags.update(("behavior", "main_behavior", "explanation"))
+        if any(term in text for term in (
+            "arquivo", "modulo", "módulo", "classe", "funcao", "função",
+            "rota", "endpoint", "componente", "file", "module", "class",
+            "function", "route", "component",
+        )):
+            tags.add("important_components")
+        if any(term in text for term in ("depende", "relacao", "relação", "origem", "importa", "chama", "uses", "depends", "relationship")):
+            tags.add("component_relationships")
+        if any(term in text for term in ("projeto", "aplicacao", "aplicação", "sistema", "project", "application")):
+            tags.add("explanation")
+        if any(term in text for term in ("resultado", "causa", "erro", "falha", "root cause")):
+            tags.add("investigation_result")
+    if claim_type == "decision":
+        tags.update(("plan", "final_state"))
+    return tags
+
+
+def evaluate_intent_coverage(contract, claims, limitations=None):
+    """Valida o perfil solicitado sem pedir outra opiniao a uma LLM."""
+    contract = contract or {}
+    claims = claims or []
+    requested = list(contract.get("requested_outputs") or [])
+    tags = set()
+    for claim in claims:
+        if isinstance(claim, dict):
+            tags.update(_claim_output_tags(claim))
+    if limitations:
+        tags.add("verified_limitations")
+
+    intent = contract.get("intent")
+    if intent == "analyze" and claims:
+        tags.add("analysis")
+    if intent == "explain" and claims:
+        tags.add("explanation")
+    if intent == "discuss" and claims:
+        tags.add("grounded_discussion")
+    if intent == "review" and claims:
+        tags.add("analysis")
+
+    missing = [item for item in requested if item not in tags]
+    recommendation_claims = [
+        item for item in claims
+        if isinstance(item, dict) and (
+            item.get("type") == "recommendation"
+            or _RECOMMENDATION_LANGUAGE_RE.search(str(item.get("text") or ""))
+        )
+    ]
+    unsolicited = bool(recommendation_claims and not contract.get("recommendations_requested"))
+    count_expected = contract.get("recommendation_count")
+    count_ok = True
+    if contract.get("recommendations_requested") and isinstance(count_expected, int):
+        count_ok = len(recommendation_claims) == count_expected
+
+    ok = not missing and not unsolicited and count_ok
+    failure = None
+    if unsolicited:
+        failure = "UNSOLICITED_RECOMMENDATIONS"
+    elif not count_ok:
+        failure = "RECOMMENDATION_COUNT_MISMATCH"
+    elif missing:
+        failure = "INTENT_OUTPUTS_NOT_COVERED"
+    return {
+        "ok": ok,
+        "failure_code": failure,
+        "requested_outputs": requested,
+        "covered_outputs": sorted(tags),
+        "missing_outputs": missing,
+        "recommendations_requested": bool(contract.get("recommendations_requested")),
+        "recommendation_count_expected": count_expected,
+        "recommendation_count_actual": len(recommendation_claims),
+        "unsolicited_recommendations": unsolicited,
+    }
+
+
+def order_claims_for_response(contract, claims):
+    """Ordena claims pela estrutura semântica do perfil, preservando estabilidade."""
+    contract = contract or {}
+    profile = str(contract.get("response_profile") or "")
+    order = list(contract.get("response_sections") or _RESPONSE_SECTION_ORDER.get(profile, []))
+    if not order:
+        return list(claims or [])
+    ranks = {name: index for index, name in enumerate(order)}
+
+    def rank(item):
+        tags = _claim_output_tags(item if isinstance(item, dict) else {})
+        candidates = [ranks[tag] for tag in tags if tag in ranks]
+        return min(candidates) if candidates else len(order)
+
+    return [item for _, item in sorted(
+        enumerate(claims or []), key=lambda pair: (rank(pair[1]), pair[0])
+    )]
+
+
+def render_claims_for_response(contract, claims):
+    """Renderiza parágrafos humanos sem misturar o painel de auditoria à resposta."""
+    ordered = order_claims_for_response(contract, claims)
+    profile = str((contract or {}).get("response_profile") or "")
+    sections = list((contract or {}).get("response_sections") or _RESPONSE_SECTION_ORDER.get(profile, []))
+    if not sections:
+        return "\n".join(
+            str(item.get("text") or "").strip() for item in ordered
+            if isinstance(item, dict) and str(item.get("text") or "").strip()
+        ).strip()
+
+    buckets = {name: [] for name in sections}
+    remainder = []
+    for claim in ordered:
+        if not isinstance(claim, dict):
+            continue
+        text = str(claim.get("text") or "").strip()
+        if not text:
+            continue
+        tags = _claim_output_tags(claim)
+        destination = next((name for name in sections if name in tags), None)
+        if destination is None:
+            remainder.append(text)
+        else:
+            buckets[destination].append(text)
+
+    paragraphs = [" ".join(buckets[name]) for name in sections if buckets[name]]
+    if remainder:
+        paragraphs.append(" ".join(remainder))
+    return "\n\n".join(paragraphs).strip()
+
+
+def render_intent_feedback(coverage):
+    coverage = coverage or {}
+    lines = ["TASK INTENT REPAIR (system-owned):"]
+    if coverage.get("unsolicited_recommendations"):
+        lines.append("- Remove recommendation language because the user did not request recommendations.")
+    for output in coverage.get("missing_outputs") or []:
+        lines.append(f"- Missing requested output: {output}")
+    expected = coverage.get("recommendation_count_expected")
+    if isinstance(expected, int) and coverage.get("recommendation_count_actual") != expected:
+        lines.append(
+            f"- Return exactly {expected} recommendation claims; current count is "
+            f"{coverage.get('recommendation_count_actual', 0)}."
+        )
+    lines.append("Return the complete structured claims envelope once, using only fresh evidence.")
+    return "\n".join(lines)
 
 
 def render_target_feedback(coverage):

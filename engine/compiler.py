@@ -341,6 +341,22 @@ def montar_prompt_agente(pergunta, observacoes=None, entendimento=None, max_entr
     else:
         partes.append("RECENT OBSERVATIONS: (no action has been executed in this task yet)")
 
+    failed_actions = [
+        item for item in actions
+        if isinstance(item, dict) and item.get("ok") is False
+    ]
+    if failed_actions:
+        last_failure = failed_actions[-1]
+        partes.extend([
+            "",
+            "TOOL FAILURE REPAIR (system-owned):",
+            "- Read the exact error_code and error_detail below before choosing the next action.",
+            "- Never repeat the same invalid tool call unchanged.",
+            "- If retryable=true, correct arguments or refresh evidence and retry once.",
+            "- If terminal=true, do not retry; return a clear failure with the observed detail.",
+            json.dumps(last_failure, ensure_ascii=False, separators=(",", ":")),
+        ])
+
     evidencias = evidencias or []
     stale = [item for item in evidencias if item.get("estado") == "stale"]
     if stale:
@@ -477,6 +493,7 @@ def montar_prompt_finalizer_auditoria(
     analysis_coverage=None,
     project_inventory=None,
     audit_pipeline=None,
+    task_contract=None,
     evidencias=None,
     config=None,
     system_prompt="",
@@ -488,6 +505,9 @@ def montar_prompt_finalizer_auditoria(
         "",
         "GOAL STATE (system-owned):",
         json.dumps(_valor_para_modelo(goal_state or {}), ensure_ascii=False, separators=(",", ":")),
+        "",
+        "TASK INTENT (system-owned; answer only the requested profile):",
+        json.dumps(_valor_para_modelo(task_contract or {}), ensure_ascii=False, separators=(",", ":")),
         "",
         "PROJECT AUDIT COVERAGE (system-calculated):",
         json.dumps(analysis_coverage or {}, ensure_ascii=False, separators=(",", ":")),
@@ -540,6 +560,13 @@ def montar_prompt_finalizer_auditoria(
     else:
         partes.append("(no fresh evidence fits in the finalizer context)")
 
+    recommendation_count = (task_contract or {}).get("recommendation_count")
+    recommendation_rule = (
+        f"- Return exactly {recommendation_count} recommendation claims, each with type=recommendation, "
+        "output=recommendations, and a concrete basis."
+        if isinstance(recommendation_count, int) else
+        "- Recommendation claims are allowed only when recommendations_requested=true."
+    )
     partes.extend([
         "",
         "FINALIZER CONTRACT:",
@@ -547,6 +574,9 @@ def montar_prompt_finalizer_auditoria(
         "- Do not repeat release notes as proof of current behavior.",
         "- Do not claim tests passed unless an executed run_tests result is present.",
         "- Return atomic claims with visible evidence_ids and report limitations honestly.",
+        "- Obey TASK INTENT: do not add recommendations when recommendations_requested=false.",
+        recommendation_rule,
+        "- Tag each claim with one requested output using the output field; absence claims must declare scope.",
         "- Do not return answer or claim_annotations; the system renders validated claims.",
         "- Return only the required JSON claims envelope.",
         "CONTEXT BUDGET: window={} tokens; reserved response={}; safety margin={}.".format(
@@ -606,13 +636,23 @@ def montar_prompt_finalizer_leitura(
         ])
     if repair_feedback:
         partes.extend(["", str(repair_feedback)])
+    recommendation_count = (task_contract or {}).get("recommendation_count")
+    recommendation_rule = (
+        f"- Return exactly {recommendation_count} recommendation claims, each with type=recommendation, "
+        "output=recommendations, and a concrete basis."
+        if isinstance(recommendation_count, int) else
+        "- Do not include recommendation claims unless TASK CONTRACT recommendations_requested=true."
+    )
     partes.extend([
         "",
         "FINALIZER CONTRACT:",
         "- No tools are available.",
         "- Answer the exact target in the original request.",
-        "- Cover every TASK CONTRACT required_target; include evidence-derived literal values when requested.",
-        "- A negative find_symbol observation proves explicit absence; BM25/search_code alone does not.",
+        "- Cover every TASK CONTRACT required_target and requested_output; include evidence-derived literal values when requested.",
+        recommendation_rule,
+        "- For code_explanation, explain only the requested file/symbol behavior; never enter a write workflow.",
+        "- For code_conversation, distinguish observed facts from inferences and give every inference a basis.",
+        "- A negative find_symbol observation proves explicit absence; absence claims must include their reviewed scope. BM25/search_code alone does not.",
         "- Return only the required JSON final envelope.",
         "CONTEXT BUDGET: window={} tokens; reserved response={}; safety margin={}.".format(
             cfg_llm.get("context_window_tokens", 2048),

@@ -309,9 +309,11 @@ def test_resposta_integrada_recebe_divulgacao_de_cobertura(monkeypatch, tmp_path
         retornar_detalhes=True,
     )
     assert status == "success"
-    assert text.startswith("Cobertura integral dos arquivos de código inventariados concluída.")
-    assert "Os testes não foram executados." in text
-    assert text.rstrip().endswith("app.py define a variável value como 1.")
+    assert text == "app.py define a variável value como 1."
+    assert not text.startswith("Cobertura integral")
     assert details["analysis_coverage"]["coverage"]["level"] == "complete"
     assert details["coverage"]["level"] == "complete"
-    assert details["coverage_disclosure"] in text
+    assert details["coverage_disclosure"].startswith(
+        "Cobertura integral dos arquivos de código inventariados concluída."
+    )
+    assert "Os testes não foram executados." in details["coverage_disclosure"]

@@ -122,6 +122,39 @@ def _pipeline_auditoria(detalhes):
         texto += f"; leituras com falha={len(failed)}"
     return texto
 
+def _erros_ferramenta(detalhes):
+    items = detalhes.get("tool_errors")
+    if not isinstance(items, list):
+        return ""
+    lines = []
+    for item in items[-3:]:
+        if not isinstance(item, dict):
+            continue
+        tool = _texto(item.get("tool"), 80) or "desconhecida"
+        code = _texto(item.get("error_code"), 120) or "TOOL_FAILED"
+        detail = _texto(item.get("error_detail"), 320) or "sem detalhe"
+        retryable = item.get("retryable")
+        retry_text = "sim" if retryable is True else "não" if retryable is False else "não informado"
+        lines.append(f"{tool}: {code}; retryable={retry_text}; {detail}")
+    return "\n".join(lines)
+
+
+def _task_intent(detalhes):
+    intent = detalhes.get("task_intent")
+    if not isinstance(intent, dict):
+        contract = detalhes.get("task_contract")
+        intent = contract if isinstance(contract, dict) else {}
+    return intent
+
+
+def _sim_nao(value):
+    if value is True:
+        return "sim"
+    if value is False:
+        return "não"
+    return "não informado"
+
+
 def _modo(resultado, detalhes, contexto):
     roteador = resultado.get("roteador") if isinstance(resultado, dict) else {}
     roteador = roteador if isinstance(roteador, dict) else {}
@@ -225,12 +258,14 @@ def _campos_leitura(leituras, ferramentas):
 
 
 def _validacao(resultado, detalhes, status):
+    gate = detalhes.get("completion_gate")
+    if status == "needs_user" and isinstance(gate, dict) and gate.get("requires_user") is True:
+        return "proposta aprovada; aguardando confirmação"
     aprovado = resultado.get("verificacao_aprovada") if isinstance(resultado, dict) else None
     if aprovado is True:
         return "aprovada"
     if aprovado is False:
         return "reprovada"
-    gate = detalhes.get("completion_gate")
     if isinstance(gate, dict):
         if gate.get("passed") is True:
             return "aprovada"
@@ -289,13 +324,20 @@ def construir_resumo_trabalho(evento, resultado, duracao_segundos, projeto=None,
     except (TypeError, ValueError):
         duracao = 0.0
 
+    intent = _task_intent(detalhes)
+
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "title": "Trabalho concluído" if status_job == "completed" else "Trabalho interrompido",
         "duration_seconds": duracao,
         "steps": [
             _etapa(1, "Entendimento", [
                 _campo("Objetivo", objetivo),
+                _campo("Intenção detectada", intent.get("intent")),
+                _campo("Perfil de resposta", intent.get("response_profile")),
+                _campo("Escrita permitida", _sim_nao(intent.get("write_allowed"))),
+                _campo("Recomendações solicitadas", _sim_nao(intent.get("recommendations_requested"))),
+                _campo("Saídas obrigatórias", ", ".join(intent.get("requested_outputs") or [])),
             ]),
             _etapa(2, "Leitura", _campos_leitura(leituras, ferramentas)),
             _etapa(3, "Análise", [
@@ -304,6 +346,7 @@ def construir_resumo_trabalho(evento, resultado, duracao_segundos, projeto=None,
                 _campo("Evidências", ", ".join(evidencias) or "nenhuma registrada"),
                 _campo("Cobertura real", _cobertura_auditoria(detalhes)),
                 _campo("Pipeline de auditoria", _pipeline_auditoria(detalhes)),
+                _campo("Erros de ferramentas", _erros_ferramenta(detalhes)),
             ]),
             _etapa(4, "Conclusão", [
                 _campo("Status", agente_status),

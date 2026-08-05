@@ -2,7 +2,7 @@
 """Grounding semantico tipado para conclusoes do Agente.
 
 O projeto e tratado como estado observado, nao como verdade universal. O
-verificador separa afirmacoes em cinco tipos epistemicos:
+verificador separa afirmacoes em tipos epistemicos explícitos, incluindo ausência com escopo:
 
 - fact: descricao objetiva do estado observado; exige evidencia;
 - inference: conclusao derivada das evidencias; exige uma base observada;
@@ -41,10 +41,11 @@ _STOP = {
     "is", "are", "was", "were", "be", "has", "have", "it", "from", "on", "by",
 }
 
-CLAIM_TYPES = ("fact", "inference", "hypothesis", "decision", "recommendation")
+CLAIM_TYPES = ("fact", "absence", "inference", "hypothesis", "decision", "recommendation")
 
 _TYPE_ALIASES = {
     "fact": "fact", "fato": "fact", "observed_fact": "fact", "fato_observado": "fact",
+    "absence": "absence", "ausência": "absence", "ausencia": "absence",
     "inference": "inference", "inferência": "inference", "inferencia": "inference",
     "hypothesis": "hypothesis", "hipótese": "hypothesis", "hipotese": "hypothesis",
     "decision": "decision", "decisão": "decision", "decisao": "decision",
@@ -151,6 +152,7 @@ def _prepare_annotations(annotations):
             "type": claim_type,
             "evidence_ids": [str(value) for value in evidence_ids if isinstance(value, str) and value],
             "basis": str(item.get("basis", item.get("base", "")) or "").strip(),
+            "scope": str(item.get("scope", item.get("escopo", "")) or "").strip(),
         })
     return prepared
 
@@ -251,8 +253,32 @@ def verify_conclusion(answer, evidences, config=None, claim_annotations=None):
     errors = []
     warnings = []
 
-    for index, claim in enumerate(_claims(answer)):
-        annotation = _annotation_for_claim(claim, index, annotations)
+    # Em respostas estruturadas, as claims anotadas sao a unidade canonica.
+    # O sistema ja renderizou o texto a partir delas; quebrar o texto outra
+    # vez por pontuacao pode perder type/scope/evidence_ids e fazer o
+    # verificador rejeitar a propria estrutura que acabou de validar.
+    parsed_claims = _claims(answer)
+    mapped_annotations = [
+        _annotation_for_claim(claim, index, annotations)
+        for index, claim in enumerate(parsed_claims)
+    ]
+    fully_annotated = bool(parsed_claims) and all(mapped_annotations)
+    if fully_annotated:
+        claim_units = [
+            (annotation.get("claim") or claim, annotation)
+            for claim, annotation in zip(parsed_claims, mapped_annotations)
+        ]
+    else:
+        # Protocolos antigos podem anotar apenas algumas frases. Nesse caso,
+        # todas as frases do texto continuam sendo verificadas; a anotacao
+        # parcial nao pode esconder um fato objetivo sem suporte.
+        claim_units = [
+            (claim, mapped_annotations[index] if index < len(mapped_annotations) else None)
+            for index, claim in enumerate(parsed_claims)
+        ]
+
+    for index, (claim, explicit_annotation) in enumerate(claim_units):
+        annotation = explicit_annotation
         if annotation:
             claim_type = annotation["type"]
             classification_source = "explicit"
@@ -286,13 +312,15 @@ def verify_conclusion(answer, evidences, config=None, claim_annotations=None):
         if missing_annotation_ids:
             claim_errors.append("annotation_evidence_not_available")
 
-        if claim_type == "fact":
+        if claim_type in ("fact", "absence"):
             if require_citations and not has_citation:
                 claim_errors.append("fact_without_inline_citation")
             if unsupported and block_anchors:
                 claim_errors.append("unsupported_objective_anchor")
             if not selected:
                 claim_errors.append("no_matching_evidence")
+            if claim_type == "absence" and not (annotation or {}).get("scope"):
+                claim_errors.append("absence_without_explicit_scope")
             if len(claim_tokens) >= min_tokens and overlap < min_overlap:
                 claim_warnings.append("low_lexical_overlap")
 

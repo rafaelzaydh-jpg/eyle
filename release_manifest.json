@@ -2,9 +2,9 @@
   "release": "2.7.4",
   "app_version": "2.7.4",
   "config_schema_version": "2.7.4",
-  "revision": "3-target-coverage-fast-path",
+  "revision": "4.3-human-readable-code-analysis",
   "released_at": "2026-08-05",
-  "title": "Target coverage, single repair, and project-read fast path",
+  "title": "Human-readable code analysis with deterministic semantic response ordering",
   "architecture": {
     "project_pipelines": [
       "agent"
@@ -35,14 +35,15 @@
     "bounded task and LLM budgets"
   ],
   "validation": {
-    "tests_passed": 307,
+    "tests_passed": 336,
     "tests_skipped": 1,
     "skip_reason": "Flask is not installed in the packaging environment",
     "real_model_benchmark_run": false
   },
   "known_limits": [
-    "The real Qwen benchmark must be rerun against revision 3.",
-    "trusted_local is allowlisted and snapshot-based but does not isolate network access or provide kernel-level sandboxing.",
+    "The real Qwen Rev4.3 behavioral smoke test must be run in the deployment environment.",
+    "Task intent remains deterministic and intentionally compact; advanced multi-goal decomposition remains deferred.",
+    "Writes without an available test suite finish as success with verification_status=unverified_no_suite after a fresh reread.",
     "The optional Flask interface requires its runtime dependency in the final environment."
   ],
   "features": {
@@ -52,6 +53,25 @@
     "request_contract": "minimal deterministic required_targets",
     "target_coverage_gate": "enabled",
     "project_read_recovery": "one directed Finalizer repair",
-    "project_read_fast_path": "enabled for explicit files"
+    "project_read_fast_path": "enabled for explicit files",
+    "task_intent": "deterministic code-domain intent and response profile",
+    "intent_output_gate": "enabled",
+    "unsolicited_recommendation_gate": "enabled",
+    "absence_claims": "fresh evidence plus explicit reviewed scope",
+    "write_finalization": "deterministic receipt after tests and reread",
+    "code_agent_identity": "exclusive code and software-engineering scope",
+    "intent_routing_hardening": "natural-language creation nouns no longer trigger project_write",
+    "exact_recommendation_contract": "analysis plus N improvements requires analysis and exactly N recommendation claims",
+    "tool_error_diagnostics": "tool, error_code, retry policy, and bounded detail are exposed",
+    "write_without_suite": "success with partial verification after post-write reread",
+    "waiting_confirmation": "proposal approved; awaiting confirmation",
+    "structured_grounding_units": "claim annotations are canonical; partial legacy annotations cannot hide unverified facts",
+    "grounding_claim_filter": "one rejected structured claim no longer destroys an otherwise useful grounded analysis",
+    "confirmed_patch_source": "apply_patch reuses the exact last approved dry-run proposal and derives original source from fresh evidence",
+    "blank_source_range": "empty original text is valid only when supported by fresh evidence and the exact dry-run fingerprint",
+    "code_analysis_sections": "plain-language summary, behavior, components, relationships, limitations",
+    "profiled_claim_rendering": "deterministic semantic ordering with paragraph grouping",
+    "coverage_disclosure": "kept in expandable task details and removed from the main answer prefix",
+    "interface_enumeration": "Finalizer explicitly enumerates observable routes, methods, handlers, and return values"
   }
 }
