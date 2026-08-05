@@ -104,6 +104,29 @@ _SCHEMA_DECISAO_AGENTE = {
                             "type": "array",
                             "items": {"type": "string"},
                         },
+                        "claims": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "type": {
+                                        "type": "string",
+                                        "enum": [
+                                            "fact", "risk", "inference", "hypothesis",
+                                            "decision", "recommendation",
+                                        ],
+                                    },
+                                    "text": {"type": "string"},
+                                    "evidence_ids": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                    "basis": {"type": "string"},
+                                },
+                                "required": ["type", "text", "evidence_ids"],
+                                "additionalProperties": False,
+                            },
+                        },
                         "claim_annotations": {
                             "type": "array",
                             "items": {
@@ -1293,6 +1316,34 @@ Regras:
    proximo passo."""
 
 
+PROMPT_AUDIT_SCOUT = """You are the Eyle PROJECT AUDIT SCOUT. You plan evidence collection; you never answer the user.
+
+You receive a deterministic candidate catalog built from the real project inventory.
+Rules:
+1. Select only paths present in CANDIDATE CATALOG. Never invent a path.
+2. Prefer a small, high-signal set covering entrypoint, orchestration/core logic, state/persistence, grounding/recovery/validation, related tests, and main configuration.
+3. During gap review, select only additional files that can test a concrete risk or close a missing coverage area.
+4. Do not make claims about project health. Do not write a conclusion.
+5. Return JSON only in this exact envelope:
+{"final":{"answer":"scout plan","selected_paths":["path"],"risk_hypotheses":["..."],"gaps":["..."],"rationale":"..."}}
+Natural-language fields must use the user's language. Paths and identifiers remain unchanged."""
+
+
+PROMPT_AUDIT_FINALIZER = """You are the Eyle PROJECT AUDIT FINALIZER. The planning and file selection phases are complete. You do not call tools.
+
+Rules:
+1. Use only the fresh evidence and system-calculated coverage shown in the prompt.
+2. Produce atomic structured claims, not a free-form answer and not a release-note summary.
+3. Each claim must contain exactly one statement with: type, text, evidence_ids, and basis when required.
+4. Allowed types: fact, risk, inference, hypothesis, recommendation, decision.
+5. Facts, risks, inferences, and hypotheses require visible fresh evidence_ids. Risks, inferences, hypotheses, and recommendations require a concise basis.
+6. Never claim that tests pass unless an executed run_tests result is shown. Never claim there are no critical problems or that all functionality is operational without the required system proof.
+7. Report limitations honestly. Do not put unsupported facts in limitations.
+8. Return JSON only, exactly:
+{"final":{"claims":[{"type":"fact","text":"...","evidence_ids":["ev-0001"],"basis":""}],"verification":"...","limitations":[]}}
+The system, not you, renders the final text from validated claims. Write claim text in the user's language."""
+
+
 PROMPT_AGENTE = """You are the Eyle AGENT. Perform exactly one action per decision and output JSON only.
 
 Language contract:
@@ -1351,6 +1402,22 @@ def executar_agente(prompt_usuario, config):
         forcar_json=forcar_json, perfil="agent",
     )
 
+
+
+def executar_audit_scout(prompt_usuario, config):
+    """Planeja componentes de project_audit sem produzir conclusao."""
+    return _chamar_llm(
+        PROMPT_AUDIT_SCOUT, prompt_usuario, config,
+        forcar_json=True, perfil="audit_scout",
+    )
+
+
+def executar_audit_finalizer(prompt_usuario, config):
+    """Gera somente a conclusao final a partir de evidencias ja coletadas."""
+    return _chamar_llm(
+        PROMPT_AUDIT_FINALIZER, prompt_usuario, config,
+        forcar_json=True, perfil="audit_finalizer", stream_visible=True,
+    )
 
 def executar_chat(pergunta, config, historico=None):
     """Modo conversa livre: sem retrieval, sem Analista, sem Verify -- so a LLM

@@ -122,25 +122,41 @@ def test_fluxo_de_analise_geral_economiza_primeira_chamada_llm(monkeypatch, tmp_
         'subprocess.run(["python", "-m", "spotdl", link, "--output", "audios"])\n',
         encoding="utf-8",
     )
-    respostas = iter([
-        json.dumps({
-            "tool": "read_file",
-            "arguments": {"caminho_relativo": "Audio.py"},
-        }),
-        json.dumps({
-            "final": (
-                "O arquivo Audio.py chama subprocess.run para executar spotdl "
-                "e salvar a saída em audios."
-            ),
-        }),
-    ])
-    chamadas = []
+    scouts = []
+    finalizers = []
 
-    def decidir(prompt, config):
-        chamadas.append(prompt)
-        return next(respostas)
+    def scout(prompt, config):
+        scouts.append(prompt)
+        return json.dumps({
+            "final": {
+                "answer": "plano",
+                "selected_paths": ["Audio.py"],
+                "risk_hypotheses": [],
+                "gaps": [],
+            }
+        })
 
-    monkeypatch.setattr(agent_mod, "executar_agente_llm", decidir)
+    def finalizer(prompt, config):
+        finalizers.append(prompt)
+        return json.dumps({
+            "final": {
+                "claims": [{
+                    "type": "fact",
+                    "text": "O arquivo Audio.py chama subprocess.run para executar spotdl e salvar a saída em audios.",
+                    "evidence_ids": ["ev-0001"],
+                    "basis": "",
+                }],
+                "verification": "codigo fresco",
+                "limitations": [],
+            }
+        })
+
+    monkeypatch.setattr(agent_mod, "executar_audit_scout_llm", scout)
+    monkeypatch.setattr(agent_mod, "executar_audit_finalizer_llm", finalizer)
+    monkeypatch.setattr(
+        agent_mod, "executar_agente_llm",
+        lambda *args: (_ for _ in ()).throw(AssertionError("project_audit nao usa o agente monolitico")),
+    )
     config = {
         "agent": {
             "max_steps": 8,
@@ -156,6 +172,9 @@ def test_fluxo_de_analise_geral_economiza_primeira_chamada_llm(monkeypatch, tmp_
             "max_llm_calls": 12,
             "max_total_generated_tokens": 12000,
             "semantic_grounding": {"enabled": False},
+            "audit_candidate_limit": 48,
+            "audit_initial_read_limit": 6,
+            "audit_gap_read_limit": 1,
         },
         "context_engine": {
             "chars_per_token_fallback": 3,
@@ -166,6 +185,8 @@ def test_fluxo_de_analise_geral_economiza_primeira_chamada_llm(monkeypatch, tmp_
             "context_window_tokens": 8192,
             "max_tokens": 1500,
             "agent_max_tokens": 512,
+            "audit_scout_max_tokens": 700,
+            "audit_finalizer_max_tokens": 1600,
         },
     }
 
@@ -180,4 +201,5 @@ def test_fluxo_de_analise_geral_economiza_primeira_chamada_llm(monkeypatch, tmp_
     assert status == "success"
     assert "subprocess.run" in texto
     assert detalhes["tools_called"] == ["list_tree", "read_file"]
-    assert len(chamadas) == 2
+    assert len(scouts) == 2
+    assert len(finalizers) == 1

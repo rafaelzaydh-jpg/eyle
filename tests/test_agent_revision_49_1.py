@@ -38,31 +38,36 @@ def _llm(*decisoes):
 
 def test_analise_geral_nao_aceita_sem_contexto_e_le_o_projeto(tmp_path, monkeypatch):
     (tmp_path / "audio.py").write_text("valor = 1\n", encoding="utf-8")
-    chamadas = []
-    respostas = iter([
-        '{"needs_user":"Nenhum contexto do projeto esta disponivel."}',
-        '{"needs_user":"Qual arquivo devo analisar?"}',
-        json.dumps({
-            "tool": "read_range",
-            "arguments": {
-                "caminho_relativo": "audio.py", "linha_inicio": 1, "linha_fim": 1,
-            },
-        }),
-        json.dumps({
+    scouts = []
+
+    def scout(prompt, config):
+        scouts.append(prompt)
+        return json.dumps({
             "final": {
-                "resposta": "audio.py:1 foi analisado",
+                "answer": "plano",
+                "selected_paths": ["audio.py"],
+                "risk_hypotheses": [],
+                "gaps": [],
+            }
+        })
+
+    monkeypatch.setattr(agent_mod, "executar_audit_scout_llm", scout)
+    monkeypatch.setattr(agent_mod, "executar_audit_finalizer_llm", lambda *args: json.dumps({
+        "final": {
+            "claims": [{
+                "type": "fact",
+                "text": "audio.py:1 define `valor` com o valor inteiro 1.",
                 "evidence_ids": ["ev-0001"],
-                "verificacao": "codigo lido do disco",
-                "limitacoes": [],
-            },
-        }),
-    ])
-
-    def fake_llm(*args, **kwargs):
-        chamadas.append(args[0])
-        return next(respostas)
-
-    monkeypatch.setattr(agent_mod, "executar_agente_llm", fake_llm)
+                "basis": "",
+            }],
+            "verification": "codigo lido do disco",
+            "limitations": [],
+        }
+    }))
+    monkeypatch.setattr(
+        agent_mod, "executar_agente_llm",
+        lambda *args: (_ for _ in ()).throw(AssertionError("project_audit nao deve pedir contexto ao usuario")),
+    )
     status, texto, pendente, detalhes = agent_mod.executar_agente(
         "Faca uma analise do projeto",
         _config(),
@@ -74,11 +79,9 @@ def test_analise_geral_nao_aceita_sem_contexto_e_le_o_projeto(tmp_path, monkeypa
     assert status == "success"
     assert "define `valor`" in texto
     assert pendente is None
-    assert detalhes["tools_called"] == ["list_tree", "read_range"]
+    assert detalhes["tools_called"] == ["list_tree", "read_file"]
     assert detalhes["read_status"] == "read"
-    assert len(chamadas) == 4
-    assert "PREMATURE_NEEDS_USER" in chamadas[2]
-
+    assert len(scouts) == 2
 
 def test_arquivo_explicito_tambem_exige_tentativa_de_leitura(tmp_path, monkeypatch):
     (tmp_path / "audio.py").write_text("valor = 1\n", encoding="utf-8")

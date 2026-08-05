@@ -120,7 +120,7 @@ def validate_response_utility(answer, objective, *, task_type="project_read", ev
 
     if not text:
         errors.append("empty_answer")
-    if task_type in ("project_read", "project_write"):
+    if task_type in ("project_read", "project_audit", "project_write"):
         fresh_evidence = _fresh_project_evidence(evidence)
         if not fresh_evidence:
             errors.append("project_not_read")

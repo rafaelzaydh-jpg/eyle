@@ -20,10 +20,10 @@
   <img alt="Versão 2.7.3" src="https://img.shields.io/badge/versão-2.7.3-2563EB">
   <img alt="Execução local" src="https://img.shields.io/badge/execução-local-16A34A">
   <img alt="Retrieval BM25" src="https://img.shields.io/badge/retrieval-BM25-F59E0B">
-  <img alt="Testes" src="https://img.shields.io/badge/testes-309%20aprovados-16A34A">
+  <img alt="Testes" src="https://img.shields.io/badge/testes-345%20aprovados-16A34A">
 </p>
 
-**Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.15-evidence-integrity-and-job-identity
+**Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.20-real-audit-coverage
 
 ## Visão geral
 
@@ -47,6 +47,13 @@ A Eyle indexa um repositório local, recupera apenas as evidências relevantes e
 - Normalização unificada de respostas com `content`, `reasoning_content`, streaming, JSON parcial e texto puro.
 - Gate de utilidade e recuperação em camadas impedem resposta vazia ou recibo técnico de virar sucesso.
 - Um único Evidence Registry alimenta leitura, análise, grounding, conclusão e resumo público.
+- Um inventário estruturado completo do projeto sobrevive aos resumos de 500 caracteres e permanece visível em todas as decisões seguintes do Agente.
+- Auditorias gerais usam um catálogo determinístico de candidatos por função antes da seleção do modelo.
+- Um Scout dedicado escolhe componentes válidos, o sistema os lê automaticamente, um Scout de lacunas recebe código fresco e um Finalizer sem ferramentas produz a conclusão grounded.
+- O Finalizer de auditoria emite claims atômicas estruturadas; a Eyle valida evidências por claim, renderiza o texto final deterministicamente e bloqueia declarações globais de saúde ou status de testes sem prova.
+- A memória indexada do projeto é marcada como pista de navegação não confiável, salvo quando o hash persistido ainda corresponde ao disco; conclusões de auditoria continuam exigindo Evidence IDs frescos.
+- Toda auditoria de projeto publica métricas determinísticas de cobertura real: inventário completo, arquivos de código lidos, componentes críticos revisados, execução atual de testes, documentos realmente usados e nível `none`/`partial`/`targeted`/`complete`.
+- O sistema adiciona uma declaração honesta de cobertura após o grounding e sempre informa que a auditoria não garante ausência universal de bugs.
 - Tools validadas por schema e permissões explícitas `READ`, `EXEC` e `WRITE`.
 - Patches atômicos, confirmação explícita, testes isolados, releitura final e rollback.
 - Deadline compartilhado, timeouts separados, backoff, rate limiting e telemetria.
@@ -168,7 +175,7 @@ python main.py benchmark
 
 Resultado no ambiente de empacotamento:
 
-- **218/218 testes não-web executáveis aprovados**;
+- **328/328 testes executáveis aprovados**;
 - **1 módulo web ignorado** porque o Flask não estava instalado naquele ambiente;
 - o benchmark com modelo real depende do endpoint, modelo, quantização, hardware e repositório usados na instalação final.
 

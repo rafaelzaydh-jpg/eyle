@@ -4,7 +4,90 @@ All notable changes to Eyle are documented here.
 
 ## Unreleased
 
+## 2.7.3 — 2026-08-05
+
+### Revision 55.20 — Real audit coverage and honest disclosure
+
+- Added a public `coverage` record with inventory completeness, total/read source files, total/read critical components, current test execution, documents used by final claims, and `none`/`partial`/`targeted`/`complete` level.
+- Derived critical components from deterministic catalog slots and Scout selections instead of model self-reporting.
+- Counted `docs_used` only from final selected evidence IDs and test execution only from an actual `run_tests` action in the current task.
+- Added a deterministic coverage disclosure after grounding, including reviewed components, source-file reach, test execution status, and the explicit limitation that universal bug absence cannot be claimed.
+- Allowed old release notes to be cited as historical records only when explicitly attributed to fresh documentation evidence; historical counts no longer become current operational status.
+- Added the required regression matrix for large trees, documentation-only reads, insufficient single-file coverage, health claims, unverified test counts, historical releases, and complete small projects.
+
+### Validation
+
+- `python -m compileall -q .` passed.
+- `node --check web/static/app.js` passed.
+- 345/345 executable tests passed.
+- One Flask-dependent module remained skipped because Flask was unavailable in the packaging environment.
+- The real Qwen 3.8 MAX endpoint was not available in the packaging environment.
+
+### Revision 55.19 — Structured claims, health gates, and indexed-memory trust
+
+- Replaced the `project_audit` Finalizer contract `answer + claim_annotations` with atomic `claims[]` containing `type`, `text`, `evidence_ids`, and `basis`.
+- Added deterministic response rendering from validated claims, so the final text cannot drift away from its evidence annotations.
+- Added `TEST_STATUS_NOT_VERIFIED` when a claim says tests pass without a successful executed `run_tests` action in the current task.
+- Added `UNSUPPORTED_HEALTH_CLAIM` for global statements such as “no critical issues” or “all functionality is operational” without complete configured audit coverage and current operational proof.
+- Marked `memory/entendimento.json` as `UNTRUSTED NAVIGATION HINT`; entries only receive `HASH_VERIFIED_NAVIGATION_FACT` when the persisted file hash still matches disk, while audit conclusions still require fresh Evidence Registry IDs.
+- Added schema/config support for `agent.audit_health_claim_required_score`.
+
+### Validation
+
+- `python -m compileall -q .` passed.
+- `node --check web/static/app.js` passed.
+- 336/336 executable tests passed.
+- One Flask-dependent module remained skipped because Flask was unavailable in the packaging environment.
+- The real Qwen 3.8 MAX endpoint was not available in the packaging environment.
+
 ## 2.7.3 — 2026-08-04
+
+### Revision 55.18 — Deterministic audit Scout and Finalizer
+
+- Added a deterministic role-based candidate catalog after `list_tree`, covering entrypoints, orchestrators, state/persistence, grounding/recovery/validation, correlated tests, and principal configuration.
+- Restricted Scout selections to real catalog paths, rejected invented paths, and preserved system-required baseline slots even when the model returns an empty or incomplete plan.
+- Split `project_audit` into inventory, initial Scout, automatic reads, fresh-code gap review, optional gap coverage, dedicated Finalizer, and the existing grounding/coverage gates.
+- Removed tools from the Finalizer prompt and rejected any Finalizer response that attempts another tool call.
+- Persisted the audit pipeline through checkpoints and exposed the public phase, selected paths, completed/failed reads, and Finalizer call count in the work summary.
+- Kept the generic monolithic Agent for other task types while preventing it from planning and concluding a general project audit in one call.
+
+### Validation
+
+- `python -m compileall -q .` passed.
+- `node --check web/static/app.js` passed.
+- 328/328 executable tests passed.
+- One Flask-dependent module remained skipped because Flask was unavailable in the packaging environment.
+- The real Qwen 3.8 MAX endpoint was not available in the packaging environment.
+
+### Revision 55.17 — Minimum project-audit coverage
+
+- Added the dedicated `project_audit` task type for general project analysis.
+- Required deterministic coverage of inventory, entrypoint, core logic, error paths, tests or test configuration, coverage reporting, and grounded conclusion.
+- Prevented README, CHANGELOG, and `docs/**` from satisfying fresh source-code evidence.
+- Added `SOURCE_CODE_NOT_ANALYZED` and `PROJECT_AUDIT_COVERAGE_INCOMPLETE` fail-closed results and blocked legacy fallback bypasses.
+
+### Validation
+
+- `python -m compileall -q .` passed.
+- `node --check web/static/app.js` passed.
+- 322/322 executable tests passed.
+- One Flask-dependent module remained skipped because Flask was unavailable in the packaging environment.
+
+### Revision 55.16 — Full project inventory
+
+- Preserved every entry returned by `list_tree` in a dedicated structured `project_inventory`, outside the 500-character recent-observation summary.
+- Included the full preserved inventory in every subsequent Agent decision, so central folders such as `engine/`, `llm/`, and `tests/` cannot disappear from context.
+- Added deterministic inventory hashes, file/directory totals, root entries, extension counts, ignore counts, and explicit complete/partial coverage metadata.
+- Persisted the inventory through task checkpoints without duplicating the raw tree in compact action logs.
+- Marked truncated inventories as partial and instructed the model not to claim that unlisted files do not exist.
+- Added regression coverage with a 143-entry tree, prompt verification, checkpoint round-trip, partial-coverage warnings, and deterministic reader metadata.
+
+### Validation
+
+- `python -m compileall -q .` passed.
+- `node --check web/static/app.js` passed.
+- 314/314 executable tests passed.
+- One Flask-dependent module remained skipped because Flask was unavailable in the packaging environment.
 
 ### Revision 55.15 — Evidence integrity and job identity
 

@@ -105,6 +105,8 @@ Enable it only after configuring an allowed command and an isolation backend tha
 
 For the shipped local backend, Worker and LLM concurrency are both `1`. Raising Worker concurrency above LLM concurrency is accepted but capped at runtime. Agent cycle detection uses `agent.cycle_min_repetitions=3`, and structured-format recovery uses `agent.max_tentativas_parse=2`.
 
+Project-audit health claims are fail-closed. `agent.audit_health_claim_required_score` is a float from `0.0` to `1.0` and defaults to `1.0`; claims such as “no critical issues” require at least that structural coverage score plus current operational proof. Claims that tests pass always require a successful `run_tests` action recorded in the current task.
+
 ```json
 {
   "worker": {

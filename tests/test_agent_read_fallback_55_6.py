@@ -144,7 +144,7 @@ def test_processar_agente_cai_no_fallback_apos_json_invalido(monkeypatch):
     assert resultado is esperado
 
 
-def test_processar_agente_cai_no_fallback_apos_timeout(monkeypatch):
+def test_project_audit_nao_cai_no_fallback_legado_apos_timeout(monkeypatch):
     monkeypatch.setattr(
         engine_mod.fila_persistente,
         "criar_tarefa_agente",
@@ -174,5 +174,6 @@ def test_processar_agente_cai_no_fallback_apos_timeout(monkeypatch):
         "analise geral encaminhada ao agente",
     )
 
-    assert resultado["resposta"] == "fallback timeout ok"
-    assert capturado["causa"] == "agent_llm_task_deadline_exceeded"
+    assert resultado["agente_status"] == "failed"
+    assert "timeout" in resultado["resposta"].lower()
+    assert capturado == {}

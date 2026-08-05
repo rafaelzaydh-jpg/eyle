@@ -86,11 +86,19 @@ if BASE_DIR not in sys.path:
 from llm.executar import (  # noqa: E402
     ErroLLM,
     PROMPT_AGENTE,
+    PROMPT_AUDIT_SCOUT,
+    PROMPT_AUDIT_FINALIZER,
     executar_agente as executar_agente_llm,
+    executar_audit_scout as executar_audit_scout_llm,
+    executar_audit_finalizer as executar_audit_finalizer_llm,
 )
 from engine.agent_state import AgentState, GoalState  # noqa: E402
 from engine.text_hash import hash_texto, normalizar_quebras  # noqa: E402
-from engine.compiler import montar_prompt_agente  # noqa: E402
+from engine.compiler import (  # noqa: E402
+    montar_prompt_agente,
+    montar_prompt_scout_auditoria,
+    montar_prompt_finalizer_auditoria,
+)
 from engine.grounding import (  # noqa: E402
     build_safe_grounded_answer,
     format_grounding_feedback,
@@ -99,11 +107,31 @@ from engine.grounding import (  # noqa: E402
 from engine.project_reader import ErroLeituraProjeto, ler_faixa_projeto  # noqa: E402
 from engine.response_recovery import recover_useful_response  # noqa: E402
 from engine.utility_gate import validate_response_utility  # noqa: E402
+from engine.structured_claims import (  # noqa: E402
+    claim_evidence_ids,
+    claims_to_annotations,
+    normalize_structured_claims,
+    render_claims,
+    validate_health_claims,
+)
 from engine.retencao import rotacionar_arquivo  # noqa: E402
-from engine.roteador import classificar_modo_projeto  # noqa: E402
+from engine.roteador import classificar_modo_projeto, pede_auditoria_projeto  # noqa: E402
 from engine.seguranca import _resolver_caminho_seguro  # noqa: E402
 from engine import telemetry  # noqa: E402
 from engine import progress as job_progress  # noqa: E402
+from engine.analysis_coverage import (  # noqa: E402
+    evaluate_project_audit_coverage,
+    is_source_path,
+    next_project_audit_action,
+    public_coverage_report,
+    render_coverage_disclosure,
+)
+from engine.audit_pipeline import (  # noqa: E402
+    build_audit_candidate_catalog,
+    normalize_scout_selection,
+    public_pipeline_state,
+    related_test_candidates,
+)
 
 try:
     from engine.agent_tools import (  # noqa: E402
@@ -193,7 +221,13 @@ def _decisao_estruturalmente_valida(dados):
     if not isinstance(final, dict):
         return False
     resposta = final.get("answer", final.get("resposta"))
-    return isinstance(resposta, str) and bool(resposta.strip())
+    claims = final.get("claims", final.get("afirmacoes"))
+    return (
+        isinstance(resposta, str) and bool(resposta.strip())
+    ) or (
+        isinstance(claims, list) and bool(claims)
+        and all(isinstance(item, dict) for item in claims)
+    )
 
 
 def _limite_runtime(config):
@@ -237,6 +271,8 @@ def classificar_tarefa_agente(objetivo, projeto=None, modo=None):
     modo = modo or classificar_modo_projeto(objetivo)
     if modo == "edit" or _RE_INTENCAO_ESCRITA.search(objetivo or ""):
         return "project_write"
+    if modo == "analyze" and pede_auditoria_projeto(objetivo):
+        return "project_audit"
     return "project_read"
 
 
@@ -287,8 +323,38 @@ def _atualizar_frescor_evidencias(estado, projeto):
 
 
 def _normalizar_conclusao(decisao, estado, task_type):
-    """Converte o JSON da LLM no contrato interno da Atualizacao 43."""
+    """Converte o JSON da LLM no contrato interno.
+
+    Em ``project_audit`` a revisao 55.19 exige claims estruturadas. O texto
+    final e renderizado pelo sistema; o modelo nao fornece mais ``answer`` nem
+    ``claim_annotations`` separados para essa tarefa.
+    """
     valor = decisao.get("final")
+    if task_type == "project_audit":
+        if not isinstance(valor, dict):
+            return None, "final precisa ser um objeto com claims estruturadas"
+        claims, claim_error = normalize_structured_claims(
+            valor.get("claims", valor.get("afirmacoes"))
+        )
+        if claim_error:
+            return None, claim_error
+        limitacoes = valor.get("limitations", valor.get("limitacoes", []))
+        verificacao = valor.get("verification", valor.get("verificacao"))
+        if not isinstance(limitacoes, list) or not all(isinstance(item, str) for item in limitacoes):
+            return None, "final.limitations precisa ser uma lista de textos"
+        resposta = render_claims(claims)
+        if not resposta:
+            return None, "final.claims nao produziu texto util"
+        return {
+            "resposta": resposta,
+            "claims": claims,
+            "evidence_ids": claim_evidence_ids(claims),
+            "verificacao": verificacao,
+            "limitacoes": limitacoes,
+            "claim_annotations": claims_to_annotations(claims),
+            "task_type": task_type,
+        }, None
+
     if isinstance(valor, dict):
         # English is the canonical model protocol; Portuguese keys remain
         # accepted for checkpoints and older model outputs.
@@ -319,9 +385,7 @@ def _normalizar_conclusao(decisao, estado, task_type):
     ):
         return None, "final.claim_annotations precisa ser uma lista de objetos"
 
-    # Compatibilidade com respostas antigas: depois de uma leitura real,
-    # uma string final e normalizada internamente com todas as evidencias
-    # frescas. O prompt novo pede IDs explicitos; o gate continua objetivo.
+    # Compatibilidade com respostas antigas fora de project_audit.
     if evidence_ids is None and task_type != "chat":
         evidence_ids = [item.get("id") for item in estado.evidencias_frescas()]
     if evidence_ids is None:
@@ -601,8 +665,9 @@ def prompt_reforco_formato(prompt, resposta_llm):
         "\n\n[FORMAT ERROR] Your previous response was not valid agent JSON. "
         "Return ONLY one allowed JSON object, with no text before or after it: "
         "{\"tool\":\"...\",\"arguments\":{...}} or "
-        "{\"final\":{\"answer\":\"...\",\"evidence_ids\":[],"
-        "\"verification\":\"...\",\"limitations\":[],\"claim_annotations\":[]}} or "
+        "{\"final\":{\"claims\":[{\"type\":\"fact\",\"text\":\"...\","
+        "\"evidence_ids\":[\"ev-0001\"],\"basis\":\"\"}],"
+        "\"verification\":\"...\",\"limitations\":[]}} or "
         "{\"final\":\"...\"} or {\"needs_user\":\"...\"}. "
         "Previous response (possibly truncated): "
         f"{(resposta_llm or '').strip()[:300]}"
@@ -802,8 +867,18 @@ def _needs_user_antes_de_leitura(estado, task_type):
     resposta nao pode transferir ao usuario um trabalho que as tools READ
     conseguem fazer. Uma falha real de tool libera a pergunta.
     """
-    if task_type not in ("project_read", "project_write"):
+    if task_type not in ("project_read", "project_audit", "project_write"):
         return False
+    # Uma auditoria geral nao precisa perguntar "qual arquivo?": o inventario
+    # e os gates determinísticos ja definem o que falta. needs_user so e
+    # liberado depois de uma falha real de ferramenta/bloqueio externo.
+    if task_type == "project_audit":
+        for acao in estado.actions:
+            if not acao.get("action_number"):
+                continue
+            if acao.get("ok") is False or acao.get("error_code"):
+                return False
+        return True
     # Evidencia stale prova que houve leitura e que o bloqueio nasceu de uma
     # mudanca real no disco; nesse caso a pausa existente da retomada continua
     # valida. O bug corrigido aqui e a fuga com zero tentativa de codigo.
@@ -828,15 +903,189 @@ def _analise_geral_ainda_precisa_list_tree(estado):
 
 
 def _acao_obrigatoria_goal_state(estado):
-    """Executa transicoes que o proprio GoalState ja tornou obrigatorias.
+    """Executa transicoes que o proprio GoalState tornou obrigatorias.
 
-    Isto nao e um atalho por tamanho de projeto. A mesma regra vale para
-    qualquer analise geral: o plano e o validador exigem ``list_tree`` como
-    primeira acao, portanto nao faz sentido gastar uma chamada LLM apenas
-    para ela repetir uma decisao que o sistema ja conhece.
+    Na revisao 55.18, ``project_audit`` usa a fila do pipeline Scout em vez de
+    pedir uma nova escolha de arquivo a cada rodada. O fallback antigo por
+    cobertura continua apenas para checkpoints legados sem pipeline montado.
     """
     if _analise_geral_ainda_precisa_list_tree(estado):
         return {"tool": "list_tree", "arguments": {}}
+    if estado.goal_state.get("task_type") == "project_audit":
+        pipeline = estado.audit_pipeline or {}
+        pendentes = pipeline.get("pending_reads") or []
+        if pendentes:
+            return {"tool": "read_file", "arguments": {"caminho_relativo": pendentes[0]}}
+        if pipeline.get("catalog"):
+            return None
+        cobertura = estado.atualizar_cobertura_auditoria()
+        return next_project_audit_action(cobertura)
+    return None
+
+
+def _executar_perfil_json(funcao, prompt, config, *, kind):
+    """Executa Scout/Finalizer com retry curto de formato, sem misturar papeis."""
+    max_tentativas = max(1, int((config or {}).get("agent", {}).get("max_tentativas_parse", 2)))
+    resposta = ""
+    atual = prompt
+    for tentativa in range(1, max_tentativas + 1):
+        resposta = funcao(atual, config)
+        decisao = _parse_decisao_agente(resposta)
+        if decisao is not None:
+            return decisao, tentativa, resposta
+        atual = (
+            prompt
+            + "\n\n[FORMAT ERROR] Return only the required JSON envelope for "
+            + kind
+            + ". Previous response: "
+            + str(resposta or "")[:300]
+        )
+    return None, max_tentativas, resposta
+
+
+def _pipeline_auditoria_preparar(estado, objetivo, config):
+    """Avanca Scout -> leituras -> gaps -> Finalizer sem gerar resposta no Scout.
+
+    Retorna ``None`` quando a proxima acao vem da fila obrigatoria, ou uma
+    decisao ``final`` ja produzida pelo Finalizer.
+    """
+    if not estado.project_inventory:
+        return None
+    cfg = (config or {}).get("agent", {})
+    pipeline = estado.audit_pipeline
+    catalog = pipeline.get("catalog") or {}
+    if not catalog:
+        catalog = build_audit_candidate_catalog(
+            estado.project_inventory,
+            max_candidates=max(8, int(cfg.get("audit_candidate_limit", 48))),
+        )
+        pipeline["catalog"] = catalog
+        pipeline["phase"] = "initial_scout"
+        if int((catalog.get("counts") or {}).get("source") or 0) <= 0:
+            pipeline["phase"] = "no_source"
+            return None
+
+    read_paths = [
+        item.get("arquivo") for item in estado.evidencias_frescas()
+        if isinstance(item.get("arquivo"), str)
+    ]
+    initial_limit = max(1, int(cfg.get("audit_initial_read_limit", 6)))
+    gap_limit = max(0, int(cfg.get("audit_gap_read_limit", 1)))
+
+    if pipeline.get("pending_reads"):
+        return None
+
+    phase = pipeline.get("phase")
+    if phase in ("awaiting_inventory", "initial_scout"):
+        prompt = montar_prompt_scout_auditoria(
+            objetivo,
+            catalog,
+            phase="initial",
+            analysis_coverage=public_coverage_report(estado.analysis_coverage),
+            evidencias=estado.evidence,
+            pipeline_state=public_pipeline_state(pipeline),
+            config=config,
+            system_prompt=PROMPT_AUDIT_SCOUT,
+        )
+        try:
+            decision, attempts, raw = _executar_perfil_json(
+                executar_audit_scout_llm, prompt, config, kind="audit scout",
+            )
+        except ErroLLM as erro:
+            decision, attempts, raw = None, 1, str(erro)
+            pipeline["initial_scout_error"] = getattr(erro, "error_code", None) or type(erro).__name__
+        if not isinstance((decision or {}).get("final"), dict):
+            decision = None
+        selection = normalize_scout_selection(
+            decision or {}, catalog, already_read=read_paths,
+            limit=initial_limit, include_required=True,
+        )
+        pipeline["initial_scout"] = {
+            **selection,
+            "attempts": attempts,
+            "fallback_deterministic": decision is None,
+        }
+        pipeline["pending_reads"] = list(selection.get("selected_paths") or [])
+        pipeline["phase"] = "reading_initial" if pipeline["pending_reads"] else "gap_scout"
+        return None
+
+    if phase == "reading_initial":
+        pipeline["phase"] = "gap_scout"
+        phase = "gap_scout"
+
+    if phase == "gap_scout":
+        remaining_steps = max(0, int(cfg.get("max_steps", 8)) - int(estado.acoes_executadas))
+        allowed_gap = min(gap_limit, remaining_steps)
+        if allowed_gap > 0:
+            prompt = montar_prompt_scout_auditoria(
+                objetivo,
+                catalog,
+                phase="gap_review",
+                analysis_coverage=public_coverage_report(estado.analysis_coverage),
+                evidencias=estado.evidence,
+                pipeline_state=public_pipeline_state(pipeline),
+                config=config,
+                system_prompt=PROMPT_AUDIT_SCOUT,
+            )
+            try:
+                decision, attempts, raw = _executar_perfil_json(
+                    executar_audit_scout_llm, prompt, config, kind="audit gap scout",
+                )
+            except ErroLLM as erro:
+                decision, attempts, raw = None, 1, str(erro)
+                pipeline["gap_scout_error"] = getattr(erro, "error_code", None) or type(erro).__name__
+            if not isinstance((decision or {}).get("final"), dict):
+                decision = None
+            selection = normalize_scout_selection(
+                decision or {}, catalog, already_read=read_paths,
+                limit=allowed_gap, include_required=False, allow_empty=True,
+            )
+            # Se o Scout apontou um componente sem seu teste relacionado, o
+            # sistema prefere fechar essa lacuna com um teste real.
+            related = related_test_candidates(
+                catalog,
+                selection.get("selected_paths") or read_paths,
+                already_read=read_paths,
+                limit=allowed_gap,
+            )
+            chosen = list(dict.fromkeys((selection.get("selected_paths") or []) + related))[:allowed_gap]
+            selection["selected_paths"] = chosen
+            pipeline["gap_scout"] = {
+                **selection,
+                "attempts": attempts,
+                "fallback_deterministic": decision is None,
+            }
+            pipeline["pending_reads"] = chosen
+            pipeline["phase"] = "reading_gaps" if chosen else "finalizer"
+            if chosen:
+                return None
+        else:
+            pipeline["gap_scout"] = {"selected_paths": [], "skipped": "tool_budget_exhausted"}
+            pipeline["phase"] = "finalizer"
+
+    if pipeline.get("phase") == "reading_gaps":
+        pipeline["phase"] = "finalizer"
+
+    if pipeline.get("phase") == "finalizer":
+        prompt = montar_prompt_finalizer_auditoria(
+            objetivo,
+            goal_state=estado.goal_state,
+            analysis_coverage=public_coverage_report(estado.analysis_coverage),
+            project_inventory=estado.project_inventory,
+            audit_pipeline=public_pipeline_state(pipeline),
+            evidencias=estado.evidence,
+            config=config,
+            system_prompt=PROMPT_AUDIT_FINALIZER,
+        )
+        decision, attempts, raw = _executar_perfil_json(
+            executar_audit_finalizer_llm, prompt, config, kind="audit finalizer",
+        )
+        pipeline["finalizer_calls"] = int(pipeline.get("finalizer_calls") or 0) + attempts
+        if decision is None or "final" not in decision:
+            pipeline["phase"] = "finalizer_failed"
+            return None
+        pipeline["phase"] = "finalizer"
+        return decision
     return None
 
 
@@ -1557,13 +1806,76 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 "tipo": "evidencias_stale_por_hash",
                 "evidence_ids": invalidadas,
             })
+        decisao_pipeline = None
+        if task_type == "project_audit":
+            estado.atualizar_cobertura_auditoria()
+            if estado.project_inventory:
+                try:
+                    decisao_pipeline = _pipeline_auditoria_preparar(
+                        estado, objetivo, config,
+                    )
+                except ErroLLM as erro_llm:
+                    return _retorno_agente(
+                        "failed",
+                        "O Finalizer da auditoria falhou antes de produzir uma conclusao estruturada.",
+                        None,
+                        {
+                            "task_type": task_type,
+                            "mode": modo,
+                            "goal_state": estado.goal_state,
+                            "failure_code": getattr(erro_llm, "error_code", None) or "AUDIT_FINALIZER_LLM_FAILURE",
+                            "audit_pipeline": public_pipeline_state(estado.audit_pipeline),
+                        },
+                        retornar_detalhes,
+                    )
+                if estado.audit_pipeline.get("phase") == "no_source":
+                    return _retorno_agente(
+                        "failed",
+                        "A auditoria nao encontrou nenhum arquivo-fonte no inventario atual.",
+                        None,
+                        {
+                            "task_type": task_type,
+                            "mode": modo,
+                            "goal_state": estado.goal_state,
+                            "failure_code": "SOURCE_CODE_NOT_ANALYZED",
+                            "analysis_coverage": public_coverage_report(estado.analysis_coverage),
+                            "audit_pipeline": public_pipeline_state(estado.audit_pipeline),
+                        },
+                        retornar_detalhes,
+                    )
+                if estado.audit_pipeline.get("phase") == "finalizer_failed":
+                    return _retorno_agente(
+                        "failed",
+                        "O Finalizer nao devolveu o contrato JSON valido da auditoria.",
+                        None,
+                        {
+                            "task_type": task_type,
+                            "mode": modo,
+                            "goal_state": estado.goal_state,
+                            "failure_code": "AUDIT_FINALIZER_INVALID_FORMAT",
+                            "audit_pipeline": public_pipeline_state(estado.audit_pipeline),
+                        },
+                        retornar_detalhes,
+                    )
         decisao_forcada = _acao_obrigatoria_goal_state(estado)
         tipo_decisao_forcada = "transicao_obrigatoria"
-        if decisao_forcada is None and _deve_recuperar_sem_llm(estado):
+        if decisao_forcada is None and decisao_pipeline is None and _deve_recuperar_sem_llm(estado):
             decisao_forcada = _acao_recuperacao_deterministica(objetivo, estado)
             tipo_decisao_forcada = "recuperacao_deterministica"
 
-        if decisao_forcada is not None:
+        if decisao_pipeline is not None:
+            resultado_passo = {
+                "decisao": decisao_pipeline,
+                "falhou": False,
+                "tentativas": 1,
+                "resposta_bruta": "",
+            }
+            _registrar_trace_estado(estado, {
+                "step": step,
+                "tipo": "audit_finalizer",
+                "phase": estado.audit_pipeline.get("phase"),
+            })
+        elif decisao_forcada is not None:
             resultado_passo = {
                 "decisao": decisao_forcada,
                 "falhou": False,
@@ -1585,15 +1897,18 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 evidencias=estado.evidence,
                 actions=estado.actions,
                 edit_state=estado.edit_state,
+                project_inventory=estado.project_inventory,
+                analysis_coverage=estado.analysis_coverage,
                 config=config,
                 system_prompt=PROMPT_AGENTE,
+                projeto=projeto,
             )
             try:
                 resultado_passo = decidir_passo(prompt, config)
             except ErroLLM as erro_llm:
                 codigo = getattr(erro_llm, "error_code", None) or "LLM_FAILURE"
                 decisao_recuperada = None
-                if task_type == "project_read":
+                if task_type in ("project_read", "project_audit"):
                     if estado.evidencias_frescas():
                         decisao_recuperada = _recuperar_resposta(
                             f"agent_llm_{str(codigo).lower()}",
@@ -1657,7 +1972,7 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 "resposta_bruta": (resultado_passo["resposta_bruta"] or "")[:300],
             })
             decisao_recuperada = None
-            if task_type == "project_read":
+            if task_type in ("project_read", "project_audit"):
                 if estado.evidencias_frescas():
                     decisao_recuperada = _recuperar_resposta(
                         "invalid_agent_json",
@@ -1789,6 +2104,69 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                         retornar_detalhes,
                     )
                 continue
+            if task_type == "project_audit":
+                cobertura_previa = estado.atualizar_cobertura_auditoria()
+                pendencias_estruturais = [
+                    item for item in cobertura_previa.get("missing") or []
+                    if item not in {"coverage_reported", "grounded_answer"}
+                ]
+                if pendencias_estruturais:
+                    codigo_cobertura = cobertura_previa.get("failure_code") or "PROJECT_AUDIT_COVERAGE_INCOMPLETE"
+                    detalhe_cobertura = {
+                        "missing": pendencias_estruturais,
+                        "next_read_candidates": cobertura_previa.get("next_read_candidates") or [],
+                        "reads": cobertura_previa.get("reads") or {},
+                    }
+                    estado.observar("project_audit_coverage", {
+                        "status": "failed", "ok": False, "executed": False,
+                        "changed": False, "error_code": codigo_cobertura,
+                        "detail": detalhe_cobertura,
+                    })
+                    if _sem_progresso(
+                        estado, max_sem_progresso, step,
+                        "final_recusado_cobertura_auditoria",
+                        f"{codigo_cobertura}: {', '.join(pendencias_estruturais)}",
+                    ):
+                        return _retorno_agente(
+                            "failed",
+                            "A auditoria não atingiu a cobertura mínima obrigatória antes da conclusão.",
+                            None,
+                            {
+                                "task_type": task_type, "mode": modo,
+                                "goal_state": estado.goal_state,
+                                "failure_code": codigo_cobertura,
+                                "analysis_coverage": public_coverage_report(cobertura_previa),
+                            },
+                            retornar_detalhes,
+                        )
+                    continue
+
+                health_gate = validate_health_claims(
+                    conclusao.get("claims") or [],
+                    cobertura_previa,
+                    estado.actions,
+                    evidence=estado.evidencias_frescas(),
+                    required_score=float(
+                        config.get("agent", {}).get("audit_health_claim_required_score", 1.0)
+                    ),
+                )
+                conclusao["health_claim_gate"] = health_gate
+                if not health_gate.get("ok", False):
+                    return _retorno_agente(
+                        "failed",
+                        "A conclusão tentou declarar a saúde geral do projeto sem prova operacional suficiente.",
+                        None,
+                        {
+                            "task_type": task_type,
+                            "mode": modo,
+                            "goal_state": estado.goal_state,
+                            "failure_code": health_gate.get("failure_code"),
+                            "health_claim_gate": health_gate,
+                            "analysis_coverage": public_coverage_report(cobertura_previa),
+                        },
+                        retornar_detalhes,
+                    )
+
             utility_gate = validate_response_utility(
                 conclusao.get("resposta"), objetivo,
                 task_type=task_type, evidence=estado.evidencias_frescas(),
@@ -1802,7 +2180,7 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 # Em tarefa de projeto, uma conclusao prematura sem qualquer
                 # evidencia nao e falha de recuperacao: o pipeline ainda deve
                 # cumprir a etapa de leitura antes de tentar gerar novamente.
-                if task_type in ("project_read", "project_write") and not estado.evidencias_frescas():
+                if task_type in ("project_read", "project_audit", "project_write") and not estado.evidencias_frescas():
                     estado.observar_final_sem_grounding(
                         "final recusado sem grounding: nenhuma evidencia fresca foi lida"
                     )
@@ -1852,7 +2230,7 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
             conclusao["utility_gate"] = utility_gate
 
             evidencias_usadas = []
-            if task_type in ("project_read", "project_write"):
+            if task_type in ("project_read", "project_audit", "project_write"):
                 valido, motivo, evidencias_usadas = _validar_conclusao_projeto(
                     conclusao, estado, projeto,
                 )
@@ -1917,6 +2295,34 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                     conclusao["recovery_layer"] = recuperacao_atual.get("layer")
                     conclusao["utility_gate"] = recuperacao_atual.get("utility_gate")
                 conclusao["verificacao_sistema"] = motivo
+                if task_type == "project_audit" and not any(
+                    is_source_path(item.get("arquivo")) for item in evidencias_usadas
+                ):
+                    estado.observar("project_audit_grounding", {
+                        "status": "failed", "ok": False, "executed": False,
+                        "changed": False, "error_code": "SOURCE_CODE_NOT_ANALYZED",
+                        "detail": (
+                            "A conclusão da auditoria declarou apenas evidências de documentação; "
+                            "inclua evidence_ids de código-fonte realmente lido."
+                        ),
+                    })
+                    if _sem_progresso(
+                        estado, max_sem_progresso, step,
+                        "final_recusado_docs_only", "conclusao apoiada apenas em documentacao",
+                    ):
+                        return _retorno_agente(
+                            "failed",
+                            "A auditoria foi recusada porque a conclusão não usou código-fonte como evidência.",
+                            None,
+                            {
+                                "task_type": task_type, "mode": modo,
+                                "goal_state": estado.goal_state,
+                                "failure_code": "SOURCE_CODE_NOT_ANALYZED",
+                                "analysis_coverage": public_coverage_report(estado.analysis_coverage),
+                            },
+                            retornar_detalhes,
+                        )
+                    continue
                 verificacao_semantica = verify_conclusion(
                     conclusao.get("resposta"),
                     evidencias_usadas,
@@ -2133,6 +2539,38 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 else:
                     conclusao["utility_gate"] = final_utility_gate
 
+                if task_type == "project_audit":
+                    cobertura_final = estado.atualizar_cobertura_auditoria(
+                        coverage_reported=True,
+                        grounded_answer=True,
+                        selected_evidence_ids=conclusao.get("evidence_ids") or [],
+                    )
+                    if not cobertura_final.get("passed"):
+                        return _retorno_agente(
+                            "failed",
+                            "A conclusão passou pelo grounding, mas a cobertura mínima da auditoria não foi satisfeita.",
+                            None,
+                            {
+                                "task_type": task_type, "mode": modo,
+                                "goal_state": estado.goal_state,
+                                "failure_code": cobertura_final.get("failure_code") or "PROJECT_AUDIT_COVERAGE_INCOMPLETE",
+                                "analysis_coverage": public_coverage_report(cobertura_final),
+                            },
+                            retornar_detalhes,
+                        )
+                    conclusao["analysis_coverage"] = public_coverage_report(cobertura_final)
+                    conclusao["coverage"] = dict(cobertura_final.get("coverage") or {})
+                    conclusao["coverage_disclosure"] = render_coverage_disclosure(
+                        cobertura_final,
+                        language_sample=f"{objetivo}\n{conclusao.get('resposta') or ''}",
+                    )
+                    if conclusao["coverage_disclosure"]:
+                        conclusao["resposta"] = (
+                            conclusao["coverage_disclosure"].strip()
+                            + "\n\n"
+                            + conclusao["resposta"].strip()
+                        )
+
                 if task_type == "project_write":
                     edit_valido, motivo_edit = estado.validar_conclusao_edicao(
                         conclusao.get("evidence_ids") or [],
@@ -2152,6 +2590,9 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                             )
                         continue
                     conclusao["verificacao_sistema"] = motivo_edit
+
+            if task_type == "project_audit":
+                estado.audit_pipeline["phase"] = "completed"
 
             estado.marcar_concluido()
             detalhes = {
@@ -2189,6 +2630,12 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                     if conclusao.get("grounding_fallback_applied") else None
                 ),
                 "limitacoes": conclusao.get("limitacoes", []),
+                "claims": conclusao.get("claims", []),
+                "health_claim_gate": conclusao.get("health_claim_gate"),
+                "analysis_coverage": conclusao.get("analysis_coverage") or public_coverage_report(estado.analysis_coverage),
+                "coverage": conclusao.get("coverage") or (estado.analysis_coverage.get("coverage") if isinstance(estado.analysis_coverage, dict) else {}),
+                "coverage_disclosure": conclusao.get("coverage_disclosure"),
+                "audit_pipeline": public_pipeline_state(estado.audit_pipeline) if task_type == "project_audit" else {},
                 "edit_state": _edit_state_publico(estado),
             }
             _registrar_trace_estado(estado, {

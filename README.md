@@ -20,10 +20,10 @@
   <img alt="Release 2.7.3" src="https://img.shields.io/badge/release-2.7.3-2563EB">
   <img alt="Local execution" src="https://img.shields.io/badge/execution-local-16A34A">
   <img alt="BM25 retrieval" src="https://img.shields.io/badge/retrieval-BM25-F59E0B">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-309%20passed-16A34A">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-345%20passed-16A34A">
 </p>
 
-**Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.15-evidence-integrity-and-job-identity
+**Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.20-real-audit-coverage
 
 ## Overview
 
@@ -47,6 +47,13 @@ Eyle indexes a local repository, retrieves only relevant evidence, and uses a lo
 - Unified response normalization for `content`, `reasoning_content`, streaming chunks, partial JSON, and plain text.
 - Utility gate and layered recovery prevent empty or receipt-only responses from being published as success.
 - A single Evidence Registry feeds reading, analysis, grounding, conclusions, and the public work summary.
+- A full structured project inventory survives the 500-character observation summaries and remains visible to every subsequent Agent decision.
+- General project audits use a deterministic role-based candidate catalog before model selection.
+- A dedicated Scout selects valid components, the system reads them automatically, a gap-review Scout inspects fresh code, and a tool-free Finalizer produces the grounded conclusion.
+- The audit Finalizer emits atomic structured claims; Eyle validates claim-level evidence, renders the final text deterministically, and blocks unsupported global health or test-status statements.
+- Indexed project memory is labeled as an untrusted navigation hint unless its stored file hash still matches disk; fresh Evidence Registry IDs remain mandatory for audit conclusions.
+- Every project audit publishes deterministic real-coverage metrics: complete inventory status, source files read, critical components reviewed, current test execution, documents actually used, and a `none`/`partial`/`targeted`/`complete` level.
+- The system adds an honest coverage disclosure after grounding and always states that the audit cannot guarantee universal absence of bugs.
 - Schema-validated tools and explicit `READ`, `EXEC`, and `WRITE` permissions.
 - Atomic patching, explicit confirmation, isolated tests, final reread, and rollback.
 - Shared deadlines, differentiated timeouts, retry backoff, rate limiting, and telemetry.
@@ -168,7 +175,7 @@ python main.py benchmark
 
 Release validation in the packaging environment:
 
-- **218/218 executable non-web tests passed**;
+- **328/328 executable tests passed**;
 - **1 web test module was skipped** because Flask was not installed there;
 - the real-model benchmark remains environment-specific and must be run with the actual endpoint, model, quantization, hardware, and target repository.
 

@@ -78,6 +78,50 @@ def _rotulos_evidencia(detalhes, contexto):
         return _unicos(rotulos)
     return _unicos(detalhes.get("evidence_ids") or contexto.get("evidence_ids"))
 
+def _cobertura_auditoria(detalhes):
+    cobertura = detalhes.get("analysis_coverage")
+    if not isinstance(cobertura, dict) or cobertura.get("task_type") != "project_audit":
+        return ""
+    criterios = cobertura.get("criteria") or {}
+    aprovados = sum(1 for valor in criterios.values() if valor is True)
+    total = len(cobertura.get("required_criteria") or criterios)
+    metricas = cobertura.get("coverage") or {}
+    pendentes = cobertura.get("missing") or []
+    texto = (
+        f"{aprovados}/{total} critérios; "
+        f"nível={metricas.get('level') or 'não medido'}; "
+        f"inventário={'completo' if metricas.get('inventory_complete') else 'parcial'}; "
+        f"código={metricas.get('code_files_read', 0)}/{metricas.get('code_files_total', 0)}; "
+        f"componentes críticos={metricas.get('critical_components_read', 0)}/"
+        f"{metricas.get('critical_components_total', 0)}; "
+        f"testes executados={'sim' if metricas.get('tests_executed') else 'não'}; "
+        f"documentos usados={metricas.get('docs_used', 0)}"
+    )
+    if pendentes:
+        texto += "; pendentes=" + ", ".join(str(item) for item in pendentes)
+    return texto
+
+
+
+def _pipeline_auditoria(detalhes):
+    pipeline = detalhes.get("audit_pipeline")
+    if not isinstance(pipeline, dict) or not pipeline:
+        return ""
+    initial = pipeline.get("initial_scout") or {}
+    gap = pipeline.get("gap_scout") or {}
+    completed = pipeline.get("completed_reads") or []
+    failed = pipeline.get("failed_reads") or []
+    phase = _texto(pipeline.get("phase"), 80) or "desconhecida"
+    texto = (
+        "Scout -> leituras automaticas -> revisao de lacunas -> Finalizer; "
+        f"fase={phase}; selecionados iniciais={len(initial.get('selected_paths') or [])}; "
+        f"lacunas adicionais={len(gap.get('selected_paths') or [])}; "
+        f"leituras concluidas={len(completed)}; finalizer_calls={pipeline.get('finalizer_calls') or 0}"
+    )
+    if failed:
+        texto += f"; leituras com falha={len(failed)}"
+    return texto
+
 def _modo(resultado, detalhes, contexto):
     roteador = resultado.get("roteador") if isinstance(resultado, dict) else {}
     roteador = roteador if isinstance(roteador, dict) else {}
@@ -262,6 +306,8 @@ def construir_resumo_trabalho(evento, resultado, duracao_segundos, projeto=None,
                 _campo("Modo", _modo(resultado, detalhes, contexto)),
                 _campo("Ferramentas utilizadas", ", ".join(ferramentas) or "nenhuma registrada"),
                 _campo("Evidências", ", ".join(evidencias) or "nenhuma registrada"),
+                _campo("Cobertura real", _cobertura_auditoria(detalhes)),
+                _campo("Pipeline de auditoria", _pipeline_auditoria(detalhes)),
             ]),
             _etapa(4, "Conclusão", [
                 _campo("Status", agente_status),

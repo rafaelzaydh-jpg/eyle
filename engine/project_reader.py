@@ -6,6 +6,8 @@ por faixa. Nenhuma funcao usa o indice como fonte do conteudo: o indice
 serve apenas para localizar candidatos; os bytes sao relidos do disco.
 """
 import fnmatch
+import hashlib
+import json
 import os
 
 from engine.seguranca import _resolver_caminho_seguro
@@ -222,13 +224,49 @@ def listar_arvore_projeto(caminho_projeto, limite=200, profundidade=6,
                 return
 
     visitar(raiz, "", [], 1)
-    return {
+
+    total_arquivos = sum(1 for item in entradas if item.get("tipo") == "arquivo")
+    total_diretorios = sum(1 for item in entradas if item.get("tipo") == "diretorio")
+    extensoes = {}
+    diretorios_raiz = []
+    arquivos_raiz = []
+    for item in entradas:
+        caminho = str(item.get("caminho") or "")
+        tipo = item.get("tipo")
+        if tipo == "arquivo":
+            extensao = os.path.splitext(caminho)[1].lower() or "[sem_extensao]"
+            extensoes[extensao] = extensoes.get(extensao, 0) + 1
+            if "/" not in caminho:
+                arquivos_raiz.append(caminho)
+        elif tipo == "diretorio" and "/" not in caminho:
+            diretorios_raiz.append(caminho)
+
+    inventario_canonico = {
+        "schema_version": 1,
         "entradas": entradas,
-        "total_retornado": len(entradas),
         "limite": limite,
         "profundidade_maxima": profundidade,
         "filtro": filtro,
         "truncado": truncado,
         "varredura_completa": not truncado,
         "ignorados_por_motivo": ignorados,
+    }
+    inventario_hash = hashlib.sha256(
+        json.dumps(
+            inventario_canonico,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8", errors="replace")
+    ).hexdigest()
+
+    return {
+        **inventario_canonico,
+        "inventory_hash": inventario_hash,
+        "total_retornado": len(entradas),
+        "total_arquivos": total_arquivos,
+        "total_diretorios": total_diretorios,
+        "diretorios_raiz": diretorios_raiz,
+        "arquivos_raiz": arquivos_raiz,
+        "extensoes": dict(sorted(extensoes.items())),
     }

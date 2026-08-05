@@ -40,7 +40,9 @@
     "retry_read_timeouts": false,
     "_comentario_agent_budget": "Revisao 55.4: decisoes estruturadas do Agente usam ate 512 tokens e 180s. Timeout de leitura nao repete a geracao inteira por padrao; conexao recusada/503 continuam com retry.",
     "stream_responses": true,
-    "_comentario_stream_responses": "Revisao 55.7: respostas textuais usam streaming no painel. Decisoes JSON do Agente continuam ocultas; o usuario ve apenas etapas operacionais, texto final parcial e tokens por segundo."
+    "_comentario_stream_responses": "Revisao 55.7: respostas textuais usam streaming no painel. Decisoes JSON do Agente continuam ocultas; o usuario ve apenas etapas operacionais, texto final parcial e tokens por segundo.",
+    "audit_scout_max_tokens": 700,
+    "audit_finalizer_max_tokens": 1600
   },
   "context": {
     "token_budget": 1500,
@@ -227,7 +229,16 @@
       "evidence_short_generation": true,
       "deterministic_fallback": true,
       "_comentario": "Revisao 55.14: recuperacao em camadas sem success vazio."
-    }
+    },
+    "_comentario_55_16": "Revisao 55.16: o resultado completo retornado por list_tree e preservado em project_inventory, fora das observacoes de 500 caracteres. O compilador inclui todas as entradas no prompt e marca explicitamente inventarios parciais quando max_tree_entries, profundidade, filtro ou regras de exclusao limitam a cobertura.",
+    "_comentario_55_17": "Revisao 55.17: pedidos gerais de analise usam project_audit e so podem concluir apos cobertura minima deterministica de inventario, entrypoint, logica central, caminhos de erro, testes/configuracao, relatorio de cobertura e grounding. README, CHANGELOG e docs sao contexto, mas nunca satisfazem leitura fresca de codigo.",
+    "audit_candidate_limit": 48,
+    "audit_initial_read_limit": 6,
+    "audit_gap_read_limit": 1,
+    "_comentario_55_18": "Revisao 55.18: project_audit usa catalogo deterministico por papel, Scout separado para escolher somente candidatos validos, fila automatica de leituras, revisao de lacunas e Finalizer exclusivo para a conclusao grounded.",
+    "audit_health_claim_required_score": 1.0,
+    "_comentario_55_19": "Revisao 55.19: o Finalizer de project_audit retorna claims atomicas com type, text, evidence_ids e basis; o sistema renderiza a resposta, bloqueia declaracoes globais de saude sem cobertura e prova operacional, exige run_tests executado para afirmar testes passando e trata entendimento.json como pista nao confiavel salvo hash atual correspondente.",
+    "_comentario_55_20": "Revisao 55.20: project_audit mede cobertura real com inventario completo, arquivos de codigo lidos, componentes criticos selecionados pelo pipeline, execucao atual de testes, documentos usados e nivel none/partial/targeted/complete. A conclusao recebe divulgacao deterministica e nunca afirma ausencia total de bugs."
   },
   "version": "2.7.3",
   "updated": "2026-08-05",
@@ -245,7 +256,7 @@
   },
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "55.15-evidence-integrity-and-job-identity",
+  "revision": "55.20-real-audit-coverage",
   "telemetry": {
     "enabled": true,
     "window_seconds": 3600,

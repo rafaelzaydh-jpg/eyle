@@ -218,6 +218,30 @@ def _pede_inspecao_projeto(texto_norm):
     return bool(tokens & PALAVRAS_CONTEUDO)
 
 
+def pede_auditoria_projeto(texto):
+    """True para pedidos gerais que exigem cobertura minima do projeto.
+
+    Consultas com arquivo literal continuam ``project_read``. O novo tipo
+    ``project_audit`` e reservado a pedidos de panorama/analise do projeto
+    inteiro, incluindo a forma curta "faça a analise" quando existe projeto.
+    """
+    texto_norm = _normalizar(str(texto or ""))
+    if re.search(
+        r"[\w./\\-]+\.(?:py|js|ts|tsx|jsx|json|html|css|md|yml|yaml)\b",
+        texto_norm, re.IGNORECASE,
+    ):
+        return False
+    return bool(
+        _RE_ANALISE_CURTA.match(texto_norm)
+        or _pede_inspecao_projeto(texto_norm)
+        or _contem_frase(texto_norm, {
+            "explique o projeto", "explique esse projeto", "resumo do projeto",
+            "analise esse projeto", "analisar esse projeto",
+            "o que esse projeto faz", "estrutura do projeto",
+        })
+    )
+
+
 # Atualizacao Agente / Fase 2 -- vocabulario que indica tarefa MULTI-PASSO
 # (algo que precisa de investigacao/execucao encadeada -- ler, editar,
 # rodar teste, ajustar de novo -- em vez de uma mudanca pontual de texto

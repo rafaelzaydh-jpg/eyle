@@ -79,9 +79,12 @@ guardas para `engine/agent.py` montar o proximo passo e validar a conclusao.
 import hashlib
 import json
 import re
+from copy import deepcopy
 
 from engine.text_hash import hash_faixa, normalizar_quebras
 from engine.evidence_registry import EvidenceRegistry
+from engine.analysis_coverage import evaluate_project_audit_coverage
+from engine.audit_pipeline import normalize_pipeline_state
 
 
 class GoalState:
@@ -117,7 +120,32 @@ class GoalState:
             else "analyze" if task_type == "project_read"
             else "chat"
         )
-        if modo == "chat":
+        if task_type == "project_audit":
+            modo = "analyze"
+            criterios = [
+                "inventory_complete",
+                "entrypoint_read",
+                "core_logic_read",
+                "error_paths_read",
+                "tests_or_test_config_checked",
+                "coverage_reported",
+                "grounded_answer",
+            ]
+            restricoes = [
+                "somente_leitura",
+                "uma_acao_por_decisao",
+                "documentacao_nao_conta_como_codigo",
+                "nao_concluir_com_cobertura_incompleta",
+            ]
+            plano = [
+                "Mapear o projeto com list_tree",
+                "Ler o entrypoint e o nucleo do codigo",
+                "Inspecionar caminhos de erro",
+                "Verificar testes ou configuracao de testes",
+                "Reportar cobertura e responder com grounding",
+            ]
+            evidencias_necessarias = list(criterios)
+        elif modo == "chat":
             criterios = ["resposta_direta"]
             restricoes = ["sem_ferramentas_de_projeto"]
             plano = ["Responder ao usuario"]
@@ -355,13 +383,21 @@ def _resumir_resultado(tool, resultado, max_chars=500):
         return _resumir_texto(prefixo_erro + str(detalhe), max_chars)
 
     if tool == "list_tree" and isinstance(detalhe, dict):
-        linhas = []
-        for item in detalhe.get("entradas", []):
-            sufixo = "/" if item.get("tipo") == "diretorio" else ""
-            linhas.append(f"- {item.get('caminho')}{sufixo}")
+        total = detalhe.get("total_retornado", len(detalhe.get("entradas") or []))
+        arquivos = detalhe.get("total_arquivos")
+        diretorios = detalhe.get("total_diretorios")
+        completa = bool(detalhe.get("varredura_completa") and not detalhe.get("truncado"))
+        hash_inventario = str(detalhe.get("inventory_hash") or "")
+        linhas = [
+            "Inventario do projeto preservado integralmente no estado estruturado.",
+            f"entradas={total}; arquivos={arquivos}; diretorios={diretorios}; "+
+            f"varredura_completa={str(completa).lower()}",
+        ]
+        if hash_inventario:
+            linhas.append(f"inventory_hash={hash_inventario}")
         linhas.append(f"ignorados_por_motivo={detalhe.get('ignorados_por_motivo', {})}")
         if detalhe.get("truncado"):
-            linhas.append("[arvore truncada pelo limite]")
+            linhas.append("[inventario parcial: o limite da tool foi atingido]")
         return _resumir_texto(prefixo_erro + "\n".join(linhas), max_chars)
 
     if tool == "apply_patch":
@@ -398,6 +434,74 @@ def _resumir_argumentos(arguments, max_chars=300):
     return resumo
 
 
+def _normalizar_inventario_projeto(detalhe):
+    """Copia o resultado completo de ``list_tree`` para o estado duravel.
+
+    O inventario nao e uma observacao textual e nao sofre o corte historico de
+    ``max_chars_por_observacao``. Apenas campos do contrato da tool sao
+    preservados, impedindo que objetos arbitrarios de mocks ou plugins vazem
+    para o prompt/persistencia.
+    """
+    if not isinstance(detalhe, dict):
+        return {}
+    entradas = []
+    for item in detalhe.get("entradas") or []:
+        if not isinstance(item, dict):
+            continue
+        caminho = str(item.get("caminho") or "").strip().replace("\\", "/")
+        tipo = item.get("tipo")
+        if not caminho or tipo not in ("arquivo", "diretorio"):
+            continue
+        try:
+            profundidade = int(item.get("profundidade") or 0)
+        except (TypeError, ValueError):
+            profundidade = 0
+        entradas.append({
+            "caminho": caminho,
+            "tipo": tipo,
+            "profundidade": max(profundidade, 0),
+        })
+
+    ignorados = detalhe.get("ignorados_por_motivo")
+    if not isinstance(ignorados, dict):
+        ignorados = {}
+    extensoes = detalhe.get("extensoes")
+    if not isinstance(extensoes, dict):
+        extensoes = {}
+
+    return {
+        "schema_version": int(detalhe.get("schema_version") or 1),
+        "source_tool": "list_tree",
+        "inventory_hash": str(detalhe.get("inventory_hash") or ""),
+        "entradas": entradas,
+        "total_retornado": int(detalhe.get("total_retornado") or len(entradas)),
+        "total_arquivos": int(detalhe.get("total_arquivos") or sum(
+            1 for item in entradas if item.get("tipo") == "arquivo"
+        )),
+        "total_diretorios": int(detalhe.get("total_diretorios") or sum(
+            1 for item in entradas if item.get("tipo") == "diretorio"
+        )),
+        "limite": detalhe.get("limite"),
+        "profundidade_maxima": detalhe.get("profundidade_maxima"),
+        "filtro": detalhe.get("filtro"),
+        "truncado": bool(detalhe.get("truncado")),
+        "varredura_completa": bool(
+            detalhe.get("varredura_completa") and not detalhe.get("truncado")
+        ),
+        "ignorados_por_motivo": deepcopy(ignorados),
+        "diretorios_raiz": [
+            str(item) for item in (detalhe.get("diretorios_raiz") or [])
+            if isinstance(item, str)
+        ],
+        "arquivos_raiz": [
+            str(item) for item in (detalhe.get("arquivos_raiz") or [])
+            if isinstance(item, str)
+        ],
+        "extensoes": {str(k): int(v) for k, v in extensoes.items()
+                       if isinstance(v, int) and not isinstance(v, bool)},
+    }
+
+
 def _fingerprint_patch(arguments):
     campos = {
         chave: (arguments or {}).get(chave)
@@ -432,6 +536,16 @@ class AgentState:
         self.goal_state = {}
         self._evidence_registry = EvidenceRegistry()
         self.actions = []
+        # Revisao 55.16: inventario completo retornado por list_tree. Ele vive
+        # fora das observacoes resumidas e, portanto, nunca sofre o corte de
+        # 500 caracteres que escondia diretorios centrais do modelo.
+        self.project_inventory = {}
+        # Revisao 55.17: gates determinísticos da auditoria geral. Derivado do
+        # inventario + evidence registry; nunca da autodeclaracao da LLM.
+        self.analysis_coverage = {}
+        # Revisao 55.18: estado duravel do fluxo Scout -> leituras automaticas
+        # -> revisao de lacunas -> Finalizer. Separado da conclusao textual.
+        self.audit_pipeline = normalize_pipeline_state({})
         self.recent_observations = []
         self._proximo_evidence_id = 1
         self._proximo_action_id = 1
@@ -718,6 +832,8 @@ class AgentState:
         detalhe = resultado.get("detail") if isinstance(resultado, dict) else None
         evidence_ids = []
         if isinstance(resultado, dict) and resultado.get("ok") is True:
+            if tool == "list_tree" and isinstance(detalhe, dict):
+                self.project_inventory = _normalizar_inventario_projeto(detalhe)
             if tool in ("read_range", "read_file", "find_symbol") and isinstance(detalhe, dict):
                 identificador = self._registrar_evidencia(tool, detalhe)
                 if identificador:
@@ -745,6 +861,10 @@ class AgentState:
             "error_code": resultado.get("error_code") if isinstance(resultado, dict) else None,
             "evidence_ids": evidence_ids,
         }
+        if tool == "list_tree" and self.project_inventory:
+            acao["project_inventory_hash"] = self.project_inventory.get("inventory_hash")
+            acao["project_inventory_entries"] = self.project_inventory.get("total_retornado")
+            acao["project_inventory_complete"] = self.project_inventory.get("varredura_completa")
         if tool == "test_patch_dry_run" and acao["ok"] is True:
             acao["patch_fingerprint"] = _fingerprint_patch(arguments)
             acao["patch_spec"] = {
@@ -776,6 +896,17 @@ class AgentState:
                     ]
             self._avancar_plano_apos_acao(tool, resultado)
         self.actions.append(acao)
+        if self.goal_state.get("task_type") == "project_audit":
+            if tool in ("read_file", "read_range"):
+                path = str((arguments or {}).get("caminho_relativo") or "").replace("\\", "/")
+                pipeline = self.audit_pipeline
+                pipeline["pending_reads"] = [
+                    item for item in pipeline.get("pending_reads") or [] if item != path
+                ]
+                target = "completed_reads" if acao.get("ok") is True else "failed_reads"
+                if path and path not in pipeline.setdefault(target, []):
+                    pipeline[target].append(path)
+            self.atualizar_cobertura_auditoria()
         return acao
 
     @staticmethod
@@ -988,6 +1119,26 @@ class AgentState:
                 f"{caminho_relativo or 'arquivo'} mudou; evidencias {afetadas} ficaram stale",
             )
         return afetadas
+
+    def atualizar_cobertura_auditoria(
+        self, *, coverage_reported=False, grounded_answer=False,
+        selected_evidence_ids=None,
+    ):
+        """Recalcula gates e metricas reais de ``project_audit``."""
+        if self.goal_state.get("task_type") != "project_audit":
+            self.analysis_coverage = {}
+            return self.analysis_coverage
+        self.analysis_coverage = evaluate_project_audit_coverage(
+            self.project_inventory,
+            self.evidence,
+            coverage_reported=coverage_reported,
+            grounded_answer=grounded_answer,
+            audit_pipeline=self.audit_pipeline,
+            actions=self.actions,
+            selected_evidence_ids=selected_evidence_ids,
+        )
+        self.goal_state["evidence_needed"] = list(self.analysis_coverage.get("missing") or [])
+        return self.analysis_coverage
 
     def marcar_concluido(self):
         self.goal_state["status"] = "completed"
@@ -1337,6 +1488,9 @@ class AgentState:
             "evidence": self.evidence_registry.export(),
             "evidence_registry_schema": self.evidence_registry.SCHEMA_VERSION,
             "actions": self.actions,
+            "project_inventory": deepcopy(self.project_inventory),
+            "analysis_coverage": deepcopy(self.analysis_coverage),
+            "audit_pipeline": deepcopy(self.audit_pipeline),
             "recent_observations": self.recent_observations,
             "assinaturas_chamadas": [list(assinatura) for assinatura in self.assinaturas_chamadas],
             "fatos_importantes": self.fatos_importantes,  # Atualizacao 12
@@ -1364,6 +1518,11 @@ class AgentState:
         estado.goal_state = dict(dados.get("goal_state") or {})
         estado.evidence = list(dados.get("evidence") or [])
         estado.actions = list(dados.get("actions") or [])
+        estado.project_inventory = _normalizar_inventario_projeto(
+            dados.get("project_inventory") or {}
+        )
+        estado.analysis_coverage = dict(dados.get("analysis_coverage") or {})
+        estado.audit_pipeline = normalize_pipeline_state(dados.get("audit_pipeline") or {})
         estado.observacoes = list(
             dados.get("recent_observations") or dados.get("observacoes") or []
         )
@@ -1391,4 +1550,6 @@ class AgentState:
         estado._proximo_action_id = int(
             dados.get("proximo_action_id") or (len(estado.actions) + 1)
         )
+        if estado.goal_state.get("task_type") == "project_audit":
+            estado.atualizar_cobertura_auditoria()
         return estado

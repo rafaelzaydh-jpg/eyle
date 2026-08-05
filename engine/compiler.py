@@ -10,7 +10,9 @@ Isso e o "Compilador de Contexto" do plano.
     montar_prompt_analista(...)  -> pede pro Analista decidir o que ler
     montar_prompt_executor(...)  -> monta o contexto final pro Executor
 """
+import hashlib
 import json
+import os
 
 from engine.context_engine import (
     calcular_orcamento_evidencias,
@@ -91,25 +93,70 @@ def _valor_para_modelo(valor):
     return valor
 
 
-def bloco_entendimento(entendimento):
+def _hash_curto_arquivo(caminho):
+    h = hashlib.sha256()
+    try:
+        with open(caminho, "rb") as handle:
+            for bloco in iter(lambda: handle.read(1024 * 1024), b""):
+                h.update(bloco)
+    except OSError:
+        return None
+    return h.hexdigest()[:16]
+
+
+def _hash_entendimento_confere(caminho_relativo, item, projeto):
+    raiz = (projeto or {}).get("caminho_origem") if isinstance(projeto, dict) else None
+    esperado = (item or {}).get("hash") if isinstance(item, dict) else None
+    if not raiz or not esperado:
+        return False
+    raiz_real = os.path.realpath(os.path.abspath(str(raiz)))
+    alvo = os.path.realpath(os.path.abspath(os.path.join(raiz_real, str(caminho_relativo))))
+    try:
+        if os.path.commonpath((raiz_real, alvo)) != raiz_real:
+            return False
+    except ValueError:
+        return False
+    atual = _hash_curto_arquivo(alvo)
+    return bool(atual and atual == str(esperado))
+
+
+def bloco_entendimento(entendimento, projeto=None):
+    """Renderiza memoria indexada somente como pista de navegacao.
+
+    A revisao 55.19 impede que ``entendimento.json`` apareca antes das
+    evidencias como se fosse estado atual observado. Entradas por arquivo so
+    recebem o selo ``HASH_MATCHES_DISK`` quando o hash persistido corresponde
+    ao arquivo real; qualquer outra entrada permanece explicitamente
+    ``UNTRUSTED_NAVIGATION_HINT`` e nao pode sustentar claims finais.
     """
-    Monta o bloco 'RESUMO DO PROJETO' a partir de memory/entendimento.json
-    (o que cada componente FAZ), separado da estrutura fisica (o que EXISTE)
-    e das evidencias (COMO se sabe disso). Devolve lista de linhas de texto.
-    """
-    partes = ["RESUMO DO PROJETO:"]
+    partes = [
+        "UNTRUSTED NAVIGATION HINT (memory/entendimento.json):",
+        "Unverified entries are clues only. HASH_VERIFIED_NAVIGATION_FACT means the indexed file hash still matches disk; project-audit final claims still require fresh Evidence Registry IDs.",
+    ]
+    adicionou = False
+
+    arquivos = (entendimento or {}).get("arquivos", {})
+    if isinstance(arquivos, dict):
+        for caminho, item in sorted(arquivos.items()):
+            if not isinstance(item, dict):
+                continue
+            descricao = item.get("responsabilidade") or item.get("funcao")
+            if not descricao:
+                continue
+            confiavel = _hash_entendimento_confere(caminho, item, projeto)
+            selo = "HASH_VERIFIED_NAVIGATION_FACT" if confiavel else "UNTRUSTED_NAVIGATION_HINT"
+            partes.append(f"- [{selo}] {caminho}: {descricao}")
+            adicionou = True
 
     componentes = (entendimento or {}).get("componentes", {})
-    algum_com_funcao = False
-    for nome, item in componentes.items():
-        if item.get("funcao"):
-            partes.append(f"- {nome}: {item['funcao']}")
-            algum_com_funcao = True
+    if isinstance(componentes, dict):
+        for nome, item in componentes.items():
+            if not isinstance(item, dict) or not item.get("funcao"):
+                continue
+            partes.append(f"- [UNTRUSTED_NAVIGATION_HINT] {nome}: {item['funcao']}")
+            adicionou = True
 
-    if not algum_com_funcao:
-        return []
-
-    return partes
+    return partes if adicionou else []
 
 
 def montar_prompt_entendedor(caminho_relativo, conteudo, max_chars=20000):
@@ -173,7 +220,7 @@ def montar_prompt_visao_geral(pergunta, projeto=None, estrutura=None, entendimen
         )
 
     if entendimento:
-        bloco = bloco_entendimento(entendimento)
+        bloco = bloco_entendimento(entendimento, projeto=projeto)
         if bloco:
             partes.append("")
             partes.extend(bloco)
@@ -267,7 +314,7 @@ def montar_prompt_dicas(pergunta, candidatos, codigos, projeto=None, entendiment
         )
 
     if entendimento:
-        bloco = bloco_entendimento(entendimento)
+        bloco = bloco_entendimento(entendimento, projeto=projeto)
         if bloco:
             partes.append("")
             partes.extend(bloco)
@@ -523,7 +570,7 @@ def montar_prompt_executor(atual, projeto=None, evidencias=None, entendimento=No
         )
 
     if entendimento:
-        bloco = bloco_entendimento(entendimento)
+        bloco = bloco_entendimento(entendimento, projeto=projeto)
         if bloco:
             partes.append("")
             partes.extend(bloco)
@@ -591,10 +638,92 @@ def _proxima_acao_edicao(goal_state, evidencias, actions, edit_state):
         return "The change was reverted; explain the failure without claiming success."
     return None
 
+def _renderizar_inventario_projeto(inventario):
+    """Renderiza todas as entradas retornadas por ``list_tree`` sem corte.
+
+    O bloco faz parte do prompt fixo e entra no calculo do orcamento antes das
+    evidencias de codigo. Assim a arvore nao compete silenciosamente com o
+    limite historico de 500 caracteres das observacoes recentes.
+    """
+    if not isinstance(inventario, dict):
+        return []
+    entradas = [
+        item for item in (inventario.get("entradas") or [])
+        if isinstance(item, dict) and item.get("caminho")
+    ]
+    if not entradas:
+        return []
+
+    completa = bool(
+        inventario.get("varredura_completa") and not inventario.get("truncado")
+    )
+    metadados = {
+        "schema_version": inventario.get("schema_version", 1),
+        "inventory_hash": inventario.get("inventory_hash"),
+        "total_entries": inventario.get("total_retornado", len(entradas)),
+        "files": inventario.get("total_arquivos"),
+        "directories": inventario.get("total_diretorios"),
+        "complete": completa,
+        "limit": inventario.get("limite"),
+        "max_depth": inventario.get("profundidade_maxima"),
+        "filter": inventario.get("filtro"),
+        "ignored_by_reason": inventario.get("ignorados_por_motivo") or {},
+        "root_directories": inventario.get("diretorios_raiz") or [],
+        "root_files": inventario.get("arquivos_raiz") or [],
+        "extensions": inventario.get("extensoes") or {},
+    }
+    linhas = [
+        "PROJECT INVENTORY (complete structured list returned by list_tree; "+
+        "never reconstructed from RECENT OBSERVATIONS):",
+        json.dumps(metadados, ensure_ascii=False, separators=(",", ":")),
+        "ENTRIES (D=directory, F=file; all returned entries follow):",
+    ]
+    for item in entradas:
+        marcador = "D" if item.get("tipo") == "diretorio" else "F"
+        caminho = str(item.get("caminho") or "").replace("\\", "/")
+        linhas.append(f"{marcador} {caminho}")
+    if completa:
+        linhas.append(
+            "COVERAGE: complete for the configured depth/filter and ignore rules. "
+            "Use this full list to choose which source files and tests must be inspected."
+        )
+    else:
+        linhas.append(
+            "COVERAGE: PARTIAL. The tool hit a limit or incomplete traversal; do not claim "
+            "that files/directories absent from this list do not exist."
+        )
+    return linhas
+
+
+def _renderizar_cobertura_auditoria(cobertura):
+    if not isinstance(cobertura, dict) or cobertura.get("task_type") != "project_audit":
+        return []
+    resumo = {
+        "criteria": cobertura.get("criteria") or {},
+        "missing": cobertura.get("missing") or [],
+        "failure_code": cobertura.get("failure_code"),
+        "inventory": cobertura.get("inventory") or {},
+        "reads": cobertura.get("reads") or {},
+        "coverage": cobertura.get("coverage") or {},
+        "critical_components": cobertura.get("critical_components") or {},
+        "test_execution": cobertura.get("test_execution") or {},
+        "minimum_code_files_required": cobertura.get("minimum_code_files_required"),
+        "next_read_candidates": cobertura.get("next_read_candidates") or [],
+    }
+    return [
+        "PROJECT AUDIT COVERAGE (system-calculated; the model cannot override it):",
+        json.dumps(resumo, ensure_ascii=False, separators=(",", ":")),
+        "AUDIT RULES: README, CHANGELOG and docs/** are context only and NEVER satisfy source-code reading. "
+        "Do not return final while any structural criterion is missing. Use the next candidate or another READ tool. "
+        "The system will publish measured coverage separately; do not invent coverage percentages or claim universal bug absence.",
+    ]
+
+
 def montar_prompt_agente(pergunta, observacoes=None, entendimento=None, max_entradas=4,
                          fatos_importantes=None, catalogo_tools=None,
                          goal_state=None, evidencias=None, actions=None,
-                         edit_state=None, config=None, system_prompt=""):
+                         edit_state=None, project_inventory=None, analysis_coverage=None,
+                         config=None, system_prompt="", projeto=None):
     """Monta um passo do Agente com contexto virtual orcado (Atualizacao 42).
 
     Metadados, acoes e observacoes continuam compactos. Codigo real fica em
@@ -606,7 +735,7 @@ def montar_prompt_agente(pergunta, observacoes=None, entendimento=None, max_entr
     max_entradas = cfg_contexto.get("max_recent_observations", max_entradas)
     partes = []
     if entendimento:
-        bloco = bloco_entendimento(entendimento)
+        bloco = bloco_entendimento(entendimento, projeto=projeto)
         if bloco:
             partes.extend(bloco)
             partes.append("")
@@ -626,6 +755,16 @@ def montar_prompt_agente(pergunta, observacoes=None, entendimento=None, max_entr
         partes.append("MANDATORY NEXT EDIT ACTION:")
         partes.append(proxima_acao)
     partes.append("")
+
+    bloco_inventario = _renderizar_inventario_projeto(project_inventory)
+    if bloco_inventario:
+        partes.extend(bloco_inventario)
+        partes.append("")
+
+    bloco_cobertura = _renderizar_cobertura_auditoria(analysis_coverage)
+    if bloco_cobertura:
+        partes.extend(bloco_cobertura)
+        partes.append("")
 
     catalogo_tools = catalogo_tools or []
     partes.append(
@@ -719,4 +858,177 @@ def montar_prompt_agente(pergunta, observacoes=None, entendimento=None, max_entr
     else:
         partes.append("(no fresh evidence is available or fits in this step)")
 
+    return "\n".join(partes)
+
+
+def montar_prompt_scout_auditoria(
+    pergunta,
+    candidate_catalog,
+    *,
+    phase="initial",
+    analysis_coverage=None,
+    evidencias=None,
+    pipeline_state=None,
+    config=None,
+    system_prompt="",
+):
+    """Prompt de planejamento; no gap review inclui codigo real selecionado."""
+    catalog = candidate_catalog or {}
+    projection = {
+        "schema_version": catalog.get("schema_version"),
+        "inventory_hash": catalog.get("inventory_hash"),
+        "inventory_complete": catalog.get("inventory_complete"),
+        "counts": catalog.get("counts") or {},
+        "required_slots": catalog.get("required_slots") or [],
+        "candidates": catalog.get("candidates") or [],
+    }
+    fresh = [
+        {
+            "id": item.get("id"),
+            "path": item.get("arquivo"),
+            "lines": [item.get("linha_inicio"), item.get("linha_fim")],
+            "complete": item.get("leitura_completa"),
+        }
+        for item in (evidencias or [])
+        if isinstance(item, dict) and item.get("estado") == "fresh"
+    ]
+    partes = [
+        "ORIGINAL USER REQUEST:",
+        str(pergunta or ""),
+        "",
+        f"SCOUT PHASE: {phase}",
+        "CANDIDATE CATALOG (system-generated; select paths only from this list):",
+        json.dumps(projection, ensure_ascii=False, separators=(",", ":")),
+        "",
+        "CURRENT SYSTEM COVERAGE:",
+        json.dumps(analysis_coverage or {}, ensure_ascii=False, separators=(",", ":")),
+        "",
+        "ALREADY READ FRESH EVIDENCE:",
+        json.dumps(fresh, ensure_ascii=False, separators=(",", ":")),
+        "",
+        "PIPELINE STATE:",
+        json.dumps(pipeline_state or {}, ensure_ascii=False, separators=(",", ":")),
+    ]
+
+    # Na fase inicial, caminhos e papeis bastam. Na revisao de lacunas, o
+    # Scout precisa ver codigo real para formular riscos e pedir leituras que
+    # testem hipoteses concretas.
+    if str(phase) == "gap_review" and fresh:
+        config = config or {}
+        cfg_llm = config.get("llm", {})
+        budget_config = dict(config)
+        budget_llm = dict(cfg_llm)
+        budget_llm["max_tokens"] = budget_llm.get(
+            "audit_scout_max_tokens", budget_llm.get("agent_max_tokens", 700)
+        )
+        budget_config["llm"] = budget_llm
+        partes.extend(["", "FRESH CODE EVIDENCE FOR RISK/GAP REVIEW:"])
+        fixed = "\n".join(partes)
+        budget = calcular_orcamento_evidencias(
+            budget_config, system_prompt, fixed,
+        )
+        selection = selecionar_evidencias(
+            evidencias or [], pergunta,
+            budget["evidence_budget_tokens"],
+            budget["chars_per_token"],
+        )
+        if selection["selecionadas"]:
+            for item in selection["selecionadas"]:
+                partes.extend(["", item["bloco"]])
+        else:
+            partes.append("(no fresh code evidence fits in the Scout context)")
+
+    partes.extend([
+        "",
+        "Choose a compact evidence plan. Do not answer the user.",
+        "During gap_review, every additional path must test a named risk or close a concrete missing area.",
+    ])
+    return "\n".join(partes)
+
+
+def montar_prompt_finalizer_auditoria(
+    pergunta,
+    *,
+    goal_state=None,
+    analysis_coverage=None,
+    project_inventory=None,
+    audit_pipeline=None,
+    evidencias=None,
+    config=None,
+    system_prompt="",
+):
+    """Compila somente a conclusao da auditoria, sem catalogo de tools."""
+    partes = [
+        "ORIGINAL USER REQUEST:",
+        str(pergunta or ""),
+        "",
+        "GOAL STATE (system-owned):",
+        json.dumps(_valor_para_modelo(goal_state or {}), ensure_ascii=False, separators=(",", ":")),
+        "",
+        "PROJECT AUDIT COVERAGE (system-calculated):",
+        json.dumps(analysis_coverage or {}, ensure_ascii=False, separators=(",", ":")),
+        "",
+        "AUDIT PIPELINE (Scout selections and read phases; planning metadata only):",
+        json.dumps(audit_pipeline or {}, ensure_ascii=False, separators=(",", ":")),
+        "",
+    ]
+    inventory = project_inventory or {}
+    partes.extend([
+        "INVENTORY SUMMARY:",
+        json.dumps({
+            "inventory_hash": inventory.get("inventory_hash"),
+            "complete": bool(inventory.get("varredura_completa") and not inventory.get("truncado")),
+            "total_entries": inventory.get("total_retornado"),
+            "files": inventory.get("total_arquivos"),
+            "directories": inventory.get("total_diretorios"),
+            "root_directories": inventory.get("diretorios_raiz") or [],
+            "root_files": inventory.get("arquivos_raiz") or [],
+            "extensions": inventory.get("extensoes") or {},
+        }, ensure_ascii=False, separators=(",", ":")),
+        "",
+        "SELECTED FRESH EVIDENCE:",
+    ])
+
+    config = config or {}
+    cfg_contexto = config.get("context_engine", {})
+    cfg_llm = config.get("llm", {})
+    prompt_sem_evidencias = "\n".join(partes)
+    budget_config = dict(config)
+    budget_llm = dict(cfg_llm)
+    budget_llm["max_tokens"] = budget_llm.get(
+        "audit_finalizer_max_tokens", budget_llm.get("max_tokens", 0)
+    )
+    budget_config["llm"] = budget_llm
+    orcamento = calcular_orcamento_evidencias(
+        budget_config,
+        system_prompt,
+        prompt_sem_evidencias,
+    )
+    selecao = selecionar_evidencias(
+        evidencias or [],
+        pergunta,
+        orcamento["evidence_budget_tokens"],
+        orcamento["chars_per_token"],
+    )
+    if selecao["selecionadas"]:
+        for item in selecao["selecionadas"]:
+            partes.extend(["", item["bloco"]])
+    else:
+        partes.append("(no fresh evidence fits in the finalizer context)")
+
+    partes.extend([
+        "",
+        "FINALIZER CONTRACT:",
+        "- No tools are available in this phase.",
+        "- Do not repeat release notes as proof of current behavior.",
+        "- Do not claim tests passed unless an executed run_tests result is present.",
+        "- Return atomic claims with visible evidence_ids and report limitations honestly.",
+        "- Do not return answer or claim_annotations; the system renders validated claims.",
+        "- Return only the required JSON claims envelope.",
+        "CONTEXT BUDGET: window={} tokens; reserved response={}; safety margin={}.".format(
+            cfg_llm.get("context_window_tokens", 2048),
+            cfg_llm.get("audit_finalizer_max_tokens", cfg_llm.get("max_tokens", 0)) or 0,
+            cfg_contexto.get("safety_margin_tokens", 256),
+        ),
+    ])
     return "\n".join(partes)

@@ -2,7 +2,7 @@
   "release": "2.7.3",
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "55.15-evidence-integrity-and-job-identity",
+  "revision": "55.20-real-audit-coverage",
   "updated": "2026-08-05",
   "installation": "overlay_safe",
   "preserve_on_update": [
@@ -13,23 +13,20 @@
   "included_runtime_state": false,
   "validation": {
     "compileall_passed": true,
-    "tests_passed": 309,
-    "tests_total_executable": 309,
+    "tests_passed": 345,
+    "tests_total_executable": 345,
     "tests_skipped": 1,
     "web_tests_executed": false,
     "javascript_syntax_passed": true,
     "real_llm_benchmark_executed": false,
     "notes": [
-      "309/309 testes executaveis passaram.",
+      "345/345 testes executaveis passaram.",
       "Um modulo dependente de Flask foi ignorado porque Flask nao estava instalado no ambiente de empacotamento.",
       "node --check web/static/app.js passou.",
-      "PROJECT_NOT_READ bloqueia qualquer sucesso de projeto sem evidencia observada e fresca.",
-      "Pipelines legados agora executam utility gate e grounding tipado antes de publicar.",
-      "O Worker trata status e agente_status failed de forma equivalente.",
-      "task_id idempotente e recusado quando objetivo modo projeto ou job de origem divergem.",
-      "A identidade persistente do SQLite invalida jobs antigos guardados no sessionStorage.",
-      "Buscas find_symbol sem resultado registram evidencia negativa executada.",
-      "O pacote final nao inclui bancos SQLite traces caches ou checkpoints de runtime."
+      "project_audit publica coverage com inventario, codigo lido, componentes criticos, testes executados, documentos usados e nivel.",
+      "A divulgacao de cobertura e montada deterministicamente apos grounding e nao pode ser sobrescrita pelo modelo.",
+      "Declaracoes de releases antigas sao permitidas apenas como historia explicitamente atribuida a documentacao fresca.",
+      "O pacote final nao inclui bancos SQLite, traces, caches ou checkpoints de runtime."
     ]
   },
   "hardening_52": [
@@ -64,7 +61,19 @@
     "desempenho real depende do hardware backend modelo e projeto do usuario",
     "grounding tipado deterministico reduz alucinacoes mas nao prova entailment semantico universal",
     "projetos acima dos limites do fallback legado falham com PROJECT_NOT_READ em vez de forcar leitura integral fora do orcamento",
-    "jobs salvos por versoes anteriores sem queue_instance_id sao descartados uma vez porque nao existe identidade historica confiavel para migra-los"
+    "jobs salvos por versoes anteriores sem queue_instance_id sao descartados uma vez porque nao existe identidade historica confiavel para migra-los",
+    "o inventario preserva integralmente as entradas retornadas por list_tree, mas a varredura continua limitada por agent.max_tree_entries, agent.max_tree_depth, filtro, gitignore e regras de segredo; inventarios parciais sao sinalizados",
+    "a classificacao de entrypoint logica central caminhos de erro e testes usa heuristicas deterministicas de nomes caminhos e extensoes; layouts incomuns podem exigir ampliacao das regras",
+    "projetos com apenas um arquivo de codigo usam uma excecao explicita de fonte unica porque nao existe um segundo arquivo central para ler; a cobertura reporta essa condicao",
+    "project_audit garante cobertura minima estrutural e grounding mas nao prova ausencia universal de bugs",
+    "a selecao deterministica usa nomes caminhos extensoes e correlacao lexical; layouts exoticos podem exigir novas regras de classificacao",
+    "o catalogo enviado ao Scout e limitado por agent.audit_candidate_limit; candidatos fora do teto permanecem no inventario mas nao entram na primeira selecao",
+    "a revisao 55.18 le por padrao seis candidatos iniciais e uma lacuna adicional para caber no teto de passos; auditorias mais profundas ainda dependem de configuracao e iteracoes futuras",
+    "o endpoint real do Qwen 3.8 MAX nao estava disponivel no ambiente de empacotamento; o comportamento de selecao e finalizacao foi validado com doubles deterministas e testes integrados",
+    "a deteccao de declaracoes globais de saude usa padroes deterministicos e nao cobre toda parafrase possivel em linguagem natural",
+    "project_audit permanece somente leitura por padrao; por isso afirmacoes de testes passando ficam bloqueadas ate uma execucao run_tests autorizada e registrada",
+    "hash correspondente em entendimento.json comprova frescor da versao do arquivo mas nao perfeicao semantica do resumo indexado; claims finais ainda exigem evidencia fresca",
+    "cobertura real mede alcance observado e componentes selecionados, mas nao constitui cobertura de branches, execucao de todos os caminhos ou prova universal de ausencia de bugs"
   ],
   "internal_protocol_language": "English",
   "user_language_behavior": "Preserva o pedido original e responde no idioma do usuario; portugues continua portugues.",
@@ -225,5 +234,56 @@
     "novo job no painel nunca herda status progresso ou resumo de ID numerico antigo",
     "evidencia negativa para find_symbol executado sem correspondencia",
     "309 testes executaveis aprovados"
+  ],
+  "hardening_55_16": [
+    "project_inventory estruturado e persistente fora das observacoes resumidas",
+    "todas as entradas retornadas por list_tree presentes em cada decisao seguinte do Agente",
+    "hash deterministico do inventario e contagens por tipo/extensao",
+    "cobertura completa ou parcial declarada explicitamente no prompt",
+    "regressao com arvore de 143 entradas e persistencia por checkpoint"
+  ],
+  "hardening_55_17": [
+    "novo task_type project_audit para pedidos gerais de analise",
+    "sete criterios minimos de cobertura controlados por codigo deterministico",
+    "selecao obrigatoria de entrypoint logica central caminhos de erro e testes ou configuracao",
+    "documentacao classificada como contexto auxiliar e nunca como codigo fresco",
+    "SOURCE_CODE_NOT_ANALYZED para evidencia composta apenas por documentacao",
+    "PROJECT_AUDIT_COVERAGE_INCOMPLETE para cobertura estrutural insuficiente",
+    "fallback legado bloqueado para impedir bypass dos gates",
+    "relatorio publico de cobertura e 322 testes executaveis aprovados"
+  ],
+  "hardening_55_18": [
+    "catalogo deterministico de candidatos por entrypoint orquestracao estado persistencia grounding recovery validacao testes e configuracao",
+    "documentacao excluida do catalogo de codigo da auditoria",
+    "Scout separado que seleciona somente caminhos validos do catalogo",
+    "slots minimos do sistema preservados mesmo quando o Scout retorna selecao vazia incompleta ou inventada",
+    "fila automatica de leituras iniciais com checkpoint duravel",
+    "segunda passagem do Scout recebe evidencias de codigo fresco para identificar riscos e lacunas reais",
+    "teste relacionado priorizado na cobertura adicional quando disponivel",
+    "Finalizer separado sem ferramentas e com contexto limitado a objetivo cobertura pipeline inventario e evidencias",
+    "project_audit deixa de usar o Agente monolitico para planejar e concluir na mesma chamada",
+    "pipeline publico Scout leituras revisao de lacunas Finalizer no resumo operacional",
+    "328 testes executaveis aprovados"
+  ],
+  "hardening_55_19": [
+    "contrato claims[] atomico para o Finalizer de project_audit",
+    "renderizacao deterministica da resposta a partir de claims validadas",
+    "evidence_ids e basis acoplados a cada claim",
+    "risk adaptado internamente para grounding de inferencia sem perder o tipo publico",
+    "TEST_STATUS_NOT_VERIFIED sem run_tests executado com sucesso",
+    "UNSUPPORTED_HEALTH_CLAIM para declaracoes globais sem cobertura e prova operacional",
+    "entendimento.json marcado como UNTRUSTED_NAVIGATION_HINT",
+    "HASH_VERIFIED_NAVIGATION_FACT somente quando o hash persistido corresponde ao disco",
+    "336 testes executaveis aprovados"
+  ],
+  "hardening_55_20": [
+    "schema coverage com inventory_complete code_files_total code_files_read critical_components_read tests_executed docs_used e level",
+    "niveis none partial targeted e complete calculados por codigo deterministico",
+    "componentes criticos derivados da selecao Scout slots obrigatorios e fallback auditavel",
+    "docs_used contabiliza apenas documentacao realmente referenciada pelas claims finais",
+    "tests_executed e tests_passed dependem de run_tests executado na tarefa atual",
+    "divulgacao publica informa alcance arquivos lidos execucao de testes e impossibilidade de garantir ausencia total de bugs",
+    "release antiga pode ser citada como historico documental sem provar o estado atual",
+    "nove testes novos cobrem a matriz obrigatoria e 345 testes executaveis foram aprovados"
   ]
 }

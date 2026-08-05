@@ -38,6 +38,7 @@ from engine.project_reader import ErroLeituraProjeto, listar_arvore_projeto
 from engine.codar import localizar_simbolo, calcular_impacto, testar_patch_em_copia, aplicar_patch
 from engine.roteador import (
     classificar_pergunta, classificar_modo_projeto, detectar_resposta_proposta,
+    pede_auditoria_projeto,
 )
 from engine.agent import executar_agente
 from llm.executar import (
@@ -1933,7 +1934,7 @@ def _causa_fallback_leitura_agente(status, texto, detalhes, modo):
     """
     detalhes = detalhes if isinstance(detalhes, dict) else {}
     task_type = detalhes.get("task_type")
-    if modo == "edit" or task_type == "project_write":
+    if modo == "edit" or task_type in ("project_write", "project_audit"):
         return None
     if modo not in ("analyze", "suggest") and task_type != "project_read":
         return None
@@ -2155,10 +2156,12 @@ def _processar_agente(pergunta, config, projeto, entendimento, motivo_roteador,
         )
     except ErroLLM as erro:
         codigo_erro = getattr(erro, "error_code", None) or "LLM_FAILURE"
-        fallback = _fallback_leitura_legado(
-            pergunta, config, projeto, entendimento, motivo_roteador, task_id,
-            f"agent_llm_{str(codigo_erro).lower()}",
-        )
+        fallback = None
+        if not pede_auditoria_projeto(pergunta):
+            fallback = _fallback_leitura_legado(
+                pergunta, config, projeto, entendimento, motivo_roteador, task_id,
+                f"agent_llm_{str(codigo_erro).lower()}",
+            )
         if fallback is not None:
             return fallback
         fila_persistente.atualizar_tarefa_agente(
