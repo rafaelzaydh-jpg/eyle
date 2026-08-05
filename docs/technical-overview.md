@@ -1,6 +1,6 @@
-# Eyle — memória externa + retrieval seletivo para LLMs locais pequenas
+# Eyle — memória externa, auditoria determinística e retrieval seletivo
 
-**Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 53.0-speed-cycle-hardening
+**Versão:** 2.7.3 · **Schema:** 2.7.3 · **Revisão:** 55.21-audit-truthfulness-hardening
 
 Implementação funcional da ideia:
 
@@ -98,10 +98,20 @@ a LLM vê agora, `retrieval` decide o que entra em `context`, `llm` só
 executa, `verify` confere se a resposta é confiável antes de virar
 "verdade" no histórico.
 
-## Proteções operacionais das revisões 52–53
+## Proteções operacionais atuais
 
-Além do hardening estrutural da revisão 52, a revisão 53 fecha os caminhos que
-ainda podiam desperdiçar tempo ou repetir estado:
+As revisões 52–55.21 combinam segurança operacional com auditoria verificável:
+
+- `project_audit` preserva o inventário completo retornado pela árvore e usa seleção determinística por função;
+- Scout, leituras automáticas e Finalizer são fases separadas;
+- o Finalizer retorna claims atômicas com evidências, nunca um texto livre sem origem;
+- documentação indexada é apenas pista de navegação e não prova o estado atual;
+- declarações globais de saúde são recusadas, mesmo com cobertura direcionada ou testes aprovados;
+- somente a execução `run_tests` mais recente da tarefa define o estado dos testes;
+- cobertura publicada diferencia arquivos lidos, componentes críticos, documentos usados e testes executados;
+- recovery de auditoria preserva o contrato `claims[]` e não retorna ao envelope legado.
+
+Proteções históricas que permanecem ativas:
 
 - respostas ambíguas com duas decisões JSON válidas são rejeitadas;
 - respostas de erro estruturadas não sobrevivem no cache;

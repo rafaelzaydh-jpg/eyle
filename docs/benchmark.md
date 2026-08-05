@@ -9,12 +9,12 @@ python -m pip install -r requirements-dev.lock
 python -m pytest -q
 ```
 
-Packaging result for release 2.7.3 revision 53:
+Packaging result for release 2.7.3 revision 55.21:
 
-- 204/204 executable non-web tests passed;
-- one web test module was skipped because Flask was not installed in that environment;
-- `python -m compileall -q .` passed;
-- `python engine/release_identity.py` passed.
+- The complete executable test count is recorded in `release_manifest.json` after packaging;
+- web tests must be executed when the locked Flask dependency is available;
+- `python -m compileall -q .` is mandatory and its final result is recorded in the release manifest;
+- `python engine/release_identity.py` is mandatory and its final result is recorded in the release manifest.
 
 Installing `requirements-dev.lock` also installs the locked web dependencies through `requirements.lock`, allowing the web module to run in CI.
 

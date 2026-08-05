@@ -105,7 +105,10 @@ from engine.grounding import (  # noqa: E402
     verify_conclusion,
 )
 from engine.project_reader import ErroLeituraProjeto, ler_faixa_projeto  # noqa: E402
-from engine.response_recovery import recover_useful_response  # noqa: E402
+from engine.response_recovery import (  # noqa: E402
+    recover_structured_audit_claims,
+    recover_useful_response,
+)
 from engine.utility_gate import validate_response_utility  # noqa: E402
 from engine.structured_claims import (  # noqa: E402
     claim_evidence_ids,
@@ -1342,11 +1345,18 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
     def _recuperar_resposta(causa, resposta_anterior="", permitir_llm=True):
         nonlocal recuperacao_atual
         evidencias_frescas = estado.evidencias_frescas() if estado is not None else []
-        recuperacao = recover_useful_response(
-            objetivo, evidencias_frescas, config,
-            cause=causa, prior_answer=resposta_anterior,
-            allow_llm=permitir_llm, task_type=task_type,
-        )
+        if task_type == "project_audit":
+            recuperacao = recover_structured_audit_claims(
+                objetivo, evidencias_frescas, config,
+                cause=causa, prior_answer=resposta_anterior,
+                allow_llm=permitir_llm,
+            )
+        else:
+            recuperacao = recover_useful_response(
+                objetivo, evidencias_frescas, config,
+                cause=causa, prior_answer=resposta_anterior,
+                allow_llm=permitir_llm, task_type=task_type,
+            )
         recuperacao_atual = dict(recuperacao or {})
         _registrar_trace_estado(estado, {
             "step": estado.acoes_executadas + 1 if estado is not None else 0,
@@ -1358,6 +1368,16 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
         })
         if not recuperacao_atual.get("ok"):
             return None
+        if task_type == "project_audit":
+            return {
+                "final": {
+                    "claims": recuperacao_atual.get("claims", []),
+                    "verification": f"structured response recovery layer: {recuperacao_atual.get('layer')}",
+                    "limitations": [
+                        "A conclusão foi reconstruída deterministicamente a partir das evidências frescas."
+                    ],
+                }
+            }
         return {
             "final": {
                 "answer": recuperacao_atual.get("answer", ""),
@@ -2342,11 +2362,13 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                     # Primeiro repara somente as claims rejeitadas. Se restar
                     # uma recomendacao/inferencia util e grounded, preserva-a;
                     # se nao restar nada, segue para a recuperacao em camadas.
-                    resposta_reparada = build_safe_grounded_answer(
-                        conclusao.get("resposta") or "",
-                        verificacao_semantica,
-                        evidencias_usadas,
-                    )
+                    resposta_reparada = ""
+                    if task_type != "project_audit":
+                        resposta_reparada = build_safe_grounded_answer(
+                            conclusao.get("resposta") or "",
+                            verificacao_semantica,
+                            evidencias_usadas,
+                        )
                     if resposta_reparada:
                         gate_candidata = validate_response_utility(
                             resposta_reparada, objetivo,
@@ -2509,9 +2531,28 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                             },
                             retornar_detalhes,
                         )
+                    evidencias_recuperadas = evidencias_usadas
+                    if task_type in ("project_read", "project_audit", "project_write"):
+                        valido_recuperado, motivo_recuperado, evidencias_recuperadas = _validar_conclusao_projeto(
+                            conclusao_recuperada, estado, projeto,
+                        )
+                        if not valido_recuperado:
+                            return _retorno_agente(
+                                "failed",
+                                "A recuperação determinística não vinculou a conclusão às evidências frescas.",
+                                None,
+                                {
+                                    "task_type": task_type, "mode": modo,
+                                    "goal_state": estado.goal_state,
+                                    "failure_code": "INVALID_EVIDENCE_GROUNDING",
+                                    "fallback_cause": "grounding_utility_failed",
+                                    "grounding_error": motivo_recuperado,
+                                },
+                                retornar_detalhes,
+                            )
                     verificacao_recuperada = verify_conclusion(
                         conclusao_recuperada.get("resposta"),
-                        evidencias_usadas,
+                        evidencias_recuperadas,
                         config.get("agent", {}).get("semantic_grounding", {}),
                         claim_annotations=conclusao_recuperada.get("claim_annotations"),
                     )
@@ -2529,7 +2570,11 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                             },
                             retornar_detalhes,
                         )
-                    conclusao["resposta"] = conclusao_recuperada["resposta"]
+                    if task_type == "project_audit":
+                        conclusao = conclusao_recuperada
+                        evidencias_usadas = evidencias_recuperadas
+                    else:
+                        conclusao["resposta"] = conclusao_recuperada["resposta"]
                     conclusao["semantic_grounding"] = verificacao_recuperada
                     conclusao["utility_gate"] = recuperacao_atual.get("utility_gate") or final_utility_gate
                     conclusao["recovery_layer"] = recuperacao_atual.get("layer")
@@ -2540,6 +2585,31 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                     conclusao["utility_gate"] = final_utility_gate
 
                 if task_type == "project_audit":
+                    health_gate_final = validate_health_claims(
+                        conclusao.get("claims") or [],
+                        estado.atualizar_cobertura_auditoria(),
+                        estado.actions,
+                        evidence=estado.evidencias_frescas(),
+                        required_score=float(
+                            config.get("agent", {}).get("audit_health_claim_required_score", 1.0)
+                        ),
+                    )
+                    conclusao["health_claim_gate"] = health_gate_final
+                    if not health_gate_final.get("ok", False):
+                        return _retorno_agente(
+                            "failed",
+                            "A conclusão recuperada tentou declarar a saúde geral do projeto sem prova suficiente.",
+                            None,
+                            {
+                                "task_type": task_type, "mode": modo,
+                                "goal_state": estado.goal_state,
+                                "failure_code": health_gate_final.get("failure_code"),
+                                "health_claim_gate": health_gate_final,
+                                "analysis_coverage": public_coverage_report(estado.analysis_coverage),
+                            },
+                            retornar_detalhes,
+                        )
+
                     cobertura_final = estado.atualizar_cobertura_auditoria(
                         coverage_reported=True,
                         grounded_answer=True,

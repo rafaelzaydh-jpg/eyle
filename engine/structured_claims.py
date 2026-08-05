@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claims estruturadas e gates de saude para auditorias de projeto.
 
-A revisao 55.20 mantem claims atomicas e diferencia estado atual de registro
+A revisao 55.21 mantem claims atomicas e diferencia estado atual de registro
 historico. Declaracoes sobre releases antigas podem ser citadas como historia
 quando estiverem explicitamente atribuidas a documentacao fresca; elas nunca
 viram prova do estado operacional atual.
@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import re
 import unicodedata
+
+from engine.test_execution import latest_test_execution, successful_test_run
 
 ALLOWED_CLAIM_TYPES = {
     "fact", "risk", "inference", "hypothesis", "recommendation", "decision",
@@ -44,6 +46,12 @@ _HEALTH_PATTERNS = (
     re.compile(r"\btodas?\s+(?:as\s+)?(?:funcionalidades?|funcoes?)\s+(?:principais\s+)?(?:estao|esta)\s+(?:operacionais?|funcionando)\b"),
     re.compile(r"\bsistema\s+(?:esta\s+)?(?:saudavel|estavel|totalmente operacional|pronto para producao)\b"),
     re.compile(r"\b(?:system|project)\s+(?:is\s+)?(?:healthy|stable|fully operational|production ready)\b"),
+)
+
+_SCOPED_REVIEW_PATTERNS = (
+    re.compile(r"\b(?:nos|dentro dos|entre os)\s+(?:componentes?|arquivos?|modulos?|trechos?)\s+(?:revisados?|analisados?|inspecionados?)\b"),
+    re.compile(r"\b(?:within|in|among)\s+(?:the\s+)?(?:reviewed|analyzed|inspected)\s+(?:components?|files?|modules?|scope)\b"),
+    re.compile(r"\b(?:no escopo|within the scope)\s+(?:revisado|analisado|inspecionado|reviewed|analyzed|inspected)\b"),
 )
 _TEST_PASS_PATTERNS = (
     re.compile(r"\b(?:todos?\s+os\s+)?testes?\s+(?:estao\s+)?(?:passando|passaram|aprovados?)\b"),
@@ -205,26 +213,18 @@ def coverage_score(coverage):
     return sum(1 for value in structural.values() if value) / len(structural)
 
 
-def successful_test_run(actions):
-    """Prova operacional: run_tests executou e retornou ok=True nesta tarefa."""
-    return any(
-        isinstance(action, dict)
-        and action.get("tool") == "run_tests"
-        and action.get("executed") is True
-        and action.get("ok") is True
-        for action in actions or []
-    )
-
-
 def validate_health_claims(
     claims, coverage, actions, *, evidence=None, required_score=1.0,
 ):
-    """Bloqueia saude atual sem prova; permite historia documental explicita."""
+    """Bloqueia atestados globais; permite apenas historia ou escopo revisado."""
     score = coverage_score(coverage)
-    tests_ok = successful_test_run(actions)
+    test_execution = latest_test_execution(actions)
+    tests_ok = test_execution["passed"]
     for index, claim in enumerate(claims or [], start=1):
         normalized = _normalize(claim.get("text"))
         historical = _historical_document_claim(claim, normalized, evidence)
+        scoped_review = any(pattern.search(normalized) for pattern in _SCOPED_REVIEW_PATTERNS)
+
         if any(pattern.search(normalized) for pattern in _TEST_PASS_PATTERNS):
             if historical:
                 continue
@@ -235,11 +235,29 @@ def validate_health_claims(
                     "claim_index": index,
                     "claim": claim.get("text"),
                     "coverage_score": score,
-                    "tests_executed": False,
+                    "tests_executed": test_execution["executed"],
+                    "tests_passed": False,
+                    "test_run_attempts": test_execution["attempts"],
                 }
+
         if any(pattern.search(normalized) for pattern in _HEALTH_PATTERNS):
             if historical:
                 continue
+            # Declaracao limitada ao material revisado pode ser validada pelo
+            # grounding. Declaracao global nunca e autorizada por cobertura
+            # direcionada nem por uma unica rodada de testes.
+            if not scoped_review:
+                return {
+                    "ok": False,
+                    "failure_code": "UNSUPPORTED_HEALTH_CLAIM",
+                    "claim_index": index,
+                    "claim": claim.get("text"),
+                    "coverage_score": score,
+                    "required_score": float(required_score),
+                    "tests_executed": test_execution["executed"],
+                    "tests_passed": tests_ok,
+                    "reason": "global_health_claim_not_allowed",
+                }
             if score < float(required_score):
                 return {
                     "ok": False,
@@ -248,25 +266,18 @@ def validate_health_claims(
                     "claim": claim.get("text"),
                     "coverage_score": score,
                     "required_score": float(required_score),
-                    "tests_executed": tests_ok,
+                    "tests_executed": test_execution["executed"],
+                    "tests_passed": tests_ok,
+                    "reason": "review_scope_coverage_incomplete",
                 }
-            # Cobertura minima prova que os componentes-alvo foram vistos, nao
-            # que todo comportamento do sistema esta saudavel. Exigimos tambem
-            # uma execucao atual dos testes para uma declaracao global.
-            if not tests_ok:
-                return {
-                    "ok": False,
-                    "failure_code": "UNSUPPORTED_HEALTH_CLAIM",
-                    "claim_index": index,
-                    "claim": claim.get("text"),
-                    "coverage_score": score,
-                    "required_score": float(required_score),
-                    "tests_executed": False,
-                }
+
     return {
         "ok": True,
         "failure_code": None,
         "coverage_score": score,
         "required_score": float(required_score),
-        "tests_executed": tests_ok,
+        "tests_executed": test_execution["executed"],
+        "tests_passed": tests_ok,
+        "test_run_attempts": test_execution["attempts"],
     }
+

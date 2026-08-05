@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Revisao 52: watchdog, grounding, telemetria e cache SQLite."""
+from contextlib import closing
 import json
 import os
 import sqlite3
@@ -166,7 +167,7 @@ def test_queue_detecta_head_of_line_blocking(monkeypatch, tmp_path):
     queue.adicionar({"tipo": "pergunta", "texto": "esperando"})
     assert queue.proximo(timeout=0, worker_id="dead-worker")["_job_id"] == first
     queue.registrar_heartbeat("dead-worker", "processing", job_id=first, pid=99999999)
-    with sqlite3.connect(queue.DB_PATH) as conn:
+    with closing(sqlite3.connect(queue.DB_PATH)) as conn:
         conn.execute(
             "UPDATE jobs SET iniciado_em='2020-01-01T00:00:00Z' WHERE id=?", (first,)
         )
@@ -174,6 +175,7 @@ def test_queue_detecta_head_of_line_blocking(monkeypatch, tmp_path):
             "UPDATE worker_heartbeat SET atualizado_em='2020-01-01T00:00:00Z' "
             "WHERE worker_id='dead-worker'"
         )
+        conn.commit()
     stats = queue.estatisticas(stale_after_seconds=1, blocked_after_seconds=1)
     assert stats["head_of_line_blocked"] is True
     assert stats["live_workers"] == 0

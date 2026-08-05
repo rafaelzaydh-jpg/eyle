@@ -148,9 +148,19 @@ def test_saude_geral_exige_cobertura_e_prova_operacional():
     no_run = validate_health_claims(claim, _coverage(True), [])
     assert no_run["failure_code"] == "UNSUPPORTED_HEALTH_CLAIM"
 
-    allowed = validate_health_claims(claim, _coverage(True), [{
+    still_blocked = validate_health_claims(claim, _coverage(True), [{
         "tool": "run_tests", "executed": True, "ok": True,
     }])
+    assert still_blocked["failure_code"] == "UNSUPPORTED_HEALTH_CLAIM"
+    assert still_blocked["reason"] == "global_health_claim_not_allowed"
+
+    scoped = [{
+        "type": "fact",
+        "text": "Não foram identificados problemas críticos nos componentes revisados.",
+        "evidence_ids": ["ev-0001"],
+        "basis": "",
+    }]
+    allowed = validate_health_claims(scoped, _coverage(True), [])
     assert allowed["ok"] is True
 
 

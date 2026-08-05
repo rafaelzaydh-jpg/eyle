@@ -1,9 +1,11 @@
 # Release hardening reports
+- [2.7.3 — revision 55.21 audit truthfulness hardening](2.7.3-revision-55.21.md)
 - [2.7.3 — revision 55.20 real audit coverage](2.7.3-revision-55.20.md)
 - [2.7.3 — revision 55.19 structured claims and health gates](2.7.3-revision-55.19.md)
 - [2.7.3 — revision 55.18 deterministic audit Scout and Finalizer](2.7.3-revision-55.18.md)
 - [2.7.3 — revision 55.17 project audit minimum coverage](2.7.3-revision-55.17.md)
 - [2.7.3 — revision 55.16 full project inventory](2.7.3-revision-55.16.md)
+- [2.7.3 — revision 55.15 evidence integrity and job identity](2.7.3-revision-55.15.md)
 - [2.7.3 — revision 55.14 unified response recovery pipeline](2.7.3-revision-55.14.md)
 
 - [2.7.3 — revision 55.13 typed grounding autonomy](2.7.3-revision-55.13.md)

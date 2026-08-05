@@ -238,7 +238,8 @@
     "_comentario_55_18": "Revisao 55.18: project_audit usa catalogo deterministico por papel, Scout separado para escolher somente candidatos validos, fila automatica de leituras, revisao de lacunas e Finalizer exclusivo para a conclusao grounded.",
     "audit_health_claim_required_score": 1.0,
     "_comentario_55_19": "Revisao 55.19: o Finalizer de project_audit retorna claims atomicas com type, text, evidence_ids e basis; o sistema renderiza a resposta, bloqueia declaracoes globais de saude sem cobertura e prova operacional, exige run_tests executado para afirmar testes passando e trata entendimento.json como pista nao confiavel salvo hash atual correspondente.",
-    "_comentario_55_20": "Revisao 55.20: project_audit mede cobertura real com inventario completo, arquivos de codigo lidos, componentes criticos selecionados pelo pipeline, execucao atual de testes, documentos usados e nivel none/partial/targeted/complete. A conclusao recebe divulgacao deterministica e nunca afirma ausencia total de bugs."
+    "_comentario_55_20": "Revisao 55.20: project_audit mede cobertura real com inventario completo, arquivos de codigo lidos, componentes criticos selecionados pelo pipeline, execucao atual de testes, documentos usados e nivel none/partial/targeted/complete. A conclusao recebe divulgacao deterministica e nunca afirma ausencia total de bugs.",
+    "_comentario_55_21": "Revisao 55.21: declaracoes globais de saude sao bloqueadas mesmo com cobertura e testes; somente o ultimo run_tests define o estado atual; recovery de project_audit preserva claims estruturadas; idioma, metricas criticas, documentacao ativa e warnings SQLite foram corrigidos."
   },
   "version": "2.7.3",
   "updated": "2026-08-05",
@@ -256,7 +257,7 @@
   },
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "55.20-real-audit-coverage",
+  "revision": "55.21-audit-truthfulness-hardening",
   "telemetry": {
     "enabled": true,
     "window_seconds": 3600,

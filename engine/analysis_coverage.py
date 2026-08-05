@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Cobertura deterministica para auditorias gerais de projeto.
 
-A revisao 55.20 separa cobertura minima de cobertura real. Este modulo
+A revisao 55.21 separa cobertura minima de cobertura real. Este modulo
 nao pergunta a LLM se a investigacao foi suficiente: classifica o inventario e
 as evidencias frescas, calcula os sete gates minimos, mede o alcance observado
 e gera uma divulgacao honesta que nao pode ser sobrescrita pelo modelo.
@@ -11,6 +11,8 @@ from __future__ import annotations
 import os
 import re
 from copy import deepcopy
+
+from engine.test_execution import latest_test_execution
 
 PROJECT_AUDIT_CRITERIA = [
     "inventory_complete",
@@ -61,10 +63,18 @@ _CRITICAL_PIPELINE_ROLES = {
     "grounding_recovery_validation", "core_logic",
 }
 
-_PORTUGUESE_HINT = re.compile(
-    r"\b(?:o|a|os|as|do|da|dos|das|um|uma|para|projeto|analise|arquivo|codigo|testes?)\b|[áàâãéêíóôõúç]",
-    re.IGNORECASE,
-)
+_PORTUGUESE_STRONG_WORDS = {
+    "analise", "análise", "projeto", "arquivo", "codigo", "código",
+    "testes", "faça", "faca", "revise", "verifique", "sistema",
+    "componente", "componentes", "leitura", "cobertura", "riscos",
+}
+_ENGLISH_STRONG_WORDS = {
+    "analyze", "analyse", "review", "inspect", "project", "code",
+    "source", "tests", "system", "component", "components", "coverage",
+    "risks", "file", "files", "audit",
+}
+_WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
+
 
 
 def _path(path):
@@ -181,18 +191,9 @@ def _content(item):
 
 
 
+
 def _successful_test_execution(actions):
-    executions = [
-        item for item in actions or []
-        if isinstance(item, dict)
-        and item.get("tool") == "run_tests"
-        and item.get("executed") is True
-    ]
-    return {
-        "executed": bool(executions),
-        "passed": bool(executions and executions[-1].get("ok") is True),
-        "attempts": len(executions),
-    }
+    return latest_test_execution(actions)
 
 
 def _pipeline_critical_paths(audit_pipeline, source_files, entrypoints, cores, error_candidates):
@@ -200,21 +201,32 @@ def _pipeline_critical_paths(audit_pipeline, source_files, entrypoints, cores, e
     catalog = pipeline.get("catalog") if isinstance(pipeline.get("catalog"), dict) else {}
     candidates = catalog.get("candidates") if isinstance(catalog.get("candidates"), list) else []
     critical = []
+    roles_by_path = {}
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        path = _path(item.get("path"))
+        if not path:
+            continue
+        roles_by_path[path] = set(item.get("roles") or [])
 
-    # Preferimos os componentes que o pipeline realmente selecionou. Assim a
-    # metrica representa a auditoria executada, e nao todos os candidatos que
-    # apenas caberam no catalogo.
+    # So conta como critico o que o catalogo classificou em papel critico.
+    # Arquivos auxiliares escolhidos pelo Scout continuam sendo lidos, mas nao
+    # inflam a metrica de componentes criticos.
     for scout_key in ("initial_scout", "gap_scout"):
         scout = pipeline.get(scout_key) if isinstance(pipeline.get(scout_key), dict) else {}
         for path in scout.get("selected_paths") or []:
             path = _path(path)
-            if path in source_files:
+            roles = roles_by_path.get(path, set())
+            if path in source_files and (_CRITICAL_PIPELINE_ROLES & roles):
                 critical.append(path)
     for slot in catalog.get("required_slots") or []:
         if not isinstance(slot, dict):
             continue
         path = _path(slot.get("path"))
-        if path in source_files:
+        role = str(slot.get("role") or "")
+        roles = roles_by_path.get(path, set()) | ({role} if role else set())
+        if path in source_files and (_CRITICAL_PIPELINE_ROLES & roles):
             critical.append(path)
 
     if not critical:
@@ -253,12 +265,28 @@ def _coverage_level(
     return "partial"
 
 
+def detect_response_language(language_sample):
+    """Detecta PT/EN sem usar artigos isolados como sinal de idioma."""
+    text = str(language_sample or "")
+    tokens = {token.casefold() for token in _WORD_RE.findall(text)}
+    pt_score = sum(2 for token in tokens if token in _PORTUGUESE_STRONG_WORDS)
+    en_score = sum(2 for token in tokens if token in _ENGLISH_STRONG_WORDS)
+    if re.search(r"[áàâãéêíóôõúç]", text, re.IGNORECASE):
+        pt_score += 3
+    # Contracoes e preposicoes compostas sao sinais melhores que "a/o".
+    if re.search(r"\b(?:do|da|dos|das|não|nao|para o|para a|no|na)\b", text, re.IGNORECASE):
+        pt_score += 1
+    if re.search(r"\b(?:the|this|that|with|without|within|from)\b", text, re.IGNORECASE):
+        en_score += 1
+    return "pt" if pt_score > en_score else "en"
+
+
 def render_coverage_disclosure(coverage, language_sample=""):
     """Gera um cabecalho factual a partir de metricas calculadas pelo sistema."""
     metrics = (coverage or {}).get("coverage") or {}
     if not metrics:
         return ""
-    portuguese = bool(_PORTUGUESE_HINT.search(str(language_sample or "")))
+    portuguese = detect_response_language(language_sample) == "pt"
     level = metrics.get("level") or "partial"
     critical = int(metrics.get("critical_components_read") or 0)
     code_read = int(metrics.get("code_files_read") or 0)

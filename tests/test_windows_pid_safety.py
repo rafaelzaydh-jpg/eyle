@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Regressoes da correcao de PID seguro no Windows."""
+from contextlib import closing
 import os
 
 from engine import process_limiter, process_utils, queue
@@ -79,11 +80,12 @@ def test_recovery_trata_heartbeat_invalido_como_interrompido(monkeypatch, tmp_pa
     queue.registrar_heartbeat("worker-corrompido", "processing", job_id=job_id, pid=os.getpid())
 
     import sqlite3
-    with sqlite3.connect(queue.DB_PATH) as conn:
+    with closing(sqlite3.connect(queue.DB_PATH)) as conn:
         conn.execute(
             "UPDATE worker_heartbeat SET atualizado_em='nao-e-data' WHERE worker_id=?",
             ("worker-corrompido",),
         )
+        conn.commit()
 
     assert queue.recuperar_interrompidos(stale_after_seconds=30) == 1
     assert queue.obter(job_id)["status"] == "pending"

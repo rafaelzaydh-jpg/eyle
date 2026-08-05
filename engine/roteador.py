@@ -69,6 +69,9 @@ PALAVRAS_CONSULTA = {
     "listar", "mostre", "mostrar", "explique o projeto",
     "explique esse projeto", "resumo do projeto", "analise esse projeto",
     "analisar esse projeto", "o que esse projeto faz",
+    "analyze the project", "analyse the project", "review the project",
+    "inspect the project", "audit the project", "explain the project",
+    "project overview", "project structure", "what does this project do",
 }
 
 # Pedidos informais tipo "da uma olhada no projeto", "confere o codigo",
@@ -91,11 +94,14 @@ VERBOS_INSPECAO = {
     "resume", "resuma", "resumir", "resumo",
     "inspeciona", "inspecione", "inspecionar",
     "avalia", "avalie", "avaliar",
+    "analyze", "analyse", "review", "inspect", "examine", "check",
+    "summarize", "evaluate", "audit",
 }
 
 SUBSTANTIVOS_PROJETO = {
     "projeto", "codigo", "código", "repositorio", "repositório", "repo",
     "aplicacao", "aplicação", "app", "sistema",
+    "project", "code", "repository", "repo", "application", "system",
 }
 
 # Perguntas tipo "o que TEM/FAZ/TA no projeto" nao usam nenhum verbo de
@@ -111,9 +117,12 @@ PALAVRAS_CONTEUDO = {
 _RE_ANALISE_CURTA = re.compile(
     r"^(?:por\s+favor\s+)?(?:faça|faca|faz|faça-me|faca-me)?\s*"
     r"(?:(?:a|uma)\s+)?(?:análise|analise|avaliação|avaliacao)"
-    r"(?:\s+(?:do|desse|deste)\s+projeto)?(?:\s+pra\s+mim)?[.!?]*$",
+    r"(?:\s+(?:do|desse|deste)\s+projeto)?(?:\s+pra\s+mim)?[.!?]*$"
+    r"|^(?:please\s+)?(?:analyze|analyse|review|inspect|audit|evaluate)"
+    r"(?:\s+(?:the|this|a))?\s*(?:project|codebase|repository|repo)?[.!?]*$",
     re.IGNORECASE,
 )
+
 
 _RE_PALAVRA = re.compile(r"[^\W\d_]{2,}", re.UNICODE)
 
@@ -238,6 +247,10 @@ def pede_auditoria_projeto(texto):
             "explique o projeto", "explique esse projeto", "resumo do projeto",
             "analise esse projeto", "analisar esse projeto",
             "o que esse projeto faz", "estrutura do projeto",
+            "analyze the project", "analyse the project", "review the project",
+            "inspect the project", "audit the project", "summarize the project",
+            "explain the project", "project overview", "project structure",
+            "what does this project do",
         })
     )
 

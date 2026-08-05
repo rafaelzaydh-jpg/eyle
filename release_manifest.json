@@ -2,7 +2,7 @@
   "release": "2.7.3",
   "app_version": "2.7.3",
   "config_schema_version": "2.7.3",
-  "revision": "55.20-real-audit-coverage",
+  "revision": "55.21-audit-truthfulness-hardening",
   "updated": "2026-08-05",
   "installation": "overlay_safe",
   "preserve_on_update": [
@@ -13,19 +13,20 @@
   "included_runtime_state": false,
   "validation": {
     "compileall_passed": true,
-    "tests_passed": 345,
-    "tests_total_executable": 345,
+    "tests_passed": 353,
+    "tests_total_executable": 353,
     "tests_skipped": 1,
     "web_tests_executed": false,
     "javascript_syntax_passed": true,
     "real_llm_benchmark_executed": false,
     "notes": [
-      "345/345 testes executaveis passaram.",
+      "353/353 testes executaveis passaram, inclusive com warnings tratados como erro.",
       "Um modulo dependente de Flask foi ignorado porque Flask nao estava instalado no ambiente de empacotamento.",
       "node --check web/static/app.js passou.",
-      "project_audit publica coverage com inventario, codigo lido, componentes criticos, testes executados, documentos usados e nivel.",
-      "A divulgacao de cobertura e montada deterministicamente apos grounding e nao pode ser sobrescrita pelo modelo.",
-      "Declaracoes de releases antigas sao permitidas apenas como historia explicitamente atribuida a documentacao fresca.",
+      "Declaracoes globais de saude sao bloqueadas; conclusoes de saude devem ser limitadas ao escopo revisado.",
+      "Somente a ultima execucao run_tests da tarefa define o estado atual dos testes.",
+      "Recovery de project_audit preserva o contrato claims[] e revalida grounding, utilidade e cobertura.",
+      "Documentacao ativa foi atualizada para nao apresentar resultados da revisao 53 como atuais.",
       "O pacote final nao inclui bancos SQLite, traces, caches ou checkpoints de runtime."
     ]
   },
@@ -70,7 +71,7 @@
     "o catalogo enviado ao Scout e limitado por agent.audit_candidate_limit; candidatos fora do teto permanecem no inventario mas nao entram na primeira selecao",
     "a revisao 55.18 le por padrao seis candidatos iniciais e uma lacuna adicional para caber no teto de passos; auditorias mais profundas ainda dependem de configuracao e iteracoes futuras",
     "o endpoint real do Qwen 3.8 MAX nao estava disponivel no ambiente de empacotamento; o comportamento de selecao e finalizacao foi validado com doubles deterministas e testes integrados",
-    "a deteccao de declaracoes globais de saude usa padroes deterministicos e nao cobre toda parafrase possivel em linguagem natural",
+    "padroes deterministas bloqueiam declaracoes globais conhecidas; parafrases sem limite exigem classificador estruturado planejado para a revisao 55.22",
     "project_audit permanece somente leitura por padrao; por isso afirmacoes de testes passando ficam bloqueadas ate uma execucao run_tests autorizada e registrada",
     "hash correspondente em entendimento.json comprova frescor da versao do arquivo mas nao perfeicao semantica do resumo indexado; claims finais ainda exigem evidencia fresca",
     "cobertura real mede alcance observado e componentes selecionados, mas nao constitui cobertura de branches, execucao de todos os caminhos ou prova universal de ausencia de bugs"
@@ -285,5 +286,16 @@
     "divulgacao publica informa alcance arquivos lidos execucao de testes e impossibilidade de garantir ausencia total de bugs",
     "release antiga pode ser citada como historico documental sem provar o estado atual",
     "nove testes novos cobrem a matriz obrigatoria e 345 testes executaveis foram aprovados"
+  ],
+  "hardening_55_21": [
+    "declaracoes globais de saude recusadas mesmo com cobertura direcionada e testes aprovados",
+    "conclusoes limitadas aos componentes revisados podem seguir para grounding",
+    "ultima execucao run_tests como unica fonte do estado atual dos testes",
+    "recovery estruturado claims[] para project_audit sem retorno ao contrato legado",
+    "revalidacao de evidencias grounding health gate utilidade e cobertura apos recovery",
+    "roteamento de auditoria e divulgacao de cobertura corrigidos para ingles",
+    "componentes criticos filtrados por papeis criticos do catalogo",
+    "documentacao ativa atualizada e conexoes SQLite de testes fechadas explicitamente",
+    "353 testes executaveis aprovados com warnings como erro"
   ]
 }

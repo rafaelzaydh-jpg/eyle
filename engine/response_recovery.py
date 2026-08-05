@@ -8,6 +8,7 @@ from pathlib import PurePosixPath
 
 from llm.executar import ErroLLM, executar_recuperacao_textual
 from engine.utility_gate import validate_response_utility
+from engine.structured_claims import normalize_structured_claims, render_claims
 
 
 _MAX_EVIDENCE_CHARS = 18000
@@ -276,6 +277,74 @@ def build_deterministic_analysis(objective, evidence):
     # o fallback criado para ser seguro.
     return "\n".join(sentences[:5]).strip()
 
+
+
+def build_deterministic_structured_claims(objective, evidence):
+    """Converte evidencia fresca em claims atomicas, sem contrato textual legado."""
+    claims = []
+    for item in evidence or []:
+        if not isinstance(item, dict) or item.get("estado") not in (None, "fresh"):
+            continue
+        evidence_id = str(item.get("id") or "").strip()
+        if not evidence_id:
+            continue
+        analysis = build_deterministic_analysis(objective, [item])
+        for sentence in analysis.splitlines():
+            sentence = sentence.strip()
+            if len(sentence) < 8:
+                continue
+            claims.append({
+                "type": "fact",
+                "text": sentence,
+                "evidence_ids": [evidence_id],
+                "basis": "",
+            })
+            if len(claims) >= 6:
+                break
+        if len(claims) >= 6:
+            break
+    normalized, error = normalize_structured_claims(claims)
+    return ([] if error else normalized), error
+
+
+def recover_structured_audit_claims(
+    objective, evidence, config, *, cause, prior_answer="", allow_llm=True,
+):
+    """Recovery seguro de ``project_audit`` que sempre devolve ``claims[]``.
+
+    O retry textual antigo nao e usado: texto solto nao pode ser convertido em
+    claims por adivinhacao. A camada deterministica usa somente o Evidence Registry.
+    """
+    claims, error = build_deterministic_structured_claims(objective, evidence)
+    answer = render_claims(claims) if claims else ""
+    gate = validate_response_utility(
+        answer, objective, task_type="project_audit", evidence=evidence,
+    )
+    attempt = {
+        "layer": "deterministic_structured_claims",
+        "ok": bool(claims and gate.get("ok")),
+        "utility_gate": gate,
+    }
+    if error:
+        attempt["contract_error"] = error
+    if claims and gate.get("ok"):
+        return {
+            "ok": True,
+            "claims": claims,
+            "answer": answer,
+            "layer": "deterministic_structured_claims",
+            "attempts": [attempt],
+            "utility_gate": gate,
+        }
+    return {
+        "ok": False,
+        "claims": [],
+        "answer": "",
+        "layer": None,
+        "attempts": [attempt],
+        "utility_gate": gate,
+        "failure_code": "NO_USEFUL_STRUCTURED_RESPONSE",
+    }
 
 def recover_useful_response(objective, evidence, config, *, cause, prior_answer="", allow_llm=True, task_type="project_read"):
     """Executa retry textual, retry curto e fallback deterministico."""

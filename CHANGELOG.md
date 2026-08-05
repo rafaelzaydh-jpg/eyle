@@ -6,6 +6,24 @@ All notable changes to Eyle are documented here.
 
 ## 2.7.3 — 2026-08-05
 
+### Revision 55.21 — Audit truthfulness hardening
+
+- Rejected global project-health claims even when targeted coverage and a successful test run exist; only explicitly scoped findings about reviewed components may proceed.
+- Unified test status around the latest executed `run_tests` action so an older passing run cannot mask a later failure.
+- Replaced legacy text recovery for `project_audit` with deterministic structured `claims[]` recovery and revalidation.
+- Fixed English project-audit routing and coverage-language detection.
+- Restricted critical-component metrics to files classified with critical catalog roles.
+- Updated active technical and benchmark documentation so historical revision 53 results are not presented as current.
+- Closed direct SQLite connections in tests and validated the suite with warnings promoted to errors.
+
+### Validation
+
+- `python -m compileall -q .` passed.
+- `node --check web/static/app.js` passed.
+- 353/353 executable tests passed, including `pytest -q -W error`.
+- One Flask-dependent module remained skipped because Flask was unavailable in the packaging environment.
+- The real Qwen 3.8 MAX endpoint was not available in the packaging environment.
+
 ### Revision 55.20 — Real audit coverage and honest disclosure
 
 - Added a public `coverage` record with inventory completeness, total/read source files, total/read critical components, current test execution, documents used by final claims, and `none`/`partial`/`targeted`/`complete` level.

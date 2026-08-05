@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Revisao 51: regressões dos limites operacionais e caches."""
+from contextlib import closing
 import io
 import json
 import os
@@ -114,7 +115,7 @@ def test_config_rejeita_schema_legado_divergente():
 def test_cache_nao_grava_resposta_vazia(tmp_path):
     assert cache_mod.definir(tmp_path, "backend", "s", "u", "") is False
     caminho = tmp_path / "context" / cache_mod.NOME_ARQUIVO
-    with sqlite3.connect(caminho) as conexao:
+    with closing(sqlite3.connect(caminho)) as conexao:
         assert conexao.execute("SELECT COUNT(*) FROM cache_entries").fetchone()[0] == 0
 
 
@@ -128,7 +129,7 @@ def test_cache_remove_erro_legado_na_primeira_leitura(tmp_path):
     }), encoding="utf-8")
 
     assert cache_mod.obter(tmp_path, "backend", "s", "u") is None
-    with sqlite3.connect(tmp_path / "context" / cache_mod.NOME_ARQUIVO) as conexao:
+    with closing(sqlite3.connect(tmp_path / "context" / cache_mod.NOME_ARQUIVO)) as conexao:
         assert conexao.execute("SELECT COUNT(*) FROM cache_entries").fetchone()[0] == 0
 
 

@@ -221,7 +221,11 @@ def test_cobertura_real_targeted_conta_componentes_testes_e_docs_usados():
                 {"role": "entrypoints", "path": "main.py"},
                 {"role": "orchestrators", "path": "engine/agent.py"},
             ],
-            "candidates": [],
+            "candidates": [
+                {"path": "main.py", "roles": ["entrypoints"]},
+                {"path": "engine/agent.py", "roles": ["orchestrators", "core_logic"]},
+                {"path": "engine/worker.py", "roles": ["orchestrators", "grounding_recovery_validation"]},
+            ],
         },
         "initial_scout": {
             "selected_paths": ["main.py", "engine/agent.py", "engine/worker.py"]
