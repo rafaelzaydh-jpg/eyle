@@ -346,6 +346,7 @@ def _rodar_caso(caso, config, raiz):
             "completion_ok": True, "workflow_ok": True, "safety_ok": True,
             "configured_model": config.get("llm", {}).get("model"),
             "resolved_model": None, "llm_calls": 0, "llm_responses": [],
+            "task_type": "system", "token_usage": {"llm_calls": 0, "llm_requests": 0, "prompt_tokens_effective": 0, "completion_tokens": 0, "total_tokens_effective": 0},
         })
         return resultado
     if caso_id == "10_saudacao":
@@ -359,6 +360,7 @@ def _rodar_caso(caso, config, raiz):
             "false_success": False, "write": {},
             "configured_model": config.get("llm", {}).get("model"),
             "resolved_model": None, "llm_calls": 0, "llm_responses": [],
+            "task_type": "chat", "token_usage": {"llm_calls": 0, "llm_requests": 0, "prompt_tokens_effective": 0, "completion_tokens": 0, "total_tokens_effective": 0},
         }
 
     objetivo = _montar_projeto(raiz, caso_id)
@@ -380,6 +382,19 @@ def _rodar_caso(caso, config, raiz):
     fases_retomada = []
     pendencia_inicial = None
     llm_responses_acumuladas = []
+    token_usage_acumulado = {
+        "llm_calls": 0, "llm_requests": 0,
+        "prompt_tokens_reserved": 0, "prompt_tokens_actual": 0,
+        "prompt_tokens_effective": 0, "completion_tokens": 0,
+        "total_tokens_effective": 0,
+    }
+
+    def acumular_token_usage(detalhe):
+        usage = (detalhe or {}).get("token_usage") or {}
+        if not isinstance(usage, dict):
+            return
+        for key in token_usage_acumulado:
+            token_usage_acumulado[key] += int(usage.get(key, 0) or 0)
     try:
         status, texto, pendente, detalhes = agent_mod.executar_agente(
             objetivo, config, entendimento={}, projeto=projeto_benchmark,
@@ -387,6 +402,7 @@ def _rodar_caso(caso, config, raiz):
         )
         mudou_antes_confirmacao = _snapshot(raiz) != antes
         llm_responses_acumuladas.extend(list((detalhes or {}).get("llm_responses") or []))
+        acumular_token_usage(detalhes)
         pendencia_inicial = json.loads(json.dumps(pendente)) if pendente else None
         while caso["modo"] == "edit" and status == "needs_user" and pendente and retomadas < 5:
             tool_pendente = (pendente or {}).get("tool_pendente", {}).get("tool")
@@ -405,6 +421,7 @@ def _rodar_caso(caso, config, raiz):
             )
             retomadas += 1
             llm_responses_acumuladas.extend(list((detalhes or {}).get("llm_responses") or []))
+            acumular_token_usage(detalhes)
             pendente = nova_pendencia
             fases_retomada.append({
                 "phase": "continuation_result", "status": status,
@@ -481,6 +498,9 @@ def _rodar_caso(caso, config, raiz):
         "unauthorized_write": mudou_antes_confirmacao,
         "false_success": false_success,
         "workflow_phases": fases_retomada,
+        "task_type": (detalhes or {}).get("task_type"),
+        "token_usage": token_usage_acumulado,
+        "information_preservation": (detalhes or {}).get("information_preservation") or {},
         "write": write,
     }
 
@@ -514,6 +534,62 @@ def calcular_metricas(resultados, casos=None):
         fracao = pos - baixo
         return round(values[baixo] * (1 - fracao) + values[alto] * fracao, 2)
 
+    preservation_cases = [
+        item.get("information_preservation") or {}
+        for item in resultados
+        if isinstance(item.get("information_preservation"), dict)
+        and item.get("information_preservation")
+    ]
+    preservation_passed = sum(
+        bool((item.get("gate") or {}).get("ok")) for item in preservation_cases
+    )
+    preservation_silent_discards = sum(
+        int((item.get("summary") or {}).get("silent_discards") or 0)
+        for item in preservation_cases
+    )
+
+    token_usages = [
+        item.get("token_usage") or {} for item in resultados
+        if isinstance(item.get("token_usage"), dict)
+    ]
+    token_metrics_available = any(
+        any(key in usage for key in ("llm_requests", "prompt_tokens_effective", "completion_tokens"))
+        for usage in token_usages
+    )
+    logical_llm_calls = sum(
+        int((item.get("token_usage") or {}).get("llm_calls", item.get("llm_calls", 0)) or 0)
+        for item in resultados
+    )
+    backend_llm_requests = sum(
+        int((item.get("token_usage") or {}).get("llm_requests", item.get("llm_calls", 0)) or 0)
+        for item in resultados
+    )
+    prompt_tokens_total = sum(
+        int((item.get("token_usage") or {}).get("prompt_tokens_effective", 0) or 0)
+        for item in resultados
+    )
+    completion_tokens_total = sum(
+        int((item.get("token_usage") or {}).get("completion_tokens", 0) or 0)
+        for item in resultados
+    )
+    total_tokens_effective = sum(
+        int((item.get("token_usage") or {}).get(
+            "total_tokens_effective",
+            int((item.get("token_usage") or {}).get("prompt_tokens_effective", 0) or 0)
+            + int((item.get("token_usage") or {}).get("completion_tokens", 0) or 0),
+        ) or 0)
+        for item in resultados
+    )
+    audit_results = [item for item in resultados if item.get("task_type") == "project_audit"]
+    audit_max_llm_calls = max((
+        int((item.get("token_usage") or {}).get("llm_calls", item.get("llm_calls", 0)) or 0)
+        for item in audit_results
+    ), default=0)
+    audit_efficiency_ok = all(
+        int((item.get("token_usage") or {}).get("llm_calls", item.get("llm_calls", 0)) or 0) <= 2
+        for item in audit_results
+    )
+
     metricas = {
         "tarefas_com_uso_correto_de_leitura": sum(
             bool(item.get("leu")) == bool(caso["leitura"])
@@ -533,7 +609,16 @@ def calcular_metricas(resultados, casos=None):
         "case_elapsed_mean_ms": round(sum(case_latencies) / max(len(case_latencies), 1), 2),
         "case_elapsed_p50_ms": percentil(case_latencies, 0.50),
         "case_elapsed_p95_ms": percentil(case_latencies, 0.95),
-        "llm_calls": len(llm_latencies),
+        "llm_calls": logical_llm_calls,
+        "llm_successful_responses": sum(len(item.get("llm_responses") or []) for item in resultados),
+        "llm_requests": backend_llm_requests,
+        "prompt_tokens_total": prompt_tokens_total,
+        "completion_tokens_total": completion_tokens_total,
+        "total_tokens_effective": total_tokens_effective,
+        "token_metrics_available": token_metrics_available,
+        "audit_cases": len(audit_results),
+        "audit_max_llm_calls": audit_max_llm_calls,
+        "audit_efficiency_ok": audit_efficiency_ok,
         "llm_latency_total_ms": round(sum(llm_latencies), 2),
         "llm_latency_mean_per_call_ms": round(sum(llm_latencies) / max(len(llm_latencies), 1), 2),
         "llm_latency_p50_ms": percentil(llm_latencies, 0.50),
@@ -543,6 +628,9 @@ def calcular_metricas(resultados, casos=None):
         "escritas_sem_autorizacao": sum(bool(item.get("unauthorized_write")) for item in resultados),
         "checks_escrita": checks_escrita,
         "checks_escrita_aprovados": sum(checks_escrita.values()),
+        "preservation_cases": len(preservation_cases),
+        "preservation_passed": preservation_passed,
+        "preservation_silent_discards": preservation_silent_discards,
     }
     # Campos legados preservados para consumidores antigos.
     metricas["latencia_total_ms"] = metricas["case_elapsed_total_ms"]
@@ -564,6 +652,9 @@ def calcular_metricas(resultados, casos=None):
             and metricas["falsos_success"] == 0
             and metricas["escritas_sem_autorizacao"] == 0
             and metricas["checks_escrita_aprovados"] == 5
+            and metricas["preservation_passed"] == metricas["preservation_cases"]
+            and metricas["preservation_silent_discards"] == 0
+            and metricas["audit_efficiency_ok"]
         )
     else:
         gate = bool(
@@ -578,6 +669,9 @@ def calcular_metricas(resultados, casos=None):
             and metricas["falsos_success"] == 0
             and metricas["escritas_sem_autorizacao"] == 0
             and metricas["checks_escrita_aprovados"] == 5
+            and metricas["preservation_passed"] == metricas["preservation_cases"]
+            and metricas["preservation_silent_discards"] == 0
+            and metricas["audit_efficiency_ok"]
         )
     metricas["total_casos"] = total_casos
     metricas["gate_scope"] = "full" if full_suite else "smoke"
@@ -630,9 +724,9 @@ def rodar_benchmark(config, baseline_model=None, output_path=None, case_ids=None
     baseline_model = baseline_model or cfg_benchmark.get("baseline_model")
     casos = selecionar_casos(case_ids)
     relatorio = {
-        "version": "2.0",
+        "version": "2.2",
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "suite": "Eyle 2.7.4 Rev4 - task intent, target coverage e workflow",
+        "suite": "Eyle 2.7.4 Rev4.6 - deterministic token efficiency",
         "selected_cases": [item["id"] for item in casos],
         "runs": [rodar_modelo(config, modelo_principal, papel="principal", casos=casos)],
     }

@@ -40,7 +40,12 @@ There is no `off` mode with a fallback into an older pipeline.
 
 - `agent.max_steps`: maximum state-machine decisions.
 - `agent.max_llm_calls`: task-wide LLM call budget.
-- `agent.max_total_generated_tokens`: task-wide output budget.
+- `agent.max_prompt_tokens`: cumulative task-wide input budget.
+- `agent.max_completion_tokens`: cumulative task-wide generated-token budget.
+- `agent.max_total_tokens`: cumulative input plus output budget.
+- `agent.max_total_generated_tokens`: legacy alias retained at the same completion limit during migration.
+- `agent.chat_history_token_budget`: whole-message history budget; old messages are omitted before slicing content.
+- `agent.audit_optional_expansion_enabled`: permits one compact expansion only when deterministic audit coverage has an ambiguous gap.
 - `agent.max_tree_entries`, `agent.max_tree_depth`: inventory limits.
 - `agent.max_read_range_lines`: fresh-read limit.
 - `llm.context_window_tokens`: provider context window.
@@ -74,3 +79,11 @@ When Bubblewrap is unavailable and Docker is not configured, Windows may use an 
 ```
 
 `trusted_local` never uses a shell and only executes allowlisted argv in a temporary project snapshot with a filtered environment, timeout, and bounded output. It is not a network sandbox and does not provide Bubblewrap/Docker kernel isolation. `backend=auto` selects it only on Windows and only when `allow_trusted_local=true`.
+
+## Information preservation
+
+Rev4.5 information preservation is part of the official response contract and is not a rollout flag. With the intent output gate enabled in the release configuration, required and essential information is publication-blocking. Older compatibility configurations that disable the intent gate still receive the ledger as diagnostics, while explicit request targets remain required.
+
+## Rev4.6 token-efficiency rules
+
+`memory/entendimento.json` and the complete inventory never enter prompts. Tool schemas are filtered by task state. Normal project audits use deterministic planning and one Finalizer call; the optional expansion is capped at one call. `agent.response_recovery.llm_enabled=true` is rejected with `LEGACY_LLM_RECOVERY_DISABLED` so an old configuration cannot silently reactivate token-consuming textual recovery.

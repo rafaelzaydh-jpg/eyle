@@ -341,6 +341,73 @@ def normalize_scout_selection(decision, catalog, *, already_read=None, limit=6, 
     }
 
 
+def build_deterministic_audit_plan(catalog, *, already_read=None, limit=6):
+    """Build the initial high-signal read plan without an LLM call."""
+    selection = normalize_scout_selection(
+        {}, catalog, already_read=already_read, limit=limit,
+        include_required=True, allow_empty=False,
+    )
+    selection.update({
+        "planner": "deterministic",
+        "risk_hypotheses": [],
+        "gaps": [],
+        "rationale": "system-ranked inventory roles and required coverage slots",
+    })
+    return selection
+
+
+def build_deterministic_gap_plan(
+    catalog, coverage, *, already_read=None, limit=1,
+):
+    """Choose concrete gap-closing reads from system coverage only."""
+    already = {_path(item) for item in (already_read or []) if _path(item)}
+    allowed = set((catalog or {}).get("all_candidate_paths") or [])
+    selected = []
+    for raw in (coverage or {}).get("next_read_candidates") or []:
+        path = _path(raw)
+        if path and path in allowed and path not in already and path not in selected:
+            selected.append(path)
+        if len(selected) >= max(0, int(limit)):
+            break
+    if len(selected) < max(0, int(limit)):
+        related = related_test_candidates(
+            catalog, list(already), already_read=already,
+            limit=max(0, int(limit)) - len(selected),
+        )
+        for path in related:
+            if path not in already and path not in selected:
+                selected.append(path)
+    return {
+        "selected_paths": selected[:max(0, int(limit))],
+        "rejected_paths": [],
+        "risk_hypotheses": [],
+        "gaps": [str(item) for item in (coverage or {}).get("missing") or []],
+        "rationale": "system-calculated audit coverage gaps",
+        "planner": "deterministic",
+    }
+
+
+def ambiguous_gap_candidates(catalog, coverage, *, already_read=None):
+    """Return unresolved candidates only when deterministic coverage has no path."""
+    if (coverage or {}).get("next_read_candidates"):
+        return []
+    missing = [
+        item for item in (coverage or {}).get("missing") or []
+        if item not in {"coverage_reported", "grounded_answer"}
+    ]
+    if not missing:
+        return []
+    already = {_path(item) for item in (already_read or []) if _path(item)}
+    candidates = [
+        item for item in (catalog or {}).get("candidates") or []
+        if isinstance(item, dict) and _path(item.get("path")) not in already
+    ]
+    if len(candidates) < 2:
+        return []
+    top_score = int(candidates[0].get("score") or 0)
+    tied = [item for item in candidates if int(item.get("score") or 0) == top_score]
+    return tied if len(tied) >= 2 else []
+
 def related_test_candidates(catalog, component_paths, *, already_read=None, limit=2):
     already = {_path(item) for item in (already_read or [])}
     components = [_path(item) for item in component_paths if _path(item)]
@@ -362,6 +429,8 @@ def new_pipeline_state():
         "catalog": {},
         "initial_scout": {},
         "gap_scout": {},
+        "optional_expansion": {},
+        "optional_expansion_used": False,
         "pending_reads": [],
         "completed_reads": [],
         "failed_reads": [],
@@ -378,9 +447,10 @@ def normalize_pipeline_state(value):
             base[key] = deepcopy(value[key])
     if not isinstance(base.get("catalog"), dict):
         base["catalog"] = {}
-    for key in ("initial_scout", "gap_scout"):
+    for key in ("initial_scout", "gap_scout", "optional_expansion"):
         if not isinstance(base.get(key), dict):
             base[key] = {}
+    base["optional_expansion_used"] = bool(base.get("optional_expansion_used"))
     for key in ("pending_reads", "completed_reads", "failed_reads"):
         values = base.get(key)
         base[key] = list(dict.fromkeys(_path(item) for item in values or [] if _path(item)))
@@ -401,6 +471,8 @@ def public_pipeline_state(value):
         "required_slots": catalog.get("required_slots") or [],
         "initial_scout": state.get("initial_scout") or {},
         "gap_scout": state.get("gap_scout") or {},
+        "optional_expansion": state.get("optional_expansion") or {},
+        "optional_expansion_used": bool(state.get("optional_expansion_used")),
         "pending_reads": state.get("pending_reads") or [],
         "completed_reads": state.get("completed_reads") or [],
         "failed_reads": state.get("failed_reads") or [],

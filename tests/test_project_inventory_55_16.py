@@ -105,11 +105,10 @@ def test_prompt_recebe_todas_as_entradas_do_inventario_estruturado():
     )
 
     assert "PROJECT INVENTORY" in prompt
-    assert "F engine/agent.py" in prompt
-    assert "F llm/executar.py" in prompt
-    assert "F tests/test_agent.py" in prompt
-    assert "F pkg/modulo_070.py" in prompt
-    assert "F pkg/modulo_142.py" in prompt
+    assert "PROJECT INVENTORY SUMMARY" in prompt
+    assert "F engine/agent.py" not in prompt
+    assert '"inventory_hash"' in prompt
+    assert '"files":' in prompt
     assert "COVERAGE: complete" in prompt
     bloco = prompt.split("PROJECT INVENTORY", 1)[1].split("TOOL CATALOG", 1)[0]
     assert "caracteres omitidos" not in bloco
@@ -140,8 +139,8 @@ def test_prompt_marca_inventario_truncado_como_cobertura_parcial():
     )
 
     assert '"complete":false' in prompt
-    assert "COVERAGE: PARTIAL" in prompt
-    assert "do not claim" in prompt
+    assert "COVERAGE: partial" in prompt
+    assert "do not infer absence" in prompt
 
 
 def test_project_reader_adiciona_metadados_e_hash_estavel(tmp_path):

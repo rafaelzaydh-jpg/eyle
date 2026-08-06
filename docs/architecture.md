@@ -94,3 +94,34 @@ For writes, the successful `test_patch_dry_run` action is the canonical proposal
 The `code_analysis` response profile now requires five semantic sections: a plain-language summary, observable behavior, important components, component relationships, and verified limitations. The Finalizer still returns atomic grounded claims, but deterministic code orders and groups them into readable paragraphs before publication.
 
 Coverage disclosure, evidence IDs, tools, audit phases, and test status remain available in the expandable task details. They are no longer prepended to the main answer. When HTTP interfaces are visible, the Finalizer is instructed to enumerate routes, methods, handlers, and returned values instead of collapsing them into a generic phrase such as “status endpoints”.
+
+
+## Rev4.4 structured intent adherence
+
+Intent adherence is evaluated on validated structured claims before the human-readable answer is rendered. `code_analysis` requests five semantic sections, but only `plain_language_summary` and `main_behavior` are blocking requirements. `important_components`, `component_relationships`, and `verified_limitations` are optional enrichments: their absence is recorded in diagnostics and does not reject an otherwise useful grounded analysis. If grounding removes an essential claim, the normal single directed repair remains required.
+
+## Rev4.5 information preservation ledger
+
+Rev4.5 keeps grounding and information preservation as separate responsibilities. Grounding validates whether an individual claim is supported. The preservation ledger validates whether information survives the complete response pipeline:
+
+```text
+request target/output
+  -> fresh evidence
+  -> stable structured claim
+  -> deterministic rendered segment
+```
+
+Targets are classified as:
+
+- `required`: explicitly requested targets and `must_preserve` facts;
+- `essential`: minimum semantic outputs needed to satisfy the intent;
+- `optional`: useful enrichment that may be summarized or omitted, but remains diagnostic.
+
+A task cannot return `success` when a required or essential item loses its evidence, claim, or rendered segment. Rejected claims are retained in the expandable diagnostics with grounding reasons and importance.
+
+
+## Rev4.6 deterministic audit and token accounting
+
+The active audit path no longer performs mandatory initial and gap Scout calls. System code builds a deterministic candidate catalog, chooses initial reads, recalculates coverage, and selects objective gap reads. A single compact model expansion is permitted only when there is a structural gap, no deterministic next candidate, and multiple equally ranked unread candidates. The normal path therefore contains one LLM call: the Finalizer.
+
+`entendimento.json` and full inventory entries stay outside prompts. Runtime accounting distinguishes logical calls from actual backend requests, reserves context before network access, replaces estimates with provider usage when available, and enforces prompt, completion, and total budgets.

@@ -1,4 +1,42 @@
+## 2.7.4 Rev4.6 — 2026-08-05
+
+- Removed `entendimento.json` and complete path inventories from all active model prompts.
+- Replaced mandatory initial/gap audit Scouts with deterministic planning and coverage-driven reads.
+- Limited ambiguous audit expansion to one compact optional call; normal audits use one Finalizer call.
+- Added task-wide prompt, completion, and total-token budgets with preflight before every backend request.
+- Counted compatibility fallbacks/retries as real requests and replaced token estimates with provider usage when available.
+- Filtered tool schemas by task state and selected chat history by a whole-message token budget.
+- Hard-disabled legacy textual LLM recovery so old configuration cannot reactivate hidden calls.
+- Added benchmark token metrics and `compare-efficiency` release regression checks.
+- Added 14 Rev4.6 regression tests; 362 tests pass in the packaging environment.
+- The real Qwen Rev4.6 behavior/token smoke remains deployment-only.
+
 # Changelog
+
+## 2.7.4 Rev4.5 — 2026-08-05
+
+- Added `TargetCoverageLedger` with `required`, `essential`, and `optional` classifications.
+- Added stable system-owned claim IDs and evidence-to-claim links.
+- Added deterministic claim-to-rendered-segment links.
+- Grounding-rejected claims are retained with reasons and importance instead of disappearing silently.
+- Publication now fails when required or essential information loses evidence, a claim, or a rendered segment.
+- Added manifest-backed `must_preserve` fixtures for preservation regression tests.
+- Added `python main.py compare-coverage <baseline> <candidate>` for automatic release comparison.
+- Benchmark reports now include preservation gates, coverage counts, and silent-discard metrics.
+- Added 8 Rev4.5 regression tests; 347 tests pass in the packaging environment.
+- The real Qwen Rev4.5 smoke remains deployment-only.
+
+## 2.7.4 Rev4.4 — 2026-08-05
+
+- Fixes the real-model failure `A conclusão final perdeu a aderência à intenção solicitada` after human-readable rendering.
+- Separates `requested_outputs` into blocking `required_outputs` and diagnostic `optional_outputs`.
+- Keeps `plain_language_summary` and `main_behavior` mandatory for `code_analysis`.
+- Treats components, component relationships, and verified limitations as optional enrichments when fresh evidence does not support them.
+- Evaluates final intent adherence on grounded structured claims, not on the prose formatting of the rendered answer.
+- Exposes required and optional outputs separately in expandable task details.
+- Adds regressions proving that grounding may remove one unsupported optional claim without rejecting the complete analysis, while missing main behavior remains blocking.
+- Validation: 339 tests passed; one optional Flask test skipped because Flask was unavailable in the packaging environment.
+- The real Qwen Rev4.4 smoke remains deployment-only.
 
 ## 2.7.4 Rev4.3 — 2026-08-05
 

@@ -678,18 +678,27 @@ def _ler_config_key(config, caminho, default):
     return valor
 
 
-def gerar_catalogo_tools(registro=None, config=None):
-    """Gera o catalogo publico diretamente do registro executavel."""
+def gerar_catalogo_tools(registro=None, config=None, allowed_names=None):
+    """Generate the public catalog from the executable registry.
+
+    ``allowed_names`` is a Rev4.6 context filter. It never grants a tool that
+    is absent from the registry; it only removes impossible actions from the
+    current model step.
+    """
     catalogo = []
     fonte = TOOLS if registro is None else registro
+    allowed = None if allowed_names is None else {str(name) for name in allowed_names}
     for chave, entrada in fonte.items():
+        public_name = entrada.get("name", chave)
+        if allowed is not None and public_name not in allowed and chave not in allowed:
+            continue
         limites = {}
         for nome_limite, origem in (entrada.get("limits") or {}).items():
             limites[nome_limite] = _ler_config_key(
                 config, origem["config_key"], origem["default"],
             )
         catalogo.append({
-            "name": entrada.get("name", chave),
+            "name": public_name,
             "description": entrada.get("description", ""),
             "permission": entrada.get("permission"),
             "input_schema": entrada.get("input_schema", _schema_objeto()),

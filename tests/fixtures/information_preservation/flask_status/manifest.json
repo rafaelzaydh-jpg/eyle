@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "flask_status",
+  "objective": "Analise o projeto e explique todas as rotas, os retornos, a porta e o modo debug.",
+  "must_preserve": [
+    {
+      "id": "framework_flask",
+      "level": "essential",
+      "terms": ["Flask"]
+    },
+    {
+      "id": "route_root",
+      "level": "required",
+      "terms": ["/", "status", "ok"]
+    },
+    {
+      "id": "route_health",
+      "level": "required",
+      "terms": ["/health", "healthy"]
+    },
+    {
+      "id": "port_default",
+      "level": "required",
+      "terms": ["PORT", "5000"]
+    },
+    {
+      "id": "debug_switch",
+      "level": "required",
+      "terms": ["FLASK_DEBUG", "1"]
+    }
+  ]
+}

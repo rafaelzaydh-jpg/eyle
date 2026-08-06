@@ -241,9 +241,9 @@ def test_fluxo_auditoria_le_entrypoint_nucleo_e_testes_antes_do_final(monkeypatc
     assert details["analysis_coverage"]["passed"] is True
     assert all(details["analysis_coverage"]["criteria"].values())
     assert details["analysis_coverage"]["reads"]["documentation"] == []
-    assert len(scout_calls) == 2
+    assert len(scout_calls) == 0
     assert len(finalizer_calls) == 1
-    assert "CANDIDATE CATALOG" in scout_calls[0]
+    assert details["audit_pipeline"]["initial_scout"]["planner"] == "deterministic"
     assert "FINALIZER CONTRACT" in finalizer_calls[0]
     assert "engine/core.py" in text
 

@@ -2,9 +2,9 @@
   "release": "2.7.4",
   "app_version": "2.7.4",
   "config_schema_version": "2.7.4",
-  "revision": "4.3-human-readable-code-analysis",
+  "revision": "4.6-token-efficiency",
   "released_at": "2026-08-05",
-  "title": "Human-readable code analysis with deterministic semantic response ordering",
+  "title": "Deterministic audit planning and end-to-end token efficiency",
   "architecture": {
     "project_pipelines": [
       "agent"
@@ -35,15 +35,15 @@
     "bounded task and LLM budgets"
   ],
   "validation": {
-    "tests_passed": 336,
+    "tests_passed": 362,
     "tests_skipped": 1,
     "skip_reason": "Flask is not installed in the packaging environment",
     "real_model_benchmark_run": false
   },
   "known_limits": [
-    "The real Qwen Rev4.3 behavioral smoke test must be run in the deployment environment.",
-    "Task intent remains deterministic and intentionally compact; advanced multi-goal decomposition remains deferred.",
-    "Writes without an available test suite finish as success with verification_status=unverified_no_suite after a fresh reread.",
+    "The real Qwen Rev4.6 behavioral and token-efficiency smoke test must be run in the deployment environment.",
+    "Provider-reported prompt token usage is authoritative when available; otherwise the runtime uses a conservative character-based estimate.",
+    "One compact optional audit expansion may be used when deterministic coverage finds a real ambiguous gap.",
     "The optional Flask interface requires its runtime dependency in the final environment."
   ],
   "features": {
@@ -72,6 +72,32 @@
     "code_analysis_sections": "plain-language summary, behavior, components, relationships, limitations",
     "profiled_claim_rendering": "deterministic semantic ordering with paragraph grouping",
     "coverage_disclosure": "kept in expandable task details and removed from the main answer prefix",
-    "interface_enumeration": "Finalizer explicitly enumerates observable routes, methods, handlers, and return values"
+    "interface_enumeration": "Finalizer explicitly enumerates observable routes, methods, handlers, and return values",
+    "intent_adherence_units": "validated structured claims before human-readable rendering",
+    "code_analysis_required_outputs": "plain_language_summary and main_behavior",
+    "code_analysis_optional_outputs": "important_components, component_relationships, verified_limitations",
+    "post_grounding_intent_gate": "optional grounded claim loss is diagnostic; essential output loss remains blocking",
+    "target_coverage_ledger": "required/essential/optional target tracking",
+    "evidence_claim_link": "fresh evidence IDs linked to stable claim IDs",
+    "claim_render_link": "stable claim IDs linked to deterministic rendered segments",
+    "rejected_claim_registry": "grounding rejections retained with reasons and importance",
+    "silent_discard_gate": "required and essential information cannot disappear before success",
+    "must_preserve_fixtures": "manifest-backed preservation fixtures",
+    "release_coverage_comparison": "compare-coverage CLI detects benchmark regressions",
+    "benchmark_preservation_metrics": "preservation gate and silent-discard metrics included per case",
+    "entendimento_prompt_injection": "disabled; legacy metadata remains system-side only",
+    "compact_project_inventory_prompt": "hash, counts, roots, extensions, and completeness only",
+    "audit_planning": "deterministic initial and gap selection",
+    "audit_optional_expansion": "at most one compact LLM expansion for a real ambiguous gap",
+    "audit_normal_llm_calls": "one Finalizer call",
+    "prompt_token_budget": "preflight before every backend request",
+    "completion_token_budget": "task-wide enforced",
+    "total_token_budget": "prompt plus completion enforced",
+    "backend_request_accounting": "retries and compatibility fallbacks counted separately",
+    "tool_catalog_filtering": "only tools valid for the current task state are exposed",
+    "chat_history_budget": "whole messages selected by token budget",
+    "legacy_llm_recovery": "hard disabled",
+    "benchmark_token_metrics": "logical calls, backend requests, prompt, completion, and total tokens",
+    "release_efficiency_comparison": "compare-efficiency CLI detects per-case regressions"
   }
 }

@@ -15,14 +15,14 @@
 <p align="center">
   <img alt="Python 3.8+" src="https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white">
   <img alt="Release 2.7.4" src="https://img.shields.io/badge/release-2.7.4-2563EB">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-336%20passed-16A34A">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-362%20passed-16A34A">
 </p>
 
-**Version:** 2.7.4 · **Schema:** 2.7.4 · **Revision:** 4.3-human-readable-code-analysis
+**Version:** 2.7.4 · **Schema:** 2.7.4 · **Revision:** 4.6-token-efficiency
 
 ## What changed in 2.7.4
 
-Rev4.3 makes code analysis understandable before it becomes technical: the main answer now explains what the project is, what it does, its principal components and their relationships, then closes with verified limitations. Audit coverage remains available in the expandable execution details instead of being prepended to the answer.
+Rev4.6 removes the largest active token waste without weakening Rev4.5 preservation guarantees. `entendimento.json` and full inventories no longer enter prompts, project audits use deterministic initial/gap planning, normal audits spend one Finalizer call, and only one compact optional expansion is allowed for a real ambiguous gap. Prompt, completion, and total-token budgets are enforced before backend requests; retries are counted; tools and chat history are filtered by the current state; and `compare-efficiency` detects per-case token regressions between releases.
 
 Eyle now has one project pipeline. The historical Retrieval → Analyst → Executor → Verify paths and their hidden fallbacks were removed. A project request either runs through the Eyle agent or returns a specific failure; it is never silently rerouted into another architecture.
 

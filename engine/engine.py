@@ -23,6 +23,7 @@ if BASE_DIR not in sys.path:
 
 from engine.agent import executar_agente
 from engine.config_schema import carregar_config_validada
+from engine.context_engine import estimar_tokens
 from engine.memoria_lock import lock_para
 from engine.persistencia import salvar_json_atomico, salvar_texto_atomico
 from engine.roteador import classificar_pergunta, classificar_modo_projeto, detectar_resposta_proposta
@@ -530,11 +531,42 @@ def _resultado_falha_llm(tipo, motivo_roteador, erro, **extras):
     resultado.update(extras)
     return resultado
 
+def _selecionar_historico_por_tokens(historico, config):
+    """Keep recent complete messages within a deterministic token budget."""
+    cfg_agent = (config or {}).get("agent", {})
+    cfg_context = (config or {}).get("context_engine", {})
+    budget = max(0, int(cfg_agent.get("chat_history_token_budget", 1200) or 0))
+    chars_per_token = max(1, int(cfg_context.get("chars_per_token_fallback", 3) or 3))
+    selected = []
+    used = 0
+    source = list(historico or [])
+    for item in reversed(source):
+        if not isinstance(item, dict):
+            continue
+        line = f"{item.get('role', '')}: {item.get('text', '')}"
+        cost = estimar_tokens(line, chars_per_token)
+        if selected and used + cost > budget:
+            break
+        if not selected and cost > budget:
+            # Never slice a message; omit it when it cannot fit whole.
+            continue
+        selected.append(item)
+        used += cost
+    selected.reverse()
+    runtime = (config or {}).get("_runtime_agent_budget")
+    if isinstance(runtime, dict):
+        runtime["chat_history_tokens"] = used
+        runtime["chat_history_messages"] = len(selected)
+        runtime["chat_history_messages_omitted"] = max(0, len(source) - len(selected))
+    return selected
+
+
 def _processar_chat(pergunta, config, motivo_roteador, historico_snapshot=None):
     """Conversa geral sem abrir o workspace nem executar ferramentas."""
     origem_historico = carregar_conversa() if historico_snapshot is None else historico_snapshot
     historico = _historico_sem_erros_llm(origem_historico)
-    historico = _historico_sem_mensagem_atual(historico, pergunta)[-6:]
+    historico = _historico_sem_mensagem_atual(historico, pergunta)
+    historico = _selecionar_historico_por_tokens(historico, config)
     try:
         resposta = executar_chat(pergunta, config, historico=historico)
     except ErroLLM as erro:
@@ -856,8 +888,15 @@ def processar(pergunta, registrar_pergunta=True, forcar_tipo=None, historico_sna
         "task_id": task_id,
         "source_job_id": source_job_id,
         "max_llm_calls": max(1, int(cfg_agent.get("max_llm_calls", 12))),
-        "max_generated_tokens": max(1, int(cfg_agent.get("max_total_generated_tokens", 12000))),
+        "max_generated_tokens": max(1, int(cfg_agent.get("max_completion_tokens", cfg_agent.get("max_total_generated_tokens", 12000)))),
+        "max_completion_tokens": max(1, int(cfg_agent.get("max_completion_tokens", cfg_agent.get("max_total_generated_tokens", 12000)))),
+        "max_prompt_tokens": max(1, int(cfg_agent.get("max_prompt_tokens", 14000))),
+        "max_total_tokens": max(1, int(cfg_agent.get("max_total_tokens", 18000))),
         "llm_calls": 0,
+        "llm_requests": 0,
+        "prompt_tokens_reserved": 0,
+        "prompt_tokens_actual": 0,
+        "prompt_tokens_effective": 0,
         "generated_tokens": 0,
     }
     projeto = carregar_projeto()

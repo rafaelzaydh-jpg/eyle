@@ -8,6 +8,8 @@ viram prova do estado operacional atual.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import unicodedata
 
@@ -188,7 +190,25 @@ def normalize_structured_claims(value):
         if claim_type == "absence" and not scope:
             return None, f"final.claims[{index}] do tipo absence exige scope"
 
+        claim_identity = json.dumps({
+            "type": claim_type,
+            "text": text,
+            "evidence_ids": evidence_ids,
+            "basis": basis,
+            "scope": scope,
+            "output": output,
+        }, ensure_ascii=False, sort_keys=True)
+        generated_claim_id = "claim-" + hashlib.sha256(
+            claim_identity.encode("utf-8")
+        ).hexdigest()[:12]
+        supplied_claim_id = item.get("claim_id", item.get("id"))
+        claim_id = (
+            str(supplied_claim_id).strip()
+            if isinstance(supplied_claim_id, str) and supplied_claim_id.strip()
+            else generated_claim_id
+        )
         claim = {
+            "claim_id": claim_id,
             "type": claim_type,
             "text": text,
             "evidence_ids": evidence_ids,

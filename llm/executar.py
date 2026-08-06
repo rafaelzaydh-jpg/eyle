@@ -28,6 +28,7 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 from engine.persistencia import salvar_texto_atomico  # noqa: E402
 from engine.config_schema import carregar_config_validada  # noqa: E402
+from engine.context_engine import estimar_tokens  # noqa: E402
 from engine import telemetry  # noqa: E402
 from engine import process_limiter  # noqa: E402
 from engine import progress as job_progress  # noqa: E402
@@ -698,23 +699,13 @@ def _chamar_openai_compatible(
 def _chamar_openai_com_fallback(
     base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
     forcar_json=False, max_tokens=None, read_timeout=None, on_chunk=None,
+    on_request=None,
 ):
-    """Detecta duas incompatibilidades comuns sem perfil por familia de modelo.
-
-    1. response_format rejeitado -> repete pedindo JSON apenas no prompt.
-    2. role=system rejeitado -> repete com system incorporado ao user.
-
-    O resultado fica em memoria por servidor+modelo para as proximas chamadas.
-    """
+    """Detect common OpenAI-compatible incompatibilities with accounting."""
     chave = (str(base_url).rstrip("/"), str(model))
     capacidades = _CAPACIDADES_OPENAI.setdefault(
-        chave, {
-            "json_mode": None,
-            "system_role": None,
-            "reasoning_controls": None,
-        },
+        chave, {"json_mode": None, "system_role": None, "reasoning_controls": None},
     )
-    # Compatibilidade com estado em memoria criado por uma versao anterior.
     capacidades.setdefault("reasoning_controls", None)
     usar_json_nativo = bool(forcar_json and capacidades["json_mode"] is not False)
     usar_system = capacidades["system_role"] is not False
@@ -722,14 +713,21 @@ def _chamar_openai_com_fallback(
         forcar_json and capacidades["reasoning_controls"] is not False
     )
 
-    try:
-        resposta = _chamar_openai_compatible(
+    def request(**kwargs):
+        if on_request is not None:
+            on_request()
+        return _chamar_openai_compatible(
             base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
-            forcar_json=usar_json_nativo, max_tokens=max_tokens,
+            max_tokens=max_tokens, read_timeout=read_timeout, on_chunk=on_chunk,
+            **kwargs,
+        )
+
+    try:
+        resposta = request(
+            forcar_json=usar_json_nativo,
             usar_system_role=usar_system,
             desativar_raciocinio=usar_controles_raciocinio,
             recuperar_reasoning_content=forcar_json,
-            read_timeout=read_timeout, on_chunk=on_chunk,
         )
         if usar_json_nativo:
             capacidades["json_mode"] = True
@@ -744,17 +742,12 @@ def _chamar_openai_com_fallback(
         if not _erro_pode_ser_incompatibilidade(primeiro_erro, primeiro_corpo):
             raise _erro_http(base_url, primeiro_erro, primeiro_corpo) from primeiro_erro
 
-    # Fallback 0: builds mais antigas podem aceitar schema JSON, mas rejeitar
-    # apenas reasoning_effort/chat_template_kwargs. Retira so esses controles
-    # antes de abrir mao da gramatica estruturada.
     if usar_json_nativo and usar_controles_raciocinio:
         try:
-            resposta = _chamar_openai_compatible(
-                base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
-                forcar_json=True, max_tokens=max_tokens,
-                usar_system_role=usar_system, desativar_raciocinio=False,
+            resposta = request(
+                forcar_json=True, usar_system_role=usar_system,
+                desativar_raciocinio=False,
                 recuperar_reasoning_content=forcar_json,
-                read_timeout=read_timeout, on_chunk=on_chunk,
             )
             capacidades["reasoning_controls"] = False
             capacidades["json_mode"] = True
@@ -771,15 +764,11 @@ def _chamar_openai_com_fallback(
                 ) from erro_sem_controles
             capacidades["reasoning_controls"] = False
 
-    # Fallback 1: response_format e opcional; o PROMPT_AGENTE ja exige JSON.
     if usar_json_nativo:
         try:
-            resposta = _chamar_openai_compatible(
-                base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
-                forcar_json=False, max_tokens=max_tokens,
-                usar_system_role=usar_system,
+            resposta = request(
+                forcar_json=False, usar_system_role=usar_system,
                 recuperar_reasoning_content=forcar_json,
-                read_timeout=read_timeout, on_chunk=on_chunk,
             )
             capacidades["json_mode"] = False
             if usar_system:
@@ -794,14 +783,11 @@ def _chamar_openai_com_fallback(
         erro_apos_json = erro_inicial
         segundo_corpo = primeiro_corpo
 
-    # Fallback 2: alguns templates antigos nao aceitam uma mensagem system.
     if usar_system:
         try:
-            resposta = _chamar_openai_compatible(
-                base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
-                forcar_json=False, max_tokens=max_tokens, usar_system_role=False,
+            resposta = request(
+                forcar_json=False, usar_system_role=False,
                 recuperar_reasoning_content=forcar_json,
-                read_timeout=read_timeout, on_chunk=on_chunk,
             )
             capacidades["system_role"] = False
             if usar_json_nativo:
@@ -837,6 +823,69 @@ def _reservar_orcamento_llm(config):
     runtime["llm_calls"] = atual + 1
 
 
+def _reservar_requisicao_llm(config, prompt_sistema, prompt_usuario, max_tokens):
+    """Preflight and account one real backend request.
+
+    Cache hits never call this function. Retries and truncation retries do,
+    so repeated prompt cost is visible instead of being hidden behind one
+    logical LLM call.
+    """
+    runtime = (config or {}).get("_runtime_agent_budget")
+    if not isinstance(runtime, dict):
+        return {"estimated_prompt_tokens": 0}
+    cfg_llm = (config or {}).get("llm", {})
+    cfg_context = (config or {}).get("context_engine", {})
+    chars_per_token = max(1, int(cfg_context.get("chars_per_token_fallback", 3) or 3))
+    prompt_tokens = estimar_tokens(prompt_sistema, chars_per_token) + estimar_tokens(
+        prompt_usuario, chars_per_token,
+    )
+    response_reserved = max(0, int(max_tokens or 0))
+    margin = max(0, int(cfg_context.get("safety_margin_tokens", 256) or 0))
+    window = max(1, int(cfg_llm.get("context_window_tokens", 8192) or 8192))
+    if prompt_tokens + response_reserved + margin > window:
+        raise ErroLLM(
+            "O prompt e a saída reservada excedem a janela de contexto do modelo.",
+            transient=False, error_code="PROMPT_CONTEXT_BUDGET_EXCEEDED",
+        )
+
+    current_prompt = int(runtime.get("prompt_tokens_effective", 0) or 0)
+    max_prompt = int(runtime.get("max_prompt_tokens", 0) or 0)
+    if max_prompt > 0 and current_prompt + prompt_tokens > max_prompt:
+        raise ErroLLM(
+            "O limite global de tokens de entrada da tarefa seria excedido.",
+            transient=False, error_code="MAX_PROMPT_TOKENS_EXCEEDED",
+        )
+    current_completion = int(runtime.get("generated_tokens", 0) or 0)
+    max_total = int(runtime.get("max_total_tokens", 0) or 0)
+    if max_total > 0 and current_prompt + current_completion + prompt_tokens + response_reserved > max_total:
+        raise ErroLLM(
+            "O limite global de tokens da tarefa seria excedido pela próxima chamada.",
+            transient=False, error_code="MAX_TOTAL_TOKENS_EXCEEDED",
+        )
+
+    runtime["llm_requests"] = int(runtime.get("llm_requests", 0) or 0) + 1
+    runtime["prompt_tokens_reserved"] = int(runtime.get("prompt_tokens_reserved", 0) or 0) + prompt_tokens
+    runtime["prompt_tokens_effective"] = current_prompt + prompt_tokens
+    return {"estimated_prompt_tokens": prompt_tokens, "finalized": False}
+
+
+def _finalizar_requisicao_llm(config, reservation, metadata):
+    runtime = (config or {}).get("_runtime_agent_budget")
+    if not isinstance(runtime, dict) or not isinstance(reservation, dict):
+        return
+    if reservation.get("finalized"):
+        return
+    estimated = int(reservation.get("estimated_prompt_tokens", 0) or 0)
+    actual = (metadata or {}).get("prompt_tokens")
+    if isinstance(actual, (int, float)):
+        actual = max(0, int(actual))
+        runtime["prompt_tokens_actual"] = int(runtime.get("prompt_tokens_actual", 0) or 0) + actual
+        runtime["prompt_tokens_effective"] = max(
+            0, int(runtime.get("prompt_tokens_effective", 0) or 0) + actual - estimated,
+        )
+    reservation["finalized"] = True
+
+
 def _registrar_tokens_gerados(config, resposta, metadata_respostas=None):
     runtime = (config or {}).get("_runtime_agent_budget")
     if not isinstance(runtime, dict):
@@ -854,12 +903,21 @@ def _registrar_tokens_gerados(config, resposta, metadata_respostas=None):
         len(str(resposta or "")) + chars_por_token - 1
     ) // chars_por_token
     total = int(runtime.get("generated_tokens", 0) or 0) + estimativa
-    max_tokens = int(runtime.get("max_generated_tokens", 0) or 0)
+    max_tokens = int(runtime.get("max_completion_tokens", runtime.get("max_generated_tokens", 0)) or 0)
     runtime["generated_tokens"] = total
+    runtime["completion_tokens_actual"] = total
     if max_tokens > 0 and total > max_tokens:
         raise ErroLLM(
-            "O limite global aproximado de tokens gerados pela tarefa foi excedido.",
-            transient=False, error_code="MAX_GENERATED_TOKENS_EXCEEDED",
+            "O limite global de tokens de saída da tarefa foi excedido.",
+            transient=False, error_code="MAX_COMPLETION_TOKENS_EXCEEDED",
+        )
+    max_total = int(runtime.get("max_total_tokens", 0) or 0)
+    effective_total = int(runtime.get("prompt_tokens_effective", 0) or 0) + total
+    runtime["total_tokens_effective"] = effective_total
+    if max_total > 0 and effective_total > max_total:
+        raise ErroLLM(
+            "O limite global de tokens da tarefa foi excedido.",
+            transient=False, error_code="MAX_TOTAL_TOKENS_EXCEEDED",
         )
 
 
@@ -1128,21 +1186,35 @@ def _chamar_llm_impl(
                 def chamar_backend(token_limit, callback):
                     _LLM_RESPONSE_LOCAL.metadata = {}
                     inicio_backend = time.monotonic()
+                    reservations = []
+
+                    def before_request():
+                        reservations.append(_reservar_requisicao_llm(
+                            config, prompt_sistema, prompt_usuario, token_limit,
+                        ))
+
                     if openai_compatible:
                         resposta_backend = _chamar_openai_com_fallback(
                             base_url, model, prompt_sistema, prompt_usuario, temperature,
                             connect_atual, forcar_json=forcar_json, max_tokens=token_limit,
                             read_timeout=read_atual, on_chunk=callback,
+                            on_request=before_request,
                         )
                     else:
+                        before_request()
                         resposta_backend = _chamar_ollama(
                             base_url, model, prompt_sistema, prompt_usuario, temperature,
                             connect_atual, forcar_json=forcar_json, max_tokens=token_limit,
                             read_timeout=read_atual, on_chunk=callback,
                         )
                     metadata_backend = _ultima_metadata_backend()
+                    if reservations:
+                        _finalizar_requisicao_llm(config, reservations[-1], metadata_backend)
                     metadata_backend["latency_ms"] = round(
                         (time.monotonic() - inicio_backend) * 1000, 2,
+                    )
+                    metadata_backend["prompt_tokens_estimated"] = (
+                        reservations[-1].get("estimated_prompt_tokens") if reservations else 0
                     )
                     return resposta_backend, metadata_backend
 
@@ -1534,23 +1606,9 @@ def executar_chat(pergunta, config, historico=None):
 
 
 
-PROMPT_RECOVERY = """You are the response recovery stage of Eyle.
-
-Return plain natural-language text only, never JSON. Use only the supplied fresh evidence.
-Produce a real conclusion related to the user's request: describe at least one observed behavior, inference, risk, or recommendation.
-Do not output a file list, evidence receipt, execution log, or status summary as the answer.
-Do not invent files, symbols, behavior, tests, or results. Keep citations exactly within the supplied file ranges.
-Answer in the user's language."""
-
-
 def executar_recuperacao_textual(prompt_usuario, config):
-    """Retry textual sem response_format para recuperar uma conclusao util."""
-    return _chamar_llm(
-        PROMPT_RECOVERY, prompt_usuario, config,
-        forcar_json=False, perfil="recovery", stream_visible=False,
+    """Legacy recovery is intentionally disconnected from the backend."""
+    raise ErroLLM(
+        "O recovery textual legado por LLM foi desativado na Rev4.6.",
+        transient=False, error_code="LEGACY_LLM_RECOVERY_DISABLED",
     )
-
-
-
-
-

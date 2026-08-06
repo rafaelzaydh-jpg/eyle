@@ -1,10 +1,10 @@
 # Technical overview — Eyle 2.7.4
 
-**Versão:** 2.7.4 · **Schema:** 2.7.4 · **Revisão:** 4.3-human-readable-code-analysis
+**Versão:** 2.7.4 · **Schema:** 2.7.4 · **Revisão:** 4.6-token-efficiency
 
 ## Single-agent core
 
-Every project request is represented by one persisted Eyle task. The same task moves through planning, reading, optional writing, testing, verification, and finalization. Names such as scout or finalizer describe internal prompt profiles, not independent agents or alternate pipelines.
+Every project request is represented by one persisted Eyle task. The same task moves through planning, reading, optional writing, testing, verification, and finalization. The Finalizer is an internal response profile, not a separate agent. Project-audit file selection is deterministic; a compact optional expansion exists only for a genuinely ambiguous uncovered gap.
 
 ## Ingest
 
@@ -12,7 +12,7 @@ Every project request is represented by one persisted Eyle task. The same task m
 
 - `projeto.json`: project identity and fingerprint;
 - `estrutura.json`: inventory and structural metadata;
-- `entendimento.json`: deterministic navigation hints and manually preserved component notes;
+- `entendimento.json`: legacy deterministic navigation hints kept system-side during migration and never serialized into model prompts;
 - `chunks.jsonl`: bounded BM25 search chunks.
 
 Ingest does not call an LLM. Indexed text is not accepted as current source evidence; the agent rereads the file from disk before using it in a conclusion.
@@ -43,3 +43,15 @@ Atomic replacement uses a temporary file in the destination directory, `fsync`, 
 ## Interfaces
 
 CLI, Flask UI, queue, and worker are adapters around the same `engine.processar()` entry point. They do not implement separate reasoning pipelines.
+
+## Token-efficient audit flow
+
+```text
+inventory (system-side)
+→ deterministic initial reads
+→ deterministic coverage and gap reads
+→ optional compact expansion only for an ambiguous gap
+→ one Finalizer
+```
+
+The model receives a compact inventory summary, fresh evidence, coverage, and the task contract. It does not receive the full `entendimento.json` or the complete project path list. Before each real backend request, Eyle reserves prompt/output capacity against the context window and task-wide prompt/completion/total budgets. Compatibility retries count as separate requests.

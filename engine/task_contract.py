@@ -84,6 +84,27 @@ _RESPONSE_SECTION_ORDER = {
 }
 
 
+def _output_requirements(profile, outputs):
+    """Separa o contrato semântico mínimo das seções enriquecedoras.
+
+    A resposta pode tentar cobrir todas as ``requested_outputs``, mas apenas
+    ``required_outputs`` bloqueiam a publicação. Em análise geral, resumo em
+    linguagem natural e comportamento principal definem a aderência mínima;
+    componentes, relações e limitações enriquecem a resposta quando a evidência
+    realmente os sustenta.
+    """
+    requested = list(outputs or [])
+    if profile == "code_analysis":
+        required = [
+            item for item in ("plain_language_summary", "main_behavior")
+            if item in requested
+        ]
+    else:
+        required = list(requested)
+    optional = [item for item in requested if item not in required]
+    return required, optional
+
+
 def _classify_task_intent(objective, task_type):
     text = str(objective or "")
     normalized = _norm(text)
@@ -162,12 +183,15 @@ def _classify_task_intent(objective, task_type):
         outputs = ["explanation"]
         write_allowed = False
 
+    required_outputs, optional_outputs = _output_requirements(profile, outputs)
     return {
         "intent": intent,
         "domain": "code",
         "response_profile": profile,
         "write_allowed": write_allowed,
         "requested_outputs": outputs,
+        "required_outputs": required_outputs,
+        "optional_outputs": optional_outputs,
         "response_sections": list(_RESPONSE_SECTION_ORDER.get(profile, outputs)),
         "recommendations_requested": recommendations_requested,
         "recommendation_count": recommendation_count,
@@ -435,7 +459,7 @@ def evaluate_target_coverage(contract, claims, evidence, answer=""):
     }
 
 
-def _claim_output_tags(claim):
+def claim_output_tags(claim):
     declared = claim.get("output", claim.get("requested_output"))
     if isinstance(declared, str) and declared.strip():
         return {declared.strip()}
@@ -483,10 +507,14 @@ def evaluate_intent_coverage(contract, claims, limitations=None):
     contract = contract or {}
     claims = claims or []
     requested = list(contract.get("requested_outputs") or [])
+    required = list(contract.get("required_outputs") or requested)
+    optional = list(contract.get("optional_outputs") or [
+        item for item in requested if item not in required
+    ])
     tags = set()
     for claim in claims:
         if isinstance(claim, dict):
-            tags.update(_claim_output_tags(claim))
+            tags.update(claim_output_tags(claim))
     if limitations:
         tags.add("verified_limitations")
 
@@ -500,7 +528,8 @@ def evaluate_intent_coverage(contract, claims, limitations=None):
     if intent == "review" and claims:
         tags.add("analysis")
 
-    missing = [item for item in requested if item not in tags]
+    missing = [item for item in required if item not in tags]
+    missing_optional = [item for item in optional if item not in tags]
     recommendation_claims = [
         item for item in claims
         if isinstance(item, dict) and (
@@ -526,8 +555,11 @@ def evaluate_intent_coverage(contract, claims, limitations=None):
         "ok": ok,
         "failure_code": failure,
         "requested_outputs": requested,
+        "required_outputs": required,
+        "optional_outputs": optional,
         "covered_outputs": sorted(tags),
         "missing_outputs": missing,
+        "missing_optional_outputs": missing_optional,
         "recommendations_requested": bool(contract.get("recommendations_requested")),
         "recommendation_count_expected": count_expected,
         "recommendation_count_actual": len(recommendation_claims),
@@ -545,7 +577,7 @@ def order_claims_for_response(contract, claims):
     ranks = {name: index for index, name in enumerate(order)}
 
     def rank(item):
-        tags = _claim_output_tags(item if isinstance(item, dict) else {})
+        tags = claim_output_tags(item if isinstance(item, dict) else {})
         candidates = [ranks[tag] for tag in tags if tag in ranks]
         return min(candidates) if candidates else len(order)
 
@@ -554,36 +586,67 @@ def order_claims_for_response(contract, claims):
     )]
 
 
-def render_claims_for_response(contract, claims):
-    """Renderiza parágrafos humanos sem misturar o painel de auditoria à resposta."""
+def render_claims_with_segments(contract, claims):
+    """Renderiza e preserva o vínculo determinístico claim -> parágrafo."""
     ordered = order_claims_for_response(contract, claims)
     profile = str((contract or {}).get("response_profile") or "")
     sections = list((contract or {}).get("response_sections") or _RESPONSE_SECTION_ORDER.get(profile, []))
     if not sections:
-        return "\n".join(
-            str(item.get("text") or "").strip() for item in ordered
-            if isinstance(item, dict) and str(item.get("text") or "").strip()
-        ).strip()
+        segments = []
+        for index, item in enumerate(ordered, start=1):
+            if not isinstance(item, dict) or not str(item.get("text") or "").strip():
+                continue
+            segments.append({
+                "segment_id": f"segment-{index:03d}",
+                "section": "unclassified",
+                "claim_ids": [str(item.get("claim_id") or f"claim-{index:03d}")],
+                "text": str(item.get("text") or "").strip(),
+            })
+        return {"text": "\n".join(item["text"] for item in segments).strip(), "segments": segments}
 
     buckets = {name: [] for name in sections}
     remainder = []
-    for claim in ordered:
+    for index, claim in enumerate(ordered, start=1):
         if not isinstance(claim, dict):
             continue
         text = str(claim.get("text") or "").strip()
         if not text:
             continue
-        tags = _claim_output_tags(claim)
+        entry = {
+            "claim_id": str(claim.get("claim_id") or f"claim-{index:03d}"),
+            "text": text,
+        }
+        tags = claim_output_tags(claim)
         destination = next((name for name in sections if name in tags), None)
         if destination is None:
-            remainder.append(text)
+            remainder.append(entry)
         else:
-            buckets[destination].append(text)
+            buckets[destination].append(entry)
 
-    paragraphs = [" ".join(buckets[name]) for name in sections if buckets[name]]
+    segments = []
+    for name in sections:
+        entries = buckets[name]
+        if not entries:
+            continue
+        segments.append({
+            "segment_id": f"segment-{len(segments)+1:03d}",
+            "section": name,
+            "claim_ids": [item["claim_id"] for item in entries],
+            "text": " ".join(item["text"] for item in entries),
+        })
     if remainder:
-        paragraphs.append(" ".join(remainder))
-    return "\n\n".join(paragraphs).strip()
+        segments.append({
+            "segment_id": f"segment-{len(segments)+1:03d}",
+            "section": "unclassified",
+            "claim_ids": [item["claim_id"] for item in remainder],
+            "text": " ".join(item["text"] for item in remainder),
+        })
+    return {"text": "\n\n".join(item["text"] for item in segments).strip(), "segments": segments}
+
+
+def render_claims_for_response(contract, claims):
+    """Compatibilidade: devolve apenas o texto da renderização auditável."""
+    return render_claims_with_segments(contract, claims)["text"]
 
 
 def render_intent_feedback(coverage):

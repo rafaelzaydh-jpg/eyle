@@ -156,7 +156,7 @@
     "max_read_range_lines": 400,
     "task_deadline_seconds": 900,
     "max_llm_calls": 12,
-    "max_total_generated_tokens": 12000,
+    "max_total_generated_tokens": 5000,
     "semantic_repeat_overlap": 0.95,
     "max_secret_scan_bytes": 65536,
     "semantic_grounding": {
@@ -180,7 +180,12 @@
     "target_coverage_enabled": true,
     "project_read_single_repair_enabled": true,
     "intent_output_gate_enabled": true,
-    "deterministic_write_receipt_enabled": true
+    "deterministic_write_receipt_enabled": true,
+    "max_prompt_tokens": 14000,
+    "max_completion_tokens": 5000,
+    "max_total_tokens": 18000,
+    "chat_history_token_budget": 1200,
+    "audit_optional_expansion_enabled": true
   },
   "worker": {
     "heartbeat_interval_seconds": 5,
@@ -202,5 +207,5 @@
   "updated": "2026-08-05",
   "app_version": "2.7.4",
   "config_schema_version": "2.7.4",
-  "revision": "4.3-human-readable-code-analysis"
+  "revision": "4.6-token-efficiency"
 }

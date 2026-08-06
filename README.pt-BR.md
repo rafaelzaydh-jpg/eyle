@@ -15,14 +15,14 @@
 <p align="center">
   <img alt="Python 3.8+" src="https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white">
   <img alt="Versão 2.7.4" src="https://img.shields.io/badge/versão-2.7.4-2563EB">
-  <img alt="Testes" src="https://img.shields.io/badge/testes-336%20aprovados-16A34A">
+  <img alt="Testes" src="https://img.shields.io/badge/testes-362%20aprovados-16A34A">
 </p>
 
-**Versão:** 2.7.4 · **Schema:** 2.7.4 · **Revisão:** 4.3-human-readable-code-analysis
+**Versão:** 2.7.4 · **Schema:** 2.7.4 · **Revisão:** 4.6-token-efficiency
 
 ## O que mudou na 2.7.4
 
-A Rev4.3 faz a análise de código ser compreensível antes de ser técnica: a resposta principal explica o que o projeto é, o que faz, seus componentes principais e como eles se relacionam, encerrando com limitações verificadas. A cobertura de auditoria continua disponível nos detalhes expansíveis, sem ser colocada no início da resposta.
+A Rev4.6 remove o maior desperdício ativo de tokens sem enfraquecer as garantias de preservação da Rev4.5. `entendimento.json` e inventários completos não entram mais nos prompts, auditorias usam planejamento inicial/de lacunas determinístico, uma auditoria normal gasta apenas a chamada do Finalizer e existe no máximo uma expansão compacta para uma lacuna realmente ambígua. Orçamentos de prompt, resposta e total são verificados antes de cada request; retries são contabilizados; ferramentas e histórico são filtrados pelo estado atual; e `compare-efficiency` detecta regressões de tokens por caso entre releases.
 
 A Eyle agora possui um único pipeline de projeto. Os caminhos históricos Retrieval → Analista → Executor → Verify e seus fallbacks ocultos foram removidos. Um pedido sobre o projeto passa pela agente Eyle ou termina com uma falha específica; nunca é redirecionado silenciosamente para outra arquitetura.
 

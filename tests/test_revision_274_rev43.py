@@ -18,6 +18,15 @@ def test_code_analysis_contract_requires_human_understanding_sections():
         "component_relationships",
         "verified_limitations",
     ]
+    assert contract["required_outputs"] == [
+        "plain_language_summary",
+        "main_behavior",
+    ]
+    assert contract["optional_outputs"] == [
+        "important_components",
+        "component_relationships",
+        "verified_limitations",
+    ]
     assert contract["response_sections"] == contract["requested_outputs"]
 
 
@@ -69,7 +78,7 @@ def test_profile_renderer_places_summary_first_and_limitations_last():
     assert "\n\n" in text
 
 
-def test_intent_gate_requires_all_code_analysis_sections():
+def test_intent_gate_requires_only_essential_code_analysis_sections():
     contract = build_task_contract("Faça a análise do projeto", "project_audit")
     claims = [{
         "type": "fact",
@@ -81,7 +90,8 @@ def test_intent_gate_requires_all_code_analysis_sections():
     result = evaluate_intent_coverage(contract, claims, limitations=[])
     assert result["ok"] is False
     assert "main_behavior" in result["missing_outputs"]
-    assert "important_components" in result["missing_outputs"]
+    assert "important_components" not in result["missing_outputs"]
+    assert "important_components" in result["missing_optional_outputs"]
 
 
 def test_project_analysis_main_answer_is_human_and_audit_data_stays_in_details(tmp_path, monkeypatch):

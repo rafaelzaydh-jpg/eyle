@@ -127,6 +127,7 @@ from engine.task_contract import (  # noqa: E402
     evaluate_target_coverage,
     project_read_fast_path_ready,
     render_claims_for_response,
+    render_claims_with_segments,
     order_claims_for_response,
     render_intent_feedback,
     render_target_feedback,
@@ -144,10 +145,17 @@ from engine.analysis_coverage import (  # noqa: E402
     render_coverage_disclosure,
 )
 from engine.audit_pipeline import (  # noqa: E402
+    ambiguous_gap_candidates,
     build_audit_candidate_catalog,
+    build_deterministic_audit_plan,
+    build_deterministic_gap_plan,
     normalize_scout_selection,
     public_pipeline_state,
-    related_test_candidates,
+)
+from engine.information_preservation import (  # noqa: E402
+    build_target_coverage_ledger,
+    public_ledger,
+    rejected_claims_from_grounding,
 )
 
 try:
@@ -172,7 +180,7 @@ except ImportError:
             "detail": f"tool '{nome}' indisponivel: engine/agent_tools.py nao pode ser importado",
         }
 
-    def gerar_catalogo_tools(registro=None, config=None):
+    def gerar_catalogo_tools(registro=None, config=None, allowed_names=None):
         return []
 
     def validar_chamada_tool(nome, arguments, registro=None):
@@ -305,9 +313,17 @@ def _limite_runtime(config):
     max_chamadas = runtime.get("max_llm_calls")
     if max_chamadas is not None and int(runtime.get("llm_calls", 0)) >= int(max_chamadas):
         return "MAX_LLM_CALLS_EXCEEDED"
-    max_tokens = runtime.get("max_generated_tokens")
+    max_tokens = runtime.get("max_completion_tokens", runtime.get("max_generated_tokens"))
     if max_tokens is not None and int(runtime.get("generated_tokens", 0)) >= int(max_tokens):
-        return "MAX_GENERATED_TOKENS_EXCEEDED"
+        return "MAX_COMPLETION_TOKENS_EXCEEDED"
+    max_prompt = runtime.get("max_prompt_tokens")
+    if max_prompt is not None and int(runtime.get("prompt_tokens_effective", 0)) >= int(max_prompt):
+        return "MAX_PROMPT_TOKENS_EXCEEDED"
+    max_total = runtime.get("max_total_tokens")
+    if max_total is not None:
+        used = int(runtime.get("prompt_tokens_effective", 0)) + int(runtime.get("generated_tokens", 0))
+        if used >= int(max_total):
+            return "MAX_TOTAL_TOKENS_EXCEEDED"
     return None
 
 
@@ -417,6 +433,7 @@ def _filtrar_conclusao_estruturada_por_grounding(conclusao, verificacao):
         return None
     candidata = dict(conclusao)
     candidata["claims"] = kept
+    candidata["rejected_claims"] = rejected_claims_from_grounding(claims, verificacao)
     candidata["resposta"] = render_claims(kept)
     candidata["evidence_ids"] = claim_evidence_ids(kept)
     candidata["claim_annotations"] = claims_to_annotations(kept)
@@ -1142,6 +1159,34 @@ def _acao_obrigatoria_goal_state(estado, objetivo=None, config=None):
     return None
 
 
+def _allowed_tools_for_model(task_type, estado):
+    """Return only tools that can be valid in the current model decision."""
+    read_tools = {"list_tree", "search_code", "find_symbol", "read_range", "read_file"}
+    if task_type == "project_audit":
+        # Audit inventory/reads/finalization are system-owned in Rev4.6.
+        return set()
+    if task_type == "project_read":
+        return read_tools
+    if task_type != "project_write":
+        return set()
+
+    edit_state = estado.edit_state or {}
+    if not estado.evidencias_frescas():
+        return read_tools
+    dry_run_ok = any(
+        item.get("tool") == "test_patch_dry_run"
+        and item.get("ok") is True
+        and item.get("executed") is True
+        for item in estado.actions
+    )
+    if not dry_run_ok and not edit_state.get("status"):
+        return read_tools | {"test_patch_dry_run"}
+    if dry_run_ok and not edit_state.get("status"):
+        return {"apply_patch"}
+    # Post-write tests and rereads are deterministic; no new model tool call.
+    return set()
+
+
 def _executar_perfil_json(funcao, prompt, config, *, kind):
     """Executa Scout/Finalizer com retry curto de formato, sem misturar papeis."""
     max_tentativas = max(1, int((config or {}).get("agent", {}).get("max_tentativas_parse", 2)))
@@ -1163,10 +1208,12 @@ def _executar_perfil_json(funcao, prompt, config, *, kind):
 
 
 def _pipeline_auditoria_preparar(estado, objetivo, config):
-    """Avanca Scout -> leituras -> gaps -> Finalizer sem gerar resposta no Scout.
+    """Advance deterministic audit reads and invoke one finalizer.
 
-    Retorna ``None`` quando a proxima acao vem da fila obrigatoria, ou uma
-    decisao ``final`` ja produzida pelo Finalizer.
+    Rev4.6 removes the mandatory initial and gap Scout calls. A single compact
+    optional expansion is allowed only when system coverage has a real
+    structural gap, no deterministic next path and multiple equally-ranked
+    unread candidates.
     """
     if not estado.project_inventory:
         return None
@@ -1179,7 +1226,7 @@ def _pipeline_auditoria_preparar(estado, objetivo, config):
             max_candidates=max(8, int(cfg.get("audit_candidate_limit", 48))),
         )
         pipeline["catalog"] = catalog
-        pipeline["phase"] = "initial_scout"
+        pipeline["phase"] = "deterministic_initial"
         if int((catalog.get("counts") or {}).get("source") or 0) <= 0:
             pipeline["phase"] = "no_source"
             return None
@@ -1195,94 +1242,111 @@ def _pipeline_auditoria_preparar(estado, objetivo, config):
         return None
 
     phase = pipeline.get("phase")
-    if phase in ("awaiting_inventory", "initial_scout"):
-        prompt = montar_prompt_scout_auditoria(
-            objetivo,
-            catalog,
-            phase="initial",
-            analysis_coverage=public_coverage_report(estado.analysis_coverage),
-            evidencias=estado.evidence,
-            pipeline_state=public_pipeline_state(pipeline),
-            config=config,
-            system_prompt=PROMPT_AUDIT_SCOUT,
-        )
-        try:
-            decision, attempts, raw = _executar_perfil_json(
-                executar_audit_scout_llm, prompt, config, kind="audit scout",
-            )
-        except ErroLLM as erro:
-            decision, attempts, raw = None, 1, str(erro)
-            pipeline["initial_scout_error"] = getattr(erro, "error_code", None) or type(erro).__name__
-        if not isinstance((decision or {}).get("final"), dict):
-            decision = None
-        selection = normalize_scout_selection(
-            decision or {}, catalog, already_read=read_paths,
-            limit=initial_limit, include_required=True,
+    if phase in ("awaiting_inventory", "initial_scout", "deterministic_initial"):
+        selection = build_deterministic_audit_plan(
+            catalog, already_read=read_paths, limit=initial_limit,
         )
         pipeline["initial_scout"] = {
             **selection,
-            "attempts": attempts,
-            "fallback_deterministic": decision is None,
+            "attempts": 0,
+            "fallback_deterministic": True,
         }
         pipeline["pending_reads"] = list(selection.get("selected_paths") or [])
-        pipeline["phase"] = "reading_initial" if pipeline["pending_reads"] else "gap_scout"
+        pipeline["phase"] = (
+            "reading_initial" if pipeline["pending_reads"] else "deterministic_gaps"
+        )
         return None
 
     if phase == "reading_initial":
-        pipeline["phase"] = "gap_scout"
-        phase = "gap_scout"
+        pipeline["phase"] = "deterministic_gaps"
+        phase = "deterministic_gaps"
 
-    if phase == "gap_scout":
+    if phase in ("gap_scout", "deterministic_gaps"):
+        coverage = estado.atualizar_cobertura_auditoria()
         remaining_steps = max(0, int(cfg.get("max_steps", 8)) - int(estado.acoes_executadas))
         allowed_gap = min(gap_limit, remaining_steps)
-        if allowed_gap > 0:
+        selection = build_deterministic_gap_plan(
+            catalog, coverage, already_read=read_paths, limit=allowed_gap,
+        ) if allowed_gap > 0 else {
+            "selected_paths": [], "planner": "deterministic",
+            "gaps": list((coverage or {}).get("missing") or []),
+            "rationale": "tool budget exhausted",
+        }
+        pipeline["gap_scout"] = {
+            **selection,
+            "attempts": 0,
+            "fallback_deterministic": True,
+        }
+        chosen = list(selection.get("selected_paths") or [])[:allowed_gap]
+        if chosen:
+            pipeline["pending_reads"] = chosen
+            pipeline["phase"] = "reading_gaps"
+            return None
+
+        optional_enabled = bool(cfg.get("audit_optional_expansion_enabled", True))
+        ambiguous = ambiguous_gap_candidates(
+            catalog, coverage, already_read=read_paths,
+        )
+        if (
+            optional_enabled
+            and not pipeline.get("optional_expansion_used")
+            and ambiguous
+            and remaining_steps > 0
+        ):
+            compact_catalog = {
+                "schema_version": catalog.get("schema_version"),
+                "inventory_hash": catalog.get("inventory_hash"),
+                "inventory_complete": catalog.get("inventory_complete"),
+                "counts": {"candidates": len(ambiguous)},
+                "required_slots": [],
+                "candidates": ambiguous[:12],
+                "all_candidate_paths": [item.get("path") for item in ambiguous[:12]],
+                "groups": {},
+            }
             prompt = montar_prompt_scout_auditoria(
                 objetivo,
-                catalog,
-                phase="gap_review",
-                analysis_coverage=public_coverage_report(estado.analysis_coverage),
-                evidencias=estado.evidence,
-                pipeline_state=public_pipeline_state(pipeline),
+                compact_catalog,
+                phase="optional_expansion",
+                analysis_coverage={
+                    "missing": coverage.get("missing") or [],
+                    "criteria": coverage.get("criteria") or {},
+                },
+                evidencias=[],
+                pipeline_state={
+                    "completed_reads": list(read_paths),
+                    "optional_expansion_used": False,
+                },
                 config=config,
                 system_prompt=PROMPT_AUDIT_SCOUT,
             )
             try:
                 decision, attempts, raw = _executar_perfil_json(
-                    executar_audit_scout_llm, prompt, config, kind="audit gap scout",
+                    executar_audit_scout_llm, prompt, config,
+                    kind="optional audit expansion",
                 )
             except ErroLLM as erro:
                 decision, attempts, raw = None, 1, str(erro)
-                pipeline["gap_scout_error"] = getattr(erro, "error_code", None) or type(erro).__name__
-            if not isinstance((decision or {}).get("final"), dict):
-                decision = None
+                pipeline["optional_expansion_error"] = (
+                    getattr(erro, "error_code", None) or type(erro).__name__
+                )
             selection = normalize_scout_selection(
-                decision or {}, catalog, already_read=read_paths,
-                limit=allowed_gap, include_required=False, allow_empty=True,
+                decision or {}, compact_catalog, already_read=read_paths,
+                limit=1, include_required=False, allow_empty=True,
             )
-            # Se o Scout apontou um componente sem seu teste relacionado, o
-            # sistema prefere fechar essa lacuna com um teste real.
-            related = related_test_candidates(
-                catalog,
-                selection.get("selected_paths") or read_paths,
-                already_read=read_paths,
-                limit=allowed_gap,
-            )
-            chosen = list(dict.fromkeys((selection.get("selected_paths") or []) + related))[:allowed_gap]
-            selection["selected_paths"] = chosen
-            pipeline["gap_scout"] = {
+            chosen = list(selection.get("selected_paths") or [])[:1]
+            pipeline["optional_expansion_used"] = True
+            pipeline["optional_expansion"] = {
                 **selection,
                 "attempts": attempts,
-                "fallback_deterministic": decision is None,
+                "planner": "llm_optional",
             }
-            pipeline["pending_reads"] = chosen
-            pipeline["phase"] = "reading_gaps" if chosen else "finalizer"
             if chosen:
+                pipeline["pending_reads"] = chosen
+                pipeline["phase"] = "reading_expansion"
                 return None
-        else:
-            pipeline["gap_scout"] = {"selected_paths": [], "skipped": "tool_budget_exhausted"}
-            pipeline["phase"] = "finalizer"
+        pipeline["phase"] = "finalizer"
 
-    if pipeline.get("phase") == "reading_gaps":
+    if pipeline.get("phase") in ("reading_gaps", "reading_expansion"):
         pipeline["phase"] = "finalizer"
 
     if pipeline.get("phase") == "finalizer":
@@ -1306,8 +1370,6 @@ def _pipeline_auditoria_preparar(estado, objetivo, config):
             return None
         pipeline["phase"] = "finalizer"
         return decision
-    return None
-
 
 def _arquivos_explicitos_objetivo(objetivo):
     """Extrai caminhos de arquivo citados literalmente, preservando a ordem."""
@@ -1552,9 +1614,18 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
             "deadline_monotonic": time.monotonic() + deadline_segundos,
             "max_llm_calls": max(1, int(cfg_agente.get("max_llm_calls", 12))),
             "max_generated_tokens": max(
-                1, int(cfg_agente.get("max_total_generated_tokens", 12000)),
+                1, int(cfg_agente.get("max_completion_tokens", cfg_agente.get("max_total_generated_tokens", 12000))),
             ),
+            "max_completion_tokens": max(
+                1, int(cfg_agente.get("max_completion_tokens", cfg_agente.get("max_total_generated_tokens", 12000))),
+            ),
+            "max_prompt_tokens": max(1, int(cfg_agente.get("max_prompt_tokens", 14000))),
+            "max_total_tokens": max(1, int(cfg_agente.get("max_total_tokens", 18000))),
             "llm_calls": 0,
+            "llm_requests": 0,
+            "prompt_tokens_reserved": 0,
+            "prompt_tokens_actual": 0,
+            "prompt_tokens_effective": 0,
             "generated_tokens": 0,
         }
     max_steps = cfg_agente.get("max_steps", 8)
@@ -1576,6 +1647,7 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
     step = 0
     estado = None
     recuperacao_atual = {}
+    rejected_claims_log = []
     task_contract = build_task_contract(objetivo, task_type)
     project_read_repair_used = False
     project_read_finalizer_calls = 0
@@ -1691,13 +1763,26 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
         runtime_llm = config.get("_runtime_agent_budget") or {}
         detalhes.setdefault("llm_responses", list(runtime_llm.get("llm_responses") or []))
         detalhes.setdefault("resolved_model", (runtime_llm.get("last_llm_response") or {}).get("resolved_model"))
+        detalhes.setdefault("token_usage", {
+            "llm_calls": int(runtime_llm.get("llm_calls", 0) or 0),
+            "llm_requests": int(runtime_llm.get("llm_requests", 0) or 0),
+            "prompt_tokens_reserved": int(runtime_llm.get("prompt_tokens_reserved", 0) or 0),
+            "prompt_tokens_actual": int(runtime_llm.get("prompt_tokens_actual", 0) or 0),
+            "prompt_tokens_effective": int(runtime_llm.get("prompt_tokens_effective", 0) or 0),
+            "completion_tokens": int(runtime_llm.get("generated_tokens", 0) or 0),
+            "total_tokens_effective": int(runtime_llm.get("prompt_tokens_effective", 0) or 0)
+                + int(runtime_llm.get("generated_tokens", 0) or 0),
+            "chat_history_tokens": int(runtime_llm.get("chat_history_tokens", 0) or 0),
+            "chat_history_messages_omitted": int(runtime_llm.get("chat_history_messages_omitted", 0) or 0),
+        })
         detalhes.setdefault("task_contract", task_contract)
         detalhes.setdefault("task_intent", {
             key: task_contract.get(key)
             for key in (
                 "intent", "domain", "response_profile", "write_allowed",
-                "requested_outputs", "recommendations_requested",
-                "recommendation_count", "issue_detection_requested",
+                "requested_outputs", "required_outputs", "optional_outputs",
+                "recommendations_requested", "recommendation_count",
+                "issue_detection_requested",
             )
         })
         estado_serializado = estado.to_dict() if estado is not None else {}
@@ -2116,8 +2201,9 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
             key: task_contract.get(key)
             for key in (
                 "intent", "domain", "response_profile", "write_allowed",
-                "requested_outputs", "recommendations_requested",
-                "recommendation_count", "issue_detection_requested",
+                "requested_outputs", "required_outputs", "optional_outputs",
+                "recommendations_requested", "recommendation_count",
+                "issue_detection_requested",
             )
         }
 
@@ -2299,7 +2385,10 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
             prompt = montar_prompt_agente(
                 objetivo, observacoes=estado.observacoes, entendimento=entendimento,
                 fatos_importantes=estado.fatos_importantes,
-                catalogo_tools=gerar_catalogo_tools(TOOLS, config=config),
+                catalogo_tools=gerar_catalogo_tools(
+                    TOOLS, config=config,
+                    allowed_names=_allowed_tools_for_model(task_type, estado),
+                ),
                 goal_state=estado.goal_state,
                 evidencias=estado.evidence,
                 actions=estado.actions,
@@ -2931,6 +3020,9 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                     )
                 conclusao["semantic_grounding"] = verificacao_semantica
                 if not verificacao_semantica.get("ok", False):
+                    rejected_claims_log.extend(rejected_claims_from_grounding(
+                        conclusao.get("claims") or [], verificacao_semantica,
+                    ))
                     feedback_semantico = format_grounding_feedback(verificacao_semantica)
                     estado.observar_final_sem_grounding(feedback_semantico)
                     verificacao_original = verificacao_semantica
@@ -3189,9 +3281,11 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                     conclusao["claims"] = order_claims_for_response(
                         task_contract, conclusao.get("claims") or [],
                     )
-                    conclusao["resposta"] = render_claims_for_response(
+                    rendered = render_claims_with_segments(
                         task_contract, conclusao.get("claims") or [],
                     )
+                    conclusao["resposta"] = rendered["text"]
+                    conclusao["rendered_segments"] = rendered["segments"]
                     conclusao["evidence_ids"] = claim_evidence_ids(conclusao["claims"])
                     conclusao["claim_annotations"] = claims_to_annotations(conclusao["claims"])
 
@@ -3269,6 +3363,53 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                             retornar_detalhes,
                         )
 
+                if task_type in {"project_read", "project_audit"} and conclusao.get("claims"):
+                    rejected_combined = []
+                    seen_rejected = set()
+                    for rejected in list(rejected_claims_log) + list(conclusao.get("rejected_claims") or []):
+                        if not isinstance(rejected, dict):
+                            continue
+                        key = (
+                            rejected.get("claim_id"),
+                            tuple(rejected.get("errors") or []),
+                        )
+                        if key in seen_rejected:
+                            continue
+                        seen_rejected.add(key)
+                        rejected_combined.append(rejected)
+                    preservation_contract = task_contract
+                    if not bool(cfg_agente.get("intent_output_gate_enabled", False)):
+                        preservation_contract = dict(task_contract)
+                        preservation_contract["required_outputs"] = []
+                        preservation_contract["optional_outputs"] = list(
+                            task_contract.get("requested_outputs") or []
+                        )
+                    preservation = build_target_coverage_ledger(
+                        preservation_contract,
+                        conclusao.get("claims") or [],
+                        evidencias_usadas,
+                        conclusao.get("rendered_segments") or [],
+                        target_coverage=conclusao.get("target_coverage"),
+                        intent_coverage=conclusao.get("intent_coverage"),
+                        rejected_claims=rejected_combined,
+                    )
+                    conclusao["information_preservation"] = preservation
+                    if not (preservation.get("gate") or {}).get("ok", False):
+                        return _retorno_agente(
+                            "failed",
+                            "A resposta perdeu informação obrigatória ou essencial entre a evidência e a renderização.",
+                            None,
+                            {
+                                "task_type": task_type,
+                                "mode": modo,
+                                "goal_state": estado.goal_state,
+                                "failure_code": "INFORMATION_PRESERVATION_FAILED",
+                                "task_contract": task_contract,
+                                "information_preservation": public_ledger(preservation),
+                            },
+                            retornar_detalhes,
+                        )
+
                 if task_type == "project_write":
                     edit_valido, motivo_edit = estado.validar_conclusao_edicao(
                         conclusao.get("evidence_ids") or [],
@@ -3332,6 +3473,9 @@ def executar_agente(objetivo, config, entendimento=None, projeto=None, retomar=N
                 "task_contract": task_contract,
                 "target_coverage": conclusao.get("target_coverage"),
                 "intent_coverage": conclusao.get("intent_coverage"),
+                "information_preservation": public_ledger(conclusao.get("information_preservation") or {}),
+                "rendered_segments": conclusao.get("rendered_segments") or [],
+                "rejected_claims": (conclusao.get("information_preservation") or {}).get("rejected_claims") or [],
                 "task_intent": estado.goal_state.get("task_intent") or {},
                 "system_generated_write_receipt": bool(conclusao.get("system_generated_write_receipt")),
                 "project_read_finalizer_calls": project_read_finalizer_calls,

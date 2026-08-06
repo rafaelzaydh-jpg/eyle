@@ -81,7 +81,7 @@ def test_analise_geral_nao_aceita_sem_contexto_e_le_o_projeto(tmp_path, monkeypa
     assert pendente is None
     assert detalhes["tools_called"] == ["list_tree", "read_file"]
     assert detalhes["read_status"] == "read"
-    assert len(scouts) == 2
+    assert len(scouts) == 0
 
 def test_arquivo_explicito_tambem_exige_tentativa_de_leitura(tmp_path, monkeypatch):
     (tmp_path / "audio.py").write_text("valor = 1\n", encoding="utf-8")

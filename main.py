@@ -255,6 +255,53 @@ def cmd_benchmark(args):
     print(f"[benchmark] Relatorio: {output}")
 
 
+def cmd_compare_coverage(args):
+    from engine.information_preservation import compare_release_coverage_files
+
+    result = compare_release_coverage_files(
+        args.baseline, args.candidate, output_path=args.output,
+    )
+    status = "APROVADO" if result.get("ok") else "REGRESSÃO"
+    print(
+        f"[coverage] {status} | baseline_cases={result.get('baseline_cases', 0)} | "
+        f"candidate_cases={result.get('candidate_cases', 0)} | "
+        f"regressions={len(result.get('regressions') or [])}"
+    )
+    for item in result.get("regressions") or []:
+        print(
+            f"[coverage][REGRESSÃO] {item.get('role')}:{item.get('case_id')} | "
+            f"{', '.join(item.get('reasons') or [item.get('reason') or 'unknown'])}"
+        )
+    if args.output:
+        print(f"[coverage] Relatório: {args.output}")
+    if not result.get("ok"):
+        raise SystemExit(1)
+
+
+def cmd_compare_efficiency(args):
+    from engine.token_efficiency import compare_token_efficiency_files
+
+    result = compare_token_efficiency_files(
+        args.baseline, args.candidate, output_path=args.output, tolerance=args.tolerance,
+    )
+    status = "APROVADO" if result.get("ok") else "REGRESSÃO"
+    print(
+        f"[efficiency] {status} | baseline_cases={result.get('baseline_cases', 0)} | "
+        f"candidate_cases={result.get('candidate_cases', 0)} | "
+        f"regressions={len(result.get('regressions') or [])} | "
+        f"tolerance={float(result.get('tolerance', 0)):.0%}"
+    )
+    for item in result.get("regressions") or []:
+        print(
+            f"[efficiency][REGRESSÃO] {item.get('role')}:{item.get('case_id')} | "
+            f"{', '.join(item.get('reasons') or [item.get('reason') or 'unknown'])}"
+        )
+    if args.output:
+        print(f"[efficiency] Relatório: {args.output}")
+    if not result.get("ok"):
+        raise SystemExit(1)
+
+
 def cmd_serve(args):
     # Sobe o Worker permanente (thread) + o Flask (web/routes.py). O
     # navegador so fala com o Flask a partir daqui; fechar a aba nao
@@ -351,6 +398,28 @@ def main():
         ),
     )
     p_benchmark.set_defaults(func=cmd_benchmark)
+
+    p_compare = sub.add_parser(
+        "compare-coverage",
+        help="Compara preservação de informação entre dois relatórios de benchmark",
+    )
+    p_compare.add_argument("baseline", help="Relatório JSON da versão base")
+    p_compare.add_argument("candidate", help="Relatório JSON da versão candidata")
+    p_compare.add_argument("--output", default=None, help="Salva o relatório de comparação em JSON")
+    p_compare.set_defaults(func=cmd_compare_coverage)
+
+    p_efficiency = sub.add_parser(
+        "compare-efficiency",
+        help="Compara chamadas e tokens entre dois relatórios de benchmark",
+    )
+    p_efficiency.add_argument("baseline", help="Relatório JSON da versão base")
+    p_efficiency.add_argument("candidate", help="Relatório JSON da versão candidata")
+    p_efficiency.add_argument(
+        "--tolerance", type=float, default=0.10,
+        help="Tolerância relativa para tokens (default: 0.10)",
+    )
+    p_efficiency.add_argument("--output", default=None, help="Salva a comparação em JSON")
+    p_efficiency.set_defaults(func=cmd_compare_efficiency)
 
     p_serve = sub.add_parser("serve", help="Sobe o agente persistente (Worker + Flask) -- requer 'pip install flask'")
     p_serve.add_argument("--host", default="127.0.0.1")

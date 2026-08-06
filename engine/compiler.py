@@ -167,11 +167,11 @@ def _proxima_acao_edicao(goal_state, evidencias, actions, edit_state):
     return None
 
 def _renderizar_inventario_projeto(inventario):
-    """Renderiza todas as entradas retornadas por ``list_tree`` sem corte.
+    """Render only a compact inventory receipt.
 
-    O bloco faz parte do prompt fixo e entra no calculo do orcamento antes das
-    evidencias de codigo. Assim a arvore nao compete silenciosamente com o
-    limite historico de 500 caracteres das observacoes recentes.
+    Rev4.6 keeps the complete list in ``AgentState.project_inventory``. The
+    model receives counts, hash and root-level navigation only; individual
+    paths are supplied by deterministic planning or fresh evidence.
     """
     if not isinstance(inventario, dict):
         return []
@@ -181,46 +181,27 @@ def _renderizar_inventario_projeto(inventario):
     ]
     if not entradas:
         return []
-
-    completa = bool(
-        inventario.get("varredura_completa") and not inventario.get("truncado")
-    )
-    metadados = {
+    complete = bool(inventario.get("varredura_completa") and not inventario.get("truncado"))
+    summary = {
         "schema_version": inventario.get("schema_version", 1),
         "inventory_hash": inventario.get("inventory_hash"),
         "total_entries": inventario.get("total_retornado", len(entradas)),
         "files": inventario.get("total_arquivos"),
         "directories": inventario.get("total_diretorios"),
-        "complete": completa,
-        "limit": inventario.get("limite"),
-        "max_depth": inventario.get("profundidade_maxima"),
-        "filter": inventario.get("filtro"),
-        "ignored_by_reason": inventario.get("ignorados_por_motivo") or {},
-        "root_directories": inventario.get("diretorios_raiz") or [],
-        "root_files": inventario.get("arquivos_raiz") or [],
+        "complete": complete,
+        "root_directories": (inventario.get("diretorios_raiz") or [])[:24],
+        "root_files": (inventario.get("arquivos_raiz") or [])[:24],
         "extensions": inventario.get("extensoes") or {},
     }
-    linhas = [
-        "PROJECT INVENTORY (complete structured list returned by list_tree; "+
-        "never reconstructed from RECENT OBSERVATIONS):",
-        json.dumps(metadados, ensure_ascii=False, separators=(",", ":")),
-        "ENTRIES (D=directory, F=file; all returned entries follow):",
+    return [
+        "PROJECT INVENTORY SUMMARY (full inventory remains in system state):",
+        json.dumps(summary, ensure_ascii=False, separators=(",", ":")),
+        (
+            "COVERAGE: complete for configured traversal and ignore rules."
+            if complete else
+            "COVERAGE: partial; do not infer absence from omitted paths."
+        ),
     ]
-    for item in entradas:
-        marcador = "D" if item.get("tipo") == "diretorio" else "F"
-        caminho = str(item.get("caminho") or "").replace("\\", "/")
-        linhas.append(f"{marcador} {caminho}")
-    if completa:
-        linhas.append(
-            "COVERAGE: complete for the configured depth/filter and ignore rules. "
-            "Use this full list to choose which source files and tests must be inspected."
-        )
-    else:
-        linhas.append(
-            "COVERAGE: PARTIAL. The tool hit a limit or incomplete traversal; do not claim "
-            "that files/directories absent from this list do not exist."
-        )
-    return linhas
 
 def _renderizar_cobertura_auditoria(cobertura):
     if not isinstance(cobertura, dict) or cobertura.get("task_type") != "project_audit":
@@ -260,11 +241,9 @@ def montar_prompt_agente(pergunta, observacoes=None, entendimento=None, max_entr
     cfg_contexto = (config or {}).get("context_engine", {})
     max_entradas = cfg_contexto.get("max_recent_observations", max_entradas)
     partes = []
-    if entendimento:
-        bloco = bloco_entendimento(entendimento, projeto=projeto)
-        if bloco:
-            partes.extend(bloco)
-            partes.append("")
+    # Rev4.6: memory/entendimento.json never enters an LLM prompt. The index
+    # remains available to deterministic tools during the migration window,
+    # but it is not evidence and must not consume context on every decision.
 
     goal_state = goal_state or {
         "objective": pergunta,
@@ -512,7 +491,7 @@ def montar_prompt_finalizer_auditoria(
         "PROJECT AUDIT COVERAGE (system-calculated):",
         json.dumps(analysis_coverage or {}, ensure_ascii=False, separators=(",", ":")),
         "",
-        "AUDIT PIPELINE (Scout selections and read phases; planning metadata only):",
+        "AUDIT PIPELINE (deterministic selections and read phases; planning metadata only):",
         json.dumps(audit_pipeline or {}, ensure_ascii=False, separators=(",", ":")),
         "",
     ]
@@ -576,7 +555,7 @@ def montar_prompt_finalizer_auditoria(
         "- Return atomic claims with visible evidence_ids and report limitations honestly.",
         "- Obey TASK INTENT: do not add recommendations when recommendations_requested=false.",
         recommendation_rule,
-        "- Tag each claim with one requested output using the output field; absence claims must declare scope.",
+        "- Cover every TASK CONTRACT required_output. Cover optional_outputs only when fresh evidence supports them. Tag each claim with one requested output using the output field; absence claims must declare scope.",
         "- Do not return answer or claim_annotations; the system renders validated claims.",
         "- Return only the required JSON claims envelope.",
         "CONTEXT BUDGET: window={} tokens; reserved response={}; safety margin={}.".format(
@@ -648,7 +627,7 @@ def montar_prompt_finalizer_leitura(
         "FINALIZER CONTRACT:",
         "- No tools are available.",
         "- Answer the exact target in the original request.",
-        "- Cover every TASK CONTRACT required_target and requested_output; include evidence-derived literal values when requested.",
+        "- Cover every TASK CONTRACT required_target and required_output; include evidence-derived literal values when requested. Cover optional_outputs only when fresh evidence supports them.",
         recommendation_rule,
         "- For code_explanation, explain only the requested file/symbol behavior; never enter a write workflow.",
         "- For code_conversation, distinguish observed facts from inferences and give every inference a basis.",

@@ -201,5 +201,5 @@ def test_fluxo_de_analise_geral_economiza_primeira_chamada_llm(monkeypatch, tmp_
     assert status == "success"
     assert "subprocess.run" in texto
     assert detalhes["tools_called"] == ["list_tree", "read_file"]
-    assert len(scouts) == 2
+    assert len(scouts) == 0
     assert len(finalizers) == 1

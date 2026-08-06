@@ -119,10 +119,10 @@ def test_arvore_grande_preserva_engine_llm_e_tests_no_prompt():
             "context_engine": {"chars_per_token_fallback": 3, "safety_margin_tokens": 256},
         },
     )
-    assert "F engine/agent.py" in prompt
-    assert "F llm/executar.py" in prompt
-    assert "F tests/test_agent.py" in prompt
-    assert "F pkg/mod_139.py" in prompt
+    assert "PROJECT INVENTORY SUMMARY" in prompt
+    assert "F engine/agent.py" not in prompt
+    assert '"files"' in prompt
+    assert '"root_directories"' in prompt
 
 
 def test_readme_sozinho_nao_conclui_auditoria_geral():

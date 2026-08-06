@@ -109,14 +109,17 @@ def _pipeline_auditoria(detalhes):
         return ""
     initial = pipeline.get("initial_scout") or {}
     gap = pipeline.get("gap_scout") or {}
+    expansion = pipeline.get("optional_expansion") or {}
     completed = pipeline.get("completed_reads") or []
     failed = pipeline.get("failed_reads") or []
     phase = _texto(pipeline.get("phase"), 80) or "desconhecida"
     texto = (
-        "Scout -> leituras automaticas -> revisao de lacunas -> Finalizer; "
+        "inventário -> planejamento determinístico -> leituras -> cobertura -> Finalizer; "
         f"fase={phase}; selecionados iniciais={len(initial.get('selected_paths') or [])}; "
-        f"lacunas adicionais={len(gap.get('selected_paths') or [])}; "
-        f"leituras concluidas={len(completed)}; finalizer_calls={pipeline.get('finalizer_calls') or 0}"
+        f"lacunas determinísticas={len(gap.get('selected_paths') or [])}; "
+        f"expansão LLM opcional={'sim' if pipeline.get('optional_expansion_used') else 'não'}; "
+        f"selecionados pela expansão={len(expansion.get('selected_paths') or [])}; "
+        f"leituras concluídas={len(completed)}; finalizer_calls={pipeline.get('finalizer_calls') or 0}"
     )
     if failed:
         texto += f"; leituras com falha={len(failed)}"
@@ -137,6 +140,43 @@ def _erros_ferramenta(detalhes):
         retry_text = "sim" if retryable is True else "não" if retryable is False else "não informado"
         lines.append(f"{tool}: {code}; retryable={retry_text}; {detail}")
     return "\n".join(lines)
+
+
+def _preservacao_informacao(detalhes):
+    ledger = detalhes.get("information_preservation")
+    if not isinstance(ledger, dict) or not ledger:
+        return ""
+    summary = ledger.get("summary") or {}
+    gate = ledger.get("gate") or {}
+    status = "aprovada" if gate.get("ok") else "reprovada"
+    return (
+        f"{status}; targets={summary.get('targets_covered', 0)}/"
+        f"{summary.get('targets_total', 0)}; required="
+        f"{summary.get('required_covered', 0)}/{summary.get('required_total', 0)}; "
+        f"essential={summary.get('essential_covered', 0)}/"
+        f"{summary.get('essential_total', 0)}; claims aprovadas="
+        f"{summary.get('claims_approved', 0)}; rejeitadas="
+        f"{summary.get('claims_rejected', 0)}; renderizadas="
+        f"{summary.get('claims_rendered', 0)}; descartes silenciosos="
+        f"{summary.get('silent_discards', 0)}"
+    )
+
+
+def _uso_tokens(detalhes):
+    usage = detalhes.get("token_usage")
+    if not isinstance(usage, dict) or not usage:
+        return ""
+    calls = int(usage.get("llm_calls", 0) or 0)
+    requests = int(usage.get("llm_requests", calls) or 0)
+    prompt = int(usage.get("prompt_tokens_effective", 0) or 0)
+    completion = int(usage.get("completion_tokens", 0) or 0)
+    total = int(usage.get("total_tokens_effective", prompt + completion) or 0)
+    omitted = int(usage.get("chat_history_messages_omitted", 0) or 0)
+    return (
+        f"chamadas lógicas={calls}; requests backend={requests}; "
+        f"entrada={prompt}; saída={completion}; total={total}; "
+        f"mensagens antigas omitidas={omitted}"
+    )
 
 
 def _task_intent(detalhes):
@@ -337,7 +377,11 @@ def construir_resumo_trabalho(evento, resultado, duracao_segundos, projeto=None,
                 _campo("Perfil de resposta", intent.get("response_profile")),
                 _campo("Escrita permitida", _sim_nao(intent.get("write_allowed"))),
                 _campo("Recomendações solicitadas", _sim_nao(intent.get("recommendations_requested"))),
-                _campo("Saídas obrigatórias", ", ".join(intent.get("requested_outputs") or [])),
+                _campo(
+                    "Saídas obrigatórias",
+                    ", ".join(intent.get("required_outputs") or intent.get("requested_outputs") or []),
+                ),
+                _campo("Saídas opcionais", ", ".join(intent.get("optional_outputs") or [])),
             ]),
             _etapa(2, "Leitura", _campos_leitura(leituras, ferramentas)),
             _etapa(3, "Análise", [
@@ -347,6 +391,8 @@ def construir_resumo_trabalho(evento, resultado, duracao_segundos, projeto=None,
                 _campo("Cobertura real", _cobertura_auditoria(detalhes)),
                 _campo("Pipeline de auditoria", _pipeline_auditoria(detalhes)),
                 _campo("Erros de ferramentas", _erros_ferramenta(detalhes)),
+                _campo("Preservação da informação", _preservacao_informacao(detalhes)),
+                _campo("Uso de tokens", _uso_tokens(detalhes)),
             ]),
             _etapa(4, "Conclusão", [
                 _campo("Status", agente_status),

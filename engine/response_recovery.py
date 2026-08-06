@@ -6,7 +6,6 @@ import ast
 import re
 from pathlib import PurePosixPath
 
-from llm.executar import ErroLLM, executar_recuperacao_textual
 from engine.utility_gate import validate_response_utility
 from engine.structured_claims import normalize_structured_claims, render_claims
 
@@ -358,37 +357,15 @@ def recover_structured_audit_claims(
 
 
 def recover_useful_response(objective, evidence, config, *, cause, prior_answer="", allow_llm=True, task_type="project_read"):
-    """Executa retry textual, retry curto e fallback deterministico."""
+    """Deterministic compatibility recovery; legacy LLM recovery is disabled."""
     attempts = []
     recovery_cfg = ((config or {}).get("agent") or {}).get("response_recovery") or {}
-    llm_configured = (
-        recovery_cfg.get("llm_enabled") is True
-        and isinstance((config or {}).get("llm"), dict)
-        and bool((config or {}).get("llm"))
-    )
-    if allow_llm and llm_configured and evidence:
-        for layer, compact in (("unstructured_retry", False), ("evidence_short_generation", True)):
-            prompt = _evidence_prompt(
-                objective, evidence, compact=compact,
-                prior_answer=prior_answer, cause=cause,
-            )
-            try:
-                answer = executar_recuperacao_textual(prompt, config)
-            except ErroLLM as error:
-                attempts.append({"layer": layer, "ok": False, "error_code": error.error_code or "LLM_FAILURE"})
-                continue
-            gate = validate_response_utility(
-                answer, objective, task_type=task_type, evidence=evidence,
-            )
-            attempts.append({"layer": layer, "ok": gate.get("ok", False), "utility_gate": gate})
-            if gate.get("ok"):
-                return {
-                    "ok": True,
-                    "answer": str(answer).strip(),
-                    "layer": layer,
-                    "attempts": attempts,
-                    "utility_gate": gate,
-                }
+    if recovery_cfg.get("llm_enabled") is True:
+        attempts.append({
+            "layer": "legacy_llm_recovery",
+            "ok": False,
+            "error_code": "LEGACY_LLM_RECOVERY_DISABLED",
+        })
 
     answer = build_deterministic_analysis(objective, evidence)
     gate = validate_response_utility(

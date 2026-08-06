@@ -214,11 +214,10 @@ def test_project_audit_usa_scout_leitura_automatica_e_finalizer(monkeypatch, tmp
     ]
     assert details["audit_pipeline"]["phase"] == "completed"
     assert details["analysis_coverage"]["passed"] is True
-    assert len(scout_prompts) == 2
+    assert len(scout_prompts) == 0
     assert len(finalizer_prompts) == 1
-    assert "CANDIDATE CATALOG" in scout_prompts[0]
-    assert "FRESH CODE EVIDENCE FOR RISK/GAP REVIEW" in scout_prompts[1]
-    assert "def run" in scout_prompts[1]
+    assert details["audit_pipeline"]["initial_scout"]["planner"] == "deterministic"
+    assert details["audit_pipeline"]["gap_scout"]["planner"] == "deterministic"
     assert "No tools are available" in finalizer_prompts[0]
     assert "testes foram lidos" in details["limitacoes"][0]
     assert "main.py" in text
@@ -242,7 +241,7 @@ def test_finalizer_nao_pode_devolver_tool(monkeypatch, tmp_path):
     assert details["failure_code"] == "AUDIT_FINALIZER_INVALID_FORMAT"
 
 
-def test_resumo_publico_mostra_pipeline_scout_finalizer():
+def test_resumo_publico_mostra_pipeline_deterministico_finalizer():
     from engine.work_summary import construir_resumo_trabalho
 
     summary = construir_resumo_trabalho(
@@ -269,6 +268,7 @@ def test_resumo_publico_mostra_pipeline_scout_finalizer():
     )
     fields = summary["steps"][2]["fields"]
     pipeline = next(item for item in fields if item["label"] == "Pipeline de auditoria")
-    assert "Scout -> leituras automaticas" in pipeline["value"]
+    assert "planejamento determinístico" in pipeline["value"]
+    assert "Finalizer" in pipeline["value"]
     assert "fase=completed" in pipeline["value"]
     assert "finalizer_calls=1" in pipeline["value"]

@@ -69,6 +69,11 @@ class AgentConfig(TypedDict, total=False):
     task_deadline_seconds: int
     max_llm_calls: int
     max_total_generated_tokens: int
+    max_prompt_tokens: int
+    max_completion_tokens: int
+    max_total_tokens: int
+    chat_history_token_budget: int
+    audit_optional_expansion_enabled: bool
     semantic_repeat_overlap: float
     max_secret_scan_bytes: int
     audit_candidate_limit: int
@@ -185,6 +190,7 @@ def validar_config(config) -> ConfigEyle:
         "codar.testes.sandbox.bloquear_rede", "codar.testes.sandbox.copiar_projeto",
         "codar.testes.sandbox.allow_trusted_local",
         "worker.isolate_jobs", "telemetry.enabled",
+        "agent.audit_optional_expansion_enabled",
     ):
         _validar_tipo(config, erros, caminho, bool, "booleano")
 
@@ -206,7 +212,9 @@ def validar_config(config) -> ConfigEyle:
         "agent.max_erros_consecutivos", "agent.max_fatos_importantes",
         "agent.max_tree_entries", "agent.max_tree_depth", "agent.max_read_range_lines",
         "agent.task_deadline_seconds", "agent.max_llm_calls",
-        "agent.max_total_generated_tokens", "agent.max_secret_scan_bytes",
+        "agent.max_total_generated_tokens", "agent.max_prompt_tokens",
+        "agent.max_completion_tokens", "agent.max_total_tokens",
+        "agent.chat_history_token_budget", "agent.max_secret_scan_bytes",
         "agent.audit_candidate_limit", "agent.audit_initial_read_limit",
         "agent.audit_gap_read_limit", "worker.heartbeat_interval_seconds",
         "worker.queue_error_backoff_seconds", "worker.max_invalid_jobs_per_reservation",
@@ -249,6 +257,10 @@ def validar_config(config) -> ConfigEyle:
     _, base_url = _valor(config, "llm.base_url")
     if isinstance(base_url, str) and not base_url.startswith(("http://", "https://")):
         erros.append("llm.base_url precisa comecar com http:// ou https://")
+
+    recovery_enabled, recovery_value = _valor(config, "agent.response_recovery.llm_enabled")
+    if recovery_enabled and recovery_value is True:
+        erros.append("agent.response_recovery.llm_enabled foi removido; recovery LLM legado esta desativado")
 
     existe_rollout, rollout = _valor(config, "agent.rollout_mode")
     if existe_rollout and rollout not in ("read_only", "full"):
