@@ -8,7 +8,7 @@
   const connDot = document.getElementById("connDot");
   const tokenBtn = document.getElementById("tokenBtn");
   const projectInfo = document.getElementById("projectInfo");
-  const pipelineEl = document.getElementById("pipeline");
+  const activityEl = document.getElementById("activity");
   const jobStateEl = document.getElementById("jobState");
 
   // Cada ciclo ativo pode consultar ate dois jobs + /conversa. Com 1,2 s,
@@ -49,7 +49,7 @@
       const ativos = dados.filter((job) =>
         job && Number.isInteger(Number(job.id)) && (
           ["pending", "processing"].includes(job.status) ||
-          (job.status === "completed" && job.work_summary)
+          job.status === "completed"
         )
       ).slice(-20);
       sessionStorage.setItem(JOBS_STORAGE_KEY, JSON.stringify(ativos));
@@ -69,7 +69,7 @@
     const numerico = Number(id);
     if (!Number.isInteger(numerico)) return;
     // Uma nova resposta de /enviar sempre nasce limpa. Nunca herda status,
-    // progresso ou work_summary de outro job que reutilizou o mesmo número.
+    // progresso de outro job que reutilizou o mesmo número.
     trackedJobs = trackedJobs.filter((job) => job.id !== numerico);
     trackedJobs.push({
       id: numerico,
@@ -87,7 +87,7 @@
     if (queueInstanceId && queueInstanceId !== normalizada) {
       trackedJobs = [];
       sessionStorage.removeItem(JOBS_STORAGE_KEY);
-      Array.from(logEl.querySelectorAll(".work-summary, .job-notice, .live-response")).forEach((el) => el.remove());
+      Array.from(logEl.querySelectorAll(".job-notice, .live-response")).forEach((el) => el.remove());
       renderedIds = new Set();
     }
     queueInstanceId = normalizada;
@@ -196,7 +196,6 @@
       (job) => job.tipo === "pergunta" && ["pending", "processing"].includes(job.status),
     );
     renderLiveProgress();
-    renderWorkSummaries();
     renderJobState();
   }
 
@@ -261,89 +260,6 @@
     if (pertoDoFim) logEl.scrollTop = logEl.scrollHeight;
   }
 
-  function formatDuration(totalSeconds) {
-    const total = Math.max(0, Math.round(Number(totalSeconds) || 0));
-    const horas = Math.floor(total / 3600);
-    const minutos = Math.floor((total % 3600) / 60);
-    const segundos = total % 60;
-    if (horas > 0) {
-      return `${horas}h${String(minutos).padStart(2, "0")}m${String(segundos).padStart(2, "0")}s`;
-    }
-    if (minutos > 0) {
-      return `${minutos}m${String(segundos).padStart(2, "0")}s`;
-    }
-    return `${segundos}s`;
-  }
-
-  function buildWorkSummaryEl(job) {
-    const resumo = job.work_summary || {};
-    const details = document.createElement("details");
-    details.className = "work-summary";
-    details.id = `workSummary-${job.id}`;
-    details.dataset.jobId = String(job.id);
-
-    const summary = document.createElement("summary");
-    summary.className = "work-summary-title";
-    summary.textContent = `${resumo.title || "Trabalho concluído"} em ${formatDuration(resumo.duration_seconds)}`;
-    details.appendChild(summary);
-
-    const body = document.createElement("div");
-    body.className = "work-summary-body";
-    (Array.isArray(resumo.steps) ? resumo.steps : []).forEach((step) => {
-      const section = document.createElement("section");
-      section.className = "work-summary-step";
-
-      const title = document.createElement("div");
-      title.className = "work-summary-step-title";
-      title.textContent = `Etapa ${step.number} — ${step.title}`;
-      section.appendChild(title);
-
-      (Array.isArray(step.fields) ? step.fields : []).forEach((field) => {
-        const line = document.createElement("div");
-        line.className = "work-summary-field";
-
-        const label = document.createElement("span");
-        label.className = "work-summary-label";
-        label.textContent = `${field.label}: `;
-        line.appendChild(label);
-
-        const value = document.createElement("span");
-        value.className = "work-summary-value";
-        value.textContent = field.value;
-        line.appendChild(value);
-        section.appendChild(line);
-      });
-      body.appendChild(section);
-    });
-    details.appendChild(body);
-    return details;
-  }
-
-  function renderWorkSummaries() {
-    const concluidos = trackedJobs.filter((job) =>
-      job.tipo === "pergunta" && job.status === "completed" && job.work_summary
-    );
-    const idsValidos = new Set(concluidos.map((job) => `workSummary-${job.id}`));
-
-    Array.from(logEl.querySelectorAll(".work-summary[data-job-id]")).forEach((el) => {
-      const job = concluidos.find((item) => `workSummary-${item.id}` === el.id);
-      const origem = job && Number.isInteger(Number(job.mensagem_id))
-        ? logEl.querySelector(`.msg[data-id="${Number(job.mensagem_id)}"]`)
-        : null;
-      if (!idsValidos.has(el.id) || !origem) el.remove();
-    });
-
-    concluidos.forEach((job) => {
-      if (document.getElementById(`workSummary-${job.id}`)) return;
-      const mensagemId = Number(job.mensagem_id);
-      const origem = Number.isInteger(mensagemId)
-        ? logEl.querySelector(`.msg[data-id="${mensagemId}"]`)
-        : null;
-      if (!origem) return;
-      origem.insertAdjacentElement("afterend", buildWorkSummaryEl(job));
-    });
-  }
-
   function renderJobFailures() {
     trackedJobs
       .filter((job) => job.tipo === "pergunta" && job.status === "failed")
@@ -382,7 +298,7 @@
   function renderJobState() {
     const job = jobPerguntaMaisRecente() || (trackedJobs.length ? trackedJobs[trackedJobs.length - 1] : null);
     const ativo = job && ["pending", "processing"].includes(job.status);
-    pipelineEl.classList.toggle("active", Boolean(ativo));
+    activityEl.classList.toggle("active", Boolean(ativo));
     if (!job) return;
     const rotulos = {
       pending: "aguardando na fila",
@@ -483,8 +399,7 @@
       connDot.classList.add("online");
       renderConversa(data);
       renderLiveProgress();
-      renderWorkSummaries();
-      renderJobFailures();
+        renderJobFailures();
     } catch (err) {
       if (!(err instanceof RateLimitError)) {
         connDot.classList.remove("online");
@@ -566,19 +481,13 @@
 
   function renderProjectInfo(data) {
     const p = data.projeto;
-    if (!p) {
-      projectInfo.innerHTML = '<span class="pi-line">nenhum projeto indexado</span>';
+    if (!p || !p.disponivel) {
+      projectInfo.innerHTML = '<span class="pi-line">nenhum workspace aberto</span>';
       return;
     }
-    const nome = p.projeto || "projeto";
-    const tokens = p.tokens_estimados_totais;
-    const arquivos = p.arquivos;
+    const nome = p.nome || "workspace";
     const fila = data.eventos_na_fila || 0;
     let html = `<span class="pi-line"><b>${escapeHtml(nome)}</b></span>`;
-    if (tokens !== undefined) {
-      const arqTxt = arquivos !== undefined ? ` · ${arquivos} arq.` : "";
-      html += `<span class="pi-line">${tokens.toLocaleString("pt-br")} tokens${arqTxt}</span>`;
-    }
     if (fila > 0) {
       html += `<span class="pi-line">${fila} na fila</span>`;
     }

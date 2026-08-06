@@ -65,7 +65,6 @@ def _config(**overrides_llm):
         "model": "modelo-teste",
         "temperature": 0.2,
         "timeout_seconds": 180,
-        "cache": {"ativado": False},  # sem cache -- cada teste quer chamar o mock de verdade
     }
     cfg.update(overrides_llm)
     return {"llm": cfg}
@@ -187,46 +186,6 @@ def test_url_error_levanta_erro_llm_em_vez_de_retornar_string(monkeypatch):
     assert "Nao foi possivel conectar" in str(capturado.value)
     assert not str(capturado.value).startswith("[erro]")
 
-
-def test_erro_legado_no_cache_tambem_nao_vira_resposta(monkeypatch):
-    cfg = _config(openai_compatible=False)
-    cfg["llm"]["cache"]["ativado"] = True
-    monkeypatch.setattr(
-        llm_mod._cache, "obter",
-        lambda *args, **kwargs: "[erro] falha antiga guardada indevidamente",
-    )
-
-    with pytest.raises(llm_mod.ErroLLM, match="falha antiga"):
-        llm_mod._chamar_llm("prompt sistema", "prompt usuario", cfg)
-
-
-def test_cache_separa_provider_e_base_url_mesmo_com_modelo_igual(monkeypatch):
-    vistos = []
-
-    def fake_obter(base_dir, fingerprint, *args, **kwargs):
-        vistos.append(fingerprint)
-        return "resposta do primeiro" if len(vistos) == 1 else None
-
-    monkeypatch.setattr(llm_mod._cache, "obter", fake_obter)
-    monkeypatch.setattr(llm_mod._cache, "definir", lambda *a, **k: None)
-    monkeypatch.setattr(
-        llm_mod, "_chamar_ollama", lambda *a, **k: "resposta do segundo",
-    )
-
-    config_a = _config(
-        provider="ollama", base_url="http://servidor-a:11434",
-        model="mesmo-modelo", cache={"ativado": True},
-    )
-    config_b = _config(
-        provider="llama.cpp", base_url="http://servidor-b:8080",
-        model="mesmo-modelo", cache={"ativado": True},
-    )
-
-    assert llm_mod._chamar_llm("s", "u", config_a) == "resposta do primeiro"
-    assert llm_mod._chamar_llm("s", "u", config_b) == "resposta do segundo"
-    assert vistos[0] != vistos[1]
-    assert "servidor-a" in vistos[0]
-    assert "llama.cpp" in vistos[1]
 
 # ---------------------------------------------------------------------------
 # 5) Compatibilidade basica com llama-server / modelos variados
@@ -477,31 +436,6 @@ def test_openai_textual_nao_expoe_reasoning_content(monkeypatch):
         llm_mod._chamar_llm("s", "u", _config(openai_compatible=True))
 
     assert erro.value.error_code == "EMPTY_MODEL_RESPONSE"
-
-
-def test_chamada_estruturada_ignora_cache_envenenado(monkeypatch):
-    cfg = _config(openai_compatible=False, cache={"ativado": True})
-    consultas_cache = []
-    gravacoes_cache = []
-
-    monkeypatch.setattr(
-        llm_mod._cache, "obter",
-        lambda *a, **k: consultas_cache.append((a, k)) or "texto invalido antigo",
-    )
-    monkeypatch.setattr(
-        llm_mod._cache, "definir",
-        lambda *a, **k: gravacoes_cache.append((a, k)),
-    )
-    monkeypatch.setattr(
-        llm_mod, "_chamar_ollama",
-        lambda *a, **k: '{"final":"novo"}',
-    )
-
-    resposta = llm_mod._chamar_llm("s", "u", cfg, forcar_json=True)
-
-    assert resposta == '{"final":"novo"}'
-    assert consultas_cache == []
-    assert gravacoes_cache == []
 
 
 def test_diagnosticar_backend_openai_sem_gerar_tokens(monkeypatch):

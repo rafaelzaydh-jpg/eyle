@@ -4,9 +4,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from engine import engine as engine_mod
-from engine import queue
-from engine import worker
+from eyle.runtime import service as service_mod
+from eyle.runtime import queue
+from eyle.runtime import worker
 
 
 def _ambiente_temporario(monkeypatch, tmp_path):
@@ -14,7 +14,7 @@ def _ambiente_temporario(monkeypatch, tmp_path):
     context = tmp_path / "context"
     memory.mkdir()
     context.mkdir()
-    monkeypatch.setattr(engine_mod, "MEMORY_DIR", str(memory))
+    monkeypatch.setattr(service_mod, "MEMORY_DIR", str(memory))
     monkeypatch.setattr(queue, "DB_PATH", str(context / "fila.sqlite3"))
     queue._evento_disponivel.clear()
     return memory, context
@@ -22,7 +22,7 @@ def _ambiente_temporario(monkeypatch, tmp_path):
 
 def test_remover_mensagem_de_origem_cancela_seu_job(monkeypatch, tmp_path):
     _ambiente_temporario(monkeypatch, tmp_path)
-    mensagem_id, snapshot = engine_mod.registrar_mensagem_com_snapshot("user", "analise")
+    mensagem_id, snapshot = service_mod.registrar_mensagem_com_snapshot("user", "analise")
     job_id = queue.adicionar({
         "tipo": "pergunta",
         "texto": "analise",
@@ -31,19 +31,19 @@ def test_remover_mensagem_de_origem_cancela_seu_job(monkeypatch, tmp_path):
     })
     queue.proximo(timeout=0, worker_id="worker-test")
 
-    resultado = engine_mod.solicitar_remocao_mensagem(mensagem_id)
+    resultado = service_mod.solicitar_remocao_mensagem(mensagem_id)
 
     assert resultado["cancelled_jobs"] == [job_id]
     assert resultado["waiting_jobs"] == []
     assert resultado["removed"] is True
     assert queue.cancelamento_solicitado(job_id) == "mensagem de origem removida pelo usuario"
-    assert engine_mod.carregar_conversa() == []
+    assert service_mod.carregar_conversa() == []
 
 
 def test_remover_mensagem_de_contexto_espera_job_sem_cancela_lo(monkeypatch, tmp_path):
     _ambiente_temporario(monkeypatch, tmp_path)
-    mensagem_a, _ = engine_mod.registrar_mensagem_com_snapshot("user", "contexto antigo")
-    mensagem_b, snapshot_b = engine_mod.registrar_mensagem_com_snapshot("user", "pergunta atual")
+    mensagem_a, _ = service_mod.registrar_mensagem_com_snapshot("user", "contexto antigo")
+    mensagem_b, snapshot_b = service_mod.registrar_mensagem_com_snapshot("user", "pergunta atual")
     job_b = queue.adicionar({
         "tipo": "pergunta",
         "texto": "pergunta atual",
@@ -52,36 +52,36 @@ def test_remover_mensagem_de_contexto_espera_job_sem_cancela_lo(monkeypatch, tmp
     })
     queue.proximo(timeout=0, worker_id="worker-test")
 
-    resultado = engine_mod.solicitar_remocao_mensagem(mensagem_a)
+    resultado = service_mod.solicitar_remocao_mensagem(mensagem_a)
 
     assert resultado["status"] == "deferred"
     assert resultado["cancelled_jobs"] == []
     assert resultado["waiting_jobs"] == [job_b]
     assert queue.cancelamento_solicitado(job_b) is None
-    pendente = next(m for m in engine_mod.carregar_conversa() if m["id"] == mensagem_a)
+    pendente = next(m for m in service_mod.carregar_conversa() if m["id"] == mensagem_a)
     assert pendente["pending_delete"] is True
 
     # Um job novo nao pode herdar a mensagem que o usuario ja mandou apagar.
-    _, snapshot_novo = engine_mod.registrar_mensagem_com_snapshot("user", "nova pergunta")
+    _, snapshot_novo = service_mod.registrar_mensagem_com_snapshot("user", "nova pergunta")
     assert mensagem_a not in {m["id"] for m in snapshot_novo}
 
     assert queue.concluir(job_b, {"resposta": "ok"}) is True
-    assert engine_mod.finalizar_remocoes_pendentes() == [mensagem_a]
-    assert mensagem_a not in {m["id"] for m in engine_mod.carregar_conversa()}
+    assert service_mod.finalizar_remocoes_pendentes() == [mensagem_a]
+    assert mensagem_a not in {m["id"] for m in service_mod.carregar_conversa()}
 
 
 def test_resposta_gravada_por_job_cancelado_pode_ser_purgada(monkeypatch, tmp_path):
     _ambiente_temporario(monkeypatch, tmp_path)
-    engine_mod._JOB_ATUAL_ID.set(77)
-    engine_mod._MENSAGEM_ORIGEM_ATUAL_ID.set(5)
-    resposta_id = engine_mod.registrar_mensagem("assistant", "resposta tardia")
+    service_mod._JOB_ATUAL_ID.set(77)
+    service_mod._MENSAGEM_ORIGEM_ATUAL_ID.set(5)
+    resposta_id = service_mod.registrar_mensagem("assistant", "resposta tardia")
 
-    salva = engine_mod.carregar_conversa()[0]
+    salva = service_mod.carregar_conversa()[0]
     assert salva["id"] == resposta_id
     assert salva["source_job_id"] == 77
     assert salva["reply_to_message_id"] == 5
-    assert engine_mod.remover_respostas_do_job(77) is True
-    assert engine_mod.carregar_conversa() == []
+    assert service_mod.remover_respostas_do_job(77) is True
+    assert service_mod.carregar_conversa() == []
 
 
 def test_pergunta_web_forca_processo_terminavel_mesmo_com_isolamento_desligado(
@@ -96,7 +96,6 @@ def test_pergunta_web_forca_processo_terminavel_mesmo_com_isolamento_desligado(
         return {"resposta": "ok"}
 
     monkeypatch.setattr(worker, "executar_evento_isolado", fake_isolado)
-    monkeypatch.setattr(worker, "_resumo_publico", lambda *args, **kwargs: None)
     monkeypatch.setattr(worker, "_limpar_remocoes_pendentes_seguro", lambda: [])
 
     assert worker.processar_proximo(

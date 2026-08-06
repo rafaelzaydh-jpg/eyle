@@ -3,29 +3,29 @@
 from contextlib import closing
 import os
 
-from engine import process_limiter, process_utils, queue
+from eyle.runtime import limiter, process, queue
 
 
 def test_pid_atual_nao_chama_os_kill(monkeypatch):
     def proibido(*args, **kwargs):
         raise AssertionError("os.kill nao pode ser chamado para o proprio PID")
 
-    monkeypatch.setattr(process_utils.os, "kill", proibido)
-    assert process_utils.pid_ativo(os.getpid()) is True
+    monkeypatch.setattr(process.os, "kill", proibido)
+    assert process.pid_ativo(os.getpid()) is True
 
 
 def test_branch_windows_nunca_usa_os_kill(monkeypatch):
     chamadas = []
 
-    monkeypatch.setattr(process_utils, "_rodando_no_windows", lambda: True)
-    monkeypatch.setattr(process_utils, "_pid_ativo_windows", lambda pid: chamadas.append(pid) or True)
+    monkeypatch.setattr(process, "_rodando_no_windows", lambda: True)
+    monkeypatch.setattr(process, "_pid_ativo_windows", lambda pid: chamadas.append(pid) or True)
     monkeypatch.setattr(
-        process_utils.os, "kill",
+        process.os, "kill",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("os.kill usado no Windows")),
     )
 
     pid_externo = os.getpid() + 100000
-    assert process_utils.pid_ativo(pid_externo) is True
+    assert process.pid_ativo(pid_externo) is True
     assert chamadas == [pid_externo]
 
 
@@ -34,7 +34,7 @@ def test_status_da_fila_com_pid_proprio_nao_sinaliza_processo(monkeypatch, tmp_p
     queue._schemas_prontos.clear()
     queue.registrar_heartbeat("worker-local", "idle", pid=os.getpid())
     monkeypatch.setattr(
-        process_utils.os, "kill",
+        process.os, "kill",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("status sinalizou o processo")),
     )
 
@@ -44,26 +44,26 @@ def test_status_da_fila_com_pid_proprio_nao_sinaliza_processo(monkeypatch, tmp_p
 
 
 def test_limiter_com_owner_proprio_nao_sinaliza_processo(monkeypatch, tmp_path):
-    monkeypatch.setattr(process_limiter, "DB_PATH", str(tmp_path / "limiter.sqlite3"))
-    process_limiter._READY.clear()
-    token = process_limiter.acquire("backend", limit=1, timeout=0.1, lease_seconds=10)
+    monkeypatch.setattr(limiter, "DB_PATH", str(tmp_path / "limiter.sqlite3"))
+    limiter._READY.clear()
+    token = limiter.acquire("backend", limit=1, timeout=0.1, lease_seconds=10)
     assert token is not None
     monkeypatch.setattr(
-        process_utils.os, "kill",
+        process.os, "kill",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("limiter sinalizou o processo")),
     )
 
-    assert process_limiter.active("backend") == 1
-    assert process_limiter.release(token) is True
+    assert limiter.active("backend") == 1
+    assert limiter.release(token) is True
 
 
 def test_pid_fora_da_faixa_nao_derruba_probe_posix(monkeypatch):
-    monkeypatch.setattr(process_utils, "_rodando_no_windows", lambda: False)
+    monkeypatch.setattr(process, "_rodando_no_windows", lambda: False)
     monkeypatch.setattr(
-        process_utils.os, "kill",
+        process.os, "kill",
         lambda *args, **kwargs: (_ for _ in ()).throw(OverflowError("pid fora da faixa")),
     )
-    assert process_utils.pid_ativo(10**30) is False
+    assert process.pid_ativo(10**30) is False
 
 
 def test_timestamp_legado_sem_timezone_nao_derruba_status():

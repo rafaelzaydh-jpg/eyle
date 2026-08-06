@@ -7,19 +7,9 @@
     "temperature": 0.2,
     "timeout_seconds": 120,
     "max_tokens": 1500,
-    "context_window_tokens": 8192,
-    "cache": {
-      "ativado": true,
-      "max_entradas": 4096,
-      "max_age_days": 30,
-      "hit_flush_interval": 20,
-      "memoria_max_entradas": 2048,
-      "max_age_hours": 24
-    },
+    "context_window_tokens": 10000,
     "connect_timeout_seconds": 5,
     "read_timeout_seconds": 120,
-    "agent_timeout_seconds": 180,
-    "executor_timeout_seconds": 180,
     "model_discovery_timeout_seconds": 3,
     "model_discovery_negative_ttl_seconds": 60,
     "retry_max_attempts": 3,
@@ -29,42 +19,17 @@
     "retry_jitter_seconds": 0.2,
     "max_concurrent_requests": 1,
     "cooldown_seconds": 2.0,
-    "agent_max_tokens": 512,
+    "agent_max_tokens": 1000,
     "retry_read_timeouts": false,
     "stream_responses": true,
-    "audit_scout_max_tokens": 700,
-    "audit_finalizer_max_tokens": 1600,
-    "project_read_finalizer_max_tokens": 1400,
     "truncation_retry_multiplier": 2.0,
-    "truncation_retry_max_tokens": 2400
-  },
-  "context": {
-    "token_budget": 1500,
-    "chars_per_token": 4,
-    "small_project_full_read_max_files": 8,
-    "small_project_full_read_max_lines": 600,
-    "small_project_full_read_max_chars": 16000
+    "truncation_retry_max_tokens": 4800,
+    "agent_decision_max_tokens": 1100,
+    "agent_patch_max_tokens": 3600
   },
   "context_engine": {
     "safety_margin_tokens": 500,
-    "chars_per_token_fallback": 3,
-    "max_recent_observations": 4
-  },
-  "retrieval": {
-    "chunk_max_tokens": 400,
-    "max_chunks_no_resultado": 8,
-    "bm25_k1": 1.5,
-    "bm25_b": 0.75,
-    "query_cache_ativado": true,
-    "query_cache_max_entradas": 256
-  },
-  "ingest": {
-    "max_workers": 4,
-    "parallel_threshold": 8
-  },
-  "servidor": {
-    "host": "127.0.0.1",
-    "port": 5000
+    "chars_per_token_fallback": 3
   },
   "web": {
     "api_token": null,
@@ -114,8 +79,6 @@
         "max_arquivos_projeto": 100000,
         "max_tamanho_projeto_mb": 2048,
         "cpus": 1.0,
-        "imagem_docker": null,
-        "projetos": {},
         "allow_trusted_local": true
       }
     }
@@ -124,68 +87,28 @@
     "expiracao_segundos": 3600
   },
   "retention": {
-    "historico_max_entradas": 1000,
-    "trace_max_files": 5,
     "backups_max_files": 50,
     "backups_max_age_days": 30,
     "backups_max_total_mb": 256
   },
-  "benchmark": {
-    "primary_model": null,
-    "baseline_model": null
-  },
   "agent": {
-    "rollout_mode": "full",
-    "enabled_modes": [
-      "analyze",
-      "suggest",
-      "edit"
-    ],
-    "max_steps": 8,
-    "max_no_progress_decisions": 3,
-    "max_tentativas_parse": 2,
     "usar_json_mode_se_suportado": true,
-    "max_chars_por_observacao": 500,
-    "require_confirmation_for_write": true,
-    "require_confirmation_for_exec": false,
-    "max_erros_consecutivos": 3,
-    "exigir_run_tests_apos_escrita": true,
-    "max_fatos_importantes": 10,
     "max_tree_entries": 200,
     "max_tree_depth": 6,
     "max_read_range_lines": 400,
     "task_deadline_seconds": 900,
-    "max_llm_calls": 12,
-    "max_total_generated_tokens": 5000,
-    "semantic_repeat_overlap": 0.95,
+    "max_llm_calls": 8,
     "max_secret_scan_bytes": 65536,
-    "semantic_grounding": {
-      "enabled": true,
-      "block_unsupported_anchors": true,
-      "require_inline_citations": false,
-      "min_claim_token_overlap": 0.12,
-      "min_claim_tokens": 5,
-      "require_inference_evidence": true,
-      "warn_hypothesis_without_evidence": true
-    },
-    "cycle_min_repetitions": 3,
-    "audit_candidate_limit": 48,
-    "audit_initial_read_limit": 6,
-    "audit_gap_read_limit": 1,
-    "audit_health_claim_required_score": 1.0,
-    "project_read_finalizer_enabled": true,
-    "deterministic_post_write_enabled": true,
-    "deterministic_symbol_lookup_enabled": true,
-    "project_read_fast_path_enabled": true,
-    "target_coverage_enabled": true,
-    "project_read_single_repair_enabled": true,
-    "intent_output_gate_enabled": true,
-    "deterministic_write_receipt_enabled": true,
-    "max_prompt_tokens": 14000,
-    "max_completion_tokens": 5000,
+    "max_prompt_tokens": 12000,
+    "max_completion_tokens": 6000,
     "max_total_tokens": 18000,
     "chat_history_token_budget": 1200,
-    "audit_optional_expansion_enabled": true
+    "final_validation_retries": 1,
+    "max_llm_turns": 6,
+    "max_tool_calls": 12,
+    "max_identical_tool_repeats": 2,
+    "protocol_parse_retries": 1,
+    "max_patch_dry_run_failures": 2
   },
   "worker": {
     "heartbeat_interval_seconds": 5,
@@ -200,12 +123,9 @@
   },
   "telemetry": {
     "enabled": true,
-    "window_seconds": 3600,
-    "max_entries": 10000
+    "window_seconds": 3600
   },
-  "version": "2.7.4",
-  "updated": "2026-08-05",
   "app_version": "2.7.4",
-  "config_schema_version": "2.7.4",
-  "revision": "4.6-token-efficiency"
+  "config_schema_version": "4.11.2",
+  "revision": "4.11.2-write-loop-fix"
 }

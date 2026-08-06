@@ -5,8 +5,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import engine.codar as codar_mod  # noqa: E402
-import engine.sandbox as sandbox_mod  # noqa: E402
+import eyle.core.editing as codar_mod  # noqa: E402
+import eyle.core.sandbox as sandbox_mod  # noqa: E402
 
 
 def _cfg(**extras):

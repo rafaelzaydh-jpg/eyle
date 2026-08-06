@@ -1,89 +1,31 @@
-# Configuration — Eyle 2.7.4
+# Configuration — Eyle Rev4.11.2
 
-Eyle reads `config.json` from the repository root. The core reset removed the historical `engine`, `dicas`, `entendimento`, trusted-path rollout, and legacy-pipeline settings.
+The default configuration exposes capacity and safety, not hidden architectures.
 
-## Minimal example
+## LLM
 
-```json
-{
-  "llm": {
-    "provider": "openai_compatible",
-    "base_url": "http://127.0.0.1:8080",
-    "model": "auto",
-    "context_window_tokens": 8192
-  },
-  "agent": {
-    "rollout_mode": "full",
-    "enabled_modes": ["analyze", "suggest", "edit"],
-    "max_steps": 12,
-    "require_confirmation_for_write": true,
-    "exigir_run_tests_apos_escrita": true
-  },
-  "codar": {
-    "fazer_backup": true,
-    "testes": {
-      "ativado": true,
-      "comando_python": "pytest -q"
-    }
-  }
-}
-```
+- `llm.context_window_tokens`: real model window used for each isolated call;
+- `llm.agent_decision_max_tokens`: normal decision/final response allowance;
+- `llm.agent_patch_max_tokens`: allowance after a source read, when a patch may be generated;
+- timeouts, retries, provider, model, and provider and retry settings.
 
-## Rollout
+## AgentSession
 
-- `read_only`: permits investigation but blocks write/exec tools.
-- `full`: enables the supervised edit workflow. Writes still require confirmation when `require_confirmation_for_write=true`.
+- `agent.max_llm_turns`;
+- `agent.max_tool_calls`;
+- `agent.max_identical_tool_repeats` (default `2`; a repeated identical read is blocked before a second disk access);
+- `agent.protocol_parse_retries`;
+- `agent.max_patch_dry_run_failures`;
+- `agent.chat_history_token_budget`;
+- read/tree limits;
+- task deadline and aggregate token accounting.
 
-There is no `off` mode with a fallback into an older pipeline.
+Only the first agent turn receives recent chat history. Patch output allowance is adaptive to the amount of fresh source instead of automatically reserving the full patch maximum on every later turn.
 
-## Important limits
+## Writes
 
-- `agent.max_steps`: maximum state-machine decisions.
-- `agent.max_llm_calls`: task-wide LLM call budget.
-- `agent.max_prompt_tokens`: cumulative task-wide input budget.
-- `agent.max_completion_tokens`: cumulative task-wide generated-token budget.
-- `agent.max_total_tokens`: cumulative input plus output budget.
-- `agent.max_total_generated_tokens`: legacy alias retained at the same completion limit during migration.
-- `agent.chat_history_token_budget`: whole-message history budget; old messages are omitted before slicing content.
-- `agent.audit_optional_expansion_enabled`: permits one compact expansion only when deterministic audit coverage has an ambiguous gap.
-- `agent.max_tree_entries`, `agent.max_tree_depth`: inventory limits.
-- `agent.max_read_range_lines`: fresh-read limit.
-- `llm.context_window_tokens`: provider context window.
-- `llm.project_read_finalizer_max_tokens`: explanation budget.
-- `agent.target_coverage_enabled`: require every deterministic request target before success.
-- `agent.project_read_single_repair_enabled`: permit one directed Finalizer repair and no more.
-- `agent.project_read_fast_path_enabled`: finalize as soon as all explicit files have fresh evidence.
-- `agent.intent_output_gate_enabled`: require the response to match the detected code-task profile and reject unsolicited recommendations.
-- `agent.deterministic_write_receipt_enabled`: finish a verified write from patch/test/reread state without an extra model summary call.
-- `worker.max_parallel_jobs`: queue worker concurrency.
+`codar` controls backup, test execution, sandbox, and resource limits. Write confirmation cannot be disabled by the LLM.
 
-The schema rejects invalid types, non-positive operational limits, ports above 65535, ingest worker counts above 32, and response budgets that consume the whole context window.
+## Removed settings
 
-## Windows trusted-local test backend
-
-When Bubblewrap is unavailable and Docker is not configured, Windows may use an explicit local backend:
-
-```json
-{
-  "codar": {
-    "testes": {
-      "sandbox": {
-        "backend": "auto",
-        "allow_trusted_local": true,
-        "comandos_permitidos": [["pytest"], ["python", "-m", "pytest"]],
-        "copiar_projeto": true
-      }
-    }
-  }
-}
-```
-
-`trusted_local` never uses a shell and only executes allowlisted argv in a temporary project snapshot with a filtered environment, timeout, and bounded output. It is not a network sandbox and does not provide Bubblewrap/Docker kernel isolation. `backend=auto` selects it only on Windows and only when `allow_trusted_local=true`.
-
-## Information preservation
-
-Rev4.5 information preservation is part of the official response contract and is not a rollout flag. With the intent output gate enabled in the release configuration, required and essential information is publication-blocking. Older compatibility configurations that disable the intent gate still receive the ledger as diagnostics, while explicit request targets remain required.
-
-## Rev4.6 token-efficiency rules
-
-`memory/entendimento.json` and the complete inventory never enter prompts. Tool schemas are filtered by task state. Normal project audits use deterministic planning and one Finalizer call; the optional expansion is capped at one call. `agent.response_recovery.llm_enabled=true` is rejected with `LEGACY_LLM_RECOVERY_DISABLED` so an old configuration cannot silently reactivate token-consuming textual recovery.
+Rev4.11.2 rejects or no longer uses settings for Scouts, Mission Interpreter, semantic grounding, ProjectMemory prompt budgets, evidence replay, no-progress detectors, or legacy pipelines.

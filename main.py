@@ -7,18 +7,16 @@ Fluxo principal da Eyle:
   Projeto de 30k-100k+ tokens
             |
             v
-  Memoria externa (memory/, sem limite pratico)
+  Memória externa sob demanda (memory/agent_memory)
             |
             v
-  Eyle Agent -> tools -> evidence -> finalizer -> validation
+  Eyle Agent -> tools -> evidence -> validation
             |
             v
-  Atualiza tarefa persistente e conversa
+  Persiste conversa e confirmação pendente
 
 Comandos:
-    python main.py ingest <pasta_do_projeto> [--nome NOME]
     python main.py perguntar "sua pergunta aqui"
-    python main.py agente "objetivo da tarefa"          # Atualizacao Agente / Fase 2
     python main.py benchmark [--baseline-model MODELO]  # Atualizacao 47
     python main.py status
     python main.py serve [--host HOST] [--port PORT]   # agente persistente (Flask + Worker)
@@ -31,79 +29,35 @@ import sys
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
-from ingest import ingerir, indice_esta_atual
-from engine.config_schema import ConfigError, carregar_config_validada
+from eyle.runtime.config import ConfigError
 
 MEMORY_DIR = os.path.join(BASE_DIR, "memory")
-WORKSPACE_DIR = os.path.join(BASE_DIR, "workspace")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
 
 def carregar_config():
-    return carregar_config_validada(CONFIG_PATH)
+    from eyle.runtime.service import carregar_config as carregar
+    return carregar()
 
 
 def carregar_projeto():
-    caminho = os.path.join(MEMORY_DIR, "projeto.json")
-    if os.path.exists(caminho):
-        with open(caminho, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return None
+    from eyle.runtime.service import carregar_projeto as carregar
+    return carregar()
 
-
-def _nome_projeto_padrao(caminho):
-    """
-    Se nenhum --nome foi passado: usa o nome da propria pasta apontada.
-    Caso especial do workspace/ (container): se dentro dele existe uma
-    unica subpasta (a raiz do projeto real que foi colocada la dentro),
-    usa o nome dessa subpasta em vez de "workspace".
-    """
-    caminho = os.path.normpath(caminho)
-    if os.path.abspath(caminho) == os.path.abspath(WORKSPACE_DIR):
-        subpastas = [
-            d for d in os.listdir(caminho)
-            if os.path.isdir(os.path.join(caminho, d)) and not d.startswith(".")
-        ]
-        if len(subpastas) == 1:
-            return subpastas[0]
-        return "workspace"
-    return os.path.basename(caminho)
-
-
-def cmd_ingest(args):
-    caminho = args.caminho or WORKSPACE_DIR
-    e_workspace = os.path.abspath(caminho) == os.path.abspath(WORKSPACE_DIR)
-    if not os.path.isdir(caminho):
-        print(f"[main] Pasta nao encontrada: {caminho}")
-        if e_workspace:
-            print("[main] Coloque a raiz do seu projeto dentro de workspace/ e rode novamente.")
-        sys.exit(1)
-    if e_workspace and not [f for f in os.listdir(caminho) if not f.startswith(".")]:
-        print("[main] A pasta workspace/ esta vazia.")
-        print("[main] Coloque a raiz inteira do projeto que voce quer analisar dentro de workspace/ e rode novamente.")
-        sys.exit(1)
-    nome = args.nome or _nome_projeto_padrao(caminho)
-    config = carregar_config()
-    ingerir(
-        caminho, nome, MEMORY_DIR,
-        chunk_max_tokens=args.chunk_max_tokens,
-        chars_per_token=config.get("context", {}).get("chars_per_token", 4),
-        config=config,
-    )
 
 
 def cmd_perguntar(args):
     # Mesmo caminho usado pelo Worker e pelo painel web.
-    from engine.engine import processar
+    from eyle.runtime.service import processar
 
     projeto = carregar_projeto()
     if projeto is None:
-        print("[main] Nenhum projeto indexado ainda -- respondendo em modo conversa livre.")
-        print("       (rode 'python main.py ingest <pasta>' quando quiser falar sobre um projeto)")
+        print("[main] Nenhum workspace encontrado -- respondendo em modo conversa livre.")
+    elif projeto.get("auto_discovered"):
+        print(f"[main] Workspace aberto diretamente: {projeto.get('caminho_origem')}")
     else:
-        print(f"[main] Corpus total indexado: {projeto['tokens_estimados_totais']} tokens "
-              f"({projeto['arquivos']} arquivos, {projeto['chunks']} chunks)")
-    print("[main] Roteando mensagem...")
+        print(f"[main] Projeto disponível: {projeto.get('nome') or projeto.get('caminho_origem')}")
+    print("[main] Iniciando AgentSession...")
 
     resultado = processar(args.pergunta)
 
@@ -111,100 +65,33 @@ def cmd_perguntar(args):
         print(f"[main] {resultado['erro']}")
         sys.exit(1)
 
-    roteador = resultado.get("roteador", {})
-    print(f"[main] Pipeline: {roteador.get('tipo')} ({roteador.get('motivo')})")
-
     print("\n" + "=" * 60)
     print("RESPOSTA")
     print("=" * 60)
     print(resultado["resposta"])
     print("=" * 60)
 
-    metricas_validacao = {
-        nome: resultado.get(nome)
-        for nome in ("citation_validity", "coverage", "grounding")
-        if resultado.get(nome) is not None
-    }
-    if metricas_validacao:
-        print("\n[validation] " + " | ".join(f"{nome}: {valor}" for nome, valor in metricas_validacao.items()))
-        for aviso in resultado.get("avisos", []):
-            print(f"[validation][AVISO] {aviso}")
-    conclusao_agente = resultado.get("agente_conclusao") or {}
+    conclusao_agente = resultado.get("details") or {}
     if conclusao_agente:
-        gate = (conclusao_agente.get("completion_gate") or {}).get("code")
+        code = conclusao_agente.get("failure_code") or "ok"
         print(
             "\n[agente] "
             f"task_id={conclusao_agente.get('task_id')} | "
-            f"leitura={conclusao_agente.get('read_status', 'not_read')} | "
-            f"tools={conclusao_agente.get('tools_called', [])} | gate={gate}"
+            f"turns={conclusao_agente.get('turns', 0)} | "
+            f"tools={conclusao_agente.get('tools_used', [])} | status={conclusao_agente.get('status')} | code={code}"
         )
-        if conclusao_agente.get("fallback_cause"):
-            print(f"[agente] fallback={conclusao_agente['fallback_cause']}")
-
-
-def cmd_agente(args):
-    # A CLI explicita usa o mesmo ponto de entrada que perguntar/Worker, apenas
-    # forca o alto nivel "agente" para depuracao deliberada.
-    from engine.engine import processar
-
-    config = carregar_config()
-    rollout = config.get("agent", {}).get("rollout_mode", "full")
-    projeto = carregar_projeto()
-    if projeto is None:
-        print(
-            "[main] Aviso: nenhum projeto indexado ainda -- as tools que tocam o codigo real "
-            "(read_file/find_symbol/test_patch_dry_run/run_tests/apply_patch) vao devolver erro."
-        )
-    print("[main] Executando o Agente...")
-
-    resultado = processar(args.objetivo, forcar_tipo="agente")
-
-    if "erro" in resultado:
-        print(f"[main] {resultado['erro']}")
-        sys.exit(1)
-
-    roteador = resultado.get("roteador", {})
-    print(f"[main] Pipeline: {roteador.get('tipo')} ({roteador.get('motivo')})")
-    print(f"[main] Status do agente: {resultado.get('agente_status')}")
-
-    print("\n" + "=" * 60)
-    print("RESPOSTA")
-    print("=" * 60)
-    print(resultado["resposta"])
-    print("=" * 60)
-    conclusao = resultado.get("agente_conclusao") or {}
-    print(
-        f"[main] task_id={conclusao.get('task_id')} | "
-        f"leitura={conclusao.get('read_status', 'not_read')} | "
-        f"tools={conclusao.get('tools_called', [])} | "
-        f"gate={(conclusao.get('completion_gate') or {}).get('code')}"
-    )
-    if conclusao.get("fallback_cause"):
-        print(f"[main] fallback={conclusao['fallback_cause']}")
 
 
 def cmd_status(args):
-    from engine import queue, telemetry
+    from eyle.runtime import queue, telemetry
 
     config = carregar_config()
     projeto = carregar_projeto()
     if projeto is None:
-        print("[main] Nenhum projeto indexado ainda.")
+        print("[main] Nenhum workspace encontrado.")
     else:
         print(json.dumps(projeto, ensure_ascii=False, indent=2))
-        atual = indice_esta_atual(projeto, config)
-        if atual is True:
-            print("\n[main] Indice: atualizado (fingerprint do conteudo confere).")
-        elif atual is False:
-            print("\n[main] Indice: DESATUALIZADO; rode ingest novamente.")
-        else:
-            print("\n[main] Indice: estado desconhecido (memoria legada ou fonte indisponivel).")
-
-    hist_path = os.path.join(MEMORY_DIR, "historico.json")
-    if os.path.exists(hist_path):
-        with open(hist_path, "r", encoding="utf-8") as f:
-            hist = json.load(f)
-        print(f"\n[main] {len(hist.get('decisoes', []))} decisoes registradas no historico.")
+        print("\n[main] Workspace: acesso direto ao código-fonte.")
 
     conversa_path = os.path.join(MEMORY_DIR, "conversa.json")
     if os.path.exists(conversa_path):
@@ -232,7 +119,7 @@ def cmd_status(args):
 
 
 def cmd_benchmark(args):
-    from engine.benchmark import rodar_benchmark
+    from eyle.devtools.benchmark import rodar_benchmark
 
     output = args.output or os.path.join(BASE_DIR, "context", "benchmark_latest.json")
     relatorio = rodar_benchmark(
@@ -248,7 +135,7 @@ def cmd_benchmark(args):
             f"({metricas.get('gate_scope', 'full')}) | "
             f"leitura={metricas['tarefas_com_uso_correto_de_leitura']}/{total} | "
             f"factual={metricas['respostas_factuais_corretas']}/{total} | "
-            f"escrita={metricas['checks_escrita_aprovados']}/5 | "
+            f"escrita={metricas['checks_escrita_aprovados']}/{metricas.get('checks_escrita_total', 0)} | "
             f"P50={metricas['latencia_p50_ms']}ms | P95={metricas['latencia_p95_ms']}ms | "
             f"P99={metricas['latencia_p99_ms']}ms"
         )
@@ -256,7 +143,7 @@ def cmd_benchmark(args):
 
 
 def cmd_compare_coverage(args):
-    from engine.information_preservation import compare_release_coverage_files
+    from eyle.devtools.coverage_compare import compare_release_coverage_files
 
     result = compare_release_coverage_files(
         args.baseline, args.candidate, output_path=args.output,
@@ -279,7 +166,7 @@ def cmd_compare_coverage(args):
 
 
 def cmd_compare_efficiency(args):
-    from engine.token_efficiency import compare_token_efficiency_files
+    from eyle.devtools.token_efficiency import compare_token_efficiency_files
 
     result = compare_token_efficiency_files(
         args.baseline, args.candidate, output_path=args.output, tolerance=args.tolerance,
@@ -306,15 +193,14 @@ def cmd_serve(args):
     # Sobe o Worker permanente (thread) + o Flask (web/routes.py). O
     # navegador so fala com o Flask a partir daqui; fechar a aba nao
     # interrompe o Worker.
-    from engine.worker import iniciar_em_thread
+    from eyle.runtime.worker import iniciar_em_thread
     from llm.executar import diagnosticar_backend
     from web.routes import app, obter_api_token, origem_api_token
 
     config = carregar_config()
     projeto = carregar_projeto()
     if projeto is None:
-        print("[main] Aviso: nenhum projeto indexado ainda. Rode 'python main.py ingest ...' "
-              "antes de mandar perguntas pelo navegador.")
+        print("[main] Aviso: nenhum workspace foi encontrado; conversas livres continuam disponíveis.")
 
     diagnostico_llm = diagnosticar_backend(config)
     if diagnostico_llm.get("ok"):
@@ -358,25 +244,13 @@ def main():
     parser = argparse.ArgumentParser(description="Eyle - agente unico para analisar, criar e editar projetos")
     sub = parser.add_subparsers(dest="comando", required=True)
 
-    p_ingest = sub.add_parser("ingest", help="Indexa uma pasta de projeto na memoria")
-    p_ingest.add_argument("caminho", nargs="?", default=None,
-                           help="Pasta do projeto a indexar (default: workspace/)")
-    p_ingest.add_argument("--nome", default=None)
-    p_ingest.add_argument("--chunk-max-tokens", type=int, default=400)
-    p_ingest.set_defaults(func=cmd_ingest)
+
 
     p_perguntar = sub.add_parser("perguntar", help="Conversa ou executa o Agente Eyle conforme o pedido")
     p_perguntar.add_argument("pergunta")
     p_perguntar.set_defaults(func=cmd_perguntar)
 
-    p_agente = sub.add_parser(
-        "agente",
-        help="Executa explicitamente uma tarefa no mesmo Agente usado pela CLI e pelo painel",
-    )
-    p_agente.add_argument("objetivo")
-    p_agente.set_defaults(func=cmd_agente)
-
-    p_status = sub.add_parser("status", help="Mostra estatisticas da memoria indexada")
+    p_status = sub.add_parser("status", help="Mostra workspace, conversa, fila e telemetria")
     p_status.set_defaults(func=cmd_status)
 
     p_benchmark = sub.add_parser(
@@ -394,7 +268,7 @@ def main():
         "--cases", default=None,
         help=(
             "IDs separados por vírgula para smoke test, por exemplo "
-            "01_audio_14_linhas,03_dois_arquivos,06_edicao_confirmada"
+            "greeting,analyze_single_file,edit_confirmed"
         ),
     )
     p_benchmark.set_defaults(func=cmd_benchmark)

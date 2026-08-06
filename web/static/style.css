@@ -98,9 +98,9 @@ html, body {
 
 .pi-line b { color: var(--text); font-weight: 500; }
 
-/* ---------- pipeline strip ---------- */
+/* ---------- current task activity ---------- */
 
-.pipeline {
+.activity {
   flex-shrink: 0;
   overflow: hidden;
   max-height: 0;
@@ -109,12 +109,12 @@ html, body {
   transition: max-height 0.25s ease, border-color 0.25s ease;
 }
 
-.pipeline.active {
+.activity.active {
   max-height: 40px;
   border-bottom: 1px solid var(--line);
 }
 
-.pipeline-track {
+.activity-track {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -233,66 +233,6 @@ html, body {
 }
 .msg-del:hover { color: #d97757; }
 
-.work-summary {
-  align-self: flex-start;
-  width: min(84%, 620px);
-  margin: 4px 0 8px;
-  border-left: 2px solid var(--accent-dim);
-  background: transparent;
-  color: var(--muted);
-  animation: rise 0.18s ease;
-}
-
-.work-summary-title {
-  cursor: pointer;
-  padding: 7px 10px;
-  font-size: 11px;
-  color: var(--accent-dim);
-  user-select: none;
-}
-
-.work-summary-title:hover,
-.work-summary-title:focus-visible {
-  color: var(--accent);
-  outline: none;
-}
-
-.work-summary[open] .work-summary-title {
-  color: var(--accent);
-}
-
-.work-summary-body {
-  padding: 3px 12px 11px;
-  border-top: 1px solid var(--line);
-  background: var(--bg-panel);
-}
-
-.work-summary-step {
-  padding-top: 11px;
-}
-
-.work-summary-step-title {
-  margin-bottom: 5px;
-  color: var(--text);
-  font-size: 11px;
-  font-weight: 500;
-}
-
-.work-summary-field {
-  font-size: 10.5px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.work-summary-label {
-  color: var(--muted);
-}
-
-.work-summary-value {
-  color: #aeb9aa;
-}
-
 .job-notice {
   align-self: flex-start;
   max-width: 84%;
@@ -404,7 +344,6 @@ html, body {
 @media (max-width: 600px) {
   .project-info { display: none; }
   .msg { max-width: 92%; }
-  .work-summary { width: 92%; }
 }
 
 /* ---------- live progress / streaming ---------- */

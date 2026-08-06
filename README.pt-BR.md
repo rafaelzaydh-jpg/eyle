@@ -1,88 +1,86 @@
-<p align="center">
-  <img src="assets/eyle-banner.svg" alt="Eyle — agente autônoma de código" width="100%">
-</p>
+<p align="center"><img src="assets/eyle-banner.svg" alt="Eyle — agente autônoma de programação" width="100%"></p>
+<p align="center"><strong>Uma agente de programação com um único cérebro LLM, ferramentas reais e escrita supervisionada.</strong></p>
 
-<p align="center"><strong>Uma agente autônoma de código, um único caminho de execução. Escritas continuam supervisionadas.</strong></p>
+**Versão:** 2.7.4 · **Schema:** 4.11.2 · **Revisão:** 4.11.2-write-loop-fix
 
-<p align="center">
-  <a href="README.md">English</a> ·
-  <a href="docs/architecture.md">Arquitetura</a> ·
-  <a href="docs/configuration.md">Configuração</a> ·
-  <a href="docs/benchmark.md">Benchmark</a> ·
-  <a href="CHANGELOG.md">Histórico</a>
-</p>
-
-<p align="center">
-  <img alt="Python 3.8+" src="https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white">
-  <img alt="Versão 2.7.4" src="https://img.shields.io/badge/versão-2.7.4-2563EB">
-  <img alt="Testes" src="https://img.shields.io/badge/testes-362%20aprovados-16A34A">
-</p>
-
-**Versão:** 2.7.4 · **Schema:** 2.7.4 · **Revisão:** 4.6-token-efficiency
-
-## O que mudou na 2.7.4
-
-A Rev4.6 remove o maior desperdício ativo de tokens sem enfraquecer as garantias de preservação da Rev4.5. `entendimento.json` e inventários completos não entram mais nos prompts, auditorias usam planejamento inicial/de lacunas determinístico, uma auditoria normal gasta apenas a chamada do Finalizer e existe no máximo uma expansão compacta para uma lacuna realmente ambígua. Orçamentos de prompt, resposta e total são verificados antes de cada request; retries são contabilizados; ferramentas e histórico são filtrados pelo estado atual; e `compare-efficiency` detecta regressões de tokens por caso entre releases.
-
-A Eyle agora possui um único pipeline de projeto. Os caminhos históricos Retrieval → Analista → Executor → Verify e seus fallbacks ocultos foram removidos. Um pedido sobre o projeto passa pela agente Eyle ou termina com uma falha específica; nunca é redirecionado silenciosamente para outra arquitetura.
+## Arquitetura
 
 ```text
-Pedido do usuário
-→ agente Eyle
-→ ferramentas validadas
-→ evidências frescas
-→ confirmação para escrita quando necessária
-→ testes e releitura
-→ resposta validada
+Interface
+→ runtime service
+→ AgentSession
+→ LLM
+↔ ferramentas
+↔ memória externa sob demanda
+→ resposta
 ```
 
-O BM25 permanece disponível como **ferramenta de busca**, não como pipeline decisório separado. A memória indexada serve apenas como pista de navegação; afirmações atuais ainda exigem leitura fresca.
+A mesma LLM conversa, interpreta, planeja quando necessário, investiga, escreve código e produz a resposta. Não existe outro agente preparando a missão ou julgando a conclusão.
 
-Na revisão 2, leituras comuns passaram a terminar em `claims[]` estruturadas antes da resposta ser renderizada. Em Windows, testes podem usar o modo opt-in `trusted_local`, limitado à allowlist e executado em cópia temporária do projeto.
+O runtime não tenta pensar pela LLM. Ele controla somente fatos executáveis:
 
-Na revisão 3, a Eyle extrai um contrato mínimo de alvos do pedido, bloqueia conclusões incompletas, permite somente um reparo direcionado e finaliza leituras explícitas sem gastar uma chamada intermediária apenas para dizer `ready_to_finalize`.
+- caminhos seguros e limites de leitura;
+- contratos das ferramentas;
+- hashes das evidências;
+- dry-run e confirmação antes da escrita;
+- alterações atômicas e transações multi-arquivo;
+- testes, rollback e releitura;
+- prazo, chamadas, tokens, fila, cancelamento e telemetria.
 
-Na revisão 4, a Eyle assume explicitamente a identidade de uma única agente autônoma de código. Uma intenção determinística escolhe o perfil da resposta (`analyze`, `explain`, `review`, `suggest`, `investigate`, `discuss` ou `edit`), bloqueia recomendações não solicitadas, exige escopo explícito em claims de ausência e monta o recibo final de escrita diretamente do estado verificado de patch/testes/releitura, sem outra chamada ao modelo.
+## AgentSession
 
-Na revisão 4.1, esse contrato foi endurecido com base nos testes reais: substantivos naturais como “criação” não acionam mais edição, pedidos de melhorias sobre o projeto inteiro mantêm a auditoria completa, quantidades exatas de recomendações são validadas sem exigir uma seção de problemas não solicitada, falhas de ferramenta exibem código/detalhe/política de retry e uma escrita confirmada sem suíte termina aplicada com verificação parcial após releitura fresca.
+O estado da tarefa contém apenas:
 
-## Capacidades centrais
+- pedido original;
+- plano opcional criado pela própria LLM;
+- último resultado das ferramentas;
+- índice compacto das evidências;
+- contadores de turnos e ferramentas;
+- proposta pendente quando houver escrita.
 
-- Analisar projetos e explicar arquivos, símbolos, relações, riscos e estrutura.
-- Criar ou editar código com ferramentas validadas e confirmação explícita.
-- Escrita atômica, hashes, dry-run, testes, releitura e rollback.
-- Estado persistente, fila, checkpoints, CLI e interface Flask opcional.
-- Backends compatíveis com OpenAI, Ollama, llama.cpp e LM Studio.
-- Registro do modelo resolvido, uso de tokens, reasoning e `finish_reason`.
-- Cobertura de auditoria e claims estruturadas para conclusões sustentadas por evidência.
+A repetição protegida é somente a mesma chamada exata várias vezes seguidas. O runtime não tenta decidir se duas investigações diferentes “significam a mesma coisa”.
 
-## Início rápido
+## Memória externa
+
+A memória nunca entra automaticamente no prompt. A LLM consulta `memory_search` quando isso ajuda e usa `memory_store` somente com evidências atuais. Entradas ligadas a arquivos são descartadas quando o hash deixa de corresponder.
+
+## Edição
+
+```text
+pedido
+→ investigação e patch pela LLM
+→ dry-run
+→ confirmação do usuário
+→ aplicação
+→ testes quando habilitados
+→ rollback em falha
+→ releitura
+→ resposta final
+```
+
+Depois da confirmação, nenhuma chamada LLM é necessária.
+
+## Estrutura
+
+```text
+eyle/core/       AgentSession, ferramentas, memória e edição segura
+eyle/runtime/    serviço, fila, worker, persistência e telemetria
+llm/             transporte e adaptação do backend
+web/             interface Flask
+```
+
+## Uso
 
 ```bash
-python ingest.py /caminho/do/projeto --nome "Meu projeto"
 python main.py status
+python main.py perguntar "Analise o projeto"
 python main.py serve
 ```
 
-Para uma tarefa direta pela CLI:
+## Validação
 
-```bash
-python main.py agent "Faça uma análise do projeto"
-```
+- 94 testes passam na suíte de validação empacotada;
+- 1 teste opcional da interface foi pulado porque Flask não está instalado no ambiente de empacotamento;
+- o smoke real com Qwen ainda precisa ser executado no ambiente final.
 
-Mesmo com `agent.rollout_mode` em `full`, escritas continuam supervisionadas:
-
-```json
-{
-  "agent": {
-    "rollout_mode": "full",
-    "require_confirmation_for_write": true
-  }
-}
-```
-
-## Regra de projeto
-
-O modelo é o cérebro de raciocínio. O código determinístico controla permissões, schemas das ferramentas, limites do workspace, frescor das evidências, confirmação, escrita atômica, testes, rollback, prazos e status terminal.
-
-Veja [Arquitetura](docs/architecture.md) para o fluxo e [Configuração](docs/configuration.md) para as opções suportadas.
+Veja [Arquitetura](docs/architecture.md), [Configuração](docs/configuration.md), [Correção do loop de escrita](docs/rev4112-write-loop-fix.md) e [Changelog](CHANGELOG.md).

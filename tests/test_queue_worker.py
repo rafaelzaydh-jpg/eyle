@@ -1,6 +1,6 @@
-from engine import engine as engine_mod
-from engine import queue
-from engine import worker
+from eyle.runtime import service as service_mod
+from eyle.runtime import queue
+from eyle.runtime import worker
 
 
 def _usar_fila_temporaria(monkeypatch, tmp_path):
@@ -64,27 +64,27 @@ def test_job_usa_snapshot_e_nao_historico_futuro(monkeypatch):
     conversa_futura = snapshot_a + [{"id": 2, "role": "user", "text": "B"}]
     recebido = {}
 
-    monkeypatch.setattr(engine_mod, "carregar_config", lambda: {})
-    monkeypatch.setattr(engine_mod, "carregar_projeto", lambda: None)
-    monkeypatch.setattr(engine_mod, "carregar_conversa", lambda: conversa_futura)
-    monkeypatch.setattr(
-        engine_mod, "classificar_pergunta", lambda *args, **kwargs: ("chat", "chat"),
-    )
-    monkeypatch.setattr(engine_mod, "registrar_mensagem", lambda *args: None)
+    monkeypatch.setattr(service_mod, "carregar_config", lambda: {
+        "agent": {"task_deadline_seconds": 30, "max_llm_calls": 10, "max_completion_tokens": 10000, "max_prompt_tokens": 24000, "max_total_tokens": 34000},
+    })
+    monkeypatch.setattr(service_mod, "carregar_projeto", lambda: {})
+    monkeypatch.setattr(service_mod, "carregar_conversa", lambda: conversa_futura)
+    monkeypatch.setattr(service_mod, "registrar_mensagem", lambda *args, **kwargs: None)
 
-    def fake_chat(pergunta, config, historico=None):
-        recebido["historico"] = historico
-        return "resposta A"
+    def fake_agent(pergunta, config, **kwargs):
+        recebido["contexto"] = kwargs.get("conversation_context")
+        return "success", "resposta A", None, {
+            "status": "success", "limitations": [],
+        }
 
-    monkeypatch.setattr(engine_mod, "executar_chat", fake_chat)
-    resultado = engine_mod.processar(
+    monkeypatch.setattr(service_mod, "executar_agente", fake_agent)
+    resultado = service_mod.processar(
         "A", registrar_pergunta=False, historico_snapshot=snapshot_a,
     )
 
     assert resultado["resposta"] == "resposta A"
-    # A e' a mensagem atual: entra em MENSAGEM ATUAL, nao no historico.
-    assert recebido["historico"] == []
-    assert "B" not in [mensagem["text"] for mensagem in recebido["historico"]]
+    assert recebido["contexto"]["recent_messages"] == []
+
 
 
 def test_worker_repassa_snapshot_do_job(monkeypatch):
@@ -95,7 +95,7 @@ def test_worker_repassa_snapshot_do_job(monkeypatch):
         chamada.update({"texto": texto, **kwargs})
         return {"confianca": None}
 
-    monkeypatch.setattr(worker.eyle_engine, "processar", fake_processar)
+    monkeypatch.setattr(worker.eyle_service, "processar", fake_processar)
     worker.processar_evento({
         "tipo": "pergunta", "texto": "agora", "historico_snapshot": snapshot,
     })
@@ -134,3 +134,80 @@ def test_queue_falhar_pode_preservar_resultado_estruturado(monkeypatch, tmp_path
     assert salvo["status"] == "failed"
     assert salvo["resultado"] == resultado
     assert salvo["erro"] == "sem resposta"
+
+
+def test_service_result_has_no_router_layer(monkeypatch):
+    monkeypatch.setattr(service_mod, "carregar_config", lambda: {
+        "agent": {"task_deadline_seconds": 30, "max_llm_calls": 4,
+                  "max_prompt_tokens": 10000, "max_completion_tokens": 3000,
+                  "max_total_tokens": 12000},
+    })
+    monkeypatch.setattr(service_mod, "carregar_projeto", lambda: {})
+    monkeypatch.setattr(service_mod, "carregar_conversa", lambda: [])
+    monkeypatch.setattr(service_mod, "registrar_mensagem", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        service_mod, "executar_agente",
+        lambda *args, **kwargs: ("success", "resposta", None, {
+            "status": "success",
+        }),
+    )
+    result = service_mod.processar("oi", registrar_pergunta=False)
+    assert result["resposta"] == "resposta"
+    assert "roteador" not in result
+    assert "agente_status" not in result and "agente_conclusao" not in result
+    assert result["details"]["status"] == "success"
+
+
+def test_natural_request_with_nao_is_not_treated_as_cancel(monkeypatch):
+    monkeypatch.setattr(service_mod, "carregar_config", lambda: {
+        "agent": {"task_deadline_seconds": 30, "max_llm_calls": 4,
+                  "max_prompt_tokens": 10000, "max_completion_tokens": 3000,
+                  "max_total_tokens": 12000},
+    })
+    monkeypatch.setattr(service_mod, "carregar_projeto", lambda: {})
+    monkeypatch.setattr(service_mod, "carregar_conversa", lambda: [])
+    monkeypatch.setattr(service_mod, "registrar_mensagem", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service_mod, "carregar_agent_pendente", lambda: {
+        "continuation_kind": "write_confirmation", "id": "ABCD",
+    })
+    cleared = []
+    monkeypatch.setattr(service_mod, "limpar_agent_pendente", lambda: cleared.append(True))
+    monkeypatch.setattr(
+        service_mod, "executar_agente",
+        lambda *args, **kwargs: ("success", "novo pedido entendido", None, {
+            "status": "success",
+        }),
+    )
+    result = service_mod.processar(
+        "não use JavaScript; deixe o HTML responsivo", registrar_pergunta=False,
+    )
+    assert result["resposta"] == "novo pedido entendido"
+    assert cleared == [True]
+
+
+def test_runtime_assigns_confirmation_metadata_once(monkeypatch, tmp_path):
+    pending_path = tmp_path / "agent_pendente.json"
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setattr(service_mod, "AGENT_PENDENTE_PATH", str(pending_path))
+    monkeypatch.setattr(service_mod.secrets, "token_hex", lambda size: "a1b2")
+
+    core_pending = {
+        "continuation_kind": "write_confirmation",
+        "pergunta_ao_usuario": "Proposta pronta.",
+        "estado": {"request": "mude o arquivo"},
+        "tool_pendente": {"tool": "apply_patch", "arguments": {}},
+    }
+    saved = service_mod.salvar_agent_pendente(
+        core_pending,
+        projeto={"caminho_origem": str(project)},
+        config={"confirmacoes": {"expiracao_segundos": 600}},
+    )
+
+    assert saved["id"] == "A1B2"
+    assert saved["pergunta_ao_usuario"].count("ID da pendência: A1B2") == 1
+    assert saved["pergunta_ao_usuario"].count("confirmar A1B2") == 1
+    assert saved["projeto_hash"] == service_mod._hash_projeto(
+        {"caminho_origem": str(project)}
+    )
+    assert "id" not in core_pending

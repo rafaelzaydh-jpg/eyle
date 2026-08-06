@@ -1,3 +1,174 @@
+## 2.7.4 Rev4.11.2 — 2026-08-06
+
+### Write-loop and token fix
+
+- Added an explicit multi-file write contract for full-file replacement, creation, deletion, and range updates.
+- Accepted common model output shapes such as `{path, content}` and `{path, new_code}` and normalized them before dry-run.
+- Filled file/range hashes only from fresh matching evidence, preserving stale-write protection without forcing the model to copy hashes perfectly.
+- Preserved the last relevant source for one dry-run correction instead of making the model reread and restart the edit.
+- Limited invalid write proposals to two attempts, preventing eight-turn token spirals.
+- Sent recent conversation history only on the first agent turn and made patch output limits adaptive to fresh source size.
+- Reduced default task budgets to 6 LLM turns, 12 tools, 8 LLM calls, and 18k aggregate tokens.
+- Added regressions for `/amor`-style full-file edits, multi-file route extraction, failed-patch correction, English patch keys, and deterministic confirmed application.
+- Validation: 90 tests passed; one optional Flask interface test was skipped because Flask is unavailable in the packaging environment.
+- The real Qwen smoke run remains deployment-only.
+
+## 2.7.4 Rev4.11.1 — 2026-08-06
+
+### Complete cleanup
+
+- Removed `llm/cache.py` and every response-cache branch/configuration. The only active LLM profile is the AgentSession decision protocol, so stale model decisions are never replayed.
+- Removed the obsolete `memory/projeto.json` fallback; workspace discovery now has one source of truth.
+- Moved confirmation IDs completely to the runtime and removed duplicated pending metadata from the core.
+- Replaced the legacy `completion_gate`/`agente_*` result envelope with one `status`, `resposta`, `avisos`, and `details` contract.
+- Removed dead persistence and telemetry functions, unused imports/constants, compatibility aliases, and a duplicated agent-config clone.
+- Kept external memory on demand, optional adaptive planning, execution limits, queueing, cancellation, supervised writes, tests, rollback, and reread.
+- Validation: 84 tests passed; one optional Flask interface test was skipped because Flask is unavailable in the packaging environment.
+
+## 2.7.4 Rev4.11 — 2026-08-06
+
+### AgentSession core cleanup
+
+- Replaced the mission-interpreter/agent split with one AgentSession and one LLM protocol.
+- Removed Mission Repair, JSON Repair, MissionSpec, CoreAgentState, ProjectMemory prompt injection, evidence replay, action caches, semantic progress gates, and duplicate SQLite agent tasks.
+- Removed the empty semantic router and routed every non-confirmation message through the same agent.
+- Removed ingest/index code because the live core has no consumer for it; workspaces open directly.
+- Added optional adaptive plans inside normal agent decisions instead of a planning pipeline.
+- Added evidence-backed external memory tools that are consulted only when the agent requests them.
+- Kept path safety, evidence hashes, dry-run, write confirmation, atomic and transactional writes, tests, rollback, reread, deadlines, and token telemetry.
+- Reduced loop controls to maximum LLM turns, maximum tool calls, and a simple consecutive-identical-call guard.
+- Removed mandatory deliverable IDs and findings schemas from ordinary final answers.
+- Removed obsolete revision tests and added Rev4.11 behavior tests for natural conversation, analysis, editing, deterministic resume, external memory, and loop protection.
+
+## 2.7.4 Rev4.10.3 — 2026-08-06
+
+- Removed the deterministic canned greeting path. Greetings and project-independent conversation now go through the LLM Mission Interpreter, preserving natural language and user tone.
+- Changed evidence retirement from “after every model response” to “after an accepted decision”. Blocked or repeated decisions no longer erase the source the LLM still needs.
+- Kept the latest compact tool result available until the next decision actually advances the task.
+- Added state-aware cached evidence replay: a repeated read with an unchanged live hash reactivates the existing evidence instead of rereading disk or failing immediately.
+- Added live file hashes to read-action signatures, so a reread after the file changes is treated as a new observation.
+- Replayed cached non-read results before declaring no progress and kept a configurable warning allowance for genuine repeated loops.
+- Updated the LLM prompts to explicitly allow natural, user-aligned writing instead of fixed robotic response templates.
+- Added Rev4.10.3 regressions for analysis after a repeated read, editing after a repeated read, cache reactivation, hash-aware rereads, and LLM-authored greetings.
+- Validation: 122 tests passed; one optional Flask interface test was skipped because Flask is unavailable in the packaging environment.
+
+## 2.7.4 Rev4.10.2 — 2026-08-06
+
+- Audited the complete active runtime and all web routes; retained only product adapter routes and removed compatibility modules that no longer belonged to the LLM-first ecosystem.
+- Removed every `eyle/core` dependency on `engine` and `ingest`; core safety, workspace access, editing, hashing, sandbox, and retention now live inside the core boundary.
+- Made normal startup open `workspace/` directly without importing ingest. Ingest remains an optional cache/index command.
+- Replaced full Mission Interpreter retries with a compact mission-repair request containing only the original request, malformed response, and parser error.
+- Added actual model-window-aware context compilation, minimal state-filtered tool contracts, one-copy active evidence, and role-oriented bounded workspace manifests.
+- Made project memory evidence-backed and hash-verified, reduced its prompt allowance to 700 tokens, and invalidated stale facts/findings after confirmed writes.
+- Fixed post-write memory refresh so pre-patch evidence cannot be reinserted after invalidation; only the mandatory post-write reread repopulates changed files.
+- Removed raw source from public execution details and pending confirmation state.
+- Removed dead configuration entries for legacy parse retries and unused observation counts.
+- Fixed the product adapter calling the new core with the removed legacy `modo` argument and removed the leftover `carregar_estrutura()` runtime call.
+- Removed the current user message from recent context when it is already present as the original request.
+- Removed legacy rollout/mode metadata from the public agent adapter result.
+- Added a full core/route audit at `docs/rev4102-core-audit.md`.
+- Validation: 116 tests passed; one optional Flask interface test was skipped because Flask is unavailable in the packaging environment.
+
+## 2.7.4 Rev4.10.1 — 2026-08-06
+
+- Added a real evidence lifecycle: fresh → active → consumed. Raw source is available for one model decision and then remains only as a compact hash/location reference.
+- Added phase-specific context compilation. Patch generation receives the mission, acceptance criteria, exact active source, latest delta, and write tools without old project memory or unrelated observations.
+- Reduced the default active evidence budget to 3,200 tokens and added a dedicated 2,200-token patch evidence budget for isolated 10k-token model windows.
+- Bounded compact project memory by serialized token budget instead of item count, preventing old findings and file maps from overflowing the next mission prompt.
+- Added repeated-action and no-semantic-progress detection. Identical tool calls are blocked before execution and a second repeated attempt fails with `REPEATED_ACTION_NO_PROGRESS` instead of reaching `MAX_STEPS_EXCEEDED`.
+- Added explicit terminal test states: `TESTS_DISABLED` and `TESTS_NOT_FOUND`. Missions that require test execution stop after mission interpretation when the runtime cannot execute tests.
+- Added local confirmation control when no pending patch exists, producing a clear response with zero LLM calls.
+- Added typed finding validation (`bug`, `risk`, `maintainability`, `recommendation`) and required evidence IDs for every non-recommendation finding.
+- Expanded task telemetry with consumed evidence, prompt snapshots, repeated-action warnings, no-progress counters, and prompt/completion/reasoning token breakdown.
+- Validation: 102 tests passed; one optional Flask UI test was skipped because Flask is unavailable.
+
+## 2.7.4 Rev4.10 — 2026-08-06
+
+- Added incremental context compilation: active source evidence is sent once, older evidence becomes a compact hash index, and only the latest compact tool delta is forwarded.
+- Allowed the Mission Interpreter to return the first tool decision, reducing a normal project analysis from four logical steps to two in the measured small-project flow.
+- Added compact state-filtered tool catalogs and batched independent tool calls.
+- Added tolerant protocol parsing and one isolated JSON-repair call instead of repeating the full project context.
+- Added token-budgeted conversation history and bounded external project memory for facts, file hashes, and validated findings.
+- Added transactional multi-file create/update/delete dry-run, single confirmation, apply, tests, rollback, and reread.
+- Exposed reasoning tokens and detailed per-request LLM metadata.
+- Updated the default isolated context window to 10,000 tokens with separate decision and patch output profiles.
+- Validation: 95 tests passed; one optional Flask UI test was skipped because Flask is unavailable.
+- Deterministic equivalent prompt comparison: approximately 4,303 input tokens across four calls in Rev4.9 versus 1,505 across two calls in Rev4.10.
+
+## 2.7.4 Rev4.9 — 2026-08-06
+
+- Replaced the active architecture with a single LLM-first programming-agent loop.
+- Moved semantic mission interpretation, investigation planning, tool selection, adaptation, analysis, and patch generation to the LLM.
+- Kept deterministic code only at the safety/proof boundary: tool schemas, workspace isolation, fresh hashes, confirmation, dry-run, atomic write, tests, rollback, reread, budgets, persistence, and terminal errors.
+- Removed keyword intent routing, deterministic TaskContract interpretation, Scouts, specialized Finalizers, lexical grounding, structured-claim court, information-preservation ledger, layered response recovery, legacy agent state, and semantic understanding memory.
+- Removed `memory/entendimento.json` generation and made project ingest optional.
+- Replaced indexed BM25 search with live workspace search using ripgrep and a Python fallback.
+- Moved benchmark, token comparison, release identity, and coverage comparison implementations to `eyle/devtools`.
+- Replaced the public work summary with mission, investigation, evidence, validation, and conclusion details.
+- Removed tests whose only purpose was to preserve deleted architectures; retained safety and behavior tests.
+- Validation: 88 behavioral/safety tests passed; one optional Flask interface test was skipped because Flask is unavailable in the packaging environment.
+- The real Qwen conversational and editing smoke test remains deployment-only.
+
+## 2.7.4 Rev4.8.2 — 2026-08-06
+
+- Added a compact `MissionSpec` to every task contract with intent, original objective, semantic deliverables, literal constraints, write permission, and optional result limit.
+- Kept the mission high-level: no `operations[]`, no hidden planner, and no attempt to model arbitrary function internals before reading the code.
+- Added bounded result-limit extraction for requests such as `indique 3 erros` and Portuguese/English number words, while explicitly allowing fewer findings when evidence is insufficient.
+- Classified `erro` and `erros` as issue-review intent so analysis-plus-errors requests retain both requested outcomes.
+- Exposed the compact mission explicitly to read and audit Finalizers and in execution details.
+- Preserved literal constraints such as `não use float`, `preserve as regras atuais`, and `mantenha compatibilidade com os testes`.
+- Added seven Rev4.8.2 regression tests.
+- Validation: 393 tests passed; one optional Flask interface test was skipped because Flask is unavailable in the packaging environment.
+- Semantic mission planning, persistent project state, and findings storage remain intentionally deferred to later revisions.
+- The real Qwen mission-preservation smoke remains deployment-only.
+
+## 2.7.4 Rev4.8.1 — 2026-08-06
+
+- Fixed project-analysis routing for the common typo `analize`.
+- Classified `retire`, `retirar`, `exclua`, and related verbs as supervised project writes instead of read-only analysis.
+- Added a bounded recent-route reference resolver so requests such as `Apague essa rota` reuse only the last explicit route target without injecting the full conversation into the model prompt.
+- Made empty replacement text valid for `test_patch_dry_run` and `apply_patch`, enabling real code deletion with the same hash and confirmation protections as other writes.
+- Added deterministic Flask route removal and simple route creation for explicit requests such as removing `/` or adding `/amor`; both paths reach dry-run and confirmation with zero LLM calls.
+- Promoted an approved dry-run directly to the exact `apply_patch` action after confirmation, removing a redundant model decision.
+- Prevented deterministic post-write receipts from being rejected by the generic utility gate after tests and reread already proved the result.
+- Added six Rev4.8.1 regressions covering typo routing, route contracts, recent references, empty patches, route deletion, and route creation.
+- Validation: 386 tests passed; one optional Flask interface test was skipped because Flask is unavailable in the packaging environment.
+- The real Qwen Rev4.8.1 conversational smoke remains deployment-only.
+
+## 2.7.4 Rev4.8 — 2026-08-05
+
+- Restored the guided editing path for natural requests such as changing `index` without requiring the user to name the file.
+- Upgraded the deterministic task contract to version 3 with requested change, concrete constraints, test obligation, and post-write reread obligation.
+- Added deterministic project-wide symbol resolution before patch generation; obvious target discovery no longer consumes an LLM planning call.
+- Added edit-specific failures: `EDIT_TARGET_NOT_FOUND`, `PATCH_GENERATION_FAILED`, and `PATCH_RESPONSE_INVALID`, without switching project writes into textual response recovery.
+- Made terminal tool errors stop immediately in both normal and resumed execution paths.
+- Gave post-write state priority so an applied patch can only proceed through tests, reread, and deterministic finalization instead of rediscovering the original symbol.
+- Moved unsupported lexical anchors to a secondary policy in the shipped configuration while retaining strict validation as an explicit option.
+- Added an end-to-end regression for `find_symbol -> dry-run -> confirmation -> apply -> tests -> reread -> deterministic receipt`, with zero LLM calls after confirmation.
+- Validation: 380 tests passed; one optional Flask test was skipped because Flask is unavailable in the packaging environment.
+- The real Qwen Rev4.8 functional and token smoke remains deployment-only.
+
+## 2.7.4 Rev4.7.1 — 2026-08-05
+
+- Removed the structural-preservation limit of at most three source files.
+- Applied structural target extraction to every fresh fully-read Python source file, regardless of repository size or global inventory completeness.
+- Kept unread and partially read files outside the ledger until complete evidence exists, without disabling guarantees for files already read.
+- Replaced the legacy one-file/two-file audit threshold with the same role-based `entrypoint` and `core_logic` contract for every repository.
+- Added 4 Rev4.7.1 regression tests; 373 tests pass in the packaging environment.
+- The real Qwen Rev4.7.1 behavior/token smoke remains deployment-only.
+
+## 2.7.4 Rev4.7 — 2026-08-05
+
+- Routed whole-project analyze/read/explain/overview wording through the same deterministic `project_audit` pipeline.
+- Moved blocking intent adherence after typed grounding and structured claim filtering.
+- Added at most one directed audit repair when grounding removes an essential analysis output.
+- Combined declared output labels with deterministic semantic coverage while preserving declared response-section ordering.
+- Added AST-derived essential structural targets for small fully-read Python projects: Flask identity, routes, literal returns, environment configuration, server parameters, and entrypoint guards.
+- Added rejected-claim text and grounding reasons to the expandable work summary.
+- Added deterministic zero-request responses for simple greetings and removed the legacy “code must be in this conversation” behavior.
+- Added 7 Rev4.7 regression tests; 369 tests pass in the packaging environment.
+- The real Qwen Rev4.7 behavior/token smoke remains deployment-only.
+
 ## 2.7.4 Rev4.6 — 2026-08-05
 
 - Removed `entendimento.json` and complete path inventories from all active model prompts.

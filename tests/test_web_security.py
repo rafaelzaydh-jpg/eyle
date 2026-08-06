@@ -22,7 +22,7 @@ def _cliente(monkeypatch):
     )
     routes._limitador.limpar()
     monkeypatch.setattr(
-        routes.eyle_engine,
+        routes.eyle_service,
         "carregar_projeto",
         lambda: {
             "projeto": "Teste",
@@ -33,7 +33,7 @@ def _cliente(monkeypatch):
             "source_hash": "nao-publico",
         },
     )
-    monkeypatch.setattr(routes.eyle_engine, "carregar_conversa", lambda: [])
+    monkeypatch.setattr(routes.eyle_service, "carregar_conversa", lambda: [])
     monkeypatch.setattr(
         routes.queue,
         "estatisticas",
@@ -88,7 +88,7 @@ def test_requisicao_sem_token_nao_chega_a_mutacao(monkeypatch):
     cliente = _cliente(monkeypatch)
     chamadas = []
     monkeypatch.setattr(
-        routes.eyle_engine,
+        routes.eyle_service,
         "registrar_mensagem_com_snapshot",
         lambda *args: chamadas.append(args) or (7, []),
     )

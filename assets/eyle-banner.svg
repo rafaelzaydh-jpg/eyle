@@ -34,5 +34,5 @@
   <text x="405" y="190" fill="#f8fafc" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="118" font-weight="800" letter-spacing="-4">Eyle</text>
   <rect x="407" y="220" width="505" height="7" rx="4" fill="url(#accent)"/>
   <text x="407" y="284" fill="#cbd5e1" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="34" font-weight="500">Local-first coding agent for local LLMs</text>
-  <text x="407" y="332" fill="#94a3b8" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="24">External memory · BM25 retrieval · grounded evidence · safe edits</text>
+  <text x="407" y="332" fill="#94a3b8" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="24">Live workspace · LLM-first reasoning · evidence · safe edits</text>
 </svg>

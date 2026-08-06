@@ -8,10 +8,10 @@ O navegador SO fala com estes endpoints. Nunca com a LLM diretamente.
     POST   /enviar          -> entra na fila, responde na hora ({"status": "ok"})
     GET    /conversa        -> conversa persistida (memory/conversa.json)
     DELETE /mensagem/<id>   -> remove mensagem (fila + memoria)
-    GET    /status          -> estatisticas do projeto indexado + tamanho da fila
+    GET    /status          -> estado do workspace + tamanho da fila
     GET    /jobs/<id>       -> estado persistido exato de uma tarefa
 
-O painel em "/" e so um cliente: ele nunca chama a LLM nem o Engine
+O painel em "/" e so um cliente: ele nunca chama a LLM nem o AgentSession
 direto, so faz polling de /conversa e /status e manda texto para
 /enviar -- exatamente o mesmo contrato que qualquer outro cliente
 (curl, app mobile futuro) usaria. Os endpoints de dados exigem um token
@@ -19,12 +19,11 @@ Bearer e tem rate limit por IP; o HTML/CSS/JS publico nao carrega o token
 nem qualquer dado da memoria.
 
 Fechar a aba nao interrompe nada: quem processa a fila e o
-engine/worker.py, que continua rodando no mesmo processo do Flask
+eyle/runtime/worker.py, que continua rodando no mesmo processo do Flask
 (veja main.py -> comando "serve").
 
 Unica dependencia externa de todo o projeto: Flask (`pip install flask`).
 """
-import json
 import math
 import os
 import secrets
@@ -38,10 +37,10 @@ sys.path.insert(0, BASE_DIR)
 
 from flask import Flask, jsonify, render_template, request
 
-from engine import queue
-from engine import telemetry
-from engine import engine as eyle_engine
-from engine.config_schema import carregar_config_validada
+from eyle.runtime import queue
+from eyle.runtime import telemetry
+from eyle.runtime import service as eyle_service
+from eyle.runtime.config import carregar_config_validada
 
 app = Flask(__name__)
 
@@ -50,14 +49,8 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 TOKEN_PATH = os.path.join(CONTEXT_DIR, "web_api_token.txt")
 
 _ROTAS_PUBLICAS = {"painel", "static"}
-_CHAVES_PUBLICAS_PROJETO = (
-    "projeto",
-    "arquivos",
-    "chunks",
-    "tokens_estimados_totais",
-    "criado_ou_atualizado_em",
-    "version",
-)
+_CHAVES_PUBLICAS_PROJETO = ("nome", "auto_discovered")
+
 _CHAVES_PUBLICAS_JOB = (
     "id", "tipo", "status", "tentativas", "criado_em", "atualizado_em",
     "iniciado_em", "concluido_em", "erro", "progresso_seq", "cancel_reason",
@@ -262,55 +255,13 @@ def proteger_api():
 def _projeto_publico(projeto):
     if not isinstance(projeto, dict):
         return None
-    return {
+    publico = {
         chave: projeto[chave]
         for chave in _CHAVES_PUBLICAS_PROJETO
         if chave in projeto
     }
-
-
-def _resumo_trabalho_publico(resumo):
-    """Valida e limita o resumo operacional antes de publica-lo no navegador."""
-    if not isinstance(resumo, dict):
-        return None
-
-    def texto(valor, limite):
-        if not isinstance(valor, str):
-            return None
-        return valor[:limite]
-
-    etapas = []
-    for etapa in (resumo.get("steps") or [])[:8]:
-        if not isinstance(etapa, dict):
-            continue
-        campos = []
-        for campo in (etapa.get("fields") or [])[:12]:
-            if not isinstance(campo, dict):
-                continue
-            rotulo = texto(campo.get("label"), 80)
-            valor = texto(campo.get("value"), 1200)
-            if rotulo and valor:
-                campos.append({"label": rotulo, "value": valor})
-        try:
-            numero = int(etapa.get("number"))
-        except (TypeError, ValueError):
-            numero = len(etapas) + 1
-        titulo = texto(etapa.get("title"), 80)
-        if titulo and campos:
-            etapas.append({"number": numero, "title": titulo, "fields": campos})
-
-    if not etapas:
-        return None
-    try:
-        duracao = round(max(0.0, float(resumo.get("duration_seconds") or 0.0)), 2)
-    except (TypeError, ValueError):
-        duracao = 0.0
-    return {
-        "schema_version": 1,
-        "title": texto(resumo.get("title"), 80) or "Trabalho concluído",
-        "duration_seconds": duracao,
-        "steps": etapas,
-    }
+    publico["disponivel"] = bool(projeto.get("caminho_origem"))
+    return publico
 
 
 def _job_publico(registro):
@@ -338,9 +289,6 @@ def _job_publico(registro):
         if isinstance(erro_progresso, str):
             seguro["error"] = erro_progresso[:500]
         publico["progresso"] = seguro
-        resumo_trabalho = _resumo_trabalho_publico(progresso.get("work_summary"))
-        if resumo_trabalho is not None:
-            publico["work_summary"] = resumo_trabalho
 
     payload = registro.get("payload")
     if isinstance(payload, dict) and registro.get("tipo") == "pergunta":
@@ -412,7 +360,7 @@ def enviar():
 
     # Registra e captura o historico no mesmo lock. Se outra mensagem entrar
     # enquanto esta espera/processa, ela nao contamina o contexto deste job.
-    mensagem_id, historico_snapshot = eyle_engine.registrar_mensagem_com_snapshot(
+    mensagem_id, historico_snapshot = eyle_service.registrar_mensagem_com_snapshot(
         "user", texto,
     )
     job_id = queue.adicionar({
@@ -428,22 +376,22 @@ def enviar():
 @app.route("/conversa", methods=["GET"])
 def conversa():
     # Fecha exclusoes adiadas que ficaram prontas entre dois ciclos do worker.
-    eyle_engine.finalizar_remocoes_pendentes()
-    return jsonify(eyle_engine.carregar_conversa())
+    eyle_service.finalizar_remocoes_pendentes()
+    return jsonify(eyle_service.carregar_conversa())
 
 
 @app.route("/mensagem/<int:mensagem_id>", methods=["DELETE"])
 def apagar_mensagem(mensagem_id):
     # A exclusao precisa agir imediatamente sobre o job correto. Colocar esta
     # operacao atras do proprio job na FIFO impediria o cancelamento.
-    resultado = eyle_engine.solicitar_remocao_mensagem(mensagem_id)
+    resultado = eyle_service.solicitar_remocao_mensagem(mensagem_id)
     codigo = 404 if resultado.get("status") == "not_found" else 200
     return jsonify(resultado), codigo
 
 
 @app.route("/status", methods=["GET"])
 def status():
-    projeto = eyle_engine.carregar_projeto()
+    projeto = eyle_service.carregar_projeto()
     caminho_projeto = projeto.get("caminho_origem") if isinstance(projeto, dict) else None
     caminhos_internos = (caminho_projeto, BASE_DIR)
     config = carregar_config_validada(CONFIG_PATH)
@@ -500,7 +448,7 @@ def job(job_id):
             "status": "erro", "error_code": "JOB_NOT_FOUND",
             "motivo": "tarefa nao encontrada",
         }), 404
-    projeto = eyle_engine.carregar_projeto()
+    projeto = eyle_service.carregar_projeto()
     caminho_projeto = projeto.get("caminho_origem") if isinstance(projeto, dict) else None
     publico = _job_publico(registro)
     return jsonify(_redigir_caminhos_internos(publico, (caminho_projeto, BASE_DIR)))
@@ -508,7 +456,7 @@ def job(job_id):
 
 if __name__ == "__main__":
     # Mantem o atalho direto funcional e com a mesma orientacao de `main.py serve`.
-    from engine.worker import iniciar_em_thread
+    from eyle.runtime.worker import iniciar_em_thread
     from llm.executar import diagnosticar_backend
 
     config = carregar_config_validada(CONFIG_PATH)

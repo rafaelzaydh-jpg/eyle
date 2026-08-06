@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """Adaptador LLM da Eyle 2.7.4.
 
-Transporta prompts do agente unico, chat, finalizers e recovery para o backend.
-Expoe apenas os perfis internos da unica agente Eyle e o modo de chat.
+Transporta o único protocolo AgentSession para o backend configurado.
 """
 import json
-import os
 import random
 import re
 import socket
@@ -16,22 +14,10 @@ import urllib.request
 import urllib.error
 from contextlib import contextmanager
 
-# garante que 'cache' (mesma pasta) e encontrado tanto quando este arquivo
-# e importado como llm.executar quanto quando rodado direto (python llm/executar.py)
-_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-if _THIS_DIR not in sys.path:
-    sys.path.insert(0, _THIS_DIR)
-import cache as _cache
-
-BASE_DIR = os.path.dirname(_THIS_DIR)
-if BASE_DIR not in sys.path:
-    sys.path.insert(0, BASE_DIR)
-from engine.persistencia import salvar_texto_atomico  # noqa: E402
-from engine.config_schema import carregar_config_validada  # noqa: E402
-from engine.context_engine import estimar_tokens  # noqa: E402
-from engine import telemetry  # noqa: E402
-from engine import process_limiter  # noqa: E402
-from engine import progress as job_progress  # noqa: E402
+from eyle.core.token_budget import estimate_tokens as estimar_tokens  # noqa: E402
+from eyle.runtime import telemetry  # noqa: E402
+from eyle.runtime import limiter  # noqa: E402
+from eyle.runtime import progress as job_progress  # noqa: E402
 from llm.response_adapter import NormalizedModelResponse, normalize_model_response  # noqa: E402
 
 
@@ -70,95 +56,15 @@ _SCHEMA_DECISAO_AGENTE = {
     "properties": {
         "tool": {"type": "string"},
         "arguments": {"type": "object"},
-        "final": {
-            "anyOf": [
-                {"type": "string"},
-                {
-                    "type": "object",
-                    "properties": {
-                        "answer": {"type": "string"},
-                        "evidence_ids": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                        },
-                        "verification": {"type": "string"},
-                        "limitations": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                        },
-                        "claims": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "type": {
-                                        "type": "string",
-                                        "enum": [
-                                            "fact", "risk", "inference", "hypothesis",
-                                            "decision", "recommendation",
-                                        ],
-                                    },
-                                    "text": {"type": "string"},
-                                    "evidence_ids": {
-                                        "type": "array",
-                                        "items": {"type": "string"},
-                                    },
-                                    "basis": {"type": "string"},
-                                },
-                                "required": ["type", "text", "evidence_ids"],
-                                "additionalProperties": False,
-                            },
-                        },
-                        "claim_annotations": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "claim": {"type": "string"},
-                                    "claim_index": {"type": "integer"},
-                                    "type": {
-                                        "type": "string",
-                                        "enum": [
-                                            "fact", "inference", "hypothesis",
-                                            "decision", "recommendation",
-                                        ],
-                                    },
-                                    "evidence_ids": {
-                                        "type": "array",
-                                        "items": {"type": "string"},
-                                    },
-                                    "basis": {"type": "string"},
-                                },
-                                "required": ["type"],
-                                "additionalProperties": True,
-                            },
-                        },
-                        # Legacy keys remain accepted during migration.
-                        "resposta": {"type": "string"},
-                        "verificacao": {"type": "string"},
-                        "limitacoes": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                        },
-                    },
-                    "additionalProperties": True,
-                },
-            ]
-        },
-        "needs_user": {"type": "string"},
-        "ready_to_finalize": {"type": "boolean", "const": True},
-        "important_fact": {"type": "string"},
-        # Legacy key remains accepted during migration.
-        "fato_importante": {"type": "string"},
-        "goal_update": {"type": "object"},
+        "tool_call": {"type": "object", "additionalProperties": True},
+        "tool_calls": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+        "actions": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+        "patches": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+        "decision": {"type": "object", "additionalProperties": True},
+        "final": {"anyOf": [{"type": "string"}, {"type": "object", "additionalProperties": True}]},
+        "needs_user": {"type": "string"}
     },
-    "oneOf": [
-        {"required": ["tool", "arguments"]},
-        {"required": ["final"]},
-        {"required": ["needs_user"]},
-        {"required": ["ready_to_finalize"]},
-    ],
-    "additionalProperties": True,
+    "additionalProperties": True
 }
 
 
@@ -172,7 +78,7 @@ def _diagnostico(codigo, **campos):
 
 
 def diagnosticar_backend(config, timeout=None):
-    """Testa somente a API do backend, sem gerar tokens nem alterar cache.
+    """Testa somente a API do backend, sem gerar tokens nem alterar estado persistente.
 
     O diagnostico e usado no startup para diferenciar "Flask/Worker online" de
     "servidor da LLM ausente". Nunca levanta para o chamador: devolve um objeto
@@ -480,45 +386,6 @@ def _limpar_resposta_estruturada(texto):
     return limpo
 
 
-def _fingerprint_backend(cfg_llm, forcar_json=False):
-    """Identidade canonica de tudo que pode mudar a resposta do backend.
-
-    Antes a chave carregava somente modelo/temperatura. Dois servidores ou
-    providers diferentes usando o mesmo nome de modelo podiam compartilhar
-    resposta indevidamente.
-    """
-    identidade = {
-        "provider": str(cfg_llm.get("provider") or "ollama").strip().lower(),
-        "base_url": str(
-            cfg_llm.get("base_url") or "http://localhost:11434"
-        ).rstrip("/"),
-        "openai_compatible": bool(cfg_llm.get("openai_compatible", False)),
-        "model": str(cfg_llm.get("model") or "qwen2.5:7b-instruct-q4_0"),
-        "temperature": cfg_llm.get("temperature", 0.2),
-        "max_tokens": cfg_llm.get("max_tokens", 700),
-        "json_mode": bool(forcar_json),
-    }
-    canonico = json.dumps(
-        identidade, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-    )
-    return canonico
-
-
-
-
-
-
-
-
-
-
-
-
-def _conteudo_delta_openai(valor):
-    """Compatibilidade interna; a normalizacao canonica vive no adapter."""
-    return normalize_model_response({"content": valor}).content
-
-
 def _metadata_resposta_normalizada(normalizada):
     return {
         "finish_reason": normalizada.finish_reason,
@@ -809,7 +676,7 @@ def _timeout_restante(config):
 
 
 def _reservar_orcamento_llm(config):
-    """Conta a chamada no ponto comum a TODOS os pipelines, apos cache miss."""
+    """Conta a chamada no ponto comum a todas as chamadas LLM, antes do envio ao backend."""
     runtime = (config or {}).get("_runtime_agent_budget")
     if not isinstance(runtime, dict):
         return
@@ -896,6 +763,12 @@ def _registrar_tokens_gerados(config, resposta, metadata_respostas=None):
         for item in metadata_respostas
         if isinstance(item, dict) and isinstance(item.get("completion_tokens"), (int, float))
     ]
+    reasoning = sum(
+        int(item.get("reasoning_tokens"))
+        for item in metadata_respostas
+        if isinstance(item, dict) and isinstance(item.get("reasoning_tokens"), (int, float))
+    )
+    runtime["reasoning_tokens_actual"] = int(runtime.get("reasoning_tokens_actual", 0) or 0) + reasoning
     chars_por_token = max(
         1, int((config or {}).get("context_engine", {}).get("chars_per_token_fallback", 3)),
     )
@@ -912,8 +785,14 @@ def _registrar_tokens_gerados(config, resposta, metadata_respostas=None):
             transient=False, error_code="MAX_COMPLETION_TOKENS_EXCEEDED",
         )
     max_total = int(runtime.get("max_total_tokens", 0) or 0)
+    # Most OpenAI-compatible providers include reasoning in completion_tokens.
+    # It is exposed separately for observability, but not double-counted here.
     effective_total = int(runtime.get("prompt_tokens_effective", 0) or 0) + total
     runtime["total_tokens_effective"] = effective_total
+    runtime["provider_reported_tokens"] = (
+        int(runtime.get("prompt_tokens_actual", 0) or 0)
+        + int(runtime.get("completion_tokens_actual", 0) or 0)
+    )
     if max_total > 0 and effective_total > max_total:
         raise ErroLLM(
             "O limite global de tokens da tarefa foi excedido.",
@@ -1035,7 +914,7 @@ def _chamar_llm_impl(
     prompt_sistema, prompt_usuario, config, forcar_json=False, perfil=None,
     stream_visible=False,
 ):
-    """Chama o backend com cache seguro, limites separados e retry transitorio."""
+    """Chama o backend com limites, isolamento e retry transitório."""
     cfg_llm = config.get("llm", {})
     base_url = cfg_llm.get("base_url", "http://localhost:11434")
     configured_model = cfg_llm.get("model", "qwen2.5:7b-instruct-q4_0")
@@ -1056,46 +935,6 @@ def _chamar_llm_impl(
             base_url, model, descoberta_timeout,
             negative_ttl=cfg_llm.get("model_discovery_negative_ttl_seconds", 60),
         )
-
-    cache_cfg = cfg_llm.get("cache", {})
-    cache_ativado = bool(cache_cfg.get("ativado", True)) and not forcar_json
-    cfg_fingerprint = dict(cfg_llm)
-    cfg_fingerprint["model"] = model
-    backend_fingerprint = _fingerprint_backend(
-        cfg_fingerprint, forcar_json=forcar_json,
-    )
-
-    if cache_ativado:
-        cacheada = _cache.obter(
-            BASE_DIR, backend_fingerprint, prompt_sistema, prompt_usuario,
-            max_entradas=cache_cfg.get("max_entradas", 4096),
-            max_age_days=cache_cfg.get("max_age_days", 30),
-            hit_flush_interval=cache_cfg.get("hit_flush_interval", 20),
-            memoria_max_entradas=cache_cfg.get("memoria_max_entradas", 2048),
-            max_age_hours=cache_cfg.get("max_age_hours", 24),
-        )
-        if cacheada is not None:
-            # Compatibilidade com implementacoes externas/mocks de cache e
-            # arquivos antigos ainda nao saneados pela nova camada.
-            if cacheada.lstrip().lower().startswith("[erro]"):
-                raise ErroLLM(cacheada[len("[erro]"):].strip())
-            if not _cache.resposta_cacheavel(cacheada):
-                _cache.invalidar(
-                    BASE_DIR, backend_fingerprint, prompt_sistema, prompt_usuario,
-                )
-                _diagnostico(
-                    "POISONED_CACHE_ENTRY_REMOVED",
-                    backend=backend_fingerprint[:16],
-                )
-            else:
-                campos_cache = {"profile": perfil or "default", "cached": True}
-                if stream_visible:
-                    campos_cache["partial_text"] = cacheada[-16000:]
-                job_progress.publicar(
-                    config, "validating", "Resposta recuperada do cache",
-                    **campos_cache,
-                )
-                return cacheada
 
     job_progress.publicar(
         config, "llm_wait", "Aguardando a LLM local",
@@ -1134,7 +973,7 @@ def _chamar_llm_impl(
         (connect_timeout + read_timeout + max_delay + cooldown) * tentativas + 30.0,
     )
     try:
-        slot_processo = process_limiter.acquire(
+        slot_processo = limiter.acquire(
             chave_backend, limit=limite_processos,
             timeout=max(0.1, espera_semaforo), lease_seconds=lease_seconds,
         )
@@ -1354,7 +1193,7 @@ def _chamar_llm_impl(
         else:
             raise ultimo_erro or ErroLLM("Falha desconhecida na LLM")
     finally:
-        process_limiter.release(slot_processo)
+        limiter.release(slot_processo)
         semaforo.release()
 
     _registrar_tokens_gerados(config, resposta, metadata_chamadas)
@@ -1366,18 +1205,6 @@ def _chamar_llm_impl(
         **campos_finais,
     )
 
-    # So publica no cache depois de todos os gates locais terem aceitado a
-    # resposta. Assim uma resposta que estoura o orçamento da tarefa nao vira
-    # um atalho permanente para sessoes futuras.
-    if cache_ativado:
-        _cache.definir(
-            BASE_DIR, backend_fingerprint, prompt_sistema, prompt_usuario, resposta,
-            max_entradas=cache_cfg.get("max_entradas", 4096),
-            max_age_days=cache_cfg.get("max_age_days", 30),
-            memoria_max_entradas=cache_cfg.get("memoria_max_entradas", 2048),
-            max_age_hours=cache_cfg.get("max_age_hours", 24),
-        )
-
     return resposta
 
 
@@ -1385,10 +1212,9 @@ def _chamar_llm(
     prompt_sistema, prompt_usuario, config, forcar_json=False, perfil=None,
     stream_visible=False,
 ):
-    """Fronteira observavel de toda chamada LLM, inclusive pipelines legados."""
+    """Fronteira observavel de toda chamada LLM, do AgentSession."""
     inicio = time.monotonic()
     runtime = (config or {}).get("_runtime_agent_budget") or {}
-    chamadas_antes = int(runtime.get("llm_calls", 0) or 0)
     status = "ok"
     metadata = {"profile": perfil or "default", "structured": bool(forcar_json)}
     try:
@@ -1397,9 +1223,6 @@ def _chamar_llm(
             forcar_json=forcar_json, perfil=perfil,
             stream_visible=stream_visible,
         )
-        chamadas_depois = int(runtime.get("llm_calls", 0) or 0)
-        if chamadas_depois == chamadas_antes:
-            status = "cache_hit"
         metadata["estimated_output_chars"] = len(str(resposta or ""))
         last_response = runtime.get("last_llm_response")
         if isinstance(last_response, dict):
@@ -1435,180 +1258,37 @@ def _chamar_llm(
         )
 
 
-PROMPT_CHAT = """Voce e a Eyle, uma unica agente autonoma local especializada exclusivamente em codigo e engenharia de software.
 
-Sua identidade nao depende de editar arquivos: voce tambem pode conversar sobre codigo, explicar implementacoes, analisar arquitetura, investigar comportamento, planejar mudancas e revisar decisoes tecnicas.
+PROMPT_AGENTE = """You are Eyle, one autonomous programming agent. You receive the complete user request, recent conversation, the latest real tool results, an evidence index and the tools currently available. You decide the next useful action and write the final response in the user's language and tone.
 
-Regras:
-1. Responda de forma direta, natural e util, preservando a identidade de agente de codigo.
-2. Se a pergunta mencionar um projeto e o codigo nao estiver disponivel nesta mensagem, diga isso sem inventar detalhes e oriente o usuario a pedir a leitura do workspace.
-3. Nao transforme uma analise em lista de melhorias quando o usuario nao pediu recomendacoes.
-4. Nao tente editar, criar ou executar algo quando o pedido for apenas conversa, explicacao ou analise.
-5. Fora do dominio de codigo, explique brevemente que a Eyle foi criada para trabalhar exclusivamente com software.
-6. Nao termine oferecendo ajuda generica; pergunte algo apenas quando uma decisao real impedir o proximo passo."""
-
-
-PROMPT_AUDIT_SCOUT = """You are the Eyle PROJECT AUDIT SCOUT. You plan evidence collection; you never answer the user.
-
-You receive a deterministic candidate catalog built from the real project inventory.
-Rules:
-1. Select only paths present in CANDIDATE CATALOG. Never invent a path.
-2. Prefer a small, high-signal set covering entrypoint, orchestration/core logic, state/persistence, grounding/recovery/validation, related tests, and main configuration.
-3. During gap review, select only additional files that can test a concrete risk or close a missing coverage area.
-4. Do not make claims about project health. Do not write a conclusion.
-5. Return JSON only in this exact envelope:
-{"final":{"answer":"scout plan","selected_paths":["path"],"risk_hypotheses":["..."],"gaps":["..."],"rationale":"..."}}
-Natural-language fields must use the user's language. Paths and identifiers remain unchanged."""
-
-
-PROMPT_AUDIT_FINALIZER = """You are the Eyle PROJECT AUDIT FINALIZER. The planning and file selection phases are complete. You do not call tools.
+Return exactly one JSON decision:
+- {"final":"natural answer"}
+- {"final":{"answer":"natural answer","evidence_ids":["ev-..."] ,"limitations":[]}}
+- {"tool":"tool_name","arguments":{},"plan":["optional adaptive step", "..."]}
+- {"tool_calls":[{"tool":"...","arguments":{}}, ...],"plan":[...]} for up to four independent actions
+- {"patches":[...],"plan":[...]} for a transactional multi-file dry-run
+- {"needs_user":"one genuinely blocking question"}
 
 Rules:
-1. Use only the fresh evidence and system-calculated coverage shown in the prompt.
-2. Produce atomic structured claims, not a free-form answer and not a release-note summary.
-3. Each claim must contain exactly one statement with: type, text, evidence_ids, and basis when required.
-4. Allowed types: fact, absence, risk, inference, hypothesis, recommendation, decision.
-5. Facts, absences, risks, inferences, and hypotheses require visible fresh evidence_ids. Risks, inferences, hypotheses, and recommendations require a concise basis. Absence requires an explicit reviewed scope.
-6. Follow TASK INTENT exactly. Do not add recommendations unless recommendations_requested=true. Every claim should declare which requested output it covers in `output`.
-7. For response_profile=code_analysis, write for a human who wants to understand the project, in this exact semantic order:
-   a) plain_language_summary: what kind of software this is and its observable purpose;
-   b) main_behavior: what happens when it runs and how a user or another system interacts with it;
-   c) important_components: the principal files, functions, classes, routes, commands, or interfaces;
-   d) component_relationships: how those components connect;
-   e) verified_limitations: only then state missing tests, absent features, or unverified behavior.
-   The first claim must not be about coverage, environment variables, missing tests, or audit limitations. Do not invent a business purpose; when it is not visible, say that the code only proves the technical purpose. Enumerate observable HTTP routes, methods, handlers, and returned values when they exist. Claims should read as a coherent explanation, not an audit checklist.
-8. Never claim that tests pass unless an executed run_tests result is shown. Never claim there are no critical problems or that all functionality is operational without the required system proof.
-9. Report limitations honestly and concisely. Do not put unsupported facts in limitations.
-10. Return JSON only, exactly:
-{"final":{"claims":[{"type":"fact","text":"...","evidence_ids":["ev-0001"],"basis":"","scope":"","output":"analysis"}],"verification":"...","limitations":[]}}
-The system, not you, renders the final text from validated claims. Write claim text in the user's language."""
-
-
-PROMPT_PROJECT_READ_FINALIZER = """You are the Eyle PROJECT READ FINALIZER. Evidence collection is complete. You do not call tools.
-
-Rules:
-1. Answer the exact user request directly using only the fresh evidence shown.
-2. Produce atomic structured claims, not a free-form answer. Each claim must answer one concrete part of the request.
-3. Explicitly cover every named file, symbol, behavior, relationship, or existence question. Do not replace a requested target with a nearby symbol.
-4. Allowed claim types: fact, absence, risk, inference, hypothesis, recommendation, decision.
-5. Facts, absences, risks, inferences, and hypotheses require visible fresh evidence_ids. Risks, inferences, hypotheses, and recommendations require a concise basis. Absence requires an explicit reviewed scope.
-6. Follow TASK INTENT exactly. Do not add recommendations unless recommendations_requested=true. Every claim should declare which requested output it covers in `output`.
-7. For response_profile=code_analysis, begin with a plain-language explanation of what the project is and what it does. Then describe its observable behavior, important components and their relationships. Put verified limitations last. Do not lead with missing tests, configuration details, coverage, or audit process. Enumerate routes/interfaces and returned values when visible. Do not invent a business purpose.
-8. If evidence proves absence, use type=absence and state the reviewed scope. search_code relevance alone never proves absence.
-9. Do not write headings with no content, incomplete sentences, or a trailing colon awaiting missing text.
-10. Return JSON only, exactly:
-{"final":{"claims":[{"type":"fact","text":"...","evidence_ids":["ev-0001"],"basis":"","scope":"","output":"explanation"}],"verification":"...","limitations":[]}}
-The system, not you, renders the final text from validated claims. Write claim text in the user's language. Paths and identifiers remain unchanged."""
-
-
-PROMPT_AGENTE = """You are the Eyle AGENT. Perform exactly one action per decision and output JSON only.
-
-Language contract:
-- The original user request may be written in Portuguese. Preserve its meaning exactly.
-- Internal instructions, state, tool protocol, and JSON keys are in English.
-- Natural-language text shown to the user (`final.answer`, string `final`, or `needs_user`) must use the user's language. When the user writes in Portuguese, answer in Brazilian Portuguese.
-- Never translate code, file paths, symbol names, identifiers, or literal values.
-
-Allowed JSON formats:
-- tool action: {"tool":"tool_name","arguments":{...}}
-- project final: {"final":{"answer":"...","evidence_ids":["ev-0001"],"verification":"...","limitations":[],"claim_annotations":[]}}
-- chat final: {"final":"..."}
-- real blocker/question: {"needs_user":"..."}
-- optional memory note: add "important_fact":"..." to any allowed object.
-
-Mandatory rules:
-1. Follow GOAL STATE (`mode`, `success_criteria`, `constraints`, `plan`, `current_step`, `blockers`, and `evidence_needed`) and the TOOL CATALOG. One decision may call at most one tool.
-2. Use the cheapest valid order: tree/metadata orient, search locates, and `read_range` reads fresh code. Do not open random candidates and never repeat the same `tool` + `arguments` call.
-3. `analyze` and `suggest` may use READ tools only. In `edit`, follow this exact state machine:
-   fresh read -> `test_patch_dry_run` -> `apply_patch` with the SAME proposal -> `run_tests` -> fresh post-write read.
-   The system derives hashes and original code from evidence and handles WRITE confirmation. Never invent or manually copy hashes.
-4. State/gate messages are authoritative:
-   - `READ_REQUIRED` or `POST_WRITE_READ_REQUIRED`: perform the requested fresh read.
-   - `WRITE_PENDING`: do not claim that a change was applied; wait for system confirmation.
-   - `RUN_TESTS` or `RUN_TESTS_REQUIRED`: call `run_tests` and do not finalize first.
-   - `STALE_PATCH`: do not retry the same patch blindly; follow the system recovery/re-read instruction.
-   - If the prompt contains `MANDATORY NEXT EDIT ACTION`, execute exactly that step.
-5. Project tasks require fresh code evidence. Tree, metadata, observations, and `important_fact` do not count. Reread stale evidence. For sufficient `project_read` evidence, return `{"ready_to_finalize":true}`; do not draft the answer.
-6. Use only visible `evidence_ids`. Every `file:line` citation must be covered by those evidence ranges. Report real limitations.
-   The project is observed state, not universal truth. You may reason beyond what is literally written, but keep epistemic types honest:
-   - unannotated assertive statements are treated as observed `fact` and must be grounded;
-   - annotate exact non-factual sentences in `claim_annotations` as `inference`, `hypothesis`, `decision`, or `recommendation`;
-   - an `inference` should identify supporting `evidence_ids` or a short `basis`;
-   - a `hypothesis` must use uncertain wording and should be tested when a READ tool can test it;
-   - `decision` and `recommendation` may introduce new values, files, designs, or approaches that do not yet exist in the project;
-   - never relabel an observed factual assertion merely to bypass grounding.
-7. After a WRITE with `changed=true`, `run_tests` must execute and pass, then the final changed range must be read again. If `executed=false`, say that no test suite ran; never claim tests passed.
-8. `important_fact` is optional, brief, and never replaces evidence.
-9. Replan only when fresh evidence disproves the hypothesis. Add this to the tool action:
-   "goal_update":{"trigger":"hypothesis_denied","detail":"...","plan":["..."],"evidence_needed":["..."]}.
-   Tool failures and changed files are replanned by the system.
-10. `max_steps` counts executed tools. Do not waste decisions on invalid formatting, rejected finals, or repeated calls.
-11. Use `needs_user` only for a real blocker after trying every applicable tool. Never claim project context is missing before using READ tools. General project analysis starts with `list_tree`, then `search_code`/`read_range` on relevant code."""
+1. You are the only planner and reasoner. Do not wait for another planner or interpreter. Planning is optional and may change as evidence appears.
+2. Use tools when project facts, execution results or source code are needed. Do not invent files, code, tests or tool outcomes.
+3. latest_tool_results contains the newest tool output, including source when just read. evidence_index contains older references and hashes. Re-read a file when exact source is needed again; disk reads are allowed.
+4. External memory is optional. Use memory_search only when earlier project knowledge could save investigation. Use memory_store only for durable, evidence-backed facts worth reusing.
+5. For a small existing file, prefer a full-file transaction after reading the whole file: {"patches":[{"operation":"replace","path":"app.py","content":"complete new file"}]}. To create use operation=create; to delete use operation=delete. Use range update only with line_start, line_end and new_code. The runtime fills hashes only from fresh matching evidence.
+6. The runtime—not you—handles confirmation, atomic writes, tests, rollback and rereads. Never claim a patch was applied before the runtime reports it.
+7. Respond directly for greetings, explanations or project-independent conversation. Keep your natural voice; do not expose internal JSON or operational stages in the answer.
+8. Return fewer findings than requested when only fewer are proved. Separate verified bugs from contextual risks or recommendations in natural prose.
+9. Use only available_tools. If a capability is absent, explain the limitation or choose another valid path.
+10. Avoid tool loops. After reading enough, answer or propose the patch. If a dry-run fails, correct it once from the returned error; do not restart the investigation.
+11. When the user explicitly asks to change files, do not stop at recommendations. Read the necessary files and produce one dry-run proposal for confirmation.
+"""
 
 
 def executar_agente(prompt_usuario, config):
-    """Personalidade do Agente minimo (Atualizacao 1): decide a proxima ferramenta
-    a chamar (ou encerra com resposta final). Usa json mode no backend quando
-    config["agent"]["usar_json_mode_se_suportado"] estiver ligado -- reduz a
-    chance de formato invalido, mas quem garante que o loop nao trava mesmo
-    assim e' o retry em engine/agent.py."""
+    """Run the only active Eyle reasoning profile."""
     cfg_agente = config.get("agent", {})
     forcar_json = cfg_agente.get("usar_json_mode_se_suportado", True)
     return _chamar_llm(
         PROMPT_AGENTE, prompt_usuario, config,
         forcar_json=forcar_json, perfil="agent",
-    )
-
-
-
-def executar_project_read_finalizer(prompt_usuario, config):
-    """Redige project_read somente depois da coleta de evidencias."""
-    return _chamar_llm(
-        PROMPT_PROJECT_READ_FINALIZER, prompt_usuario, config,
-        forcar_json=True, perfil="project_read_finalizer", stream_visible=True,
-    )
-
-
-def executar_audit_scout(prompt_usuario, config):
-    """Planeja componentes de project_audit sem produzir conclusao."""
-    return _chamar_llm(
-        PROMPT_AUDIT_SCOUT, prompt_usuario, config,
-        forcar_json=True, perfil="audit_scout",
-    )
-
-
-def executar_audit_finalizer(prompt_usuario, config):
-    """Gera somente a conclusao final a partir de evidencias ja coletadas."""
-    return _chamar_llm(
-        PROMPT_AUDIT_FINALIZER, prompt_usuario, config,
-        forcar_json=True, perfil="audit_finalizer", stream_visible=True,
-    )
-
-def executar_chat(pergunta, config, historico=None):
-    """Modo conversa livre: sem workspace ou ferramentas -- somente a LLM
-    respondendo direto, com no maximo um resumo curto do historico recente."""
-    prompt_usuario = pergunta
-    if historico:
-        linhas = [f"{m['role']}: {m['text']}" for m in historico]
-        prompt_usuario = "HISTORICO RECENTE DA CONVERSA:\n" + "\n".join(linhas) + f"\n\nMENSAGEM ATUAL:\n{pergunta}"
-    return _chamar_llm(
-        PROMPT_CHAT, prompt_usuario, config, perfil="chat", stream_visible=True,
-    )
-
-
-
-
-
-
-
-
-
-
-
-
-def executar_recuperacao_textual(prompt_usuario, config):
-    """Legacy recovery is intentionally disconnected from the backend."""
-    raise ErroLLM(
-        "O recovery textual legado por LLM foi desativado na Rev4.6.",
-        transient=False, error_code="LEGACY_LLM_RECOVERY_DISABLED",
     )
