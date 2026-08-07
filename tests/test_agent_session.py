@@ -220,7 +220,7 @@ def test_pending_state_does_not_duplicate_raw_source(monkeypatch, tmp_path):
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
     status, _, pending, _ = core_agent.executar_agente(
-        "altere f", config(tmp_path), projeto={"caminho_origem": str(tmp_path)},
+        "altere a função f no arquivo app.py", config(tmp_path), projeto={"caminho_origem": str(tmp_path)},
         retornar_detalhes=True,
     )
     assert status == "needs_user"
@@ -339,7 +339,7 @@ def test_single_range_patch_accepts_english_keys_and_fills_hashes(monkeypatch, t
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
     status, _, pending, _ = core_agent.executar_agente(
-        "mude x", config(tmp_path), projeto={"caminho_origem": str(tmp_path)},
+        "mude x no arquivo app.py", config(tmp_path), projeto={"caminho_origem": str(tmp_path)},
         retornar_detalhes=True,
     )
     assert status == "needs_user"
@@ -444,7 +444,7 @@ def test_failed_single_post_write_reread_rolls_back(monkeypatch, tmp_path):
     monkeypatch.setattr(core_agent, "executar_agente_llm", lambda *_: next(outputs))
     cfg = config(tmp_path)
     status, _, pending, _ = core_agent.executar_agente(
-        "mude x", cfg, projeto={"caminho_origem": str(tmp_path)},
+        "mude x no arquivo app.py", cfg, projeto={"caminho_origem": str(tmp_path)},
         retornar_detalhes=True,
     )
     assert status == "needs_user"
@@ -483,7 +483,7 @@ def test_failed_multi_file_post_write_reread_rolls_back(monkeypatch, tmp_path):
     monkeypatch.setattr(core_agent, "executar_agente_llm", lambda *_: next(outputs))
     cfg = config(tmp_path)
     status, _, pending, _ = core_agent.executar_agente(
-        "refatore", cfg, projeto={"caminho_origem": str(tmp_path)},
+        "refatore o arquivo app.py", cfg, projeto={"caminho_origem": str(tmp_path)},
         retornar_detalhes=True,
     )
     assert status == "needs_user"

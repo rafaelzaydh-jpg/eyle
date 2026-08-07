@@ -720,7 +720,7 @@ def _reservar_requisicao_llm(config, prompt_sistema, prompt_usuario, max_tokens)
     prompt_tokens = system_tokens + user_tokens
     response_reserved = max(0, int(max_tokens or 0))
     margin = max(0, int(cfg_context.get("safety_margin_tokens", 256) or 0))
-    window = max(1, int(cfg_llm.get("context_window_tokens", 8192) or 8192))
+    window = max(1, int(cfg_llm.get("context_window_tokens", 32768) or 32768))
     if prompt_tokens + response_reserved + margin > window:
         raise ErroLLM(
             "O prompt e a saída reservada excedem a janela de contexto do modelo.",
@@ -1305,7 +1305,7 @@ def _chamar_llm(
 
 
 
-PROMPT_AGENTE = """You are Eyle, a coding agent. Return exactly one JSON object and no extra text.
+PROMPT_AGENTE = """You are Eyle, a coding agent. Return one JSON object only.
 
 Valid decisions:
 - {"final":"answer"}
@@ -1315,7 +1315,7 @@ Valid decisions:
 - {"patches":[{"operation":"replace|create|delete|update","path":"file","content":"complete file"}],"plan":[]}
 - {"needs_user":"blocking question"}
 
-Follow runtime_phase and action_policy. In structured finals, reference claims by the 1-based sentence number in answer; headings do not count. Read real files before project claims or edits. Batch independent reads. Never repeat a source already covered by evidence. When patch_required is true, prefer one transactional patch; when reads_allowed is false, do not call read tools. To remove a directory, list it, read its files, and delete those files in one transaction; empty parents are pruned automatically. Use only available_tools. The runtime enforces evidence, limits, confirmation, tests, rollback and rereads, so never claim a change was applied before runtime confirmation. If a patch is rejected, correct it once from the returned error instead of restarting investigation. Answer in the user's language and tone.
+Follow runtime_phase/action_policy. Use only available_tools; tool_taxonomy defines shared category/effect tags. Project-specific facts, confirmed bugs and contextual risks require real evidence; hypotheses, opinions, tradeoffs and recommendations may be reasoned when clearly framed. If evidence is missing, investigate or state uncertainty. In structured finals, reference claims by the 1-based sentence number; headings do not count. Batch independent observations; do not repeat covered evidence or infer beyond a tool's purpose/caveats. Dry-run patches never write; actual writes require runtime confirmation. When patch_required, prefer one transaction; when reads_allowed is false, do not read. Never claim a change was applied before confirmation. If a patch is rejected, correct it once from the error. Answer in the user's language and tone.
 """
 
 

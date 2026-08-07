@@ -1,7 +1,7 @@
 <p align="center"><img src="assets/eyle-banner.svg" alt="Eyle — agente autônoma de programação" width="100%"></p>
 <p align="center"><strong>Um cérebro LLM. Ferramentas reais. Escrita supervisionada. Execução observável.</strong></p>
 
-**Versão:** 2.7.4 · **Schema:** 4.12.2 · **Revisão:** 4.12.2-context-runner-hardening
+**Versão:** 2.7.4 · **Schema:** 4.12.4.1 · **Revisão:** 4.12.4.1-context-budget-hardening
 
 A Eyle é uma agente local de programação construída em torno de uma ideia simples: a LLM decide o que fazer, ferramentas determinísticas medem e executam a realidade, e o runtime protege apenas os limites que não podem depender de adivinhação.
 
@@ -19,21 +19,19 @@ usuário
 → resposta
 ```
 
-## Rev4.12.2: contexto + robustez do executor de testes
+## Rev4.12.4.1: endurecimento do orçamento de contexto
 
-A Rev4.12.2 preserva as tools e o histórico expansível da Rev4.12.1 e corrige duas falhas encontradas em testes reais com projeto grande: resultados estruturados de tools estourando o prompt seguinte e `run_tests` disponível enquanto `pytest` ainda era apenas dependência de desenvolvimento. Cada resposta da Eyle ligada a um job pode mostrar um botão **histórico** na interface web. O conteúdo só é buscado quando você abre a aba, portanto não aumenta o polling normal.
+A Rev4.12.4.1 mantém a taxonomia compartilhada da Rev4.12.4 e eleva a janela padrão por chamada de 10k para 32k. O orçamento cumulativo efetivo de prompt por tarefa passa a 96k, enquanto cada chamada continua obrigada a caber na janela real do modelo. Análises usam reserva de saída estável por tipo de trabalho, fases analíticas não recebem dry-run de patch automaticamente, e `agent_info` separa o registro completo das tools do subconjunto disponível na fase atual. Falhas de pytest em estilo Windows continuam sendo reportadas como falhas reais, e `execution_trace` é testada dentro de uma investigação multi-tool real.
 
-O histórico mostra fatos observáveis do runtime:
+## Rev4.12.4: taxonomia compartilhada de tools
 
-- turnos do agente e fase final;
-- quantidade de chamadas LLM, latência e motivo de término;
-- tokens de prompt, cacheados, novos/não cacheados, saída e total efetivo;
-- tipo de decisão por turno, incluindo aceitação/rejeição e motivo de validação;
-- ferramentas chamadas, argumentos observáveis e resultado resumido;
-- `compileall`, testes, releituras e rollback após escrita;
-- códigos de falha quando a tarefa para.
+A Rev4.12.4 mantém o modelo de execução da Rev4.12.3.1 e a `execution_trace`, mas compacta como as ferramentas são descritas para a LLM. O runtime continua expondo de uma vez todas as tools permitidas pela fase executável atual e a própria LLM continua escolhendo qual usar; não foi criado roteador de categoria nem chamada extra ao modelo.
 
-Ele **não mostra** chain-of-thought, prompt bruto, resposta bruta do modelo, conteúdo dos arquivos-fonte, hashes ou corpo da memória externa.
+A autoridade compartilhada é declarada uma única vez por chamada em duas categorias: `READ_ONLY` (sem alteração persistente intencional em arquivos do projeto ou memória do projeto) e `EDIT` (pode persistir arquivos ou memória). Os efeitos também viraram tags compartilhadas: `NONE` por padrão, além de `EXEC`, `TEMP`, `MEMORY_WRITE`, `WORKSPACE_WRITE`, `VERIFY` e `ROLLBACK` quando aplicável. Cada contrato individual mantém apenas finalidade, assinatura compacta dos argumentos, retorno, ressalvas específicas e limites numéricos configurados.
+
+Isso remove repetições como “does not modify files” e `side_effects: none` sem enfraquecer os limites das tools. No catálogo completo de 20 ferramentas, catálogo + taxonomia caem de 12.492 caracteres na Rev4.12.3.1 para cerca de 10.241; numa investigação normal com 15 tools, de 8.353 para cerca de 7.049 caracteres na mesma medição.
+
+A `execution_trace` continua sendo a única tool de auto-observabilidade: ela expõe fatos sanitizados de fases/contexto/tokens/tools/decisões/validações, não diagnósticos, chain-of-thought, prompts brutos, corpos de fonte/patch/memória ou segredos.
 
 ## Raciocínio assistido por ferramentas
 
@@ -48,6 +46,7 @@ A LLM não precisa fazer tudo “de cabeça”. A Eyle pode usar:
 - `run_tests` — execução real em sandbox, com escopo pytest opcional e saída diagnóstica limitada;
 - `git_status` — estado do working tree em modo somente leitura;
 - `git_diff` — diff somente leitura com tamanho limitado;
+- `execution_trace` — fatos sanitizados da execução atual/jobs persistidos para self-debugging;
 - memória externa somente quando a própria LLM decide consultar ou armazenar algo.
 
 A ferramenta observa. A Eyle interpreta a observação conforme a tarefa. Resultados determinísticos como `calculate` viram evidência real, mas a resposta final continua sendo escrita pela LLM para preservar tom, explicação e personalidade.
@@ -96,7 +95,7 @@ Os endpoints de dados da interface usam Bearer token. O comando `serve` informa 
 
 ## Validação
 
-- 162 testes passam na suíte determinística empacotada;
+- 178 testes passam na suíte determinística empacotada;
 - 1 teste opcional da interface é pulado quando Flask não está instalado no ambiente de empacotamento;
 - o smoke real com Qwen continua sendo executado apenas no ambiente de deploy.
 
@@ -112,6 +111,10 @@ Consulte [LICENSE.md](LICENSE.md) para os termos que regem o software e [CONTRIB
 - [Visão técnica](docs/technical-overview.md)
 - [Configuração](docs/configuration.md)
 - [Benchmark](docs/benchmark.md)
+- [Notas da Rev4.12.4.1](docs/releases/2.7.4-rev4.12.4.1.md)
+- [Notas da Rev4.12.4](docs/releases/2.7.4-rev4.12.4.md)
+- [Notas da Rev4.12.3.1](docs/releases/2.7.4-rev4.12.3.1.md)
+- [Notas da Rev4.12.3](docs/releases/2.7.4-rev4.12.3.md)
 - [Notas da Rev4.12.2](docs/releases/2.7.4-rev4.12.2.md)
 - [Histórico de decisões removidas](UPDATE_HISTORY.md)
 - [Changelog](CHANGELOG.md)

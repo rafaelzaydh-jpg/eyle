@@ -1,4 +1,4 @@
-"""Rev4.12 configuration boundary for the observable AgentSession core."""
+"""Rev4.12.4.1 configuration boundary for the observable AgentSession core."""
 from __future__ import annotations
 
 import json
@@ -36,8 +36,8 @@ def validar_config(config):
         ("task_context_token_budget", 500),
         ("max_project_scan_entries", 20000), ("max_project_scan_depth", 32),
         ("max_project_file_bytes", 4194304), ("max_inspect_relation_edges", 60),
-        ("max_llm_calls", 8), ("max_prompt_tokens", 12000),
-        ("max_completion_tokens", 6000), ("max_total_tokens", 18000),
+        ("max_llm_calls", 8), ("max_prompt_tokens", 96000),
+        ("max_completion_tokens", 6000), ("max_total_tokens", 102000),
     ):
         value = agent.get(key, default)
         if not isinstance(value, int) or value < 1:

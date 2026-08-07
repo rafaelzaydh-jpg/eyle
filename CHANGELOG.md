@@ -1,3 +1,67 @@
+## 2.7.4 Rev4.12.4.1 — 2026-08-07
+
+- raised the default model context window from 10,000 to 32,768 tokens;
+- raised the task-wide effective prompt budget to 96,000 tokens while keeping per-request context-window enforcement;
+- made output reserve phase-based instead of source-volume-based;
+- removed patch dry-run tools from all analysis phases;
+- split `agent_info` into `registered_tools` and phase-local `available_tools`;
+- added regressions for the AgentSession-location, implementation-flow, bug and risk prompts that previously exhausted context;
+- added a Windows-style pytest failure regression that preserves real failures instead of masking them;
+- added an integrated `execution_trace -> search_code -> final` investigation regression.
+
+## 2.7.4 Rev4.12.4 — 2026-08-07
+
+### Shared tool taxonomy and compact contracts
+
+- Replaced repeated per-tool `does_not` / `side_effects` boilerplate with one shared model-visible taxonomy.
+- Added two authority categories: `READ_ONLY` and `EDIT`.
+- Added shared effect tags: `NONE`, `EXEC`, `TEMP`, `MEMORY_WRITE`, `WORKSPACE_WRITE`, `VERIFY`, and `ROLLBACK`.
+- Kept tool selection LLM-led: the runtime still exposes all actions allowed by the current executable phase at once; taxonomy tags do not route requests or add model calls.
+- Compacted model-visible argument schemas into concise type/required/bounds signatures while leaving the executable JSON schema authoritative for validation.
+- Retained only tool-specific caveats such as literal search scope, token-measurement scope, trace privacy, bounded reads/diffs and write preconditions.
+- Reduced the full 20-tool model-visible wire representation from 12,492 to about 10,241 characters including taxonomy; a normal 15-tool investigation drops from 8,353 to about 7,049 characters.
+- Kept the fixed agent prompt below its 450-token fallback regression budget.
+- Preserved `execution_trace`, the single AgentSession loop, supervised writes and the absence of legacy semantic routing.
+- 184 tests passed; 1 optional Flask interface test skipped in the packaging environment.
+
+## 2.7.4 Rev4.12.3.1 — 2026-08-07
+
+### Foundation hardening hotfix
+
+- Added `execution_trace` as the single read-only self-observability tool for current and persisted jobs.
+- Added phase-transition and per-prompt context-component size tracing before/after compaction without storing raw prompt/source content.
+- Reused the existing persisted job history instead of creating a second trace store; the tool reports facts only and leaves diagnosis to the LLM.
+- Kept context budgets stable by omitting empty `limits` objects from compact tool contracts.
+- Narrowed calculator/agent-info fast paths to whole-request utility matches so compound workspace questions keep investigation tools.
+- Made `run_tests` answer-only closure depend on an explicitly narrow test-only task, not an optional LLM plan.
+- Corrected project-evidence gating for real bugs, named symbols and directory state while leaving general opinions/hypotheses unrestricted.
+- Corrected response-rewrite false positives in workspace write detection.
+- Completed model-visible input descriptions for every registered tool argument and clarified `search_code` as literal fixed-string search with canonical `query`.
+- Labeled external-memory persistence as `MEMORY_WRITE` and separated `write_enabled` from confirmation policy in `agent_info`.
+- Made observable tool history truthful across requested, validated/rejected and execution outcomes; rejected attempts are retained.
+- Removed duplicate dead `run_tests` history code and stale benchmark/worker routing labels.
+- 183 tests passed; 1 optional Flask interface test skipped in the packaging environment.
+
+## 2.7.4 Rev4.12.3 — 2026-08-07
+
+### Tool contracts and LLM-led investigation hardening
+
+- Replaced model-visible name/argument-only tool catalogs with compact semantic contracts: purpose, inputs, returns, non-guarantees, side effects and limits.
+- Removed per-tool `_tool_guidance` routing hints; tool boundaries now live with each tool and the LLM chooses among them.
+- Reduced lexical routing power: obvious chat/utilities keep the cheap path, while other requests in a real workspace receive investigation tools by default.
+- Fixed the `separe` false positive that sent “separate risks from bugs” into write phases.
+- Made supervised dry-run patch tools available after evidence in the general analysis flow, so ambiguous edit wording is not blocked by the write-intent detector.
+- Made `run_tests` answer-only optimization state-aware: it closes tools only for a narrow test-only execution, not compound analysis.
+- Added an epistemic rule: project-specific facts, confirmed bugs and contextual risks need real evidence; clearly framed hypotheses/opinions/tradeoffs/recommendations remain free reasoning.
+- Made tool names explicit in public history and added a safe fallback when old history entries only preserve the name inside the summarized result.
+- Fixed a context-compaction loop where already-cropped ~1000-character strings could be repeatedly re-suffixed forever.
+- Kept `pytest==8.2.2` pinned in runtime requirements and added a regression preventing its accidental removal.
+- Added 9 Rev4.12.3 foundation regressions. Debug/trace self-inspection remains deliberately deferred to the next implementation.
+
+### Validation
+
+- 171 tests passed; 1 optional Flask interface test skipped in the packaging environment.
+
 ## 2.7.4 Rev4.12.2 — 2026-08-07
 
 - Generalized prompt compaction for large nested structured tool results (`list_tree`, `inspect_project` and future schemas) instead of cropping only named raw-source fields.

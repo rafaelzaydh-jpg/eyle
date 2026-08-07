@@ -43,6 +43,7 @@ from eyle.core.project_inspection import (  # noqa: E402
     project_stats as measure_project_stats,
 )
 from eyle.core.git_tools import git_status as inspect_git_status, git_diff as inspect_git_diff  # noqa: E402
+from eyle.core.execution_trace import build_execution_trace, filter_execution_trace  # noqa: E402
 
 PROJECT_BASE_DIR = os.path.dirname(BASE_DIR)
 MEMORY_DIR = os.path.join(PROJECT_BASE_DIR, "memory")
@@ -91,7 +92,7 @@ def _caminho_projeto(ctx):
 
 def _tool_search_code(arguments, ctx):
     """Search the live workspace directly and return verifiable source ranges."""
-    query = arguments["pergunta"].strip()
+    query = arguments["query"].strip()
     root = _caminho_projeto(ctx)
     if not root:
         return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
@@ -268,24 +269,34 @@ def _tool_inspect_project(arguments, ctx):
 
 
 def _tool_agent_info(arguments, ctx):
-    """Expose runtime identity and the executable tool registry to the agent itself."""
+    """Expose full registered capability separately from current phase availability."""
     config = (ctx or {}).get("config") or {}
-    public = []
+    available_names = {str(name) for name in ((ctx or {}).get("available_tools") or [])}
+    registered = []
     for name, item in sorted(TOOLS.items()):
-        if item.get("permission") == "WRITE":
-            continue
-        public.append({
+        registered.append({
             "name": item.get("name", name),
             "permission": item.get("permission"),
+            "category": item.get("category", "READ_ONLY"),
+            "effects": list(item.get("effects") or ["NONE"]),
             "description": item.get("description", ""),
         })
+    available = [item for item in registered if item.get("name") in available_names]
     return _sucesso({
         "name": "Eyle",
         "app_version": config.get("app_version"),
         "revision": config.get("revision"),
-        "tools": public,
-        "write_confirmation_required": bool(((config.get("codar") or {}).get("ativado", True))),
-        "note": "Tool availability can be phase-specific; this registry describes executable capabilities, not permission to use every tool in every turn.",
+        "registered_tools": registered,
+        "available_tools": available,
+        # Compatibility alias for older UI/history consumers. It deliberately
+        # means the complete registry now, not the phase-local subset.
+        "tools": registered,
+        "write_enabled": bool(((config.get("codar") or {}).get("ativado", True))),
+        "write_confirmation_required": True,
+        "note": (
+            "registered_tools is the complete executable registry; available_tools "
+            "is only the subset callable in the current phase. Workspace writes are supervised."
+        ),
     })
 
 
@@ -433,6 +444,55 @@ def _tool_run_tests(arguments, ctx):
     return _falha(
         error_code, detail, executed=resultado.get("executado") is True,
     )
+
+
+def _tool_execution_trace(arguments, ctx):
+    """Inspect sanitized factual execution history for the current or one persisted job."""
+    section = str(arguments.get("section") or "all").strip().lower()
+    turn = arguments.get("turn")
+    limit = int(arguments.get("limit") or 100)
+    requested_job_id = arguments.get("job_id")
+
+    current = (ctx or {}).get("execution_trace")
+    current_job_id = None
+    if isinstance(current, dict):
+        current_job_id = ((current.get("summary") or {}).get("job_id")
+                          if isinstance(current.get("summary"), dict) else None)
+
+    if requested_job_id is None or (current_job_id is not None and int(requested_job_id) == int(current_job_id)):
+        if not isinstance(current, dict):
+            return _falha("EXECUTION_TRACE_UNAVAILABLE", "o trace da sessão atual não está disponível neste contexto")
+        trace = current
+    else:
+        try:
+            from eyle.runtime import queue as runtime_queue
+        except Exception as error:
+            return _falha("EXECUTION_TRACE_UNAVAILABLE", f"não foi possível acessar o histórico persistido: {error}")
+        registro = runtime_queue.obter(int(requested_job_id))
+        if not isinstance(registro, dict):
+            return _falha("JOB_NOT_FOUND", f"job #{int(requested_job_id)} não foi encontrado")
+        resultado = registro.get("resultado") if isinstance(registro.get("resultado"), dict) else {}
+        details = resultado.get("details") if isinstance(resultado.get("details"), dict) else {}
+        if not details:
+            return _falha(
+                "EXECUTION_TRACE_NOT_READY",
+                f"job #{int(requested_job_id)} ainda não possui detalhes de execução persistidos",
+            )
+        progresso = registro.get("progresso") if isinstance(registro.get("progresso"), dict) else {}
+        trace = build_execution_trace(
+            details,
+            job_id=int(requested_job_id),
+            status=registro.get("status"),
+            created_at=registro.get("criado_em"),
+            started_at=registro.get("iniciado_em"),
+            completed_at=registro.get("concluido_em"),
+            duration_seconds=progresso.get("elapsed_seconds"),
+            limit=max(100, limit),
+        )
+    try:
+        return _sucesso(filter_execution_trace(trace, section=section, turn=turn, limit=limit))
+    except (TypeError, ValueError) as error:
+        return _falha("INVALID_ARGUMENT", str(error))
 
 
 def _tool_git_status(arguments, ctx):
@@ -601,13 +661,13 @@ _CAMINHO = {
     "type": "string", "minLength": 1,
     "description": "Relative path inside the project root.",
 }
-_LINHA = {"type": "integer", "minimum": 1}
-_CODIGO = {"type": "string", "minLength": 1}
+_LINHA = {"type": "integer", "minimum": 1, "description": "1-based line number inside the selected project file."}
+_CODIGO = {"type": "string", "minLength": 1, "description": "Source text supplied for the requested code operation."}
 _CODIGO_NOVO = {
     "type": "string", "minLength": 0,
     "description": "Replacement code. Empty string is valid for deletion.",
 }
-_CODIGO_ORIGINAL = {"type": "string", "minLength": 0}
+_CODIGO_ORIGINAL = {"type": "string", "minLength": 0, "description": "Exact original source text expected before a confirmed replacement."}
 _HASH = {
     "type": "string", "minLength": 64, "maxLength": 64,
     "pattern": "^[0-9a-f]{64}$",
@@ -618,10 +678,10 @@ _HASH = {
 TOOLS = {
     "calculate": {
         "name": "calculate",
-        "description": "Evaluate arithmetic deterministically with safe decimal math; use instead of mental calculation.",
+        "description": "Evaluate one arithmetic expression deterministically with decimal-safe math.",
         "permission": "EXEC",
         "input_schema": _schema_objeto({
-            "expression": {"type": "string", "minLength": 1, "maxLength": 500},
+            "expression": {"type": "string", "minLength": 1, "maxLength": 500, "description": "Arithmetic expression containing numeric values and supported operators."},
         }, ["expression"]),
         "output_schema": "Standard envelope; detail contains expression, deterministic decimal result, exact/approximate status, and precision metadata.",
         "compat_aliases": {"expressao": "expression"},
@@ -629,10 +689,10 @@ TOOLS = {
     },
     "agent_info": {
         "name": "agent_info",
-        "description": "Return Eyle runtime identity and the current executable tool registry for self-capability questions.",
+        "description": "Return Eyle runtime identity, release metadata, executable tool registry and write policy.",
         "permission": "READ",
         "input_schema": _schema_objeto(),
-        "output_schema": "Standard envelope; detail contains name, release identity, tool names/permissions/descriptions, and write policy.",
+        "output_schema": "Standard envelope; detail contains name, release identity, tool names/permissions/categories/effects/descriptions, and write policy.",
         "compat_aliases": {},
         "fn": _tool_agent_info,
     },
@@ -647,11 +707,11 @@ TOOLS = {
     },
     "count_tokens": {
         "name": "count_tokens",
-        "description": "Count project text and report a truthful token estimate; never labels heuristic output as exact.",
+        "description": "Measure token count or a truthful token estimate for safe project text.",
         "permission": "READ",
         "input_schema": _schema_objeto({
-            "caminho_relativo": {"type": "string", "minLength": 1},
-            "tokenizer": {"type": "string", "minLength": 1},
+            "caminho_relativo": {"type": "string", "minLength": 1, "description": "Optional project-relative file or directory to measure instead of the whole project."},
+            "tokenizer": {"type": "string", "minLength": 1, "description": "Optional tokenizer/model identifier; if unavailable, the configured truthful fallback is reported."},
         }),
         "output_schema": "Standard envelope; detail includes exact=false when using the configured character/token fallback.",
         "compat_aliases": {"path": "caminho_relativo", "model": "tokenizer"},
@@ -659,7 +719,7 @@ TOOLS = {
     },
     "inspect_project": {
         "name": "inspect_project",
-        "description": "Inspect objective project signals: languages, entrypoint evidence, imports, tests, CI, frameworks, and manifests; never ranks importance.",
+        "description": "Inspect objective project structure and relation signals such as languages, entrypoints, imports, tests, CI, frameworks and manifests.",
         "permission": "READ",
         "input_schema": _schema_objeto(),
         "output_schema": "Standard envelope; detail contains objective structural and relation signals with hashes and scan completeness.",
@@ -671,9 +731,9 @@ TOOLS = {
         "description": "List the fresh project tree with limit, depth, filter, and ignored-item counts.",
         "permission": "READ",
         "input_schema": _schema_objeto({
-            "limite": {"type": "integer", "minimum": 1},
-            "profundidade": {"type": "integer", "minimum": 1},
-            "filtro": {"type": "string", "minLength": 1},
+            "limite": {"type": "integer", "minimum": 1, "description": "Maximum number of tree entries to return before marking the result truncated."},
+            "profundidade": {"type": "integer", "minimum": 1, "description": "Maximum directory depth to traverse from the project root."},
+            "filtro": {"type": "string", "minLength": 1, "description": "Optional filename/path glob-style filter applied to returned tree entries."},
         }),
         "output_schema": "Standard envelope; detail contains tree entries, truncation, and ignored_by_reason counts.",
         "compat_aliases": {"max_depth": "profundidade"},
@@ -681,13 +741,13 @@ TOOLS = {
     },
     "search_code": {
         "name": "search_code",
-        "description": "Search the live workspace directly and return fresh verifiable ranges.",
+        "description": "Find exact literal text/code matches in live project files and return fresh verifiable ranges.",
         "permission": "READ",
         "input_schema": _schema_objeto(
-            {"pergunta": {"type": "string", "minLength": 1}}, ["pergunta"],
+            {"query": {"type": "string", "minLength": 1, "description": "Literal text or code fragment to match exactly in project files."}}, ["query"],
         ),
         "output_schema": "Standard envelope; detail.resultados contains file, range, symbol, score, numbered snippet, content_hash, and file_hash.",
-        "compat_aliases": {"query": "pergunta"},
+        "compat_aliases": {"pergunta": "query"},
         "fn": _tool_search_code,
     },
     "find_symbol": {
@@ -696,7 +756,7 @@ TOOLS = {
         "permission": "READ",
         "input_schema": _schema_objeto({
             "caminho_relativo": _CAMINHO,
-            "simbolo": {"type": "string", "minLength": 1},
+            "simbolo": {"type": "string", "minLength": 1, "description": "Exact code symbol name whose definition/location should be found."},
         }, ["simbolo"]),
         "output_schema": "Standard envelope; detail contains the range, original code, and total line count.",
         "compat_aliases": {"arquivo": "caminho_relativo"},
@@ -704,7 +764,7 @@ TOOLS = {
     },
     "read_range": {
         "name": "read_range",
-        "description": "Read a small, fresh, numbered range directly from disk; prefer this over read_file.",
+        "description": "Read one fresh numbered line range directly from a project file.",
         "permission": "READ",
         "input_schema": _schema_objeto({
             "caminho_relativo": _CAMINHO,
@@ -720,7 +780,7 @@ TOOLS = {
     },
     "read_file": {
         "name": "read_file",
-        "description": "Read the beginning of a file and return verifiable lines/hashes; read_range remains preferred for exact ranges.",
+        "description": "Read a bounded beginning portion of one project file with verifiable hashes and line metadata.",
         "permission": "READ",
         "input_schema": _schema_objeto(
             {"caminho_relativo": _CAMINHO}, ["caminho_relativo"],
@@ -753,7 +813,7 @@ TOOLS = {
         "description": "Dry-run a transactional set of free-form file updates, creations, or deletions.",
         "permission": "READ",
         "input_schema": _schema_objeto({
-            "patches": {"type": "array"},
+            "patches": {"type": "array", "description": "Transactional list of create/delete/replace/update patch objects to validate without writing."},
         }, ["patches"]),
         "output_schema": "Standard envelope; detail contains prepared patches and affected files.",
         "compat_aliases": {},
@@ -761,11 +821,11 @@ TOOLS = {
     },
     "memory_search": {
         "name": "memory_search",
-        "description": "Search verified external memory for the active project. Use only when prior task knowledge could help.",
+        "description": "Search hash-validated external memory entries associated with the active project.",
         "permission": "READ",
         "input_schema": _schema_objeto({
-            "query": {"type": "string"},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+            "query": {"type": "string", "description": "Text used to match relevant external project-memory entries."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "Maximum number of matching memory entries to return."},
         }),
         "output_schema": "Standard envelope; detail.entries contains compact, hash-validated project facts.",
         "compat_aliases": {},
@@ -774,11 +834,11 @@ TOOLS = {
     "memory_store": {
         "name": "memory_store",
         "description": "Store one useful evidence-backed project fact in external memory.",
-        "permission": "READ",
+        "permission": "MEMORY_WRITE",
         "input_schema": _schema_objeto({
-            "text": {"type": "string", "minLength": 1},
-            "kind": {"type": "string"},
-            "evidence_ids": {"type": "array"},
+            "text": {"type": "string", "minLength": 1, "description": "Compact project fact to persist in external project memory."},
+            "kind": {"type": "string", "description": "Optional memory category; defaults to fact when omitted."},
+            "evidence_ids": {"type": "array", "description": "Current-task evidence IDs that substantiate the stored fact."},
         }, ["text", "evidence_ids"]),
         "output_schema": "Standard envelope containing the stored memory entry.",
         "compat_aliases": {},
@@ -789,18 +849,32 @@ TOOLS = {
         "description": "Run the detected test suite in the sandbox; optionally focus pytest on one safe relative file or directory.",
         "permission": "EXEC",
         "input_schema": _schema_objeto({
-            "scope": {"type": "string", "minLength": 1},
+            "scope": {"type": "string", "minLength": 1, "description": "Optional safe project-relative pytest file or directory; omitted means the detected full suite."},
         }),
         "output_schema": "Standard envelope; detail contains command, return code, concise pytest summary, bounded output tail, scope and execution status.",
         "compat_aliases": {"path": "scope", "caminho_relativo": "scope"},
         "fn": _tool_run_tests,
+    },
+    "execution_trace": {
+        "name": "execution_trace",
+        "description": "Read sanitized facts from current or past executions.",
+        "permission": "READ",
+        "input_schema": _schema_objeto({
+            "job_id": {"type": "integer", "minimum": 1, "description": "Past job id; omit=current."},
+            "turn": {"type": "integer", "minimum": 1, "description": "Turn filter."},
+            "section": {"type": "string", "minLength": 1, "maxLength": 20, "description": "Trace section."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "Event limit."},
+        }),
+        "output_schema": "Standard envelope with selected sanitized trace facts.",
+        "compat_aliases": {"job": "job_id"},
+        "fn": _tool_execution_trace,
     },
     "git_status": {
         "name": "git_status",
         "description": "Inspect current Git working-tree state without changing files; returns branch and compact modified/added/deleted/untracked entries.",
         "permission": "READ",
         "input_schema": _schema_objeto({
-            "max_entries": {"type": "integer", "minimum": 1, "maximum": 500},
+            "max_entries": {"type": "integer", "minimum": 1, "maximum": 500, "description": "Maximum number of changed-path status entries to return."},
         }),
         "output_schema": "Standard envelope; detail contains branch, clean flag, category counts and bounded changed-file entries.",
         "compat_aliases": {},
@@ -811,9 +885,9 @@ TOOLS = {
         "description": "Inspect a bounded read-only Git diff for the workspace or one relative path, optionally staged.",
         "permission": "READ",
         "input_schema": _schema_objeto({
-            "path": {"type": "string", "minLength": 1},
-            "staged": {"type": "boolean"},
-            "context_lines": {"type": "integer", "minimum": 0, "maximum": 10},
+            "path": {"type": "string", "minLength": 1, "description": "Optional project-relative path whose Git diff should be inspected."},
+            "staged": {"type": "boolean", "description": "When true inspect staged/index changes; otherwise inspect unstaged working-tree changes."},
+            "context_lines": {"type": "integer", "minimum": 0, "maximum": 10, "description": "Number of unchanged context lines around each returned diff hunk."},
         }),
         "output_schema": "Standard envelope; detail contains changed files, added/removed line counts, bounded diff text and truncation state.",
         "compat_aliases": {"caminho_relativo": "path", "arquivo": "path"},
@@ -844,7 +918,7 @@ TOOLS = {
         "name": "apply_patch_set",
         "description": "Apply a confirmed multi-file transaction with rollback.",
         "permission": "WRITE",
-        "input_schema": _schema_objeto({"patches": {"type": "array"}}, ["patches"]),
+        "input_schema": _schema_objeto({"patches": {"type": "array", "description": "Prepared multi-file transaction previously confirmed by the user."}}, ["patches"]),
         "output_schema": "Standard envelope; detail contains applied patches for rollback and reread.",
         "compat_aliases": {},
         "fn": _tool_apply_patch_set,
@@ -869,6 +943,158 @@ TOOLS["read_file"]["limits"] = {
     "max_linhas": {"config_key": "agent.max_read_range_lines", "default": 400},
 }
 
+# Public tool semantics. Shared authority/effect meaning is declared once;
+# each tool keeps only its specific purpose/arguments/result/caveats. Nothing
+# here encodes preferences between tools or task-routing rules.
+_TOOL_TAXONOMY = {
+    "categories": {
+        "READ_ONLY": (
+            "May inspect, calculate, execute checks, or use temporary validation; "
+            "does not intentionally persist project-file or project-memory changes."
+        ),
+        "EDIT": (
+            "May persist project-file or project-memory changes; runtime controls still apply."
+        ),
+    },
+    "effects": {
+        "NONE": "No persistent side effect.",
+        "EXEC": "Executes project code/processes; incidental temporary artifacts may occur.",
+        "TEMP": "Uses temporary validation state only; no persistent project change.",
+        "MEMORY_WRITE": "Persists external project memory.",
+        "WORKSPACE_WRITE": "Persists project-file changes.",
+        "VERIFY": "May run post-change verification.",
+        "ROLLBACK": "May restore changes if verification fails.",
+    },
+}
+
+# Tool-specific semantics. Shared authority and side-effect meaning live in the
+# taxonomy above, so contracts do not repeat "read-only", "does not modify
+# files", or "side_effects: none" for every tool. Caveats are reserved for
+# limits that are unique to a tool and matter to the model's conclusion.
+_TOOL_CONTRACTS = {
+    "calculate": {
+        "category": "READ_ONLY",
+        "effects": ["NONE"],
+        "returns": "Decimal result with exact/approximate and precision metadata.",
+    },
+    "agent_info": {
+        "category": "READ_ONLY",
+        "effects": ["NONE"],
+        "returns": "Runtime identity, complete registered_tools, phase-local available_tools and write policy.",
+        "caveats": ["registered_tools is the full registry; available_tools is only the current phase subset. Runtime metadata does not prove source-level implementation behavior."],
+    },
+    "project_stats": {
+        "category": "READ_ONLY",
+        "effects": ["NONE"],
+        "returns": "Counts for files, directories, lines, characters, bytes, extensions and languages.",
+        "caveats": ["Measurements only; no importance ranking or code-behavior diagnosis."],
+    },
+    "count_tokens": {
+        "category": "READ_ONLY",
+        "effects": ["NONE"],
+        "returns": "Token count/estimate, method, exactness, measured characters and scan completeness.",
+        "caveats": ["Measures project text, not actual LLM request usage or token waste."],
+    },
+    "inspect_project": {
+        "category": "READ_ONLY",
+        "effects": ["NONE"],
+        "returns": "Languages, entrypoints, imports, tests, CI, frameworks, manifests and relation signals.",
+        "caveats": ["Objective static signals only; no importance ranking, runtime confirmation or bug proof."],
+    },
+    "list_tree": {
+        "category": "READ_ONLY",
+        "effects": ["NONE"],
+        "returns": "Project-relative tree entries plus depth, truncation and ignored-item metadata.",
+    },
+    "search_code": {
+        "category": "READ_ONLY",
+        "effects": ["NONE"],
+        "returns": "Fresh bounded matches with file, line range, numbered snippet and hashes.",
+        "caveats": ["Literal text/code search only; not semantic or natural-language search."],
+    },
+    "find_symbol": {
+        "category": "READ_ONLY",
+        "effects": ["NONE"],
+        "returns": "Fresh symbol definition/location and verifiable source range metadata.",
+        "caveats": ["Locates definitions/locations; does not guarantee every runtime reference or call site."],
+    },
+    "read_range": {
+        "category": "READ_ONLY",
+        "effects": ["NONE"],
+        "returns": "Numbered source range, total lines, content hash and file hash.",
+    },
+    "read_file": {
+        "category": "READ_ONLY",
+        "effects": ["NONE"],
+        "returns": "Bounded file content, truncation state, line metadata and hashes.",
+        "caveats": ["The returned content may be truncated by configured read limits."],
+    },
+    "test_patch_dry_run": {
+        "category": "READ_ONLY",
+        "effects": ["TEMP"],
+        "returns": "Temporary validation result and resulting content without applying the change.",
+        "caveats": ["Fresh-read preconditions still apply; dry-run never confirms a write for the user."],
+    },
+    "test_patch_set_dry_run": {
+        "category": "READ_ONLY",
+        "effects": ["TEMP"],
+        "returns": "Prepared/validated patch transaction and affected-file metadata without applying it.",
+        "caveats": ["Existing files still require fresh evidence; dry-run never confirms a write for the user."],
+    },
+    "memory_search": {
+        "category": "READ_ONLY",
+        "effects": ["NONE"],
+        "returns": "Bounded hash-validated prior project-memory entries.",
+        "caveats": ["Prior memory is context, not proof of current live source state."],
+    },
+    "memory_store": {
+        "category": "EDIT",
+        "effects": ["MEMORY_WRITE"],
+        "returns": "The external project-memory entry that was stored.",
+        "caveats": ["Persists project memory only and requires current-task evidence references."],
+    },
+    "run_tests": {
+        "category": "READ_ONLY",
+        "effects": ["EXEC"],
+        "returns": "Runner command, status, return code, concise summary, bounded output and runner diagnostics.",
+        "caveats": ["Does not install a missing runner or prove untested behavior; tests may create incidental temporary/cache artifacts."],
+    },
+    "execution_trace": {
+        "category": "READ_ONLY",
+        "effects": ["NONE"],
+        "returns": "Bounded sanitized execution trace.",
+        "caveats": ["Observable facts only: no diagnosis, chain-of-thought, raw prompts, source/patch/memory bodies or secrets."],
+    },
+    "git_status": {
+        "category": "READ_ONLY",
+        "effects": ["NONE"],
+        "returns": "Branch, clean flag, category counts and bounded changed-path entries.",
+        "caveats": ["Status metadata only; it does not include patch contents."],
+    },
+    "git_diff": {
+        "category": "READ_ONLY",
+        "effects": ["NONE"],
+        "returns": "Changed files, added/removed line counts, bounded diff text and truncation state.",
+        "caveats": ["Bounded output may omit truncated hunks."],
+    },
+    "apply_patch": {
+        "category": "EDIT",
+        "effects": ["WORKSPACE_WRITE", "VERIFY", "ROLLBACK"],
+        "returns": "Applied change plus verification, reread and rollback metadata.",
+        "caveats": ["Requires runtime confirmation, fresh-content preconditions and a path inside the project root."],
+    },
+    "apply_patch_set": {
+        "category": "EDIT",
+        "effects": ["WORKSPACE_WRITE", "VERIFY", "ROLLBACK"],
+        "returns": "Applied transaction plus verification, reread and rollback metadata.",
+        "caveats": ["Requires runtime confirmation, transaction preconditions and paths inside the project root."],
+    },
+}
+
+for _tool_name, _contract in _TOOL_CONTRACTS.items():
+    if _tool_name in TOOLS:
+        TOOLS[_tool_name].update(_contract)
+
 
 def _ler_config_key(config, caminho, default):
     valor = config or {}
@@ -879,12 +1105,55 @@ def _ler_config_key(config, caminho, default):
     return valor
 
 
+def _compact_arg_description(text):
+    text = str(text or "").strip()
+    replacements = {
+        "Relative path inside the project root.": "project-relative path",
+        "1-based line number inside the selected project file.": "1-based line",
+        "Hexadecimal SHA-256 returned by a fresh read.": "fresh-read SHA-256",
+        "Replacement code. Empty string is valid for deletion.": "replacement code; empty=delete",
+        "Exact original source text expected before a confirmed replacement.": "exact original source expected before replacement",
+    }
+    return replacements.get(text, text)[:110]
+
+
+def _compact_input_contract(schema):
+    """Compact JSON-schema arguments into model-readable signatures.
+
+    The executable schema remains authoritative for validation. The model only
+    needs type, required/optional state, numeric bounds and the tool-specific
+    meaning of each argument.
+    """
+    schema = schema if isinstance(schema, dict) else _schema_objeto()
+    required = set(schema.get("required") or [])
+    aliases = {
+        "string": "str", "integer": "int", "number": "num",
+        "boolean": "bool", "object": "obj", "array": "list",
+    }
+    inputs = {}
+    for name, spec in (schema.get("properties") or {}).items():
+        spec = spec if isinstance(spec, dict) else {}
+        kind = aliases.get(spec.get("type", "any"), spec.get("type", "any"))
+        if name not in required:
+            kind += "?"
+        bounds = []
+        if spec.get("minimum") is not None:
+            bounds.append(f">={spec.get('minimum')}")
+        if spec.get("maximum") is not None:
+            bounds.append(f"<={spec.get('maximum')}")
+        head = kind + ((" " + " ".join(bounds)) if bounds else "")
+        description = _compact_arg_description(spec.get("description"))
+        inputs[name] = f"{head} | {description}" if description else head
+    return inputs
+
+
 def gerar_catalogo_tools(registro=None, config=None, allowed_names=None, compact=False, minimal=False):
     """Generate the public catalog from the executable registry.
 
-    ``allowed_names`` is a Rev4.6 context filter. It never grants a tool that
-    is absent from the registry; it only removes impossible actions from the
-    current model step.
+    ``allowed_names`` only filters actions that are impossible in the current
+    runtime state. ``compact`` keeps each tool's semantic contract while
+    removing implementation-only schema detail. ``minimal`` is retained only
+    for compatibility tests/consumers that explicitly request names/arguments.
     """
     catalogo = []
     fonte = TOOLS if registro is None else registro
@@ -898,27 +1167,82 @@ def gerar_catalogo_tools(registro=None, config=None, allowed_names=None, compact
             limites[nome_limite] = _ler_config_key(
                 config, origem["config_key"], origem["default"],
             )
-        if compact or minimal:
-            schema = entrada.get("input_schema", _schema_objeto())
-            item = {
+        schema = entrada.get("input_schema", _schema_objeto())
+        if minimal:
+            catalogo.append({
                 "name": public_name,
                 "required": list(schema.get("required") or []),
                 "arguments": list((schema.get("properties") or {}).keys()),
+            })
+        elif compact:
+            item = {
+                "name": public_name,
+                "purpose": entrada.get("description", "")[:200],
+                "inputs": _compact_input_contract(schema),
+                "returns": str(entrada.get("returns") or entrada.get("output_schema") or "")[:220],
             }
-            if not minimal:
-                item["description"] = entrada.get("description", "")[:180]
+            caveats = [str(value)[:150] for value in (entrada.get("caveats") or [])[:4]]
+            if caveats:
+                item["caveats"] = caveats
+            if limites:
                 item["limits"] = limites
             catalogo.append(item)
         else:
-            catalogo.append({
+            item = {
                 "name": public_name,
                 "description": entrada.get("description", ""),
                 "permission": entrada.get("permission"),
-                "input_schema": entrada.get("input_schema", _schema_objeto()),
+                "category": entrada.get("category", "READ_ONLY"),
+                "effects": list(entrada.get("effects") or ["NONE"]),
+                "input_schema": schema,
                 "output_schema": entrada.get("output_schema", "Standard tool envelope."),
+                "returns": entrada.get("returns", ""),
                 "limits": limites,
-            })
+            }
+            if entrada.get("caveats"):
+                item["caveats"] = list(entrada.get("caveats") or [])
+            catalogo.append(item)
     return catalogo
+
+
+def gerar_taxonomia_tools(catalogo):
+    """Describe shared authority/effect classes once for the visible tools.
+
+    Tool names are grouped here, so individual contracts do not repeat category
+    or side-effect boilerplate. ``NONE`` is the default effect for tools absent
+    from the special-effect tag lists.
+    """
+    items = catalogo if isinstance(catalogo, list) else []
+    names = [str(item.get("name")) for item in items if isinstance(item, dict) and item.get("name")]
+    categories = {}
+    for category, meaning in _TOOL_TAXONOMY["categories"].items():
+        members = [name for name in names if (TOOLS.get(name) or {}).get("category") == category]
+        if members:
+            categories[category] = {"meaning": meaning, "tools": members}
+
+    effect_tags = {}
+    used_effects = set()
+    for effect in _TOOL_TAXONOMY["effects"]:
+        if effect == "NONE":
+            continue
+        members = [name for name in names if effect in ((TOOLS.get(name) or {}).get("effects") or [])]
+        if members:
+            effect_tags[effect] = members
+            used_effects.add(effect)
+
+    effect_meanings = {
+        key: _TOOL_TAXONOMY["effects"][key]
+        for key in _TOOL_TAXONOMY["effects"]
+        if key == "NONE" or key in used_effects
+    }
+    return {
+        "categories": categories,
+        "effects": {
+            "default": "NONE",
+            "meanings": effect_meanings,
+            "tags": effect_tags,
+        },
+    }
 
 
 def _tipo_json_valido(valor, tipo):

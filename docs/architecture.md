@@ -1,4 +1,4 @@
-# Eyle Rev4.12.2 architecture
+# Eyle Rev4.12.4.1 architecture
 
 ## Active path
 
@@ -7,7 +7,8 @@ web / CLI
 → runtime service
 → AgentSession
 → LLM decision
-↔ phase-specific deterministic tools / live workspace / external memory on demand
+↔ state-filtered deterministic tools with shared taxonomy + compact contracts / live workspace / external memory on demand
+↔ execution_trace over sanitized current/persisted runtime facts
 → response-quality validation
 → answer or supervised write
 
@@ -17,7 +18,7 @@ completed job
 → expandable web panel
 ```
 
-There is one reasoning loop. No semantic router, Mission Interpreter, Scout, Finalizer agent, recovery agent or automatic project-memory injection sits in front of the model.
+There is one reasoning loop. No semantic router, Mission Interpreter, Scout, Finalizer agent, recovery agent or automatic project-memory injection sits in front of the model. Rev4.12.4.1 keeps per-tool routing hints removed. The runtime sends shared `READ_ONLY`/`EDIT` authority and effect-tag meanings once, then the LLM chooses among the phase-allowed tool contracts.
 
 ## Responsibility split
 
@@ -34,7 +35,7 @@ The model owns:
 
 ### Tools
 
-Tools own deterministic observations or actions:
+Tools own deterministic observations or actions. Shared authority/effects are defined once through the tool taxonomy; each model-visible contract states purpose, compact inputs, returned observation, tool-specific caveats and configured limits without teaching one tool in terms of another:
 
 - source reads/search/symbol lookup/tree inventory;
 - arithmetic with calculator evidence;
@@ -43,7 +44,8 @@ Tools own deterministic observations or actions:
 - test execution, including focused pytest investigation;
 - read-only Git working-tree and diff inspection;
 - dry-run and write operations;
-- external memory search/store.
+- external memory search/store;
+- `execution_trace` for sanitized phase/context/token/tool/decision/validation facts from current or persisted jobs.
 
 `inspect_project` reports signals, never an `important=true` judgment. Relevance remains task-dependent and belongs to the LLM.
 
@@ -52,7 +54,7 @@ Tools own deterministic observations or actions:
 The runtime owns executable boundaries:
 
 - safe paths and scan/read limits;
-- phase-specific tool availability;
+- concrete tool availability based on executable state, while lexical routing is limited to cheap obvious chat/utilities and a conservative write-completion guard;
 - task deadline and call/token budgets;
 - dry-run and explicit confirmation;
 - transactional apply and rollback;
@@ -72,7 +74,7 @@ Normal writes do not rely on the global turn limit as the anti-loop mechanism:
 - `write_patch_retry` — one bounded correction after rejected dry-run;
 - `analysis_answer_only` — tools close and the model answers from current evidence.
 
-Equivalent fresh reads are rejected through semantic coverage. Consecutive no-progress turns force completion or fail with a specific runtime code.
+Equivalent fresh reads are rejected through semantic coverage. Consecutive no-progress turns force completion or fail with a specific runtime code. `run_tests` enters `analysis_answer_only` only when runtime state shows a narrow test-only request and no other project observation; compound investigations remain open.
 
 ## Context model
 
@@ -91,7 +93,7 @@ Full conversation history is not replayed on every turn. External project memory
 
 ## Factual response ledger
 
-Project facts, confirmed bugs and contextual risks must map to real evidence. Preferred claims reference visible non-heading sentences by 1-based index, avoiding a second copy of the answer. The ledger is internal execution metadata; the user receives natural prose.
+Project facts, confirmed bugs and contextual risks must map to real evidence. The LLM may still form hypotheses, opinions, tradeoffs and recommendations when they are clearly framed as interpretation rather than verified project fact. Preferred claims reference visible non-heading sentences by 1-based index, avoiding a second copy of the answer. The ledger is internal execution metadata; the user receives natural prose.
 
 ## Post-write verification
 
@@ -108,11 +110,14 @@ apply
 
 A failed confirmed write preserves bounded real diagnostic output and rollback state for follow-up questions.
 
-## Rev4.12.2 context compaction
+## Rev4.12.4.1 context and budget model
 
-Structured tool output is allowed to be large inside the runtime, but the next LLM prompt receives a deep-copied bounded view. Lists, maps and long strings are reduced generically until the prompt fits the configured context budget. Full results stay in session/history.
+The default model window is 32,768 tokens per request. Analysis output reserve is stable and phase-based rather than growing with source volume. The task-wide effective prompt budget is 96,000 tokens, so several individually valid requests can complete one investigation without pretending that 96k tokens fit in a single 32k model context. Analysis phases remain observational and never receive patch dry-run tools automatically.
 
-## Rev4.12.2 observable history
+
+Structured tool output is allowed to be large inside the runtime, but the next LLM prompt receives a deep-copied bounded view. Lists, maps and long strings are reduced generically until the prompt fits the configured context budget. Already-cropped strings now converge at a stable minimum instead of being re-suffixed indefinitely. Full results stay in session/history.
+
+## Rev4.12.4.1 observable history
 
 The job result already contains deterministic execution metadata. Rev4.12 turns a sanitized subset into an on-demand API/UI view.
 
@@ -122,7 +127,7 @@ Visible:
 - turns and runtime phase;
 - per-call LLM usage metadata and latency;
 - aggregate prompt/cached/new/effective/output token counts;
-- called tools with bounded safe arguments and summarized results;
+- called tools with an explicit visible tool name, bounded safe arguments and summarized results;
 - compile/test/reread/rollback stages;
 - failure codes;
 - accepted/rejected decision type per turn and validation reason.

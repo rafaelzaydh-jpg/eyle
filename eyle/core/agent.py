@@ -17,6 +17,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from llm.executar import ErroLLM, PROMPT_AGENTE, executar_agente as executar_agente_llm
 
 from .session import AgentSession
+from .execution_trace import build_execution_trace
 from .security import _resolver_caminho_seguro
 from .token_budget import available_user_prompt_tokens, estimate_tokens
 from .text_hash import extrair_faixa, hash_faixa, hash_texto
@@ -28,14 +29,14 @@ from .post_write import (
 from .tools import (
     executar_tool,
     gerar_catalogo_tools,
+    gerar_taxonomia_tools,
     reverter_patch_confirmado,
     reverter_patch_set_confirmado,
     validar_chamada_tool,
 )
 from .validation import validate_final
 from .response_quality import (
-    claim_evidence_ledger, quality_contract, request_needs_project_evidence,
-    request_requires_write,
+    claim_evidence_ledger, quality_contract, request_requires_write,
 )
 
 READ_TOOLS = {"list_tree", "search_code", "find_symbol", "read_range", "read_file"}
@@ -43,24 +44,52 @@ OBSERVATION_TOOLS = {"project_stats", "count_tokens", "inspect_project"}
 UTILITY_TOOLS = {"calculate", "agent_info"}
 GIT_TOOLS = {"git_status", "git_diff"}
 EXECUTION_TOOLS = {"run_tests"}
-EVIDENCE_TOOLS = READ_TOOLS | OBSERVATION_TOOLS | GIT_TOOLS | EXECUTION_TOOLS | {"calculate", "agent_info"}
+TRACE_TOOLS = {"execution_trace"}
+EVIDENCE_TOOLS = READ_TOOLS | OBSERVATION_TOOLS | GIT_TOOLS | EXECUTION_TOOLS | TRACE_TOOLS | {"calculate", "agent_info"}
 MEMORY_TOOLS = {"memory_search", "memory_store"}
 PATCH_TOOLS = {"test_patch_dry_run", "test_patch_set_dry_run"}
 TERMINAL_TOOL_ERRORS = {"UNSAFE_PATH", "PATH_OUTSIDE_PROJECT", "PERMISSION_DENIED", "WORKSPACE_NOT_AVAILABLE"}
-_PROJECT_TASK_HINT = re.compile(
-    r"\b(?:analise|análise|analize|analisar|analyze|review|revise|revisar|"
-    r"inspecione|inspect|verifique|verify|audite|audit|investigue|investigate|"
-    r"olhe|avalie|evaluate|teste|testes|test|tests|projeto|project|workspace|código|codigo|code)\b",
+_OBVIOUS_CALCULATOR_REQUEST = re.compile(
+    r"^\s*(?:(?:quanto\s+(?:é|e)|calcule|calcular|calculate|resultado\s+de)\s+)?"
+    r"[0-9\s.,()+\-*/%^]+[?!.]?\s*$",
     re.I,
 )
-_CALCULATOR_HINT = re.compile(
-    r"(?:\d\s*[+\-*/%^]|[+\-*/%^]\s*\d|\b(?:calcule|calcular|calculate|quanto é|quanto e|porcentagem|percentual)\b)",
+_OBVIOUS_AGENT_INFO_REQUEST = re.compile(
+    r"^\s*(?:(?:quem|o\s+que)\s+(?:é|e)\s+voc[eê]|who\s+are\s+you|"
+    r"(?:qual|quais)\s+(?:é|e|são|sao)?\s*(?:suas?\s+)?(?:ferramentas?|funções|funcoes|capacidades?)|"
+    r"(?:que|quais)\s+ferramentas?\s+(?:voc[eê]\s+)?(?:tem|possui)|"
+    r"do\s+que\s+voc[eê]\s+(?:é|e)\s+capaz|"
+    r"what\s+(?:tools|capabilities)\s+do\s+you\s+have|"
+    r"(?:qual\s+(?:é|e)\s+)?(?:seu\s+nome|your\s+name))"
+    r"(?:\s+eyle)?[!?.\s]*$",
     re.I,
 )
-_AGENT_INFO_HINT = re.compile(
-    r"\b(?:ferramentas?|tools?|capaz|capacidade|capabilities|quem (?:é|e) você|quem (?:é|e) voce|who are you|seu nome|your name)\b",
+_FAST_CHAT_HINT = re.compile(
+    r"^\s*(?:oi|olá|ola|hey|hello|hi|bom dia|boa tarde|boa noite|tudo bem\??|"
+    r"como vai\??|valeu|obrigad[oa]|thanks|thank you)(?:\s+eyle)?[!?.\s]*$",
     re.I,
 )
+_TEST_ONLY_REQUEST = re.compile(
+    r"^\s*(?:(?:execute|rode|rodar|faça|faca|run)\s+)?"
+    r"(?:os\s+|the\s+)?(?:testes|tests|pytest|test suite|su[ií]te de testes)"
+    r"(?:\s+(?:do|de|of)\s+(?:projeto|project|workspace))?"
+    r"(?:\s+e\s+(?:explique|explain)\b[^.;]*)?[?!.\s]*$",
+    re.I,
+)
+
+
+def _is_obvious_calculator_request(request: Any) -> bool:
+    return bool(_OBVIOUS_CALCULATOR_REQUEST.fullmatch(str(request or "")))
+
+
+def _is_obvious_agent_info_request(request: Any) -> bool:
+    return bool(_OBVIOUS_AGENT_INFO_REQUEST.fullmatch(str(request or "")))
+
+
+def _is_test_only_request(request: Any) -> bool:
+    """Conservative optimization hint; never routes a compound investigation."""
+    return bool(_TEST_ONLY_REQUEST.fullmatch(str(request or "")))
+
 
 
 def _return(status: str, text: str, pending: Any, details: Dict[str, Any], full: bool):
@@ -226,6 +255,32 @@ def _response_quality_config(config: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _run_tests_closes_read_only_task(session: AgentSession) -> bool:
+    latest_terminal_test = any(
+        isinstance(item, dict)
+        and item.get("tool") == "run_tests"
+        and (
+            item.get("executed") is True
+            or item.get("error_code") in {"TEST_RUNNER_UNAVAILABLE", "TESTS_NOT_FOUND"}
+        )
+        for item in session.latest_tool_results
+    )
+    if not latest_terminal_test:
+        return False
+    if not _is_test_only_request(session.request):
+        return False
+    observed_tools = [
+        str(item.get("tool") or "")
+        for item in session.tool_history
+        if isinstance(item, dict) and str(item.get("tool") or "") in EVIDENCE_TOOLS
+    ]
+    if any(name != "run_tests" for name in observed_tools):
+        return False
+    if len(session.plan) > 1:
+        return False
+    return True
+
+
 def _phase_for_call(
     session: AgentSession, config: Dict[str, Any], project: Dict[str, Any],
 ) -> str:
@@ -252,25 +307,27 @@ def _phase_for_call(
             return "write_investigate"
         return "write_prepare"
 
-    needs_evidence = request_needs_project_evidence(session.request, True)
-    if not needs_evidence and not _PROJECT_TASK_HINT.search(str(session.request or "")):
+    # Rev4.12.3 keeps only a cheap fast path for obvious conversation and
+    # deterministic utilities. In a real workspace, every other request gets
+    # investigative capability and the LLM chooses the evidence it needs.
+    # This prevents a lexical classifier from hiding Git/symbol/read tools just
+    # because the user's wording was not anticipated.
+    if (
+        session.turn == 1
+        and not session.evidence
+        and (
+            _FAST_CHAT_HINT.fullmatch(str(session.request or ""))
+            or _is_obvious_calculator_request(session.request)
+            or _is_obvious_agent_info_request(session.request)
+        )
+    ):
         return "chat"
     if not session.evidence:
         return "analysis_investigate"
-    # A real test execution (including a deterministic runner-unavailable
-    # diagnostic) is terminal evidence for a read-only "run/test" request.
-    # Close the tool catalog on the next turn so the model explains the result
-    # instead of inspecting unrelated files again. Write requests keep their
-    # normal patch flow above.
-    if any(
-        isinstance(item, dict)
-        and item.get("tool") == "run_tests"
-        and (
-            item.get("executed") is True
-            or item.get("error_code") in {"TEST_RUNNER_UNAVAILABLE", "TESTS_NOT_FOUND"}
-        )
-        for item in session.latest_tool_results
-    ):
+    # A test result closes tools only when execution state shows a narrow
+    # test-only flow: run_tests was the sole project observation and the model
+    # did not declare a multi-step plan. Compound investigations remain open.
+    if _run_tests_closes_read_only_task(session):
         return "analysis_answer_only"
     if session.no_progress_turns >= max_no_progress or session.turn >= max_turns:
         return "analysis_answer_only"
@@ -302,9 +359,9 @@ def _allowed_tools(
     if phase == "chat":
         names = set()
         text = str(request or "")
-        if _CALCULATOR_HINT.search(text):
+        if _is_obvious_calculator_request(text):
             names.add("calculate")
-        if _AGENT_INFO_HINT.search(text):
+        if _is_obvious_agent_info_request(text):
             names.add("agent_info")
         return names
     if phase == "analysis_answer_only":
@@ -313,13 +370,16 @@ def _allowed_tools(
         return set(PATCH_TOOLS) if project_available and bool(((config or {}).get("codar") or {}).get("ativado", True)) else set()
     if not project_available:
         text = str(request or "")
-        names = {"calculate"} if _CALCULATOR_HINT.search(text) else set()
-        if _AGENT_INFO_HINT.search(text):
+        names = {"calculate"} if _is_obvious_calculator_request(text) else set()
+        if _is_obvious_agent_info_request(text):
             names.add("agent_info")
+        names |= TRACE_TOOLS
         return names
 
-    names = set(READ_TOOLS) | set(MEMORY_TOOLS) | set(UTILITY_TOOLS) | set(GIT_TOOLS)
+    names = set(READ_TOOLS) | set(MEMORY_TOOLS) | set(UTILITY_TOOLS) | set(GIT_TOOLS) | set(TRACE_TOOLS)
     if phase.startswith("analysis"):
+        # Analysis stays observational. Patch dry-run tools are not introduced
+        # merely because evidence exists; they belong to explicit write phases.
         names |= OBSERVATION_TOOLS
     if phase == "write_prepare" and bool(((config or {}).get("codar") or {}).get("ativado", True)):
         names |= PATCH_TOOLS
@@ -333,7 +393,7 @@ def _tool_catalog(
 ) -> Tuple[set[str], List[Dict[str, Any]]]:
     allowed = _allowed_tools(config, project, phase, request)
     catalog = gerar_catalogo_tools(
-        config=config, allowed_names=allowed, compact=True, minimal=True,
+        config=config, allowed_names=allowed, compact=True, minimal=False,
     ) if allowed else []
     for item in catalog:
         if item.get("name") == "test_patch_set_dry_run":
@@ -392,7 +452,7 @@ def _observable_tool_arguments(tool: str, arguments: Dict[str, Any]) -> Dict[str
             if arguments.get(k) is not None
         }
     if tool == "search_code":
-        return {"query": str(arguments.get("pergunta") or "")[:240]}
+        return {"query": str(arguments.get("query") or "")[:240]}
     if tool == "find_symbol":
         return {
             k: arguments.get(k) for k in ("simbolo", "caminho_relativo")
@@ -496,10 +556,15 @@ def _observable_tool_result(tool: str, result: Dict[str, Any]) -> Dict[str, Any]
             if isinstance(detail.get(key), list):
                 public[f"{key}_count"] = len(detail.get(key) or [])
     elif tool == "agent_info":
-        for key in ("name", "version", "revision", "capabilities", "available_tools"):
+        for key in ("name", "app_version", "revision", "write_enabled", "write_confirmation_required"):
             if key in detail:
-                value = detail.get(key)
-                public[key] = value[:40] if isinstance(value, list) else value
+                public[key] = detail.get(key)
+        registered = detail.get("registered_tools") if isinstance(detail.get("registered_tools"), list) else detail.get("tools")
+        available = detail.get("available_tools") if isinstance(detail.get("available_tools"), list) else []
+        if isinstance(registered, list):
+            public["registered_tools"] = [item.get("name") for item in registered[:40] if isinstance(item, dict)]
+        if isinstance(available, list):
+            public["available_tools"] = [item.get("name") for item in available[:40] if isinstance(item, dict)]
     elif tool == "run_tests":
         for key in ("command", "returncode", "scope", "backend", "tests_detected", "summary"):
             if key in detail:
@@ -516,6 +581,16 @@ def _observable_tool_result(tool: str, result: Dict[str, Any]) -> Dict[str, Any]
                 public[key] = detail.get(key)
         if isinstance(detail.get("files"), list):
             public["files"] = [item.get("path") for item in detail.get("files")[:40] if isinstance(item, dict)]
+    elif tool == "execution_trace":
+        summary = detail.get("summary") if isinstance(detail.get("summary"), dict) else {}
+        public["job_id"] = summary.get("job_id")
+        public["trace_status"] = summary.get("status")
+        public["current_phase"] = summary.get("current_phase")
+        for key in ("phases", "context", "llm_calls", "decisions", "tools"):
+            if isinstance(detail.get(key), list):
+                public[f"{key}_count"] = len(detail.get(key) or [])
+        if isinstance(detail.get("tokens"), dict):
+            public["tokens"] = detail.get("tokens")
     elif tool in PATCH_TOOLS:
         patches = detail.get("prepared_patches") or detail.get("patches") or []
         public["patches"] = [
@@ -524,10 +599,6 @@ def _observable_tool_result(tool: str, result: Dict[str, Any]) -> Dict[str, Any]
         ]
         if detail.get("detail") is not None:
             public["detail"] = str(detail.get("detail"))[:500]
-    elif tool == "run_tests":
-        for key in ("command", "returncode", "tests_detected"):
-            if key in detail:
-                public[key] = detail.get(key)
     return {k: v for k, v in public.items() if v is not None}
 
 
@@ -597,7 +668,7 @@ def _register_evidence(session: AgentSession, tool: str, detail: Any) -> List[st
             "conteudo": content,
             "source_type": "agent_runtime",
         }]
-    elif tool in {"calculate", "run_tests", "git_status", "git_diff"} and isinstance(detail, dict):
+    elif tool in {"calculate", "run_tests", "git_status", "git_diff", "execution_trace"} and isinstance(detail, dict):
         content = json.dumps(detail, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
         source_hash = hash_texto(content)
         source_names = {
@@ -605,6 +676,7 @@ def _register_evidence(session: AgentSession, tool: str, detail: Any) -> List[st
             "run_tests": "<runtime-tests>",
             "git_status": "<git-status>",
             "git_diff": "<git-diff>",
+            "execution_trace": "<execution-trace>",
         }
         candidates = [{
             "arquivo": source_names[tool],
@@ -817,17 +889,22 @@ def _shrink_structured_once(value: Any) -> bool:
             return True
 
         # Raw strings can still dominate a prompt (README/read_file/diff tails).
-        string_candidates = [
-            (len(item), key, item)
-            for key, item in value.items()
-            if isinstance(item, str) and len(item) > 1000
-        ]
+        crop_suffix = "\n...[context cropped]"
+        string_candidates = []
+        for key, item in value.items():
+            if not isinstance(item, str):
+                continue
+            raw = item[:-len(crop_suffix)] if item.endswith(crop_suffix) else item
+            if len(raw) > 1000:
+                string_candidates.append((len(raw), key, raw))
         if string_candidates:
-            _, key, item = max(string_candidates, key=lambda candidate: candidate[0])
-            keep = max(1000, len(item) // 2)
-            value[key] = item[:keep] + "\n...[context cropped]"
+            _, key, raw = max(string_candidates, key=lambda candidate: candidate[0])
+            keep = max(1000, len(raw) // 2)
+            if keep >= len(raw):
+                return False
+            value[key] = raw[:keep] + crop_suffix
             value[f"{key}_context_original_chars"] = max(
-                int(value.get(f"{key}_context_original_chars", 0) or 0), len(item),
+                int(value.get(f"{key}_context_original_chars", 0) or 0), len(raw),
             )
             value["context_truncated"] = True
             return True
@@ -897,7 +974,7 @@ def _minimal_tool_context(result: Dict[str, Any]) -> Dict[str, Any]:
 def _crop_payload(payload: Dict[str, Any], budget: int, chars_per_token: int) -> Dict[str, Any]:
     """Fit a prompt without destroying the full tool results kept in session.
 
-    Rev4.12.2 generalizes context compaction to arbitrary nested tool output.
+    Rev4.12.4.1 keeps generic context compaction to arbitrary nested tool output.
     The prompt receives a deep-copied, bounded view; session evidence and public
     history keep the original runtime data.
     """
@@ -920,11 +997,16 @@ def _crop_payload(payload: Dict[str, Any], budget: int, chars_per_token: int) ->
                 result["context_compacted"] = True
                 reduced = True
                 break
-            if isinstance(detail, str) and len(detail) > 1000:
-                result["detail"] = detail[: max(1000, len(detail) // 2)] + "\n...[context cropped]"
-                result["context_compacted"] = True
-                reduced = True
-                break
+            if isinstance(detail, str):
+                crop_suffix = "\n...[context cropped]"
+                raw_detail = detail[:-len(crop_suffix)] if detail.endswith(crop_suffix) else detail
+                if len(raw_detail) > 1000:
+                    keep = max(1000, len(raw_detail) // 2)
+                    if keep < len(raw_detail):
+                        result["detail"] = raw_detail[:keep] + crop_suffix
+                        result["context_compacted"] = True
+                        reduced = True
+                        break
         if reduced:
             continue
 
@@ -961,59 +1043,80 @@ def _crop_payload(payload: Dict[str, Any], budget: int, chars_per_token: int) ->
 
 
 def _agent_config(config: Dict[str, Any], session: AgentSession, project: Dict[str, Any]) -> Dict[str, Any]:
+    """Resolve output reserve from work type, never from source volume.
+
+    Context already becomes more valuable as evidence accumulates. Increasing
+    completion reserve in proportion to source text would steal input budget at
+    exactly the wrong time. Analysis therefore has a stable reserve, while
+    patch-producing phases retain a larger bounded reserve.
+    """
     clone = dict(config)
     llm = dict(config.get("llm") or {})
-    latest_has_source = any(
-        isinstance(item, dict)
-        and item.get("tool") in READ_TOOLS
-        and isinstance(item.get("detail"), dict)
-        for item in session.latest_tool_results
-    )
     phase = _phase_for_call(session, config, project)
-    decision_limit = int(llm.get("agent_decision_max_tokens", 1400) or 1400)
-    patch_limit = int(llm.get("agent_patch_max_tokens", 4200) or 4200)
-    patch_phase = phase in {"write_prepare", "write_patch_only", "write_patch_retry"}
-    if latest_has_source or (patch_phase and bool(session.evidence)):
-        source_chars = 0
-        for item in list(session.latest_tool_results) + list(session.relevant_sources):
-            detail = item.get("detail") if isinstance(item, dict) else None
-            containers = [detail] if isinstance(detail, dict) else [item]
-            for container in containers:
-                if not isinstance(container, dict):
-                    continue
-                source_chars += sum(
-                    len(value) for key, value in container.items()
-                    if key in {"conteudo", "trecho_numerado", "conteudo_raw"} and isinstance(value, str)
-                )
-        chars_per_token = max(1, int((config.get("context_engine") or {}).get("chars_per_token_fallback", 3) or 3))
-        adaptive = max(1800, (source_chars // chars_per_token) + 1000)
-        llm["agent_max_tokens"] = min(patch_limit, adaptive)
+    decision_limit = max(1, int(llm.get("agent_decision_max_tokens", 1100) or 1100))
+    analysis_limit = max(1, int(llm.get("agent_analysis_max_tokens", 1800) or 1800))
+    patch_limit = max(1, int(llm.get("agent_patch_max_tokens", 3600) or 3600))
+
+    if phase in {"write_prepare", "write_patch_only", "write_patch_retry"}:
+        reserve = patch_limit
+    elif phase.startswith("analysis"):
+        reserve = analysis_limit
     else:
-        llm["agent_max_tokens"] = decision_limit
+        reserve = decision_limit
+    llm["agent_max_tokens"] = reserve
     clone["llm"] = llm
     return clone
 
 
-def _tool_guidance(tools: List[Dict[str, Any]]) -> Optional[str]:
-    names = {str(item.get("name") or "") for item in tools if isinstance(item, dict)}
-    hints = []
-    if "calculate" in names:
-        hints.append("calculate: use for arithmetic instead of mental math; after success answer on the next turn and cite its evidence_id only if you choose a structured final")
-    if "agent_info" in names:
-        hints.append("agent_info: use for Eyle identity, capabilities or tool-list questions")
-    if "project_stats" in names:
-        hints.append("project_stats: exact files/lines/chars/bytes/language measurements")
-    if "count_tokens" in names:
-        hints.append("count_tokens: measured text plus truthful token estimate; respect exact=false")
-    if "inspect_project" in names:
-        hints.append("inspect_project: objective structure/relation signals only; it never ranks file importance")
-    if "run_tests" in names:
-        hints.append("run_tests: for an explicit request to run/test the project, call it directly; it detects the suite itself. Prefer a narrow pytest scope only when already known")
-    if "git_status" in names:
-        hints.append("git_status: inspect existing user/worktree changes before edits when repository state matters")
-    if "git_diff" in names:
-        hints.append("git_diff: inspect only the relevant bounded diff; do not request it when live source reads already answer the question")
-    return "; ".join(hints) if hints else None
+def _trace_value_metrics(value: Any, chars_per_token: int) -> Dict[str, Any]:
+    try:
+        serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+    except (TypeError, ValueError):
+        serialized = str(value)
+    metrics: Dict[str, Any] = {
+        "characters": len(serialized),
+        "estimated_tokens": estimate_tokens(serialized, chars_per_token),
+    }
+    if isinstance(value, (list, dict)):
+        metrics["items"] = len(value)
+    return metrics
+
+
+def _trace_prompt_components(payload: Dict[str, Any], chars_per_token: int) -> Dict[str, Dict[str, Any]]:
+    return {
+        str(key): _trace_value_metrics(value, chars_per_token)
+        for key, value in payload.items()
+    }
+
+
+def _current_trace_snapshot(session: AgentSession, config: Dict[str, Any]) -> Dict[str, Any]:
+    runtime = config.get("_runtime_agent_budget") or {}
+    details = {
+        "status": "processing",
+        "turns": session.turn,
+        "tool_calls": session.tool_calls,
+        "tool_history": list(session.tool_history[-50:]),
+        "decision_history": list(session.decision_history[-50:]),
+        "llm_usage": {key: value for key, value in runtime.items() if key in {
+            "llm_calls", "llm_requests", "prompt_tokens_actual", "prompt_tokens_cached",
+            "prompt_tokens_uncached", "prompt_tokens_effective", "completion_tokens_actual",
+            "generated_tokens", "reasoning_tokens_actual", "total_tokens_effective",
+        }},
+        "llm_responses": list(runtime.get("llm_responses") or []),
+        "runtime_phase": session.phase,
+        "prompt_snapshots": list(session.prompt_snapshots[-20:]),
+        "phase_history": list(session.phase_history[-50:]),
+        "parse_failures": session.parse_failures,
+        "no_progress_turns": session.no_progress_turns,
+        "phase_violations": session.phase_violations,
+        "write_validation": dict(session.write_validation or {}),
+    }
+    return build_execution_trace(
+        details,
+        job_id=runtime.get("source_job_id"),
+        status="processing",
+        limit=100,
+    )
 
 
 def _compile_prompt(
@@ -1040,7 +1143,7 @@ def _compile_prompt(
     if isinstance(runtime, dict):
         runtime["history_messages_omitted"] = history.get("omitted_messages", 0)
     phase = _phase_for_call(session, call_config, project)
-    session.phase = phase
+    session.record_phase(phase, turn=session.turn, reason="phase_for_call")
     allowed, tools = _tool_catalog(call_config, project, phase, session.request)
     payload = {
         "request": session.request,
@@ -1059,18 +1162,34 @@ def _compile_prompt(
             _response_quality_config(call_config)["enabled"],
             write_available=bool(((call_config or {}).get("codar") or {}).get("ativado", True)),
         ),
+        "tool_taxonomy": gerar_taxonomia_tools(tools) if tools else {},
         "available_tools": tools,
-        "tool_guidance": _tool_guidance(tools),
         "runtime_feedback": feedback or None,
     }
     output_tokens = int((call_config.get("llm") or {}).get("agent_max_tokens", 1400) or 1400)
     prompt_budget = available_user_prompt_tokens(call_config, PROMPT_AGENTE, output_tokens=output_tokens)
+    components_before = _trace_prompt_components(payload, chars_per_token)
+    pre_crop = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+    pre_crop_tokens = estimate_tokens(pre_crop, chars_per_token)
     payload = _crop_payload(copy.deepcopy(payload), prompt_budget, chars_per_token)
+    components_after = _trace_prompt_components(payload, chars_per_token)
     prompt = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+    post_crop_tokens = estimate_tokens(prompt, chars_per_token)
     session.record_prompt(
         mode="agent", characters=len(prompt),
-        estimated_tokens=estimate_tokens(prompt, chars_per_token), tool_count=len(tools),
+        estimated_tokens=post_crop_tokens, tool_count=len(tools),
         phase=phase, turn=session.turn,
+        metadata={
+            "prompt_budget_tokens": prompt_budget,
+            "output_tokens_reserved": output_tokens,
+            "system_prompt_characters": len(PROMPT_AGENTE),
+            "system_prompt_estimated_tokens": estimate_tokens(PROMPT_AGENTE, chars_per_token),
+            "pre_crop_characters": len(pre_crop),
+            "pre_crop_estimated_tokens": pre_crop_tokens,
+            "crop_applied": len(pre_crop) != len(prompt),
+            "components_before": components_before,
+            "components_after": components_after,
+        },
     )
     return prompt, allowed
 
@@ -1128,6 +1247,7 @@ def _details(
         "no_progress_turns": session.no_progress_turns,
         "phase_violations": session.phase_violations,
         "prompt_snapshots": session.prompt_snapshots,
+        "phase_history": list(session.phase_history[-50:]),
         "write_validation": dict(session.write_validation or {}),
     }
 
@@ -1756,7 +1876,7 @@ def _semantic_read_signature(tool: str, arguments: Dict[str, Any]) -> Optional[s
             "limite": arguments.get("limite"),
         }, sort_keys=True, separators=(",", ":"), default=str)
     if tool == "search_code":
-        query = " ".join(str(arguments.get("pergunta") or "").lower().split())
+        query = " ".join(str(arguments.get("query") or "").lower().split())
         return f"search:{query}"
     if tool == "find_symbol":
         path = _normalized_path(arguments.get("caminho_relativo"))
@@ -1981,7 +2101,7 @@ def _run(
         _record_decision(
             session,
             "tool_calls" if len(calls) > 1 else "tool",
-            "accepted",
+            "requested",
             tools=[str(call.get("tool") or "") for call in calls],
         )
         next_results: List[Dict[str, Any]] = []
@@ -2005,11 +2125,15 @@ def _run(
                     phase_detail = "A investigação terminou. Responda usando as evidências atuais, sem novas ferramentas."
                 if phase_error in {"READ_PHASE_CLOSED", "FINAL_PHASE_REQUIRES_ANSWER"}:
                     session.phase_violations += 1
-                next_results.append({
+                rejected = {
                     "tool": tool, "status": "failed", "ok": False,
+                    "executed": False, "changed": False,
                     "error_code": phase_error or "TOOL_NOT_AVAILABLE",
                     "detail": phase_detail,
-                })
+                }
+                next_results.append(rejected)
+                _record_decision(session, "tool_validation", "rejected", reason=rejected["error_code"], tools=[tool])
+                _record_tool_history(session, tool, arguments, rejected, status_override="rejected")
                 if (
                     phase_error in {"READ_PHASE_CLOSED", "FINAL_PHASE_REQUIRES_ANSWER"}
                     and session.phase_violations > max_phase_violations
@@ -2024,10 +2148,14 @@ def _run(
                 arguments, patch_error = _enrich_single_patch(session, arguments)
                 if patch_error:
                     session.patch_failures += 1
-                    next_results.append({
+                    rejected = {
                         "tool": tool, "status": "failed", "ok": False,
+                        "executed": False, "changed": False,
                         "error_code": "PATCH_SCHEMA_INVALID", "detail": patch_error,
-                    })
+                    }
+                    next_results.append(rejected)
+                    _record_decision(session, "tool_validation", "rejected", reason="PATCH_SCHEMA_INVALID", tools=[tool])
+                    _record_tool_history(session, tool, arguments, rejected, status_override="rejected")
                     if session.patch_failures >= max_patch_failures:
                         text = f"A proposta de escrita continuou inválida após {session.patch_failures} tentativa(s): {patch_error}."
                         return _return("failed", text, None, _details(session, "failed", config, failure_code="PATCH_SCHEMA_INVALID"), full)
@@ -2036,23 +2164,31 @@ def _run(
                 arguments, patch_error = _enrich_patch_set(session, project, arguments)
                 if patch_error:
                     session.patch_failures += 1
-                    next_results.append({
+                    rejected = {
                         "tool": tool, "status": "failed", "ok": False,
+                        "executed": False, "changed": False,
                         "error_code": "PATCH_SCHEMA_INVALID", "detail": patch_error,
-                    })
+                    }
+                    next_results.append(rejected)
+                    _record_decision(session, "tool_validation", "rejected", reason="PATCH_SCHEMA_INVALID", tools=[tool])
+                    _record_tool_history(session, tool, arguments, rejected, status_override="rejected")
                     if session.patch_failures >= max_patch_failures:
                         text = f"A proposta de escrita continuou inválida após {session.patch_failures} tentativa(s): {patch_error}."
                         return _return("failed", text, None, _details(session, "failed", config, failure_code="PATCH_SCHEMA_INVALID"), full)
                     continue
             normalized, error = validar_chamada_tool(tool, arguments)
             if error:
-                next_results.append(_compact_non_read_result(tool, error))
+                rejected = _compact_non_read_result(tool, error)
+                next_results.append(rejected)
+                _record_decision(session, "tool_validation", "rejected", reason=error.get("error_code") or "INVALID_ARGUMENT", tools=[tool])
+                _record_tool_history(session, tool, arguments, error, status_override="rejected")
                 if tool in PATCH_TOOLS:
                     session.patch_failures += 1
                     if session.patch_failures >= max_patch_failures:
                         text = f"A proposta de escrita continuou inválida após {session.patch_failures} tentativa(s): {error.get('detail')}."
                         return _return("failed", text, None, _details(session, "failed", config, failure_code=error.get("error_code") or "PATCH_SCHEMA_INVALID"), full)
                 continue
+            _record_decision(session, "tool_validation", "validated", tools=[tool])
             semantic_signature = _semantic_read_signature(tool, normalized)
             signature = _action_signature(tool, normalized)
             if signature == session.last_tool_signature:
@@ -2071,6 +2207,7 @@ def _run(
                     "detail": "A mesma leitura fresca já está disponível. Use o resultado atual, conclua ou escolha outra faixa/arquivo.",
                 }
                 next_results.append(blocked)
+                _record_decision(session, "tool_execution", "skipped", reason="IDENTICAL_READ_BLOCKED", tools=[tool])
                 _record_tool_history(session, tool, normalized, blocked, semantic_signature=semantic_signature)
                 continue
             if tool in READ_TOOLS and _read_already_covered(session, tool, normalized):
@@ -2081,14 +2218,31 @@ def _run(
                     "detail": "Essa fonte ou faixa já está coberta por evidência fresca. Use o conteúdo atual e avance.",
                 }
                 next_results.append(blocked)
+                _record_decision(session, "tool_execution", "skipped", reason="SEMANTIC_READ_BLOCKED", tools=[tool])
                 _record_tool_history(session, tool, normalized, blocked, semantic_signature=semantic_signature)
                 continue
 
-            context = {"config": config, "projeto": project, "evidence": session.evidence}
+            context = {
+                "config": config, "projeto": project, "evidence": session.evidence,
+                "execution_trace": _current_trace_snapshot(session, config),
+                "available_tools": sorted(allowed),
+            }
             result = executar_tool(tool, normalized, context)
             session.tool_calls += 1
             _record_tool_history(
                 session, tool, normalized, result, semantic_signature=semantic_signature,
+            )
+            if result.get("executed") is True:
+                execution_outcome = "executed" if result.get("ok") is True else "failed"
+            elif result.get("status") == "skipped":
+                execution_outcome = "skipped"
+            elif result.get("ok") is True:
+                execution_outcome = "completed"
+            else:
+                execution_outcome = "failed"
+            _record_decision(
+                session, "tool_execution", execution_outcome,
+                reason=result.get("error_code"), tools=[tool],
             )
             model_result = _model_tool_result(session, tool, result)
             _remember_relevant_sources(session, tool, model_result, config)

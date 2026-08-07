@@ -99,8 +99,12 @@ def test_calculate_structured_final_finishes_in_two_calls(monkeypatch):
     assert "190" in text
     assert len(prompts) == 2
     assert details["turns"] == 2
-    assert [item["decision"] for item in details["decision_history"]] == ["tool", "final"]
-    assert all(item["outcome"] == "accepted" for item in details["decision_history"])
+    assert [item["decision"] for item in details["decision_history"]] == [
+        "tool", "tool_validation", "tool_execution", "final",
+    ]
+    assert [item["outcome"] for item in details["decision_history"][:3]] == [
+        "requested", "validated", "executed",
+    ]
     assert details["evidence"][0]["source_type"] == "calculate"
 
 

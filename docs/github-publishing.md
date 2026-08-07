@@ -1,4 +1,4 @@
-# Publishing Eyle Rev4.12.2
+# Publishing Eyle Rev4.12.4.1
 
 ## Repository description
 
@@ -27,14 +27,14 @@ node --check web/static/app.js
 9. Do not replace the custom personal-use license with an OSI template merely because the repository is public. A licensing change must be intentional and documented in `UPDATE_HISTORY.md`.
 10. Verify the expandable job history exposes only sanitized runtime facts.
 11. Confirm Git/test tools are read-only/bounded and the decision history contains no raw reasoning.
-12. Tag the release as `v2.7.4-rev4.12.2`.
+12. Tag the release as `v2.7.4-rev4.12.4.1`.
 
 ## Suggested Git commands
 
 ```bash
 git add -A
-git commit -m "Rev4.12.2 - context and test-runner hardening"
-git tag -a v2.7.4-rev4.12.2 -m "Stable Rev4.12.2 context and test-runner hardening"
+git commit -m "Rev4.12.4.1 - context budget hardening"
+git tag -a v2.7.4-rev4.12.4.1 -m "Stable functional Rev4.12.4.1"
 git push origin HEAD
-git push origin v2.7.4-rev4.12.2
+git push origin v2.7.4-rev4.12.4.1
 ```

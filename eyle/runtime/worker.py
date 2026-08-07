@@ -65,7 +65,7 @@ def processar_evento(evento):
     if tipo == "pergunta":
         if evento.get("_job_id") is not None:
             progress.publicar_job(
-                evento["_job_id"], "routing", "Entendendo o pedido e escolhendo o fluxo",
+                evento["_job_id"], "agent", "Processando o pedido com AgentSession",
             )
         resultado = eyle_service.processar(
             evento["texto"],

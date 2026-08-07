@@ -289,6 +289,8 @@
         const phaseText = call.phase ? ` · ${call.phase}` : "";
         summaryEl.textContent = `${call.call}. ${call.tool || "tool"}${statusText}${phaseText}`;
         details.appendChild(summaryEl);
+        const toolNameLine = historyLine("ferramenta", call.tool || "unknown_tool");
+        if (toolNameLine) details.appendChild(toolNameLine);
 
         const argsTitle = document.createElement("div");
         argsTitle.className = "history-subtitle";

@@ -7,7 +7,7 @@
     "temperature": 0.2,
     "timeout_seconds": 120,
     "max_tokens": 1500,
-    "context_window_tokens": 10000,
+    "context_window_tokens": 32768,
     "connect_timeout_seconds": 5,
     "read_timeout_seconds": 120,
     "model_discovery_timeout_seconds": 3,
@@ -25,7 +25,8 @@
     "truncation_retry_multiplier": 2.0,
     "truncation_retry_max_tokens": 4800,
     "agent_decision_max_tokens": 1100,
-    "agent_patch_max_tokens": 3600
+    "agent_patch_max_tokens": 3600,
+    "agent_analysis_max_tokens": 1800
   },
   "context_engine": {
     "safety_margin_tokens": 500,
@@ -100,9 +101,9 @@
     "task_deadline_seconds": 900,
     "max_llm_calls": 8,
     "max_secret_scan_bytes": 65536,
-    "max_prompt_tokens": 12000,
+    "max_prompt_tokens": 96000,
     "max_completion_tokens": 6000,
-    "max_total_tokens": 18000,
+    "max_total_tokens": 102000,
     "chat_history_token_budget": 700,
     "final_validation_retries": 1,
     "max_llm_turns": 6,
@@ -142,6 +143,6 @@
     "window_seconds": 3600
   },
   "app_version": "2.7.4",
-  "config_schema_version": "4.12.2",
-  "revision": "4.12.2-context-runner-hardening"
+  "config_schema_version": "4.12.4.1",
+  "revision": "4.12.4.1-context-budget-hardening"
 }

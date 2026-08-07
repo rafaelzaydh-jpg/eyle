@@ -1,4 +1,4 @@
-"""Shared token-budget helpers for isolated 10k-context operation.
+"""Shared token-budget helpers for bounded-context agent operation.
 
 The runtime uses conservative character estimates only when the provider does
 not expose token counts. This module intentionally contains no retrieval or
@@ -28,7 +28,7 @@ def available_user_prompt_tokens(
     llm = (config or {}).get("llm") or {}
     context = (config or {}).get("context_engine") or {}
     chars_per_token = max(1, int(context.get("chars_per_token_fallback", 3) or 3))
-    window = max(1, int(llm.get("context_window_tokens", 8192) or 8192))
+    window = max(1, int(llm.get("context_window_tokens", 32768) or 32768))
     margin = max(0, int(context.get("safety_margin_tokens", 500) or 0))
     system_tokens = estimate_tokens(system_prompt, chars_per_token)
     return max(0, window - margin - max(0, int(output_tokens or 0)) - system_tokens)

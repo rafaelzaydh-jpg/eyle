@@ -1,6 +1,10 @@
-- [2.7.4 Rev4.12.2 — Context and test-runner hardening](2.7.4-rev4.12.2.md)
 # Releases
+- [2.7.4 Rev4.12.4.1 — Context budget hardening](2.7.4-rev4.12.4.1.md)
 
+- [2.7.4 Rev4.12.4 — Shared tool taxonomy](2.7.4-rev4.12.4.md)
+- [2.7.4 Rev4.12.3.1 — Foundation hardening hotfix](2.7.4-rev4.12.3.1.md)
+- [2.7.4 Rev4.12.3 — Tool contracts and LLM-led investigation hardening](2.7.4-rev4.12.3.md)
+- [2.7.4 Rev4.12.2 — Context and test-runner hardening](2.7.4-rev4.12.2.md)
 - [2.7.4 Rev4.12.1 — Runtime tools and decision observability](2.7.4-rev4.12.1.md)
 - [2.7.4 Rev4.12 — Observable execution history](2.7.4-rev4.12.md)
 - [2.7.4 Rev4.11.8 — Project intelligence tools](2.7.4-rev4.11.8.md)

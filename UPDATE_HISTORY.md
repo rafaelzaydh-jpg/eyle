@@ -354,3 +354,108 @@ A regra arquitetural resultante é simples:
 - README wording that describes Eyle as open source when the license has not explicitly changed.
 
 **Reconsider only if:** the project intentionally decides to allow broader redistribution/commercial use, or legal review recommends a different licensing structure. Any such change should be explicit, repository-wide, and documented here before publication.
+
+---
+
+## 20. Palavra-chave como roteador principal de capacidade
+
+**Reduzido na Rev4.12.3:** o classificador lexical não decide mais se uma pergunta normal sobre um workspace merece ferramentas de investigação. Apenas conversa/utilidades óbvias mantêm um fast-path barato; fora disso, a LLM recebe capacidade real de inspeção e escolhe a evidência necessária.
+
+**Por que reduzimos:** palavras isoladas criaram falsos positivos e falsos negativos concretos. `separe` em “separe riscos de bugs” armou fluxo de escrita, enquanto perguntas sobre Git, `AgentSession` e fluxo de mensagens caíram em chat sem tools porque não continham a combinação esperada de palavras.
+
+**O que permanece:** um detector conservador de mutação continua existindo somente como proteção contra conclusão em prosa quando um pedido de escrita é claramente identificável. A segurança real continua nas fronteiras executáveis: dry-run, confirmação, paths, hashes, transação, testes, rollback e releitura.
+
+**Não reintroduzir:** listas crescentes de palavras para mapear cada intenção possível para uma tool/fase. Uma nova regra lexical precisa provar que protege uma fronteira concreta e não apenas tenta pensar no lugar da LLM.
+
+---
+
+## 21. Orientação de tools separada do contrato da própria tool
+
+**Removido na Rev4.12.3:** `_tool_guidance` com dicas específicas como “use X para isso” ou “prefira Y em vez de Z”.
+
+**Por que saiu:** a informação ficava fragmentada entre registro, catálogo minimalista, guidance e fase. Isso tornava a escolha da LLM dependente de regras externas e permitia que uma tool fosse descrita em função de outra.
+
+**Substituição atual:** cada tool model-visible possui contrato compacto próprio: `purpose`, `inputs`, `returns`, `does_not`, `side_effects` e `limits`. A tool descreve somente o que observa/executa e o que sua saída não prova. A combinação entre tools pertence à LLM.
+
+**Não reintroduzir:** instruções por-tool fora do registro para roteamento semântico. Exceções só cabem quando representam uma restrição executável que não pode ser expressa no contrato/validador da própria tool.
+
+---
+
+## 22. `run_tests` encerrando qualquer investigação após um resultado
+
+**Removido na Rev4.12.3:** a regra “houve `run_tests` → próximo turno é answer-only” para toda análise read-only.
+
+**Por que saiu:** funcionava para “execute os testes”, mas cortava tarefas compostas como “analise profundamente, execute testes e proponha correções”. Um runner indisponível virava fim artificial da investigação.
+
+**Substituição atual:** o fechamento é baseado no estado observável da tarefa. `run_tests` só fecha tools quando é a única observação de projeto e não existe plano multi-etapa declarado. Se outras observações já aconteceram, a investigação permanece aberta.
+
+**Só reconsiderar:** com métricas/trace que provem chamadas extras reais em tarefas estreitas e sem voltar a encerrar tarefas compostas.
+
+---
+
+## 23. Medição tratada como diagnóstico
+
+**Regra explicitada na Rev4.12.3:** uma tool não prova algo que ela não observa. Exemplo: `count_tokens` mede texto do projeto; não mede tokens realmente enviados à LLM e não diagnostica desperdício de contexto. `project_stats` mede tamanho/estrutura, não importância. `inspect_project` retorna sinais, não confirma comportamento runtime.
+
+**Motivo:** no teste real, tamanho de `agent.py` foi usado como proxy para “desperdício de tokens”. A conclusão era plausível, mas não estava medida.
+
+**Substituição atual:** contratos declaram explicitamente `does_not`. O futuro mecanismo de self-debug/tracing deve oferecer fatos do caminho real da execução; a conclusão continuará sendo da LLM.
+
+---
+
+## 24. Repetir sufixo de compactação em string já truncada
+
+**Corrigido na Rev4.12.3:** strings próximas do piso de compactação não recebem `...[context cropped]` repetidamente.
+
+**Falha antiga:** ao reduzir uma string para 1000 caracteres e adicionar o marcador, ela continuava maior que 1000; o próximo ciclo podia repetir a mesma operação indefinidamente. O catálogo semântico maior expôs esse loop em regressão de contexto.
+
+**Substituição atual:** o compactador remove logicamente o sufixo antes de medir, só reduz quando há redução real possível e converge para um piso estável.
+
+## 25. Rev4.12.3.1 — hotfix da fundação antes do self-debug
+
+**Corrigido:** fast-paths por presença de palavras (`capacidade`, expressão matemática etc.) podiam esconder tools de projeto em pedidos compostos. Agora apenas pedidos integralmente utilitários usam o caminho barato.
+
+**Corrigido:** `run_tests` podia fechar uma análise composta se a LLM não declarasse `plan`. O fechamento antecipado agora exige que o próprio pedido seja claramente test-only e que não existam outras observações de projeto.
+
+**Corrigido:** a exigência de evidência confundia opinião geral sobre arquitetura com fato do workspace e deixava escapar pedidos como “identifique bugs reais”/“onde AgentSession é definido”. A regra agora mira realidade concreta do workspace; hipóteses, opiniões, recomendações e trade-offs continuam livres quando claramente assumidos.
+
+**Corrigido:** comandos para reescrever a própria resposta não armam mais o fluxo de escrita no workspace. Escrita real continua sendo decidida pela tentativa concreta de patch e protegida por confirmação/validação.
+
+**Corrigido:** contratos de tools agora descrevem todos os argumentos; `search_code` declara busca literal, `memory_store` declara efeito `MEMORY_WRITE`, e `agent_info` separa escrita habilitada da política de confirmação.
+
+**Corrigido:** histórico de tools deixou de registrar “accepted” antes da validação. O fluxo observável passa a distinguir `requested → validated/rejected → executed/skipped/failed/completed`, preservando tentativas rejeitadas. Essa base agora é consumida pela `execution_trace` sem reinterpretar estados antigos.
+
+**Compatibilidade mantida conscientemente:** `claims[].text` e aliases selecionados ainda podem ser aceitos para retomada/compatibilidade de protocolo, mas não são o formato emitido pelo prompt/catalogo atual e não reativam nenhuma arquitetura de raciocínio legada.
+
+
+## 26. Rev4.12.3.1 — `execution_trace` sem segundo oráculo de diagnóstico
+
+**Adicionado:** uma única tool `execution_trace` consulta fatos sanitizados da execução atual ou de jobs persistidos: fases, composição/tamanho do contexto antes e depois da compactação, metadados de chamadas LLM/tokens, decisões, tools e validações.
+
+**Decisão arquitetural:** o runtime continua apenas registrando realidade observável. A tool não conclui causa, não decide se tokens foram desperdiçados e não substitui leitura de código/testes. A LLM conecta o trace às demais evidências e testa suas próprias hipóteses.
+
+**Sem segundo store:** o trace reutiliza `AgentSession` + detalhes já persistidos do job. Não criar bancos paralelos de tracing enquanto esse registro for suficiente.
+
+**Privacidade:** não expor chain-of-thought, prompt bruto, resposta bruta do modelo, corpos de fonte/patch/memória, hashes sensíveis ou segredos. O registro de composição do contexto guarda apenas nomes de componentes e métricas de tamanho/tokens.
+
+**Não reintroduzir:** tools especializadas como `token_waste`, `why_transition`, `debug_classifier` ou equivalentes que entreguem diagnóstico mastigado. Só reconsiderar se o trace factual não conseguir representar uma evidência concreta necessária.
+## 27. Rev4.12.4 — taxonomia compartilhada de tools sem novo roteador
+
+A Rev4.12.4 não cria uma etapa de seleção por categoria. O runtime continua filtrando somente o que é executável na fase atual e envia todas as tools permitidas para a mesma LLM escolher. `READ_ONLY` e `EDIT` são apenas classes de autoridade compartilhadas, não rotas semânticas.
+
+Os efeitos deixam de ser frases repetidas em cada contrato e passam a tags globais: `NONE` (padrão), `EXEC`, `TEMP`, `MEMORY_WRITE`, `WORKSPACE_WRITE`, `VERIFY` e `ROLLBACK`. Contratos individuais preservam somente finalidade, assinatura compacta de argumentos, retorno, caveats específicos e limites numéricos.
+
+Motivo: o catálogo da Rev4.12.3.1 repetia `side_effects: none`, “does not modify files” e explicações equivalentes em quase todas as tools. A primeira tentativa de simplesmente adicionar `category/effects` por tool aumentou o wire-size; ela foi descartada antes do release. A implementação final agrupa nomes na taxonomia uma única vez.
+
+Medição com o mesmo serializador: catálogo completo de 20 tools caiu de 12.492 caracteres para ~10.241 incluindo a taxonomia; `analysis_investigate` com 15 tools caiu de 8.353 para ~7.049. A otimização não justifica esconder tools da LLM nem adicionar uma chamada de roteamento.
+
+Não reintroduzir `_tool_guidance`, seleção lexical por ferramenta ou “LLM escolhe categoria → segunda LLM escolhe tool” sem evidência nova: isso recuperaria exatamente as camadas que a arquitetura removeu.
+
+
+## 28. Rev4.12.4.1 — janela 32k e orçamento cumulativo separado
+
+A janela por chamada e o orçamento cumulativo do job foram separados explicitamente. O contexto padrão passa a 32.768 tokens por request; o job pode acumular até 96.000 tokens efetivos de prompt ao longo de várias chamadas, sem nunca permitir que uma única chamada ultrapasse a janela do backend. Não restaurar o antigo teto de 12k como mecanismo anti-loop: loops continuam limitados por turnos, ferramentas repetidas, no-progress, deadline e fases.
+
+A reserva de saída deixa de crescer conforme a quantidade de fonte lida. Análise usa reserva estável por fase; apenas fases de patch recebem reserva maior. Fases `analysis_*` também deixam de ganhar dry-run de patch automaticamente. Essa separação evita que evidência crescente reduza o próprio espaço de investigação.
+
+`agent_info` passa a distinguir `registered_tools` (registro completo) de `available_tools` (subconjunto executável na fase atual). Não voltar a inferir capacidade total pelo catálogo local do turno.

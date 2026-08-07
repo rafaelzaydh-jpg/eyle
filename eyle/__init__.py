@@ -1,1 +1,1 @@
-"""Eyle 2.7.4 Rev4.12.2 — context and test-runner hardening."""
+"""Eyle 2.7.4 Rev4.12.3 — tool contracts and LLM-led investigation hardening."""

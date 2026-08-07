@@ -154,7 +154,12 @@ def test_greeting_stays_tool_free_but_self_question_gets_agent_info(monkeypatch,
     )
     assert status == "success"
     assert [item["name"] for item in payloads[0]["available_tools"]] == ["agent_info"]
-    assert "agent_info" in payloads[0]["tool_guidance"]
+    contract = payloads[0]["available_tools"][0]
+    assert "runtime identity" in contract["purpose"].lower()
+    taxonomy = payloads[0]["tool_taxonomy"]
+    assert "agent_info" in taxonomy["categories"]["READ_ONLY"]["tools"]
+    assert taxonomy["effects"]["default"] == "NONE"
+    assert "tool_guidance" not in payloads[0]
 
 
 def test_agent_can_answer_its_tool_list_from_runtime_evidence(monkeypatch, tmp_path):
@@ -191,7 +196,8 @@ def test_token_question_exposes_count_tokens_and_cites_measurement(monkeypatch, 
         if len(prompts) == 1:
             names = {item["name"] for item in payload["available_tools"]}
             assert {"project_stats", "count_tokens", "inspect_project"} <= names
-            assert "count_tokens" in payload["tool_guidance"]
+            contract = next(item for item in payload["available_tools"] if item["name"] == "count_tokens")
+            assert "actual llm request usage" in " ".join(contract["caveats"]).lower()
             return '{"tool":"count_tokens","arguments":{"tokenizer":"qwen"}}'
         detail = payload["latest_tool_results"][0]["detail"]
         assert detail["exact"] is False
