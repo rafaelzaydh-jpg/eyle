@@ -398,18 +398,13 @@ def _detectar_comando_teste(caminho_projeto, cfg_testes):
     return None
 
 
-def rodar_testes_projeto(caminho_projeto, cfg_testes):
-    """
-    Roda a suite de teste real do projeto (nao numa copia -- teste real
-    precisa do projeto inteiro, nao so do arquivo que foi alterado). So
-    executa se _detectar_comando_teste achar um comando aplicavel; caso
-    contrario devolve {"executado": False, ...} sem tentar rodar nada.
+def rodar_testes_projeto(caminho_projeto, cfg_testes, scope=None):
+    """Run the detected real test suite, optionally narrowed to one safe pytest scope.
 
-    Chamado depois que o patch ja foi escrito no arquivo real (dentro de
-    aplicar_patch), nunca antes -- rodar teste sobre codigo ainda nao
-    escrito nao verificaria a mudanca de verdade.
-
-    Devolve {"executado": bool, "ok": bool, "detalhe": str}.
+    The post-write validator calls this without ``scope`` and keeps the full-suite
+    behavior. The agent-facing ``run_tests`` tool may pass a relative file or
+    directory so investigation can test a focused area without dumping an entire
+    project suite into the model context.
     """
     comando = _detectar_comando_teste(caminho_projeto, cfg_testes)
     if comando is None:
@@ -417,10 +412,15 @@ def rodar_testes_projeto(caminho_projeto, cfg_testes):
             "executado": False,
             "ok": True,
             "detalhe": "Nenhum pytest/npm test foi detectado no projeto -- execução não aplicável.",
+            "comando": None,
+            "codigo": None,
+            "saida_resumida": "",
+            "backend": None,
+            "scope": scope,
+            "tests_detected": False,
         }
 
     cfg_testes = cfg_testes or {}
-    descricao_comando = _descricao_comando(comando)
     try:
         argv = (
             shlex.split(comando, posix=os.name != "nt")
@@ -430,6 +430,8 @@ def rodar_testes_projeto(caminho_projeto, cfg_testes):
         return {
             "executado": False, "ok": False, "recusado": True,
             "detalhe": f"Comando de teste invalido: {erro}.",
+            "comando": str(comando), "codigo": None, "saida_resumida": "",
+            "backend": None, "scope": scope, "tests_detected": True,
         }
     if not argv or any(
         not isinstance(item, str) or not item or "\x00" in item for item in argv
@@ -437,37 +439,68 @@ def rodar_testes_projeto(caminho_projeto, cfg_testes):
         return {
             "executado": False, "ok": False, "recusado": True,
             "detalhe": "Comando de teste vazio ou com argumento invalido.",
+            "comando": str(comando), "codigo": None, "saida_resumida": "",
+            "backend": None, "scope": scope, "tests_detected": True,
         }
+
+    normalized_scope = None
+    if scope:
+        normalized_scope = str(scope).strip().replace("\\", "/")
+        safe = _resolver_caminho_seguro(caminho_projeto, normalized_scope)
+        if safe is None or not os.path.exists(safe):
+            return {
+                "executado": False, "ok": False, "recusado": True,
+                "detalhe": f"Escopo de teste inválido ou inexistente: {normalized_scope}.",
+                "comando": _descricao_comando(argv), "codigo": None,
+                "saida_resumida": "", "backend": None,
+                "scope": normalized_scope, "tests_detected": True,
+            }
+        is_pytest = (
+            os.path.basename(argv[0]).lower() in {"pytest", "pytest.exe"}
+            or (len(argv) >= 3 and os.path.basename(argv[0]).lower().startswith("python") and argv[1:3] == ["-m", "pytest"])
+        )
+        if not is_pytest:
+            return {
+                "executado": False, "ok": False, "recusado": True,
+                "detalhe": "Escopo seletivo só é suportado para pytest.",
+                "comando": _descricao_comando(argv), "codigo": None,
+                "saida_resumida": "", "backend": None,
+                "scope": normalized_scope, "tests_detected": True,
+            }
+        argv.append(normalized_scope)
+
+    descricao_comando = _descricao_comando(argv)
     cfg_sandbox = dict(cfg_testes.get("sandbox") or {})
-    # Mantem compatibilidade com o timeout que ja existia antes da 28. Um
-    # valor mais especifico dentro de sandbox continua tendo precedencia.
     cfg_sandbox.setdefault("timeout_segundos", cfg_testes.get("timeout_segundos", 60))
     resultado = executar_no_sandbox(caminho_projeto, argv, cfg_sandbox)
-    saida_resumida = (resultado.get("saida") or "").strip()[-1000:]
+    saida_resumida = (resultado.get("saida") or "").strip()[-4000:]
+    backend = resultado.get("backend", "sandbox")
+    codigo = resultado.get("codigo")
 
     if resultado.get("executado") is not True:
+        detalhe = f"Teste recusado pelo sandbox: {resultado.get('erro') or 'erro desconhecido'}."
         return {
-            "executado": False,
-            "ok": False,
-            "recusado": True,
-            "detalhe": f"Teste recusado pelo sandbox: {resultado.get('erro') or 'erro desconhecido'}.",
+            "executado": False, "ok": False, "recusado": True, "detalhe": detalhe,
+            "comando": descricao_comando, "codigo": codigo, "saida_resumida": saida_resumida,
+            "backend": backend, "scope": normalized_scope, "tests_detected": True,
         }
     if resultado.get("ok") is True:
-        backend = resultado.get("backend", "sandbox")
+        detalhe = f"'{descricao_comando}' passou no sandbox ({backend}).\n{saida_resumida}".rstrip()
         return {
-            "executado": True,
-            "ok": True,
-            "detalhe": f"'{descricao_comando}' passou no sandbox ({backend}).\n{saida_resumida}",
+            "executado": True, "ok": True, "detalhe": detalhe,
+            "comando": descricao_comando, "codigo": codigo, "saida_resumida": saida_resumida,
+            "backend": backend, "scope": normalized_scope, "tests_detected": True,
         }
     erro = resultado.get("erro")
     complemento = f" {erro}." if erro else ""
+    detalhe = (
+        f"'{descricao_comando}' falhou no sandbox (codigo {codigo})."
+        f"{complemento}\n{saida_resumida}"
+    ).rstrip()
     return {
-        "executado": True,
-        "ok": False,
-        "detalhe": (
-            f"'{descricao_comando}' falhou no sandbox (codigo {resultado.get('codigo')})."
-            f"{complemento}\n{saida_resumida}"
-        ),
+        "executado": True, "ok": False, "detalhe": detalhe,
+        "comando": descricao_comando, "codigo": codigo, "saida_resumida": saida_resumida,
+        "backend": backend, "scope": normalized_scope, "tests_detected": True,
     }
 
 

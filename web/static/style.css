@@ -398,3 +398,124 @@ html, body {
   0%, 100% { opacity: 0.72; }
   50% { opacity: 1; }
 }
+
+/* ---------- observable execution history ---------- */
+
+.msg-history {
+  cursor: pointer;
+  color: var(--accent-dim);
+  background: none;
+  border: none;
+  font-family: inherit;
+  font-size: 10px;
+  padding: 0;
+}
+.msg-history:hover,
+.msg-history:focus-visible {
+  color: var(--accent);
+  outline: none;
+}
+.msg-history:disabled { color: var(--muted); cursor: default; }
+
+.job-notice-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.execution-history {
+  width: min(680px, 92vw);
+  margin-top: 7px;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--accent-dim);
+  background: #0d110d;
+  color: #b8c4b3;
+  font-size: 10.5px;
+  line-height: 1.5;
+  overflow: hidden;
+}
+
+.history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+}
+
+.history-status {
+  color: var(--muted);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.history-status.completed { color: var(--accent); }
+.history-status.failed { color: #d97757; }
+.history-status.cancelled { color: var(--amber); }
+
+.history-section + .history-section { margin-top: 10px; }
+.history-section-title {
+  margin-bottom: 5px;
+  color: var(--accent-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 9px;
+}
+
+.history-line {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+.history-key { color: var(--muted); flex: 0 0 auto; }
+
+.history-item {
+  border-top: 1px solid rgba(35, 43, 32, 0.72);
+  padding: 5px 0;
+}
+.history-item:last-child { border-bottom: 1px solid rgba(35, 43, 32, 0.72); }
+.history-item summary {
+  cursor: pointer;
+  color: var(--text);
+  list-style-position: inside;
+  user-select: none;
+}
+.history-item summary:hover { color: var(--accent); }
+
+.history-subtitle {
+  margin: 8px 0 3px;
+  color: var(--muted);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.history-json {
+  margin: 4px 0 7px;
+  padding: 7px 8px;
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.2);
+  color: #aab7a5;
+  font: inherit;
+  font-size: 9.5px;
+}
+
+.history-privacy {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  color: #596453;
+  font-size: 9px;
+}
+
+@media (max-width: 600px) {
+  .execution-history { width: 92vw; }
+}

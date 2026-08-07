@@ -489,12 +489,17 @@ def validate_response_quality(
         )
         return ok, reason, claims, finding_limit
 
-    if isinstance(claims_raw, list) and claims_raw:
+    # Claims are primarily a project-grounding contract. In general chat the
+    # model may choose the structured shape by habit; claims with no evidence
+    # references are ignored instead of creating a fake project requirement.
+    # If the model *does* cite evidence, keep validating the ledger normally.
+    if isinstance(claims_raw, list) and claims_raw and any(
+        isinstance(item, dict) and item.get("evidence_ids") for item in claims_raw
+    ):
         ok, reason, claims = _validate_claims(
             claims_raw, answer, evidence, finding_limit, kind_limits,
         )
         return ok, reason, claims, finding_limit
-
     return True, "ok", [], finding_limit
 
 

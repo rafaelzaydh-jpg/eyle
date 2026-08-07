@@ -1,0 +1,5 @@
+# O core AgentSession e o runtime usam apenas a biblioteca padrão do Python.
+# Flask é necessário somente para o painel web (`python main.py serve`).
+Flask==3.0.3
+
+# Para desenvolvimento e CI, instale também requirements-dev.txt.

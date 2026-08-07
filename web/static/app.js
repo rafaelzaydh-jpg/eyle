@@ -161,6 +161,211 @@
     flushCode();
   }
 
+  function historyJsonBlock(value) {
+    const pre = document.createElement("pre");
+    pre.className = "history-json";
+    pre.textContent = JSON.stringify(value || {}, null, 2);
+    return pre;
+  }
+
+  function historyLine(label, value) {
+    if (value === undefined || value === null || value === "") return null;
+    const line = document.createElement("div");
+    line.className = "history-line";
+    const key = document.createElement("span");
+    key.className = "history-key";
+    key.textContent = `${label}:`;
+    const val = document.createElement("span");
+    val.textContent = String(value);
+    line.append(key, val);
+    return line;
+  }
+
+  function historySection(title) {
+    const section = document.createElement("section");
+    section.className = "history-section";
+    const heading = document.createElement("div");
+    heading.className = "history-section-title";
+    heading.textContent = title;
+    section.appendChild(heading);
+    return section;
+  }
+
+  function renderExecutionHistory(panel, history) {
+    panel.replaceChildren();
+
+    const head = document.createElement("div");
+    head.className = "history-head";
+    const title = document.createElement("strong");
+    title.textContent = `histórico · job #${history.job_id}`;
+    const status = document.createElement("span");
+    status.className = `history-status ${history.status || ""}`;
+    status.textContent = history.status || "desconhecido";
+    head.append(title, status);
+    panel.appendChild(head);
+
+    const agent = history.agent || {};
+    const summary = historySection("Execução");
+    [
+      historyLine("turnos", agent.turns),
+      historyLine("tools executadas", agent.tool_calls),
+      historyLine("fase final", agent.final_phase),
+      historyLine("duração", history.duration_seconds != null ? `${history.duration_seconds}s` : null),
+      historyLine("falha", agent.failure_code),
+    ].filter(Boolean).forEach((line) => summary.appendChild(line));
+    panel.appendChild(summary);
+
+    const tokens = history.tokens || {};
+    if (Object.keys(tokens).length) {
+      const tokenSection = historySection("Tokens");
+      const labels = {
+        prompt_total: "prompt total",
+        prompt_cached: "cacheados",
+        prompt_new: "novos",
+        prompt_effective: "prompt efetivo",
+        completion: "saída",
+        reasoning: "reasoning reportado",
+        effective_total: "total efetivo",
+      };
+      Object.entries(labels).forEach(([key, label]) => {
+        const line = historyLine(label, tokens[key]);
+        if (line) tokenSection.appendChild(line);
+      });
+      panel.appendChild(tokenSection);
+    }
+
+    const llmCalls = Array.isArray(history.llm_calls) ? history.llm_calls : [];
+    if (llmCalls.length) {
+      const llmSection = historySection(`LLM · ${llmCalls.length} chamada(s)`);
+      llmCalls.forEach((call) => {
+        const details = document.createElement("details");
+        details.className = "history-item";
+        const summaryEl = document.createElement("summary");
+        const phase = call.phase ? ` · ${call.phase}` : "";
+        const prompt = call.prompt_tokens != null ? ` · ${call.prompt_tokens} prompt` : "";
+        const cached = call.cached_prompt_tokens != null ? ` · ${call.cached_prompt_tokens} cache` : "";
+        summaryEl.textContent = `LLM #${call.call}${phase}${prompt}${cached}`;
+        details.appendChild(summaryEl);
+        const body = { ...call };
+        delete body.call;
+        details.appendChild(historyJsonBlock(body));
+        llmSection.appendChild(details);
+      });
+      panel.appendChild(llmSection);
+    }
+
+    const decisions = Array.isArray(history.decisions) ? history.decisions : [];
+    if (decisions.length) {
+      const decisionSection = historySection(`Decisões · ${decisions.length} turno(s)`);
+      decisions.forEach((item) => {
+        const details = document.createElement("details");
+        details.className = "history-item";
+        const summaryEl = document.createElement("summary");
+        const outcome = item.outcome ? ` · ${item.outcome}` : "";
+        const phase = item.phase ? ` · ${item.phase}` : "";
+        summaryEl.textContent = `turno ${item.turn || item.call} · ${item.decision || "decisão"}${outcome}${phase}`;
+        details.appendChild(summaryEl);
+        const body = { ...item };
+        delete body.call;
+        details.appendChild(historyJsonBlock(body));
+        decisionSection.appendChild(details);
+      });
+      panel.appendChild(decisionSection);
+    }
+
+    const tools = Array.isArray(history.tools) ? history.tools : [];
+    if (tools.length) {
+      const toolSection = historySection(`Ferramentas · ${tools.length} ação(ões)`);
+      tools.forEach((call) => {
+        const details = document.createElement("details");
+        details.className = "history-item";
+        const summaryEl = document.createElement("summary");
+        const statusText = call.status ? ` · ${call.status}` : "";
+        const phaseText = call.phase ? ` · ${call.phase}` : "";
+        summaryEl.textContent = `${call.call}. ${call.tool || "tool"}${statusText}${phaseText}`;
+        details.appendChild(summaryEl);
+
+        const argsTitle = document.createElement("div");
+        argsTitle.className = "history-subtitle";
+        argsTitle.textContent = "argumentos observáveis";
+        details.append(argsTitle, historyJsonBlock(call.arguments || {}));
+        const resultTitle = document.createElement("div");
+        resultTitle.className = "history-subtitle";
+        resultTitle.textContent = "resultado resumido";
+        details.append(resultTitle, historyJsonBlock(call.result || {}));
+        toolSection.appendChild(details);
+      });
+      panel.appendChild(toolSection);
+    }
+
+    const validation = history.write_validation || {};
+    if (Object.keys(validation).length) {
+      const writeSection = historySection("Validação pós-escrita");
+      Object.entries(validation).forEach(([stage, data]) => {
+        const details = document.createElement("details");
+        details.className = "history-item";
+        const summaryEl = document.createElement("summary");
+        const ok = data && data.ok === true ? "ok" : data && data.ok === false ? "falhou" : "informativo";
+        summaryEl.textContent = `${stage} · ${ok}`;
+        details.append(summaryEl, historyJsonBlock(data || {}));
+        writeSection.appendChild(details);
+      });
+      panel.appendChild(writeSection);
+    }
+
+    if (history.write_failure) {
+      const failSection = historySection("Falha de escrita");
+      failSection.appendChild(historyJsonBlock(history.write_failure));
+      panel.appendChild(failSection);
+    }
+
+    const privacy = document.createElement("div");
+    privacy.className = "history-privacy";
+    privacy.textContent = "Mostra ações observáveis do runtime. Não exibe chain-of-thought, prompts brutos, respostas brutas do modelo ou conteúdo-fonte.";
+    panel.appendChild(privacy);
+  }
+
+  async function toggleJobHistory(jobId, wrap, button) {
+    const numeric = Number(jobId);
+    if (!Number.isInteger(numeric)) return;
+    let panel = wrap.querySelector(`.execution-history[data-job-id="${numeric}"]`);
+    if (panel) {
+      const nowHidden = !panel.hidden;
+      panel.hidden = nowHidden;
+      button.textContent = nowHidden ? "histórico" : "ocultar histórico";
+      return;
+    }
+
+    button.disabled = true;
+    button.textContent = "carregando…";
+    try {
+      const res = await apiFetch(`/jobs/${numeric}/history`);
+      if (!res.ok) throw new Error(`status ${res.status}`);
+      const history = await res.json();
+      panel = document.createElement("div");
+      panel.className = "execution-history";
+      panel.dataset.jobId = numeric;
+      renderExecutionHistory(panel, history);
+      wrap.appendChild(panel);
+      button.textContent = "ocultar histórico";
+    } catch (err) {
+      button.textContent = "histórico indisponível";
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  function addHistoryButton(meta, wrap, jobId) {
+    const numeric = Number(jobId);
+    if (!Number.isInteger(numeric)) return;
+    const button = document.createElement("button");
+    button.className = "msg-history";
+    button.type = "button";
+    button.textContent = "histórico";
+    button.addEventListener("click", () => toggleJobHistory(numeric, wrap, button));
+    meta.appendChild(button);
+  }
+
   function syncDeleteState(wrap, msg) {
     const del = wrap.querySelector(".msg-del");
     if (!del) return;
@@ -192,6 +397,10 @@
       const time = document.createElement("span");
       time.textContent = formatTime(msg.timestamp);
       meta.appendChild(time);
+    }
+
+    if (msg.role === "assistant" && msg.source_job_id) {
+      addHistoryButton(meta, wrap, msg.source_job_id);
     }
 
     const del = document.createElement("button");
@@ -339,7 +548,10 @@
 
         const meta = document.createElement("div");
         meta.className = "job-notice-meta";
-        meta.textContent = `job #${job.id}${job.error_code ? ` · ${job.error_code}` : ""}`;
+        const metaText = document.createElement("span");
+        metaText.textContent = `job #${job.id}${job.error_code ? ` · ${job.error_code}` : ""}`;
+        meta.appendChild(metaText);
+        addHistoryButton(meta, wrap, job.id);
         wrap.appendChild(meta);
 
         const mensagemId = Number(job.mensagem_id);

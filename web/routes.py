@@ -10,6 +10,7 @@ O navegador SO fala com estes endpoints. Nunca com a LLM diretamente.
     DELETE /mensagem/<id>   -> remove mensagem (fila + memoria)
     GET    /status          -> estado do workspace + tamanho da fila
     GET    /jobs/<id>       -> estado persistido exato de uma tarefa
+    GET    /jobs/<id>/history -> histórico observável seguro da execução
 
 O painel em "/" e so um cliente: ele nunca chama a LLM nem o AgentSession
 direto, so faz polling de /conversa e /status e manda texto para
@@ -39,6 +40,7 @@ from flask import Flask, jsonify, render_template, request
 
 from eyle.runtime import queue
 from eyle.runtime import telemetry
+from eyle.runtime.history import build_public_job_history
 from eyle.runtime import service as eyle_service
 from eyle.runtime.config import carregar_config_validada
 
@@ -452,6 +454,20 @@ def job(job_id):
     caminho_projeto = projeto.get("caminho_origem") if isinstance(projeto, dict) else None
     publico = _job_publico(registro)
     return jsonify(_redigir_caminhos_internos(publico, (caminho_projeto, BASE_DIR)))
+
+
+@app.route("/jobs/<int:job_id>/history", methods=["GET"])
+def job_history(job_id):
+    registro = queue.obter(job_id)
+    if registro is None:
+        return jsonify({
+            "status": "erro", "error_code": "JOB_NOT_FOUND",
+            "motivo": "tarefa nao encontrada",
+        }), 404
+    projeto = eyle_service.carregar_projeto()
+    caminho_projeto = projeto.get("caminho_origem") if isinstance(projeto, dict) else None
+    history = build_public_job_history(registro)
+    return jsonify(_redigir_caminhos_internos(history, (caminho_projeto, BASE_DIR)))
 
 
 if __name__ == "__main__":

@@ -1,3 +1,49 @@
+## 2.7.4 Rev4.12.1 — 2026-08-07
+
+### Runtime tools and decision observability
+
+- Promoted deterministic calculator results to citable runtime evidence so structured arithmetic finals normally finish in two LLM calls instead of triggering an avoidable validation retry.
+- Kept the LLM as the author of every user-facing utility response; the runtime never replaces the Eyle's tone/explanation with a hard-coded calculator answer.
+- Added observable per-turn decision outcomes (`tool`, `final`, accepted/rejected) and bounded rejection codes to the expandable history without exposing chain-of-thought or raw model content.
+- Upgraded `run_tests` into a first-class investigation tool with optional safe pytest scope, bounded output tail, concise summary, and evidence support for executed failures.
+- Added read-only `git_status` and bounded read-only `git_diff` tools.
+- Recognized plural test requests (`testes`/`tests`) as project tasks so test execution is not accidentally routed through tool-free chat.
+- Added seven targeted regressions for two-call calculator completion, decision-history rejection diagnostics, focused pytest, failed-test evidence, Git inspection, and tool availability.
+- Validation: 157 tests passed; one optional Flask interface test was skipped because Flask is unavailable in the packaging environment.
+
+## 2.7.4 Rev4.12 — 2026-08-06
+
+### Observable execution history
+
+- Added an on-demand expandable `histórico` panel for every persisted job in the web UI.
+- Added `GET /jobs/<id>/history` with a sanitized public runtime history instead of expanding the normal polling payload.
+- Exposed objective runtime facts: agent phase/turns, LLM call count, total/cached/new/effective tokens, safe tool arguments/results, post-write validation stages, failures, and rollback status.
+- Kept chain-of-thought, raw prompts, raw model responses, source bodies, hashes, and stored-memory bodies out of the public history.
+- Added bounded observable tool traces and per-call phase metadata to `AgentSession` persistence.
+- Added structured write-validation history for apply, `compileall`, detected tests, tool reread, full reread, and rollback.
+- Reworked GitHub documentation around the active single-agent architecture and observable execution model.
+- Added `UPDATE_HISTORY.md`, a recoverable architecture-decision history documenting removed approaches, why they failed, and the evidence required before reintroducing them.
+
+### Validation
+
+- 150 tests passed; 1 optional Flask test skipped in the packaging environment.
+- JavaScript syntax validation and release-identity validation are part of the release check.
+
+## 2.7.4 Rev4.11.8 — 2026-08-06
+
+### Added
+- Added `calculate`, `project_stats`, `count_tokens`, `inspect_project`, and `agent_info` tools.
+- Project measurements and structural inspections are registered as runtime evidence.
+- `inspect_project` reports objective relation signals and never marks files as important.
+
+### Fixed
+- General/self questions no longer fail because of optional evidence-free structured claims.
+- Greetings keep an empty tool catalog; utility tools are surfaced only when relevant.
+- Token counting reports heuristic estimates honestly with `exact: false` when no exact tokenizer is installed.
+
+### Validation
+- 145 tests passed; 1 optional Flask test skipped in the packaging environment.
+
 ## 2.7.4 Rev4.11.7 — 2026-08-06
 
 ### Sentence references, safe Markdown, and directory workflow

@@ -1,58 +1,85 @@
-# Configuration — Eyle Rev4.11.7
+# Configuration — Eyle Rev4.12.1
 
-The default configuration exposes capacity and safety, not hidden architectures.
+The default configuration describes capacity, tools and executable safety. It does not enable hidden planners or alternate reasoning pipelines.
 
 ## LLM
 
-- `llm.context_window_tokens`: real model window used for each isolated call;
-- `llm.agent_decision_max_tokens`: normal decision/final response allowance;
-- `llm.agent_patch_max_tokens`: allowance after a source read, when a patch may be generated;
-- timeouts, retries, provider, model, and provider and retry settings.
+Key settings:
+
+- `llm.context_window_tokens` — model context window used for each request;
+- `llm.agent_decision_max_tokens` — normal decision/final allowance;
+- `llm.agent_patch_max_tokens` — larger allowance when a code patch is expected;
+- provider/model, timeouts, retries and concurrency.
 
 ## AgentSession
 
 - `agent.max_llm_turns`;
 - `agent.max_tool_calls`;
-- `agent.max_identical_tool_repeats` (default `2`; a repeated identical read is blocked before a second disk access);
-- `agent.protocol_parse_retries`;
+- `agent.max_identical_tool_repeats`;
 - `agent.max_patch_dry_run_failures`;
 - `agent.chat_history_token_budget`;
-- `agent.task_context_token_budget` for the stable cross-turn request anchor;
-- `agent.max_write_investigation_turns` (default `2`);
-- `agent.max_no_progress_turns` (default `2`);
-- `agent.max_phase_violations` (default `1`);
-- read/tree limits;
-- task deadline and aggregate token accounting.
+- `agent.task_context_token_budget`;
+- `agent.max_write_investigation_turns`;
+- `agent.max_no_progress_turns`;
+- `agent.max_phase_violations`;
+- read/tree/scan limits;
+- task deadline and aggregate token budgets.
 
-Only the first turn receives the broader recent history. A smaller task anchor remains on later turns so literal constraints do not disappear. Patch output allowance is adaptive to retained source, and write tools become patch-only after the investigation budget.
-
-## Response quality
-
-`agent.response_quality` controls the small deterministic factual gate:
-
-- `enabled`: activates claim validation for project/code analysis;
-- `max_relevant_sources`: number of recent useful source snippets retained across turns;
-- `max_relevant_source_chars`: maximum raw characters kept per retained snippet;
-- `reject_mid_list_corrections`: rejects lists that retract or correct themselves midway.
-
-When enabled, project facts, verified bugs, and contextual risks require evidence IDs created by real read tools. An explicit request such as “até 3” becomes an enforced overall claim cap. Multiple limits such as “até 3 bugs e até 5 recomendações” also create per-kind caps. Recommendations remain a distinct claim kind and may be evidence-free when they are general advice.
+The global turn limit is a final cap. Common write loops are controlled earlier by phase transitions and semantic read coverage.
 
 ## Token accounting
 
-`context_engine.cached_prompt_weight` defaults to `0.2`. Every request is still checked against the full model context window, while the task-wide aggregate exposes separate raw, cached, uncached, and effective prompt counts. Repeated identical system prompts receive the configured cache weight; provider-reported `cached_tokens` replaces the estimate when available. This fixes false aggregate exhaustion without being used as loop control.
+`context_engine.cached_prompt_weight` defaults to `0.2`.
+
+Each individual model request is still checked against the full context window. Task-wide accounting separately tracks raw prompt tokens, provider-cached prompt tokens, uncached/new prompt tokens and effective prompt tokens. Provider cache discounts are accounting only; they do not grant more investigation turns.
+
+## Project inspection
+
+- `agent.max_project_scan_entries` — safe maximum entries inspected by deterministic project tools;
+- `agent.max_project_scan_depth` — maximum scan depth;
+- `agent.max_project_file_bytes` — largest text file measured by project-stat/token tools;
+- `agent.max_inspect_relation_edges` — bounded relation edges returned by `inspect_project`;
+- `agent.max_git_diff_chars` — maximum Git diff text returned to the model per `git_diff` call (default `6000`).
+
+`count_tokens` does not claim an exact model-token count unless an exact tokenizer implementation exists. The shipped fallback reports measured characters converted by `context_engine.chars_per_token_fallback` with `exact: false`.
+
+## Response quality
+
+`agent.response_quality` controls the compact factual gate:
+
+- evidence is required for concrete project facts, confirmed bugs and contextual risks;
+- explicit limits such as “up to 3” are enforced;
+- useful source snippets are retained within configured bounds;
+- the final answer uses sentence-indexed claims internally to avoid duplicating prose.
 
 ## Writes
 
-`codar` controls backup, test execution, sandbox, and resource limits. Write confirmation cannot be disabled by the LLM.
+`codar.testes.ativado` defaults to `true`.
 
-`codar.testes.ativado` defaults to `true`. After a confirmed write, Rev4.11.7 detects pytest files recursively (including tests created by that transaction) or an npm `test` script. A detected suite must execute successfully; refusal, timeout, or failure rolls back the whole write. Disabling tests explicitly leaves the result in partial-verification state.
+After confirmation, Python changes are checked by `compileall`, tests are detected and executed when applicable, and any syntax/test/reread failure rolls back the full transaction. A write without an applicable executed test suite is reported as partial verification rather than verified.
 
-Changed Python files are always checked with the real `compileall` module in a temporary copy before tests run. This check does not leave `__pycache__` files in the user workspace.
+## Test and Git tools
 
-## Removed settings
+`run_tests` is available during analysis and first-turn write investigation when tests are enabled. It can focus a safe relative path for pytest; other runners keep their configured full-suite behavior. Failed executed tests are valid runtime evidence.
 
-Rev4.11.7 rejects or no longer uses settings for Scouts, Mission Interpreter, semantic grounding, ProjectMemory prompt budgets, evidence replay, or legacy pipelines. The new no-progress counters belong to the single AgentSession phase machine, not to a second reasoning architecture.
+`git_status` and `git_diff` are read-only. `git_diff` is bounded before reaching the model and should be narrowed by path when needed.
 
-## Failed-write diagnostics
+## Observable history
 
-When a confirmed write fails during `compileall`, tests, application, or final reread, the runtime returns the real bounded diagnostic output, the affected paths, and whether rollback was confirmed. That structured report is stored as metadata on the assistant message and becomes citable runtime evidence in the next AgentSession. Restored source code is never used to pretend the failed attempt had no error.
+Rev4.12.1 adds no large prompt or model-side history feature. The expandable history is derived from already available runtime data plus a bounded sanitized tool trace.
+
+Hard privacy rules for the public history surface:
+
+- no chain-of-thought;
+- no raw prompts;
+- no raw model response bodies;
+- no source-code contents;
+- no evidence hashes;
+- no external-memory bodies;
+- no raw model decision body. Only decision type/outcome/rejection code is public.
+
+The web client fetches job history only when the user opens it. Normal `/conversa`, `/status` and active-job polling remain compact.
+
+## Removed settings and architectures
+
+Settings tied to Scouts, Mission Interpreter, automatic ProjectMemory injection, legacy evidence replay, response caches and historical pipelines are not part of the active architecture. See [`UPDATE_HISTORY.md`](../UPDATE_HISTORY.md) before reintroducing any equivalent mechanism.

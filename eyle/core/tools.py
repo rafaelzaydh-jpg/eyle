@@ -36,6 +36,13 @@ from eyle.core.transactions import (  # noqa: E402
     dry_run_patch_set, apply_patch_set, rollback_patch_set,
 )
 from eyle.core.memory import search_memory, store_memory  # noqa: E402
+from eyle.core.project_inspection import (  # noqa: E402
+    calculate as calculate_expression,
+    count_tokens as count_project_tokens,
+    inspect_project as inspect_project_signals,
+    project_stats as measure_project_stats,
+)
+from eyle.core.git_tools import git_status as inspect_git_status, git_diff as inspect_git_diff  # noqa: E402
 
 PROJECT_BASE_DIR = os.path.dirname(BASE_DIR)
 MEMORY_DIR = os.path.join(PROJECT_BASE_DIR, "memory")
@@ -214,6 +221,74 @@ def _tool_list_tree(arguments, ctx):
     return _sucesso(resultado)
 
 
+def _tool_calculate(arguments, ctx):
+    """Evaluate arithmetic deterministically instead of asking the LLM to do it mentally."""
+    try:
+        return _sucesso(calculate_expression(arguments["expression"]))
+    except (ValueError, SyntaxError) as erro:
+        return _falha("INVALID_EXPRESSION", str(erro), executed=True)
+
+
+def _tool_project_stats(arguments, ctx):
+    """Measure objective project size/statistics over the safe text workspace."""
+    root = _caminho_projeto(ctx)
+    if not root:
+        return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
+    try:
+        return _sucesso(measure_project_stats(root, (ctx or {}).get("config") or {}))
+    except ErroLeituraProjeto as erro:
+        return _falha(erro.error_code, erro.detail, executed=True)
+
+
+def _tool_count_tokens(arguments, ctx):
+    """Measure project text and convert it to a truthful token estimate."""
+    root = _caminho_projeto(ctx)
+    if not root:
+        return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
+    try:
+        detail = count_project_tokens(
+            root, (ctx or {}).get("config") or {},
+            path=arguments.get("caminho_relativo"),
+            tokenizer=arguments.get("tokenizer"),
+        )
+        return _sucesso(detail)
+    except ErroLeituraProjeto as erro:
+        return _falha(erro.error_code, erro.detail, executed=True)
+
+
+def _tool_inspect_project(arguments, ctx):
+    """Return objective structural/relation signals without ranking file importance."""
+    root = _caminho_projeto(ctx)
+    if not root:
+        return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
+    try:
+        return _sucesso(inspect_project_signals(root, (ctx or {}).get("config") or {}))
+    except ErroLeituraProjeto as erro:
+        return _falha(erro.error_code, erro.detail, executed=True)
+
+
+def _tool_agent_info(arguments, ctx):
+    """Expose runtime identity and the executable tool registry to the agent itself."""
+    config = (ctx or {}).get("config") or {}
+    public = []
+    for name, item in sorted(TOOLS.items()):
+        if item.get("permission") == "WRITE":
+            continue
+        public.append({
+            "name": item.get("name", name),
+            "permission": item.get("permission"),
+            "description": item.get("description", ""),
+        })
+    return _sucesso({
+        "name": "Eyle",
+        "app_version": config.get("app_version"),
+        "revision": config.get("revision"),
+        "tools": public,
+        "write_confirmation_required": bool(((config.get("codar") or {}).get("ativado", True))),
+        "note": "Tool availability can be phase-specific; this registry describes executable capabilities, not permission to use every tool in every turn.",
+    })
+
+
 def _tool_read_range(arguments, ctx):
     """Le uma janela fresca e numerada do disco, nunca do indice."""
     caminho_projeto = _caminho_projeto(ctx)
@@ -315,8 +390,18 @@ def reverter_patch_set_confirmado(snapshot, ctx):
     return rollback_patch_set(snapshot or [])
 
 
+def _pytest_summary(output):
+    """Return the last concise pytest summary line without exposing huge logs."""
+    lines = [line.strip() for line in str(output or "").splitlines() if line.strip()]
+    for line in reversed(lines):
+        lowered = line.lower()
+        if any(token in lowered for token in (" passed", " failed", " skipped", " error", " errors")):
+            return line[:500]
+    return lines[-1][:500] if lines else ""
+
+
 def _tool_run_tests(arguments, ctx):
-    """Run the real suite and expose terminal non-execution states clearly."""
+    """Run the real suite, optionally focused to a safe pytest file/directory."""
     caminho_projeto = _caminho_projeto(ctx)
     if not caminho_projeto:
         return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
@@ -326,8 +411,17 @@ def _tool_run_tests(arguments, ctx):
             "A execução de testes está desativada em config['codar']['testes']['ativado'].",
             error_code="TESTS_DISABLED",
         )
-    resultado = rodar_testes_projeto(caminho_projeto, cfg_testes)
-    detail = resultado.get("detalhe", "")
+    resultado = rodar_testes_projeto(caminho_projeto, cfg_testes, scope=arguments.get("scope"))
+    output = str(resultado.get("saida_resumida") or "")
+    detail = {
+        "command": resultado.get("comando"),
+        "returncode": resultado.get("codigo"),
+        "scope": resultado.get("scope"),
+        "backend": resultado.get("backend"),
+        "tests_detected": bool(resultado.get("tests_detected")),
+        "summary": _pytest_summary(output) or str(resultado.get("detalhe") or "")[:500],
+        "output_tail": output[-3000:],
+    }
     if resultado.get("executado") is not True and resultado.get("ok") is True:
         return _pulado(detail, error_code="TESTS_NOT_FOUND")
     if resultado.get("ok") is True:
@@ -337,6 +431,35 @@ def _tool_run_tests(arguments, ctx):
         detail,
         executed=resultado.get("executado") is True,
     )
+
+
+def _tool_git_status(arguments, ctx):
+    """Inspect Git working-tree state without modifying the repository."""
+    root = _caminho_projeto(ctx)
+    if not root:
+        return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
+    result = inspect_git_status(root, max_entries=int(arguments.get("max_entries") or 200))
+    if result.get("ok"):
+        return _sucesso(result)
+    return _falha(result.get("error_code") or "GIT_STATUS_FAILED", result.get("detail"), executed=True)
+
+
+def _tool_git_diff(arguments, ctx):
+    """Inspect a bounded Git diff; raw diff is available to the LLM but not public history."""
+    root = _caminho_projeto(ctx)
+    if not root:
+        return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
+    cfg_agent = ((ctx or {}).get("config") or {}).get("agent", {})
+    result = inspect_git_diff(
+        root,
+        path=arguments.get("path"),
+        staged=bool(arguments.get("staged", False)),
+        context_lines=int(arguments.get("context_lines") or 3),
+        max_chars=int(cfg_agent.get("max_git_diff_chars", 6000) or 6000),
+    )
+    if result.get("ok"):
+        return _sucesso(result)
+    return _falha(result.get("error_code") or "GIT_DIFF_FAILED", result.get("detail"), executed=True)
 
 
 def _tool_memory_search(arguments, ctx):
@@ -491,6 +614,56 @@ _HASH = {
 
 
 TOOLS = {
+    "calculate": {
+        "name": "calculate",
+        "description": "Evaluate arithmetic deterministically with safe decimal math; use instead of mental calculation.",
+        "permission": "EXEC",
+        "input_schema": _schema_objeto({
+            "expression": {"type": "string", "minLength": 1, "maxLength": 500},
+        }, ["expression"]),
+        "output_schema": "Standard envelope; detail contains expression, deterministic decimal result, exact/approximate status, and precision metadata.",
+        "compat_aliases": {"expressao": "expression"},
+        "fn": _tool_calculate,
+    },
+    "agent_info": {
+        "name": "agent_info",
+        "description": "Return Eyle runtime identity and the current executable tool registry for self-capability questions.",
+        "permission": "READ",
+        "input_schema": _schema_objeto(),
+        "output_schema": "Standard envelope; detail contains name, release identity, tool names/permissions/descriptions, and write policy.",
+        "compat_aliases": {},
+        "fn": _tool_agent_info,
+    },
+    "project_stats": {
+        "name": "project_stats",
+        "description": "Measure safe project text: files, directories, lines, characters, bytes, extensions, and languages.",
+        "permission": "READ",
+        "input_schema": _schema_objeto(),
+        "output_schema": "Standard envelope; detail contains deterministic project measurements and scan completeness.",
+        "compat_aliases": {},
+        "fn": _tool_project_stats,
+    },
+    "count_tokens": {
+        "name": "count_tokens",
+        "description": "Count project text and report a truthful token estimate; never labels heuristic output as exact.",
+        "permission": "READ",
+        "input_schema": _schema_objeto({
+            "caminho_relativo": {"type": "string", "minLength": 1},
+            "tokenizer": {"type": "string", "minLength": 1},
+        }),
+        "output_schema": "Standard envelope; detail includes exact=false when using the configured character/token fallback.",
+        "compat_aliases": {"path": "caminho_relativo", "model": "tokenizer"},
+        "fn": _tool_count_tokens,
+    },
+    "inspect_project": {
+        "name": "inspect_project",
+        "description": "Inspect objective project signals: languages, entrypoint evidence, imports, tests, CI, frameworks, and manifests; never ranks importance.",
+        "permission": "READ",
+        "input_schema": _schema_objeto(),
+        "output_schema": "Standard envelope; detail contains objective structural and relation signals with hashes and scan completeness.",
+        "compat_aliases": {},
+        "fn": _tool_inspect_project,
+    },
     "list_tree": {
         "name": "list_tree",
         "description": "List the fresh project tree with limit, depth, filter, and ignored-item counts.",
@@ -611,12 +784,38 @@ TOOLS = {
     },
     "run_tests": {
         "name": "run_tests",
-        "description": "Run the configured test suite inside the sandbox.",
+        "description": "Run the detected test suite in the sandbox; optionally focus pytest on one safe relative file or directory.",
         "permission": "EXEC",
-        "input_schema": _schema_objeto(),
-        "output_schema": "Standard envelope; executed distinguishes an executed suite from unavailable tests.",
-        "compat_aliases": {},
+        "input_schema": _schema_objeto({
+            "scope": {"type": "string", "minLength": 1},
+        }),
+        "output_schema": "Standard envelope; detail contains command, return code, concise pytest summary, bounded output tail, scope and execution status.",
+        "compat_aliases": {"path": "scope", "caminho_relativo": "scope"},
         "fn": _tool_run_tests,
+    },
+    "git_status": {
+        "name": "git_status",
+        "description": "Inspect current Git working-tree state without changing files; returns branch and compact modified/added/deleted/untracked entries.",
+        "permission": "READ",
+        "input_schema": _schema_objeto({
+            "max_entries": {"type": "integer", "minimum": 1, "maximum": 500},
+        }),
+        "output_schema": "Standard envelope; detail contains branch, clean flag, category counts and bounded changed-file entries.",
+        "compat_aliases": {},
+        "fn": _tool_git_status,
+    },
+    "git_diff": {
+        "name": "git_diff",
+        "description": "Inspect a bounded read-only Git diff for the workspace or one relative path, optionally staged.",
+        "permission": "READ",
+        "input_schema": _schema_objeto({
+            "path": {"type": "string", "minLength": 1},
+            "staged": {"type": "boolean"},
+            "context_lines": {"type": "integer", "minimum": 0, "maximum": 10},
+        }),
+        "output_schema": "Standard envelope; detail contains changed files, added/removed line counts, bounded diff text and truncation state.",
+        "compat_aliases": {"caminho_relativo": "path", "arquivo": "path"},
+        "fn": _tool_git_diff,
     },
     "apply_patch": {
         "name": "apply_patch",

@@ -19,6 +19,7 @@ class AgentSession:
     latest_tool_results: List[Dict[str, Any]] = field(default_factory=list)
     evidence: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     tool_history: List[Dict[str, Any]] = field(default_factory=list)
+    decision_history: List[Dict[str, Any]] = field(default_factory=list)
     parse_failures: int = 0
     patch_failures: int = 0
     last_tool_signature: Optional[str] = None
@@ -31,6 +32,7 @@ class AgentSession:
     no_progress_turns: int = 0
     phase_violations: int = 0
     context_anchor: List[Dict[str, Any]] = field(default_factory=list)
+    write_validation: Dict[str, Any] = field(default_factory=dict)
 
     def evidence_index(self) -> List[Dict[str, Any]]:
         index: List[Dict[str, Any]] = []
@@ -53,12 +55,14 @@ class AgentSession:
             index.append(entry)
         return index
 
-    def record_prompt(self, mode: str, characters: int, estimated_tokens: int, tool_count: int) -> None:
+    def record_prompt(self, mode: str, characters: int, estimated_tokens: int, tool_count: int, *, phase: str | None = None, turn: int | None = None) -> None:
         self.prompt_snapshots.append({
             "mode": mode,
             "characters": int(characters),
             "estimated_tokens": int(estimated_tokens),
             "tool_count": int(tool_count),
+            "phase": phase or self.phase,
+            "turn": int(self.turn if turn is None else turn),
         })
         del self.prompt_snapshots[:-20]
 
@@ -91,6 +95,7 @@ class AgentSession:
             "latest_tool_results": latest_results,
             "evidence": evidence,
             "tool_history": self.tool_history[-30:],
+            "decision_history": self.decision_history[-30:],
             "parse_failures": self.parse_failures,
             "patch_failures": self.patch_failures,
             "prompt_snapshots": self.prompt_snapshots,
@@ -101,6 +106,7 @@ class AgentSession:
             "no_progress_turns": self.no_progress_turns,
             "phase_violations": self.phase_violations,
             "context_anchor": self.context_anchor,
+            "write_validation": self.write_validation,
         }
 
     @classmethod
@@ -115,6 +121,7 @@ class AgentSession:
         session.latest_tool_results = list(data.get("latest_tool_results") or [])
         session.evidence = dict(data.get("evidence") or {})
         session.tool_history = list(data.get("tool_history") or [])
+        session.decision_history = list(data.get("decision_history") or [])
         session.parse_failures = int(data.get("parse_failures") or 0)
         session.patch_failures = int(data.get("patch_failures") or 0)
         session.prompt_snapshots = list(data.get("prompt_snapshots") or [])
@@ -125,4 +132,5 @@ class AgentSession:
         session.no_progress_turns = int(data.get("no_progress_turns") or 0)
         session.phase_violations = int(data.get("phase_violations") or 0)
         session.context_anchor = list(data.get("context_anchor") or [])
+        session.write_validation = dict(data.get("write_validation") or {})
         return session

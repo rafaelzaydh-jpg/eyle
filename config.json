@@ -119,7 +119,12 @@
     "task_context_token_budget": 500,
     "max_write_investigation_turns": 2,
     "max_no_progress_turns": 2,
-    "max_phase_violations": 1
+    "max_phase_violations": 1,
+    "max_project_scan_entries": 20000,
+    "max_project_scan_depth": 32,
+    "max_project_file_bytes": 4194304,
+    "max_inspect_relation_edges": 60,
+    "max_git_diff_chars": 6000
   },
   "worker": {
     "heartbeat_interval_seconds": 5,
@@ -137,6 +142,6 @@
     "window_seconds": 3600
   },
   "app_version": "2.7.4",
-  "config_schema_version": "4.11.7",
-  "revision": "4.11.7-sentence-markdown-directory-flow"
+  "config_schema_version": "4.12.1",
+  "revision": "4.12.1-runtime-tools-observability"
 }

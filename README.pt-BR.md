@@ -1,80 +1,87 @@
 <p align="center"><img src="assets/eyle-banner.svg" alt="Eyle — agente autônoma de programação" width="100%"></p>
-<p align="center"><strong>Uma agente de programação com um único cérebro LLM, ferramentas reais e escrita supervisionada.</strong></p>
+<p align="center"><strong>Um cérebro LLM. Ferramentas reais. Escrita supervisionada. Execução observável.</strong></p>
 
-**Versão:** 2.7.4 · **Schema:** 4.11.7 · **Revisão:** 4.11.7-sentence-markdown-directory-flow
+**Versão:** 2.7.4 · **Schema:** 4.12.1 · **Revisão:** 4.12.1-runtime-tools-observability
 
-## Arquitetura
+A Eyle é uma agente local de programação construída em torno de uma ideia simples: a LLM decide o que fazer, ferramentas determinísticas medem e executam a realidade, e o runtime protege apenas os limites que não podem depender de adivinhação.
+
+## Por que a Eyle existe
+
+Ela foi pensada para repositórios reais, inclusive projetos grandes demais para caber em um único prompt. A Eyle não despeja o projeto inteiro no contexto e não usa um comitê de agentes. Ela investiga somente o necessário para a tarefa, preserva as evidências úteis e consegue alterar vários arquivos numa única transação supervisionada.
 
 ```text
-Interface
-→ runtime service
+usuário
 → AgentSession
-→ LLM
-↔ ferramentas
-↔ memória externa sob demanda
-→ validação factual
+→ decisão da LLM
+↔ ferramentas determinísticas / workspace real / memória externa sob demanda
+→ dry-run + confirmação para escrita
+→ compile/testes/releitura/rollback
 → resposta
 ```
 
-A mesma LLM conversa, interpreta, planeja quando necessário, investiga, escreve código e produz a resposta. Não existe outro agente preparando a missão ou julgando a conclusão.
+## Rev4.12.1: ferramentas de runtime + decisões observáveis
 
-O runtime não tenta pensar pela LLM. Ele controla somente fatos executáveis:
+A Rev4.12.1 preserva o histórico expansível da Rev4.12 e adiciona o resultado das decisões do agente e ferramentas determinísticas mais fortes. Cada resposta da Eyle ligada a um job pode mostrar um botão **histórico** na interface web. O conteúdo só é buscado quando você abre a aba, portanto não aumenta o polling normal.
 
-- caminhos seguros e limites de leitura;
-- contratos das ferramentas;
-- hashes das evidências;
-- dry-run e confirmação antes da escrita;
-- alterações atômicas e transações multi-arquivo;
-- compileall pós-escrita, testes detectados, rollback transacional, releitura integral e diagnóstico exato das falhas;
-- validação factual por referência numérica às frases, separação entre bug/risco/recomendação e limites “até N”;
-- Markdown seguro na interface e evidência estrutural fresca para perguntas sobre pastas;
-- prazo, chamadas, tokens totais/cacheados/efetivos, fila, cancelamento e telemetria.
+O histórico mostra fatos observáveis do runtime:
 
-## AgentSession
+- turnos do agente e fase final;
+- quantidade de chamadas LLM, latência e motivo de término;
+- tokens de prompt, cacheados, novos/não cacheados, saída e total efetivo;
+- tipo de decisão por turno, incluindo aceitação/rejeição e motivo de validação;
+- ferramentas chamadas, argumentos observáveis e resultado resumido;
+- `compileall`, testes, releituras e rollback após escrita;
+- códigos de falha quando a tarefa para.
 
-O estado da tarefa contém apenas:
+Ele **não mostra** chain-of-thought, prompt bruto, resposta bruta do modelo, conteúdo dos arquivos-fonte, hashes ou corpo da memória externa.
 
-- pedido original;
-- plano opcional criado pela própria LLM;
-- último resultado das ferramentas;
-- últimos trechos de código relevantes, com limite de tamanho;
-- índice compacto das evidências;
-- mapa interno entre afirmações finais e evidências, usando o número da frase visível sem duplicar seu texto; claims textuais antigas continuam compatíveis;
-- relatório estruturado da última escrita confirmada que falhou, quando existir;
-- fase atual, progresso semântico e contadores de turnos/ferramentas;
-- proposta pendente quando houver escrita.
+## Raciocínio assistido por ferramentas
 
-A sessão usa fases explícitas. Em escrita comum, a LLM pode investigar por até dois turnos; o próximo fica restrito ao patch. Leituras já cobertas por uma leitura integral ou faixa maior são bloqueadas mesmo quando a ferramenta ou a faixa muda. Dois turnos sem nova evidência encerram a investigação em vez de alimentar o loop.
+A LLM não precisa fazer tudo “de cabeça”. A Eyle pode usar:
 
-## Memória externa
+- `calculate` — cálculo decimal determinístico;
+- `project_stats` — arquivos, linhas, caracteres, bytes e linguagens;
+- `count_tokens` — tamanho medido com indicação explícita de contagem exata ou heurística;
+- `inspect_project` — sinais objetivos de entrypoints, imports, rotas, testes, CI e frameworks, sem declarar qual arquivo é “importante”;
+- `search_code`, `read_file`, `read_range`, `find_symbol`, `list_tree` — inspeção do workspace real;
+- `agent_info` — identidade atual e ferramentas realmente disponíveis;
+- `run_tests` — execução real em sandbox, com escopo pytest opcional e saída diagnóstica limitada;
+- `git_status` — estado do working tree em modo somente leitura;
+- `git_diff` — diff somente leitura com tamanho limitado;
+- memória externa somente quando a própria LLM decide consultar ou armazenar algo.
 
-A memória nunca entra automaticamente no prompt. A LLM consulta `memory_search` quando isso ajuda e usa `memory_store` somente com evidências atuais. Entradas ligadas a arquivos são descartadas quando o hash deixa de corresponder.
+A ferramenta observa. A Eyle interpreta a observação conforme a tarefa. Resultados determinísticos como `calculate` viram evidência real, mas a resposta final continua sendo escrita pela LLM para preservar tom, explicação e personalidade.
 
-## Edição
+## Escrita supervisionada
 
 ```text
 pedido
-→ investigação e patch pela LLM
+→ ler o código necessário
+→ gerar uma transação
 → dry-run
 → confirmação do usuário
-→ aplicação da transação
-→ compileall dos arquivos Python alterados
-→ detecção e execução de testes existentes ou recém-criados
-→ quando falhar, exibição da saída real e rollback completo
-→ preservação do relatório para perguntas posteriores
-→ releitura de todos os arquivos e confirmação de criações/exclusões
-→ resposta final com estado honesto de verificação
+→ aplicar
+→ compileall dos Python alterados
+→ detectar e executar testes
+→ rollback se compile/testes/releitura falharem
+→ reler e confirmar a saída real
+→ informar honestamente se foi verificado ou parcialmente validado
 ```
 
-Depois da confirmação, nenhuma chamada LLM é necessária.
+Tarefas comuns de escrita usam fases. Depois do orçamento de investigação, leituras são fechadas e o próximo turno fica reservado ao patch. Leituras equivalentes também são bloqueadas quando já existe evidência fresca.
+
+## Qualidade factual
+
+Fatos sobre o projeto, bugs confirmados e riscos contextuais precisam nascer de observações reais. O runtime mantém um ledger compacto entre afirmações e evidências e aplica limites explícitos como “até 3”. As claims apontam para o número da frase visível, sem repetir o texto completo dentro do protocolo.
 
 ## Estrutura
 
 ```text
-eyle/core/       AgentSession, ferramentas, memória e edição segura
-eyle/runtime/    serviço, fila, worker, persistência e telemetria
-llm/             transporte e adaptação do backend
-web/             interface Flask
+eyle/core/       AgentSession, tools, inspeção, memória e edição segura
+eyle/runtime/    serviço, fila, worker, persistência, telemetria e histórico público
+llm/             transporte, normalização e contabilidade de tokens
+web/             chat Flask e histórico expansível
+docs/            arquitetura, configuração, releases e notas de engenharia
 ```
 
 ## Uso
@@ -85,10 +92,20 @@ python main.py perguntar "Analise o projeto"
 python main.py serve
 ```
 
+Os endpoints de dados da interface usam Bearer token. O comando `serve` informa no terminal onde obter o token local da API.
+
 ## Validação
 
-- 136 testes passam na suíte de validação empacotada;
-- 1 teste opcional da interface foi pulado porque Flask não está instalado no ambiente de empacotamento;
-- o smoke real com Qwen ainda precisa ser executado no ambiente final.
+- 157 testes passam na suíte determinística empacotada;
+- 1 teste opcional da interface é pulado quando Flask não está instalado no ambiente de empacotamento;
+- o smoke real com Qwen continua sendo executado apenas no ambiente de deploy.
 
-Veja [Arquitetura](docs/architecture.md), [Configuração](docs/configuration.md), [Qualidade factual](docs/rev4114-factual-response-quality.md), [Verificação pós-escrita](docs/rev4113-post-write-verification.md) e [Changelog](CHANGELOG.md).
+## Documentação
+
+- [Arquitetura](docs/architecture.md)
+- [Visão técnica](docs/technical-overview.md)
+- [Configuração](docs/configuration.md)
+- [Benchmark](docs/benchmark.md)
+- [Notas da Rev4.12.1](docs/releases/2.7.4-rev4.12.1.md)
+- [Histórico de decisões removidas](UPDATE_HISTORY.md)
+- [Changelog](CHANGELOG.md)

@@ -1,4 +1,4 @@
-"""Behavior benchmark for the Rev4.11.7 AgentSession core.
+"""Behavior benchmark for the Rev4.12 AgentSession core.
 
 This is a development tool, not part of the reasoning path. It exercises the
 public agent contract against small disposable projects and records real model
@@ -188,7 +188,7 @@ def rodar_benchmark(config, baseline_model=None, output_path=None, case_ids=None
     if baseline_model:
         runs.append(_run_model(config, str(baseline_model), "baseline", cases))
     report = {
-        "revision": "4.11.7-sentence-markdown-directory-flow",
+        "revision": "4.12-observable-execution-history",
         "cases": list(cases),
         "runs": runs,
     }

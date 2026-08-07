@@ -1,12 +1,12 @@
 {
   "release": "2.7.4",
   "app_version": "2.7.4",
-  "config_schema_version": "4.11.7",
-  "revision": "4.11.7-sentence-markdown-directory-flow",
-  "released_at": "2026-08-06",
-  "title": "Sentence references, safe Markdown, and reliable directory workflows",
+  "config_schema_version": "4.12.1",
+  "revision": "4.12.1-runtime-tools-observability",
+  "released_at": "2026-08-07",
+  "title": "Runtime tools, two-call utilities, Git inspection and decision observability",
   "architecture": {
-    "path": "interface -> eyle.runtime.service -> AgentSession phase machine -> LLM <-> phase-specific tools/external memory -> quality validation -> supervised write diagnostics -> response",
+    "path": "interface -> eyle.runtime.service -> AgentSession phase machine -> LLM <-> phase-specific tools/project observations/tests/Git/external memory -> quality validation -> supervised writes -> persisted observable job history -> response",
     "reasoning_loops": 1,
     "separate_mission_interpreter": false,
     "automatic_project_memory": false,
@@ -16,7 +16,8 @@
     "write_model": "supervised dry-run, confirmation, apply, compileall, detected tests, rollback, exact reread",
     "model_response_cache": false,
     "response_model": "natural prose with sentence-indexed typed claims and an internal claim-to-evidence ledger",
-    "active_source_context": "latest tool result, bounded retained snippets, and a compact stable task anchor"
+    "active_source_context": "latest tool result, bounded retained snippets, and a compact stable task anchor",
+    "observable_history": "on-demand sanitized runtime facts including accepted/rejected decision types; no chain-of-thought/raw prompts/raw model responses/source contents"
   },
   "removed_from_ecosystem": [
     "engine package as a misleading reasoning layer",
@@ -63,7 +64,21 @@
       "legacy text-claim compatibility and conservative alignment",
       "citable workspace-tree structural evidence",
       "safe DOM-based Markdown rendering",
-      "empty-directory pruning after transactional deletes"
+      "empty-directory pruning after transactional deletes",
+      "deterministic calculate utility",
+      "project_stats repository measurements",
+      "truthful count_tokens estimation with exactness metadata",
+      "inspect_project objective structure/relation signals without importance ranking",
+      "agent_info runtime self-capability inspection",
+      "bounded observable tool-call history with sanitized arguments/results",
+      "per-call phase/turn prompt metadata for runtime auditing",
+      "structured post-write validation history",
+      "calculator results promoted to citable deterministic evidence for two-call utility completion",
+      "run_tests as an agent-callable sandbox tool with optional focused pytest scope and bounded output",
+      "failed executed tests promoted to runtime evidence for diagnosis",
+      "read-only git_status working-tree inspection",
+      "read-only bounded git_diff inspection",
+      "observable accepted/rejected decision history with validation reasons"
     ],
     "runtime": [
       "application service",
@@ -72,7 +87,10 @@
       "atomic persistence",
       "process limiter",
       "progress",
-      "telemetry"
+      "telemetry",
+      "on-demand public job history serializer",
+      "expandable web execution-history surface",
+      "expandable decision outcome history per LLM turn"
     ],
     "execution_guards": [
       "safe paths",
@@ -111,11 +129,17 @@
       "workspace tree inventories count as fresh structural evidence",
       "directory state questions reopen real workspace inspection",
       "empty parent directories are pruned after confirmed file deletion",
-      "assistant Markdown is rendered with safe DOM nodes instead of HTML injection"
+      "assistant Markdown is rendered with safe DOM nodes instead of HTML injection",
+      "observable history excludes chain-of-thought and raw model/source payloads",
+      "history is fetched on demand instead of normal polling",
+      "utility tools keep LLM-authored final responses",
+      "Git inspection tools are read-only",
+      "test output sent to the model is bounded",
+      "decision history excludes reasoning and raw model content"
     ]
   },
   "validation": {
-    "tests_passed": 136,
+    "tests_passed": 157,
     "tests_skipped": 1,
     "skip_reason": "Flask is not installed in the packaging environment",
     "compileall": true,
@@ -125,7 +149,15 @@
     "loop_token_regressions": 6,
     "sentence_reference_regressions": 2,
     "directory_workflow_regressions": 5,
-    "markdown_regressions": 1
+    "markdown_regressions": 1,
+    "project_tool_regressions": true,
+    "self_capability_regressions": true,
+    "token_estimate_truthfulness_regressions": true,
+    "observable_history_regressions": 6,
+    "runtime_tool_regressions": 7,
+    "git_tool_regressions": true,
+    "scoped_pytest_regressions": true,
+    "two_call_calculator_regression": true
   },
   "known_limits": [
     "The real Qwen smoke test must run in the deployment environment.",
@@ -135,9 +167,13 @@
     "Cross-language verification depends on available project tests and language-specific checks.",
     "Multi-file rollback provides all-or-restored behavior but filesystems cannot atomically replace several files in one operation.",
     "The response-quality gate validates the structured claim ledger; it does not perform full natural-language theorem proving over every sentence.",
-    "A failed write is diagnosed and rolled back, but automatic investigation and a new corrective proposal remain planned for Rev4.13.",
     "Phase control prevents common loops, but complex edits may still need a blocking user question when required files cannot be identified within two investigation turns.",
-    "Sentence numbering ignores Markdown headings but still requires the model to reference the visible sentence order correctly; out-of-range references receive one correction attempt."
+    "Sentence numbering ignores Markdown headings but still requires the model to reference the visible sentence order correctly; out-of-range references receive one correction attempt.",
+    "Observable history is available only for persisted jobs that still exist in the runtime queue database.",
+    "The history is operational observability, not a reasoning transcript; raw prompts, raw model responses, source contents and chain-of-thought are intentionally excluded.",
+    "Git tools require the git executable and an active Git work tree; otherwise they return an explicit unavailable/not-repository result.",
+    "run_tests can focus a path only for pytest; other detected test runners still execute their configured full suite.",
+    "git_diff intentionally truncates diff text before it reaches the model; use a narrower path when the relevant hunk is outside the bound."
   ],
   "write_protocol": {
     "full_file_replace": true,
@@ -176,7 +212,8 @@
     "legacy_text_claims_supported": true,
     "workspace_tree_evidence": true,
     "empty_parent_directory_pruning": true,
-    "broadened_portuguese_write_intent": true
+    "broadened_portuguese_write_intent": true,
+    "general_claims_do_not_fake_project_evidence": true
   },
   "loop_control": {
     "max_write_investigation_turns": 2,
@@ -191,6 +228,69 @@
     "provider_cached_tokens_supported": true,
     "cached_prompt_weight": 0.2,
     "raw_cached_uncached_effective_counters": true,
-    "cache_not_used_as_loop_control": true
+    "cache_not_used_as_loop_control": true,
+    "measurement_tools_do_not_expand_fixed_prompt": true
+  },
+  "project_intelligence": {
+    "calculate": "safe deterministic decimal arithmetic with exact/approximate metadata",
+    "project_stats": "safe text files/directories/lines/characters/bytes/languages",
+    "count_tokens": "measured characters converted by configured fallback; exact=false without exact tokenizer",
+    "inspect_project": "objective entrypoint/import/route/test/CI/framework signals; no importance ranking",
+    "agent_info": "runtime identity and executable tool registry"
+  },
+  "observability": {
+    "job_history_endpoint": "GET /jobs/<id>/history",
+    "lazy_loaded": true,
+    "llm_call_metadata": true,
+    "aggregate_token_breakdown": [
+      "prompt_total",
+      "prompt_cached",
+      "prompt_new",
+      "prompt_effective",
+      "completion",
+      "reasoning",
+      "effective_total"
+    ],
+    "tool_arguments": "bounded and sanitized; code/memory bodies excluded",
+    "tool_results": "bounded objective summaries",
+    "post_write_stages": [
+      "apply",
+      "compileall",
+      "tests",
+      "tool_reread",
+      "full_reread",
+      "rollback"
+    ],
+    "chain_of_thought_exposed": false,
+    "raw_prompts_exposed": false,
+    "raw_model_responses_exposed": false
+  },
+  "documentation": {
+    "github_readme_rewritten": true,
+    "portuguese_readme_rewritten": true,
+    "architecture_rewritten": true,
+    "technical_overview_rewritten": true,
+    "configuration_rewritten": true,
+    "removed_design_history": "UPDATE_HISTORY.md"
+  },
+  "runtime_tools": {
+    "calculate_final_author": "LLM",
+    "calculate_expected_llm_calls": 2,
+    "run_tests": {
+      "agent_callable": true,
+      "pytest_scope": true,
+      "bounded_output_tail_chars": 3000
+    },
+    "git_status": {
+      "read_only": true
+    },
+    "git_diff": {
+      "read_only": true,
+      "max_chars": 6000
+    },
+    "decision_history": {
+      "public": true,
+      "raw_reasoning": false
+    }
   }
 }

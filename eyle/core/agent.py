@@ -38,13 +38,26 @@ from .response_quality import (
 )
 
 READ_TOOLS = {"list_tree", "search_code", "find_symbol", "read_range", "read_file"}
+OBSERVATION_TOOLS = {"project_stats", "count_tokens", "inspect_project"}
+UTILITY_TOOLS = {"calculate", "agent_info"}
+GIT_TOOLS = {"git_status", "git_diff"}
+EXECUTION_TOOLS = {"run_tests"}
+EVIDENCE_TOOLS = READ_TOOLS | OBSERVATION_TOOLS | GIT_TOOLS | EXECUTION_TOOLS | {"calculate", "agent_info"}
 MEMORY_TOOLS = {"memory_search", "memory_store"}
 PATCH_TOOLS = {"test_patch_dry_run", "test_patch_set_dry_run"}
 TERMINAL_TOOL_ERRORS = {"UNSAFE_PATH", "PATH_OUTSIDE_PROJECT", "PERMISSION_DENIED", "WORKSPACE_NOT_AVAILABLE"}
 _PROJECT_TASK_HINT = re.compile(
     r"\b(?:analise|análise|analize|analisar|analyze|review|revise|revisar|"
     r"inspecione|inspect|verifique|verify|audite|audit|investigue|investigate|"
-    r"olhe|avalie|evaluate|teste|test|projeto|project|workspace|código|codigo|code)\b",
+    r"olhe|avalie|evaluate|teste|testes|test|tests|projeto|project|workspace|código|codigo|code)\b",
+    re.I,
+)
+_CALCULATOR_HINT = re.compile(
+    r"(?:\d\s*[+\-*/%^]|[+\-*/%^]\s*\d|\b(?:calcule|calcular|calculate|quanto é|quanto e|porcentagem|percentual)\b)",
+    re.I,
+)
+_AGENT_INFO_HINT = re.compile(
+    r"\b(?:ferramentas?|tools?|capaz|capacidade|capabilities|quem (?:é|e) você|quem (?:é|e) voce|who are you|seu nome|your name)\b",
     re.I,
 )
 
@@ -262,25 +275,47 @@ def _phase_policy(phase: str) -> Dict[str, Any]:
     return dict(policies.get(phase, policies["chat"]))
 
 
-def _allowed_tools(config: Dict[str, Any], project: Dict[str, Any], phase: str) -> set[str]:
+def _allowed_tools(
+    config: Dict[str, Any], project: Dict[str, Any], phase: str, request: Any = "",
+) -> set[str]:
     root = (project or {}).get("caminho_origem")
-    if not root or not os.path.isdir(root):
-        return set()
-    if phase in {"chat", "analysis_answer_only"}:
+    project_available = bool(root and os.path.isdir(root))
+
+    # Keep greetings and ordinary chat tool-free. Utilities appear only when
+    # the request gives a concrete reason, preserving the cheap chat path.
+    if phase == "chat":
+        names = set()
+        text = str(request or "")
+        if _CALCULATOR_HINT.search(text):
+            names.add("calculate")
+        if _AGENT_INFO_HINT.search(text):
+            names.add("agent_info")
+        return names
+    if phase == "analysis_answer_only":
         return set()
     if phase in {"write_patch_only", "write_patch_retry"}:
-        return set(PATCH_TOOLS) if bool(((config or {}).get("codar") or {}).get("ativado", True)) else set()
+        return set(PATCH_TOOLS) if project_available and bool(((config or {}).get("codar") or {}).get("ativado", True)) else set()
+    if not project_available:
+        text = str(request or "")
+        names = {"calculate"} if _CALCULATOR_HINT.search(text) else set()
+        if _AGENT_INFO_HINT.search(text):
+            names.add("agent_info")
+        return names
 
-    names = set(READ_TOOLS) | set(MEMORY_TOOLS)
+    names = set(READ_TOOLS) | set(MEMORY_TOOLS) | set(UTILITY_TOOLS) | set(GIT_TOOLS)
+    if phase.startswith("analysis"):
+        names |= OBSERVATION_TOOLS
     if phase == "write_prepare" and bool(((config or {}).get("codar") or {}).get("ativado", True)):
         names |= PATCH_TOOLS
-    if phase.startswith("analysis") and _tests_enabled(config):
+    if _tests_enabled(config) and (phase.startswith("analysis") or phase == "write_investigate"):
         names.add("run_tests")
     return names
 
 
-def _tool_catalog(config: Dict[str, Any], project: Dict[str, Any], phase: str) -> Tuple[set[str], List[Dict[str, Any]]]:
-    allowed = _allowed_tools(config, project, phase)
+def _tool_catalog(
+    config: Dict[str, Any], project: Dict[str, Any], phase: str, request: Any = "",
+) -> Tuple[set[str], List[Dict[str, Any]]]:
+    allowed = _allowed_tools(config, project, phase, request)
     catalog = gerar_catalogo_tools(
         config=config, allowed_names=allowed, compact=True, minimal=True,
     ) if allowed else []
@@ -320,6 +355,184 @@ def _compact_non_read_result(tool: str, result: Dict[str, Any]) -> Dict[str, Any
     }
 
 
+def _observable_tool_arguments(tool: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    """Return bounded tool arguments safe for the user-visible execution history.
+
+    The history is observability, not a replay surface: source/code bodies, memory
+    values and hashes are deliberately excluded.
+    """
+    arguments = arguments if isinstance(arguments, dict) else {}
+    if tool in {"read_file", "read_range"}:
+        result = {"path": arguments.get("caminho_relativo")}
+        if tool == "read_range":
+            result.update({
+                "line_start": arguments.get("linha_inicio"),
+                "line_end": arguments.get("linha_fim"),
+            })
+        return {k: v for k, v in result.items() if v is not None}
+    if tool == "list_tree":
+        return {
+            k: arguments.get(k) for k in ("limite", "profundidade", "filtro")
+            if arguments.get(k) is not None
+        }
+    if tool == "search_code":
+        return {"query": str(arguments.get("pergunta") or "")[:240]}
+    if tool == "find_symbol":
+        return {
+            k: arguments.get(k) for k in ("simbolo", "caminho_relativo")
+            if arguments.get(k) is not None
+        }
+    if tool == "calculate":
+        return {"expression": str(arguments.get("expression") or "")[:240]}
+    if tool == "count_tokens":
+        return {
+            k: arguments.get(k) for k in ("caminho_relativo", "tokenizer")
+            if arguments.get(k) is not None
+        }
+    if tool in {"project_stats", "inspect_project", "agent_info"}:
+        return {}
+    if tool == "run_tests":
+        return {"scope": arguments.get("scope")} if arguments.get("scope") else {}
+    if tool == "git_status":
+        return {"max_entries": arguments.get("max_entries")} if arguments.get("max_entries") is not None else {}
+    if tool == "git_diff":
+        return {
+            key: arguments.get(key) for key in ("path", "staged", "context_lines")
+            if arguments.get(key) is not None
+        }
+    if tool in PATCH_TOOLS:
+        patches = arguments.get("patches") if tool == "test_patch_set_dry_run" else [arguments]
+        public = []
+        for patch in patches or []:
+            if not isinstance(patch, dict):
+                continue
+            public.append({
+                key: patch.get(key)
+                for key in ("operation", "path", "caminho_relativo", "line_start", "line_end", "linha_inicio", "linha_fim")
+                if patch.get(key) is not None
+            })
+        return {"patches": public[:50]}
+    if tool.startswith("memory_"):
+        # Never expose stored memory bodies in the UI history.
+        return {
+            key: str(arguments.get(key))[:160]
+            for key in ("query", "key", "chave", "namespace")
+            if arguments.get(key) is not None
+        }
+    return {
+        str(key): (str(value)[:240] if not isinstance(value, (int, float, bool)) else value)
+        for key, value in list(arguments.items())[:12]
+        if key not in {"content", "conteudo", "codigo_novo", "new_code", "value", "valor", "file_hash_expected", "range_hash_expected", "file_hash_esperado", "range_hash_esperado"}
+    }
+
+
+def _observable_tool_result(tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    result = result if isinstance(result, dict) else {}
+    public: Dict[str, Any] = {
+        "status": result.get("status"),
+        "ok": bool(result.get("ok")),
+        "executed": bool(result.get("executed")),
+        "changed": bool(result.get("changed")),
+    }
+    if result.get("error_code"):
+        public["error_code"] = str(result.get("error_code"))[:120]
+    detail = result.get("detail")
+    if isinstance(detail, str):
+        public["detail"] = detail[:500]
+        return public
+    if not isinstance(detail, dict):
+        return public
+
+    if tool in {"read_file", "read_range", "find_symbol"}:
+        public.update({
+            "file": detail.get("arquivo"),
+            "lines": [detail.get("linha_inicio"), detail.get("linha_fim")],
+            "total_lines": detail.get("total_linhas_arquivo"),
+            "truncated": bool(detail.get("truncado")),
+        })
+    elif tool == "list_tree":
+        public.update({
+            "entries": len(detail.get("entradas") or []),
+            "truncated": bool(detail.get("truncado")),
+            "complete_scan": bool(detail.get("varredura_completa")),
+        })
+    elif tool == "search_code":
+        public.update({
+            "matches": len(detail.get("resultados") or []),
+            "files": list(detail.get("arquivos_relevantes") or [])[:20],
+        })
+    elif tool == "calculate":
+        for key in ("result", "resultado", "exact", "expression"):
+            if key in detail:
+                public[key] = detail.get(key)
+    elif tool in {"project_stats", "count_tokens"}:
+        for key in (
+            "file_count", "files", "directories", "lines", "characters", "bytes",
+            "estimated_tokens", "tokens", "exact", "method", "characters_per_token", "languages",
+        ):
+            if key in detail:
+                public[key] = detail.get(key)
+    elif tool == "inspect_project":
+        for key in ("file_count", "languages", "frameworks", "entrypoints", "test_frameworks", "has_tests", "has_ci"):
+            if key in detail:
+                public[key] = detail.get(key)
+        for key in ("routes", "local_import_edges", "relation_hubs"):
+            if isinstance(detail.get(key), list):
+                public[f"{key}_count"] = len(detail.get(key) or [])
+    elif tool == "agent_info":
+        for key in ("name", "version", "revision", "capabilities", "available_tools"):
+            if key in detail:
+                value = detail.get(key)
+                public[key] = value[:40] if isinstance(value, list) else value
+    elif tool == "run_tests":
+        for key in ("command", "returncode", "scope", "backend", "tests_detected", "summary"):
+            if key in detail:
+                public[key] = detail.get(key)
+    elif tool == "git_status":
+        for key in ("branch", "clean", "changed_count", "returned_count", "truncated", "counts"):
+            if key in detail:
+                public[key] = detail.get(key)
+        if isinstance(detail.get("entries"), list):
+            public["files"] = [item.get("path") for item in detail.get("entries")[:40] if isinstance(item, dict)]
+    elif tool == "git_diff":
+        for key in ("staged", "path", "file_count", "added_lines", "removed_lines", "truncated", "diff_characters"):
+            if key in detail:
+                public[key] = detail.get(key)
+        if isinstance(detail.get("files"), list):
+            public["files"] = [item.get("path") for item in detail.get("files")[:40] if isinstance(item, dict)]
+    elif tool in PATCH_TOOLS:
+        patches = detail.get("prepared_patches") or detail.get("patches") or []
+        public["patches"] = [
+            {k: item.get(k) for k in ("operation", "path") if item.get(k) is not None}
+            for item in patches[:50] if isinstance(item, dict)
+        ]
+        if detail.get("detail") is not None:
+            public["detail"] = str(detail.get("detail"))[:500]
+    elif tool == "run_tests":
+        for key in ("command", "returncode", "tests_detected"):
+            if key in detail:
+                public[key] = detail.get(key)
+    return {k: v for k, v in public.items() if v is not None}
+
+
+def _record_tool_history(
+    session: AgentSession, tool: str, arguments: Dict[str, Any], result: Dict[str, Any],
+    *, semantic_signature: Optional[str] = None, status_override: Optional[str] = None,
+) -> None:
+    item = {
+        "tool": tool,
+        "turn": session.turn,
+        "phase": session.phase,
+        "status": status_override or result.get("status"),
+        "error_code": result.get("error_code"),
+        "semantic_signature": semantic_signature,
+        "arguments": _observable_tool_arguments(tool, arguments),
+        "result": _observable_tool_result(tool, result),
+    }
+    session.tool_history.append(item)
+    del session.tool_history[:-50]
+
+
 def _register_evidence(session: AgentSession, tool: str, detail: Any) -> List[str]:
     if tool == "search_code" and isinstance(detail, dict):
         candidates = [item for item in detail.get("resultados") or [] if isinstance(item, dict)]
@@ -340,6 +553,51 @@ def _register_evidence(session: AgentSession, tool: str, detail: Any) -> List[st
             "content_hash": hash_texto(inventory),
             "conteudo": inventory,
             "source_type": "workspace_tree",
+        }]
+    elif tool in OBSERVATION_TOOLS and isinstance(detail, dict):
+        content = json.dumps(detail, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        source_hash = (
+            detail.get("scan_hash") or detail.get("measurement_hash")
+            or detail.get("inspection_hash") or hash_texto(content)
+        )
+        candidates = [{
+            "arquivo": f"<tool:{tool}>",
+            "linha_inicio": None,
+            "linha_fim": None,
+            "file_hash": source_hash,
+            "content_hash": hash_texto(content),
+            "conteudo": content,
+            "source_type": tool,
+        }]
+    elif tool == "agent_info" and isinstance(detail, dict):
+        content = json.dumps(detail, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        source_hash = hash_texto(content)
+        candidates = [{
+            "arquivo": "<agent-runtime>",
+            "linha_inicio": None,
+            "linha_fim": None,
+            "file_hash": source_hash,
+            "content_hash": source_hash,
+            "conteudo": content,
+            "source_type": "agent_runtime",
+        }]
+    elif tool in {"calculate", "run_tests", "git_status", "git_diff"} and isinstance(detail, dict):
+        content = json.dumps(detail, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        source_hash = hash_texto(content)
+        source_names = {
+            "calculate": "<calculator>",
+            "run_tests": "<runtime-tests>",
+            "git_status": "<git-status>",
+            "git_diff": "<git-diff>",
+        }
+        candidates = [{
+            "arquivo": source_names[tool],
+            "linha_inicio": None,
+            "linha_fim": None,
+            "file_hash": source_hash,
+            "content_hash": source_hash,
+            "conteudo": content,
+            "source_type": tool,
         }]
     else:
         candidates = []
@@ -410,8 +668,11 @@ def _seed_runtime_failure_evidence(session: AgentSession, conversation_context: 
 
 
 def _model_tool_result(session: AgentSession, tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
-    evidence_ids = _register_evidence(session, tool, result.get("detail")) if result.get("ok") else []
-    if tool in READ_TOOLS and isinstance(result.get("detail"), dict):
+    evidence_worthy = bool(result.get("ok")) or (
+        tool == "run_tests" and result.get("executed") is True and isinstance(result.get("detail"), dict)
+    )
+    evidence_ids = _register_evidence(session, tool, result.get("detail")) if evidence_worthy else []
+    if tool in EVIDENCE_TOOLS and isinstance(result.get("detail"), dict):
         detail = result.get("detail")
         if tool == "search_code":
             copied = dict(detail)
@@ -429,6 +690,8 @@ def _model_tool_result(session: AgentSession, tool: str, result: Dict[str, Any])
             "tool": tool,
             "status": result.get("status"),
             "ok": result.get("ok"),
+            "executed": result.get("executed"),
+            "changed": result.get("changed"),
             "error_code": result.get("error_code"),
             "detail": detail,
             "evidence_ids": evidence_ids,
@@ -445,7 +708,11 @@ def _remember_relevant_sources(
     model_result: Dict[str, Any],
     config: Dict[str, Any],
 ) -> None:
-    if tool not in READ_TOOLS or model_result.get("ok") is not True:
+    if tool not in EVIDENCE_TOOLS:
+        return
+    if model_result.get("ok") is not True and not (
+        tool == "run_tests" and model_result.get("executed") is True
+    ):
         return
     quality = _response_quality_config(config)
     detail = model_result.get("detail")
@@ -593,6 +860,28 @@ def _agent_config(config: Dict[str, Any], session: AgentSession, project: Dict[s
     return clone
 
 
+def _tool_guidance(tools: List[Dict[str, Any]]) -> Optional[str]:
+    names = {str(item.get("name") or "") for item in tools if isinstance(item, dict)}
+    hints = []
+    if "calculate" in names:
+        hints.append("calculate: use for arithmetic instead of mental math; after success answer on the next turn and cite its evidence_id only if you choose a structured final")
+    if "agent_info" in names:
+        hints.append("agent_info: use for Eyle identity, capabilities or tool-list questions")
+    if "project_stats" in names:
+        hints.append("project_stats: exact files/lines/chars/bytes/language measurements")
+    if "count_tokens" in names:
+        hints.append("count_tokens: measured text plus truthful token estimate; respect exact=false")
+    if "inspect_project" in names:
+        hints.append("inspect_project: objective structure/relation signals only; it never ranks file importance")
+    if "run_tests" in names:
+        hints.append("run_tests: execute real tests only when they answer the task; prefer a narrow pytest scope when known")
+    if "git_status" in names:
+        hints.append("git_status: inspect existing user/worktree changes before edits when repository state matters")
+    if "git_diff" in names:
+        hints.append("git_diff: inspect only the relevant bounded diff; do not request it when live source reads already answer the question")
+    return "; ".join(hints) if hints else None
+
+
 def _compile_prompt(
     session: AgentSession,
     config: Dict[str, Any],
@@ -618,7 +907,7 @@ def _compile_prompt(
         runtime["history_messages_omitted"] = history.get("omitted_messages", 0)
     phase = _phase_for_call(session, call_config, project)
     session.phase = phase
-    allowed, tools = _tool_catalog(call_config, project, phase)
+    allowed, tools = _tool_catalog(call_config, project, phase, session.request)
     payload = {
         "request": session.request,
         "turn": session.turn,
@@ -637,6 +926,7 @@ def _compile_prompt(
             write_available=bool(((call_config or {}).get("codar") or {}).get("ativado", True)),
         ),
         "available_tools": tools,
+        "tool_guidance": _tool_guidance(tools),
         "runtime_feedback": feedback or None,
     }
     output_tokens = int((call_config.get("llm") or {}).get("agent_max_tokens", 1400) or 1400)
@@ -646,6 +936,7 @@ def _compile_prompt(
     session.record_prompt(
         mode="agent", characters=len(prompt),
         estimated_tokens=estimate_tokens(prompt, chars_per_token), tool_count=len(tools),
+        phase=phase, turn=session.turn,
     )
     return prompt, allowed
 
@@ -684,7 +975,13 @@ def _details(
         "plan": session.plan,
         "turns": session.turn,
         "tool_calls": session.tool_calls,
-        "tools_used": [item.get("tool") for item in session.tool_history],
+        "tools_used": [
+            item.get("tool") for item in session.tool_history
+            if (item.get("result") or {}).get("executed") is True
+            or ("result" not in item and item.get("status") == "success")
+        ],
+        "tool_history": list(session.tool_history[-50:]),
+        "decision_history": list(session.decision_history[-50:]),
         "evidence": session.evidence_index(),
         "claim_evidence": claim_evidence_ledger(session.final_claims, session.evidence),
         "limitations": list(limitations or []),
@@ -697,6 +994,7 @@ def _details(
         "no_progress_turns": session.no_progress_turns,
         "phase_violations": session.phase_violations,
         "prompt_snapshots": session.prompt_snapshots,
+        "write_validation": dict(session.write_validation or {}),
     }
 
 
@@ -912,6 +1210,41 @@ def _clean_check_line(value: Any) -> str:
     return str(value or "").strip().rstrip(".;")
 
 
+def _validation_step(result: Dict[str, Any], *, paths: Optional[List[str]] = None) -> Dict[str, Any]:
+    result = result if isinstance(result, dict) else {}
+    raw_detail = result.get("detail")
+    if isinstance(raw_detail, str):
+        public_detail = raw_detail[:1200]
+    elif isinstance(raw_detail, dict) and isinstance(raw_detail.get("detail"), str):
+        public_detail = raw_detail.get("detail")[:1200]
+    else:
+        public_detail = None
+    item = {
+        "ok": result.get("ok"),
+        "executed": result.get("executed"),
+        "error_code": result.get("error_code"),
+        "detail": public_detail,
+    }
+    if paths is not None:
+        item["paths"] = [str(path) for path in paths if str(path)]
+    detail = result.get("detail")
+    if isinstance(detail, dict):
+        for key in ("command", "returncode", "tests_detected", "files", "failures", "checked"):
+            if key in detail:
+                value = detail.get(key)
+                if isinstance(value, list):
+                    item[key] = value[:30]
+                elif isinstance(value, (str, int, float, bool)) or value is None:
+                    item[key] = value
+    if isinstance(result.get("files"), list):
+        item["files"] = list(result.get("files") or [])[:30]
+    return {key: value for key, value in item.items() if value is not None}
+
+
+def _record_rollback(session: AgentSession, rollback: Dict[str, Any], paths: List[str]) -> None:
+    session.write_validation["rollback"] = _validation_step(rollback, paths=paths)
+
+
 def _resume_single(session: AgentSession, pending: Dict[str, Any], config: Dict[str, Any], project: Dict[str, Any], full: bool):
     context = {"config": config, "projeto": project, "evidence": session.evidence}
     args, error = validar_chamada_tool("apply_patch", (pending.get("tool_pendente") or {}).get("arguments") or {})
@@ -919,6 +1252,8 @@ def _resume_single(session: AgentSession, pending: Dict[str, Any], config: Dict[
         text = "A proposta confirmada ficou inválida."
         return _return("failed", text, None, _details(session, "failed", config, failure_code="PATCH_RESPONSE_INVALID"), full)
     applied = executar_tool("apply_patch", args, context)
+    single_paths = [str(args.get("caminho_relativo") or "")]
+    session.write_validation = {"apply": _validation_step(applied, paths=single_paths)}
     if not applied.get("ok"):
         code = applied.get("error_code") or "PATCH_FAILED"
         diagnostic = _diagnostic_text(applied)
@@ -939,8 +1274,10 @@ def _resume_single(session: AgentSession, pending: Dict[str, Any], config: Dict[
     detail = applied.get("detail") if isinstance(applied.get("detail"), dict) else {}
     snapshot = detail.get("rollback_snapshot")
     compile_result = _compile_after_write(config, project, [args["caminho_relativo"]])
+    session.write_validation["compileall"] = _validation_step(compile_result, paths=single_paths)
     if compile_result.get("ok") is not True:
         rollback = reverter_patch_confirmado(snapshot, context) if snapshot else {"ok": False}
+        _record_rollback(session, rollback, single_paths)
         text, suffix, report = _write_failure_response(
             "compileall falhou após a escrita.", "compileall", compile_result, rollback,
             "O arquivo foi restaurado automaticamente.", [args["caminho_relativo"]],
@@ -953,8 +1290,10 @@ def _resume_single(session: AgentSession, pending: Dict[str, Any], config: Dict[
         ), full)
 
     tests = _run_tests_after_write(config, context)
+    session.write_validation["tests"] = _validation_step(tests, paths=single_paths)
     if tests.get("ok") is not True:
         rollback = reverter_patch_confirmado(snapshot, context) if snapshot else {"ok": False}
+        _record_rollback(session, rollback, single_paths)
         text, suffix, report = _write_failure_response(
             "A verificação por testes falhou após a escrita.", "tests", tests, rollback,
             "O arquivo foi restaurado automaticamente.", [args["caminho_relativo"]],
@@ -973,8 +1312,11 @@ def _resume_single(session: AgentSession, pending: Dict[str, Any], config: Dict[
     }]
     tool_reread = _reread_with_tools(context, expected_outputs)
     reread = verify_expected_outputs(project.get("caminho_origem"), expected_outputs)
+    session.write_validation["tool_reread"] = _validation_step(tool_reread, paths=single_paths)
+    session.write_validation["full_reread"] = _validation_step(reread, paths=single_paths)
     if not tool_reread.get("ok") or not reread.get("ok"):
         rollback = reverter_patch_confirmado(snapshot, context) if snapshot else {"ok": False}
+        _record_rollback(session, rollback, single_paths)
         reread_failure = tool_reread if not tool_reread.get("ok") else reread
         reread_failure = dict(reread_failure)
         reread_failure.setdefault("error_code", "POST_WRITE_READ_FAILED")
@@ -1016,10 +1358,11 @@ def _resume_set(session: AgentSession, pending: Dict[str, Any], config: Dict[str
         text = "A transação confirmada ficou inválida."
         return _return("failed", text, None, _details(session, "failed", config, failure_code="PATCH_RESPONSE_INVALID"), full)
     applied = executar_tool("apply_patch_set", args, context)
+    attempted_paths = [str(item.get("path") or "") for item in args.get("patches") or [] if isinstance(item, dict)]
+    session.write_validation = {"apply": _validation_step(applied, paths=attempted_paths)}
     if not applied.get("ok"):
         code = applied.get("error_code") or "PATCH_TRANSACTION_FAILED"
         diagnostic = _diagnostic_text(applied)
-        attempted_paths = [str(item.get("path") or "") for item in args.get("patches") or []]
         report = {
             "stage": "apply",
             "error_code": code,
@@ -1037,8 +1380,10 @@ def _resume_set(session: AgentSession, pending: Dict[str, Any], config: Dict[str
     applied_patches = (applied.get("detail") or {}).get("applied_patches") or []
     paths = [str(item.get("path") or "") for item in applied_patches]
     compile_result = _compile_after_write(config, project, paths)
+    session.write_validation["compileall"] = _validation_step(compile_result, paths=paths)
     if compile_result.get("ok") is not True:
         rollback = reverter_patch_set_confirmado(applied_patches, context)
+        _record_rollback(session, rollback, paths)
         text, suffix, report = _write_failure_response(
             "compileall falhou após a transação.", "compileall", compile_result, rollback,
             "Todos os arquivos foram restaurados.", paths,
@@ -1051,8 +1396,10 @@ def _resume_set(session: AgentSession, pending: Dict[str, Any], config: Dict[str
         ), full)
 
     tests = _run_tests_after_write(config, context)
+    session.write_validation["tests"] = _validation_step(tests, paths=paths)
     if tests.get("ok") is not True:
         rollback = reverter_patch_set_confirmado(applied_patches, context)
+        _record_rollback(session, rollback, paths)
         text, suffix, report = _write_failure_response(
             "A verificação por testes falhou após a transação.", "tests", tests, rollback,
             "Todos os arquivos foram restaurados.", paths,
@@ -1067,8 +1414,11 @@ def _resume_set(session: AgentSession, pending: Dict[str, Any], config: Dict[str
     expected_outputs = expected_outputs_from_patches(applied_patches)
     tool_reread = _reread_with_tools(context, expected_outputs)
     reread = verify_expected_outputs(project.get("caminho_origem"), expected_outputs)
+    session.write_validation["tool_reread"] = _validation_step(tool_reread, paths=paths)
+    session.write_validation["full_reread"] = _validation_step(reread, paths=paths)
     if not tool_reread.get("ok") or not reread.get("ok"):
         rollback = reverter_patch_set_confirmado(applied_patches, context)
+        _record_rollback(session, rollback, paths)
         reread_failure = tool_reread if not tool_reread.get("ok") else reread
         reread_failure = dict(reread_failure)
         reread_failure.setdefault("error_code", "POST_WRITE_READ_FAILED")
@@ -1256,7 +1606,7 @@ def _preserve_source_for_retry(previous: List[Dict[str, Any]], current: List[Dic
         return current
     sources = [
         item for item in previous
-        if isinstance(item, dict) and item.get("tool") in READ_TOOLS and item.get("ok") is True
+        if isinstance(item, dict) and item.get("tool") in EVIDENCE_TOOLS and item.get("ok") is True
     ][-2:]
     return sources + current
 
@@ -1283,6 +1633,17 @@ def _semantic_read_signature(tool: str, arguments: Dict[str, Any]) -> Optional[s
     if tool == "read_range":
         path = _normalized_path(arguments.get("caminho_relativo"))
         return f"file:{path}:{arguments.get('linha_inicio')}:{arguments.get('linha_fim')}"
+    if tool == "project_stats":
+        return "project_stats:root"
+    if tool == "inspect_project":
+        return "inspect_project:root"
+    if tool == "count_tokens":
+        return "count_tokens:" + json.dumps({
+            "path": _normalized_path(arguments.get("caminho_relativo") or "."),
+            "tokenizer": str(arguments.get("tokenizer") or "").strip().lower(),
+        }, sort_keys=True, separators=(",", ":"))
+    if tool == "agent_info":
+        return "agent_info:runtime"
     return None
 
 
@@ -1292,7 +1653,7 @@ def _read_already_covered(
     signature = _semantic_read_signature(tool, arguments)
     if not signature:
         return False
-    if tool in {"list_tree", "search_code", "find_symbol"}:
+    if tool in {"list_tree", "search_code", "find_symbol"} | OBSERVATION_TOOLS | {"agent_info"}:
         return any(
             item.get("semantic_signature") == signature and item.get("status") == "success"
             for item in session.tool_history
@@ -1316,6 +1677,29 @@ def _read_already_covered(
         if tool == "read_range" and start <= requested_start and end >= int(requested_end or 0):
             return True
     return False
+
+
+def _record_decision(
+    session: AgentSession,
+    decision_type: str,
+    outcome: str,
+    *,
+    reason: Optional[str] = None,
+    tools: Optional[List[str]] = None,
+) -> None:
+    """Record only observable protocol decisions, never model reasoning or prose."""
+    item: Dict[str, Any] = {
+        "turn": session.turn,
+        "phase": session.phase,
+        "decision": str(decision_type),
+        "outcome": str(outcome),
+    }
+    if reason:
+        item["reason"] = str(reason)[:240]
+    if tools:
+        item["tools"] = [str(tool) for tool in tools[:8]]
+    session.decision_history.append(item)
+    del session.decision_history[:-50]
 
 
 def _turn_made_progress(
@@ -1396,6 +1780,7 @@ def _run(
             return _return("failed", text, None, _details(session, "failed", config, limitations=[str(error)], failure_code=error.error_code or "LLM_FAILED"), full)
         except Exception as error:
             session.parse_failures += 1
+            _record_decision(session, "protocol", "rejected", reason=f"PROTOCOL_ERROR:{type(error).__name__}")
             if session.parse_failures <= parse_retries:
                 feedback = f"PROTOCOL_ERROR: {error}. Return exactly one valid JSON decision."
                 continue
@@ -1406,6 +1791,7 @@ def _run(
             session.plan = decision["plan"][:20]
 
         if decision.get("needs_user"):
+            _record_decision(session, "needs_user", "accepted")
             text = str(decision["needs_user"])
             pending = {
                 "continuation_kind": "user_input",
@@ -1433,8 +1819,10 @@ def _run(
                     reject_mid_list_corrections=quality["reject_mid_list_corrections"],
                 )
             if ok:
+                _record_decision(session, "final", "accepted")
                 session.final_claims = claims
                 return _return("success", answer, None, _details(session, "success", config, limitations=limitations), full)
+            _record_decision(session, "final", "rejected", reason=reason)
             final_failures += 1
             if final_failures <= final_retries:
                 if reason == "FINAL_WRITE_ACTION_REQUIRED":
@@ -1452,9 +1840,16 @@ def _run(
         calls = decision.get("tool_calls") if isinstance(decision.get("tool_calls"), list) else [decision]
         calls = [call for call in calls if isinstance(call, dict) and call.get("tool")]
         if not calls:
+            _record_decision(session, "empty", "rejected", reason="NO_ACTION")
             feedback = "Choose one available tool, ask a blocking question, or return final."
             continue
 
+        _record_decision(
+            session,
+            "tool_calls" if len(calls) > 1 else "tool",
+            "accepted",
+            tools=[str(call.get("tool") or "") for call in calls],
+        )
         next_results: List[Dict[str, Any]] = []
         for call in calls[:4]:
             if session.tool_calls >= max_tool_calls:
@@ -1535,36 +1930,32 @@ def _run(
                 text = "A LLM repetiu exatamente a mesma ferramenta várias vezes sem mudar a ação."
                 return _return("failed", text, None, _details(session, "failed", config, failure_code="IDENTICAL_TOOL_LOOP"), full)
             if tool in READ_TOOLS and session.consecutive_identical_calls > 1:
-                next_results.append({
+                blocked = {
                     "tool": tool, "status": "skipped", "ok": False,
                     "executed": False, "changed": False,
                     "error_code": "IDENTICAL_READ_BLOCKED",
                     "detail": "A mesma leitura fresca já está disponível. Use o resultado atual, conclua ou escolha outra faixa/arquivo.",
-                })
+                }
+                next_results.append(blocked)
+                _record_tool_history(session, tool, normalized, blocked, semantic_signature=semantic_signature)
                 continue
             if tool in READ_TOOLS and _read_already_covered(session, tool, normalized):
-                next_results.append({
+                blocked = {
                     "tool": tool, "status": "skipped", "ok": False,
                     "executed": False, "changed": False,
                     "error_code": "SEMANTIC_READ_BLOCKED",
                     "detail": "Essa fonte ou faixa já está coberta por evidência fresca. Use o conteúdo atual e avance.",
-                })
-                session.tool_history.append({
-                    "tool": tool, "status": "skipped",
-                    "error_code": "SEMANTIC_READ_BLOCKED",
-                    "semantic_signature": semantic_signature,
-                })
+                }
+                next_results.append(blocked)
+                _record_tool_history(session, tool, normalized, blocked, semantic_signature=semantic_signature)
                 continue
 
             context = {"config": config, "projeto": project, "evidence": session.evidence}
             result = executar_tool(tool, normalized, context)
             session.tool_calls += 1
-            session.tool_history.append({
-                "tool": tool,
-                "status": result.get("status"),
-                "error_code": result.get("error_code"),
-                "semantic_signature": semantic_signature,
-            })
+            _record_tool_history(
+                session, tool, normalized, result, semantic_signature=semantic_signature,
+            )
             model_result = _model_tool_result(session, tool, result)
             _remember_relevant_sources(session, tool, model_result, config)
             next_results.append(model_result)
