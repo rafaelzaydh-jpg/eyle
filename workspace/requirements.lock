@@ -1,9 +1,0 @@
-# Runtime lock da Eyle (Python 3.8+)
-# Gerado para Flask==3.0.3 e suas dependencias transitivas.
-Flask==3.0.3
-Werkzeug==3.0.3
-Jinja2==3.1.4
-MarkupSafe==2.1.5
-itsdangerous==2.2.0
-click==8.1.7
-blinker==1.8.2
