@@ -1,3 +1,99 @@
+## 2.7.4 Rev4.11.7 — 2026-08-06
+
+### Sentence references, safe Markdown, and directory workflow
+
+- Replaced duplicated `claims[].text` in the preferred model protocol with compact 1-based `claims[].sentence` references.
+- Kept legacy text claims compatible while resolving sentence references deterministically into the internal evidence ledger.
+- Excluded Markdown headings from sentence numbering and added precise invalid/out-of-range correction feedback.
+- Added safe DOM-based Markdown rendering for bold text, inline code, and fenced code blocks without injecting model HTML.
+- Expanded Portuguese write-intent detection for commands such as `traga`, `embuta`, `inclua`, `centralize`, and `simplifique`.
+- Treated folders/directories/templates as project-evidence anchors so follow-up questions can inspect the live workspace instead of claiming reads are disabled.
+- Promoted fresh `list_tree` inventories to citable structural evidence and real progress in the phase machine.
+- Documented directory deletion as transactional file deletion and pruned empty parent directories after confirmed writes; rollback recreates them when needed.
+- Added eight regressions covering sentence claims, Markdown safety, broader write intent, structural evidence, folder-state questions, and confirmed empty-folder pruning.
+- Validation: 136 tests passed; one optional Flask interface test was skipped because Flask is unavailable in the packaging environment.
+
+## 2.7.4 Rev4.11.6 — 2026-08-06
+
+### Claim-to-answer alignment
+
+- Restored the compact prompt instruction that every `claims[].text` must be copied verbatim from a sentence already present in `final.answer`.
+- Added conservative deterministic alignment for harmless wording drift, replacing the internal claim text with the exact visible answer sentence before the evidence ledger is accepted.
+- Preserved negation, numeric values, file paths, and code identifiers during alignment; materially different claims remain rejected.
+- Added targeted validation feedback for `FINAL_CLAIM_NOT_IN_ANSWER` instead of the generic “return a corrected answer” instruction.
+- Prevented a valid project analysis from failing merely because the answer and claim ledger used slightly different wording.
+- Kept the fixed prompt compact at about 406 conservative tokens, still below the 450-token regression ceiling.
+- Added six regressions covering successful alignment, framework mismatch, reversed polarity, no-retry completion, and precise correction feedback.
+- Validation: 136 tests passed; one optional Flask interface test was skipped because Flask is unavailable in the packaging environment.
+
+## 2.7.4 Rev4.11.5 — 2026-08-06
+
+### Loop and token control
+
+- Added explicit write/analysis phases with phase-specific tool catalogs.
+- Limited common write investigation to two turns and made the following turn patch-only.
+- Blocked overlapping reads from fresh evidence and equivalent tree/search/symbol requests.
+- Added consecutive no-progress handling and a stable compact task-context anchor.
+- Reduced the fixed agent prompt from about 1,395 to about 371 conservative tokens.
+- Added raw, cached, uncached, and effective prompt accounting with provider cache metadata support.
+- Switched agent regression tests from 50k/100k artificial budgets to production 12k/6k/18k limits.
+- Added regressions for three-call multi-file writes, semantic read coverage, compact prompts, and cached-token accounting.
+- Validation: 122 tests passed; one optional Flask interface test was skipped because Flask is unavailable in the packaging environment.
+
+## 2.7.4 Rev4.11.4.2 — 2026-08-06
+
+### Failed-write diagnostics hotfix
+
+- Exposed the exact bounded validation output when a confirmed write fails during application, `compileall`, tests, or final reread.
+- Added structured `write_failure` details with stage, error code, affected paths, execution state, and rollback confirmation.
+- Preserved failed-write metadata on the assistant message instead of losing it when the pending transaction is cleared.
+- Promoted the latest failure report to citable runtime-validation evidence in the next AgentSession.
+- Prevented follow-up answers from inferring “there was no error” merely because rollback restored the previous source.
+- Added regressions for a missing `render_template`, metadata persistence, and evidence-backed follow-up diagnosis.
+- Validation: 116 tests passed; one optional Flask interface test was skipped because Flask is unavailable in the packaging environment.
+
+## 2.7.4 Rev4.11.4.1 — 2026-08-06
+
+### Write-intent gate hotfix
+
+- Fixed direct file-change requests being allowed to reach factual final validation before a patch proposal existed.
+- Added conservative multilingual write-intent detection for commands such as `extraia`, `crie`, `altere`, `move`, `create`, and `implementa`.
+- Rejected prose-only completion of active write requests with `FINAL_WRITE_ACTION_REQUIRED`.
+- Added targeted runtime feedback that sends the model back to real reads and one transactional dry-run instead of asking it to rewrite the same unsupported final answer.
+- Preserved analysis and advisory questions such as `Faça uma análise` and `Como extraio...` as non-write requests.
+- Added a regression reproducing `Extraia o html para templates/amor.html`, including replacement of `routes.py` and creation of `templates/amor.html`.
+- Validation: 113 tests passed; one optional Flask interface test was skipped because Flask is unavailable in the packaging environment.
+
+## 2.7.4 Rev4.11.4 — 2026-08-06
+
+### Factual response quality
+
+- Required real read evidence before accepting concrete project/code conclusions when response-quality validation is enabled.
+- Added typed internal claims for `fact`, `bug`, `risk`, and `recommendation`, with evidence mandatory for facts, bugs, and risks.
+- Added a claim-to-evidence ledger to execution details, including file, line range, file hash, and content hash.
+- Enforced explicit limits such as `até 3`, `up to 5`, and `como máximo 2` as deterministic overall and per-kind maximum claim counts.
+- Rejected duplicate claims, direct claim contradictions, and lists that correct or retract themselves midway.
+- Retained a bounded set of recent relevant source snippets across later tool calls, deduplicated by evidence ID and cropped by prompt budget.
+- Kept raw source out of pending write-confirmation state because confirmed writes resume deterministically without another LLM call.
+- Added response-quality configuration validation and seven focused regression scenarios.
+- Validation: 110 tests passed; one optional Flask interface test was skipped because Flask is unavailable in the packaging environment.
+
+## 2.7.4 Rev4.11.3 — 2026-08-06
+
+### Real post-write verification
+
+- Added a deterministic post-confirmation chain: apply → compileall → detected tests → rollback on failure → tool reread → full hash verification → conclusion.
+- Executed the real `compileall` module for every changed Python file in a temporary copy, avoiding `__pycache__` artifacts in the live workspace.
+- Enabled project tests by default and detected newly created pytest files recursively through `test_*.py`, `*_test.py`, and `tests.py`.
+- Treated test refusal, timeout, execution failure, or non-zero results as verification failures that roll back the whole transaction.
+- Reread every changed file through the workspace tool and then compared full live contents with the exact expected hash.
+- Confirmed promised file creation and deletion before reporting success.
+- Strengthened multi-file rollback by rereading restored files and verifying their original hashes.
+- Closed an inherited `.gitignore` file-handle leak found by the warning-clean validation gate.
+- Replaced false “verified by dry-run and reread” claims with explicit verified or partial-verification states.
+- Validation: 103 tests passed; one optional Flask interface test was skipped because Flask is unavailable in the packaging environment.
+- The real Qwen smoke run remains deployment-only.
+
 ## 2.7.4 Rev4.11.2 — 2026-08-06
 
 ### Write-loop and token fix
@@ -80,7 +176,7 @@
 - Added local confirmation control when no pending patch exists, producing a clear response with zero LLM calls.
 - Added typed finding validation (`bug`, `risk`, `maintainability`, `recommendation`) and required evidence IDs for every non-recommendation finding.
 - Expanded task telemetry with consumed evidence, prompt snapshots, repeated-action warnings, no-progress counters, and prompt/completion/reasoning token breakdown.
-- Validation: 102 tests passed; one optional Flask UI test was skipped because Flask is unavailable.
+- Validation: 103 tests passed; one optional Flask UI test was skipped because Flask is unavailable.
 
 ## 2.7.4 Rev4.10 — 2026-08-06
 

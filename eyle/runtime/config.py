@@ -1,4 +1,4 @@
-"""Rev4.11.2 configuration boundary for the single AgentSession core."""
+"""Rev4.11.7 configuration boundary for the phase-controlled AgentSession core."""
 from __future__ import annotations
 
 import json
@@ -32,13 +32,33 @@ def validar_config(config):
         ("max_llm_turns", 6), ("max_tool_calls", 12),
         ("max_identical_tool_repeats", 2), ("protocol_parse_retries", 1),
         ("max_patch_dry_run_failures", 2),
+        ("max_write_investigation_turns", 2), ("max_no_progress_turns", 2),
+        ("task_context_token_budget", 500),
         ("max_llm_calls", 8), ("max_prompt_tokens", 12000),
         ("max_completion_tokens", 6000), ("max_total_tokens", 18000),
     ):
         value = agent.get(key, default)
         if not isinstance(value, int) or value < 1:
             raise ConfigError(f"agent.{key} precisa ser inteiro positivo")
+    phase_violations = agent.get("max_phase_violations", 1)
+    if not isinstance(phase_violations, int) or phase_violations < 0:
+        raise ConfigError("agent.max_phase_violations precisa ser inteiro não negativo")
+    quality = agent.get("response_quality") or {}
+    if not isinstance(quality, dict):
+        raise ConfigError("agent.response_quality precisa ser um objeto")
+    for key in ("enabled", "reject_mid_list_corrections"):
+        if key in quality and not isinstance(quality.get(key), bool):
+            raise ConfigError(f"agent.response_quality.{key} precisa ser booleano")
+    for key, default in (("max_relevant_sources", 4), ("max_relevant_source_chars", 8000)):
+        value = quality.get(key, default)
+        if not isinstance(value, int) or value < 1:
+            raise ConfigError(
+                f"agent.response_quality.{key} precisa ser inteiro positivo"
+            )
     context = config.get("context_engine") or {}
+    cached_weight = context.get("cached_prompt_weight", 0.2)
+    if not isinstance(cached_weight, (int, float)) or not 0 <= float(cached_weight) <= 1:
+        raise ConfigError("context_engine.cached_prompt_weight precisa estar entre 0 e 1")
     for key, default in (("safety_margin_tokens", 500), ("chars_per_token_fallback", 3)):
         value = context.get(key, default)
         if not isinstance(value, int) or value < 1:

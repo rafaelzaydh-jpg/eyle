@@ -193,6 +193,35 @@ html, body {
   border: 1px solid var(--line);
 }
 
+.msg-bubble strong {
+  font-weight: 600;
+  color: inherit;
+}
+
+.msg-bubble code {
+  padding: 1px 4px;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.035);
+  font-family: inherit;
+  font-size: 0.94em;
+}
+
+.msg-bubble pre {
+  margin: 8px 0;
+  padding: 9px 10px;
+  overflow-x: auto;
+  white-space: pre;
+  border: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.msg-bubble pre code {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
 .msg.user .msg-bubble {
   background: var(--user-bg);
   border-color: #2a3527;

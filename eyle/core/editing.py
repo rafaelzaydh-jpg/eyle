@@ -312,7 +312,7 @@ def testar_patch_em_copia(caminho_projeto, caminho_relativo, linha_inicio,
                 f"Recorte e escrita testados numa copia temporaria (arquivo real nao foi tocado). "
                 f"Arquivos '{ext}' nao tem parser de sintaxe real aqui (verificacao minima viavel) -- "
                 f"confirma so que a faixa de linhas e a escrita funcionaram. Se o projeto tiver "
-                f"pytest/npm test configurado e o teste opt-in estiver ativado, a suite real roda "
+                f"pytest/npm test for detectado e a execução de testes estiver ativada, a suite real roda "
                 f"apos aplicar o patch (rodar_testes_projeto)."
             ),
             "conteudo_resultante": conteudo_resultante,
@@ -321,7 +321,41 @@ def testar_patch_em_copia(caminho_projeto, caminho_relativo, linha_inicio,
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-_MARCADORES_PYTEST = ("pytest.ini", "pyproject.toml", "setup.cfg", "conftest.py")
+_MARCADORES_PYTEST_DIRETOS = ("pytest.ini", "conftest.py")
+_DIRETORIOS_TESTE_IGNORADOS = {
+    ".git", ".hg", ".svn", ".venv", "venv", "env", "node_modules",
+    "__pycache__", ".pytest_cache", ".tox", ".nox", "build", "dist",
+}
+
+
+def _arquivo_contem(caminho, marcador):
+    try:
+        with open(caminho, "r", encoding="utf-8", errors="replace") as arquivo:
+            return marcador in arquivo.read(256 * 1024)
+    except OSError:
+        return False
+
+
+def _tem_testes_pytest(caminho_projeto):
+    """Detecta configuração pytest específica ou arquivos de teste reais."""
+    if any(os.path.isfile(os.path.join(caminho_projeto, marcador)) for marcador in _MARCADORES_PYTEST_DIRETOS):
+        return True
+    if _arquivo_contem(os.path.join(caminho_projeto, "pyproject.toml"), "[tool.pytest"):
+        return True
+    if _arquivo_contem(os.path.join(caminho_projeto, "setup.cfg"), "[tool:pytest"):
+        return True
+    if _arquivo_contem(os.path.join(caminho_projeto, "tox.ini"), "[pytest]"):
+        return True
+    for raiz, pastas, arquivos in os.walk(caminho_projeto, followlinks=False):
+        pastas[:] = [pasta for pasta in pastas if pasta not in _DIRETORIOS_TESTE_IGNORADOS]
+        for nome in arquivos:
+            nome_lower = nome.lower()
+            if nome_lower == "tests.py" or (
+                nome_lower.endswith(".py")
+                and (nome_lower.startswith("test_") or nome_lower.endswith("_test.py"))
+            ):
+                return True
+    return False
 
 
 def _descricao_comando(comando):
@@ -334,22 +368,22 @@ def _descricao_comando(comando):
 
 def _detectar_comando_teste(caminho_projeto, cfg_testes):
     """
-    So devolve um comando se cfg_testes.get("ativado") for True E existir,
-    na raiz do projeto, alguma evidencia de que aquele tipo de teste ja
-    esta configurado -- nunca tenta "adivinhar" ou rodar pytest/npm test
-    num projeto que nao tem nada disso (evita erro de "comando nao
-    encontrado" ou rodar suite de outro projeto por engano).
+    So devolve um comando se cfg_testes.get("ativado") for True E existir
+    evidencia de uma suite. Pytest e detectado tanto por configuracao quanto
+    por arquivos ``test_*.py``, ``*_test.py`` ou ``tests.py`` em qualquer
+    pasta valida, inclusive quando esses testes acabaram de ser criados pela
+    transacao confirmada.
 
-    Prioridade: pytest primeiro (qualquer um dos _MARCADORES_PYTEST
-    presente), depois package.json com um script "test" definido. Se os
+    Prioridade: pytest primeiro, depois package.json com um script "test"
+    definido. Se os
     dois existirem, prefere pytest (mesma raiz normalmente so faz sentido
     ter um dos dois como projeto principal). Devolve None se nada aplicavel.
     """
     if not cfg_testes or not cfg_testes.get("ativado", False):
         return None
 
-    if any(os.path.isfile(os.path.join(caminho_projeto, marcador)) for marcador in _MARCADORES_PYTEST):
-        return cfg_testes.get("comando_python", "pytest -q")
+    if _tem_testes_pytest(caminho_projeto):
+        return cfg_testes.get("comando_python", "python -m pytest -q")
 
     package_json = os.path.join(caminho_projeto, "package.json")
     if os.path.isfile(package_json):
@@ -382,7 +416,7 @@ def rodar_testes_projeto(caminho_projeto, cfg_testes):
         return {
             "executado": False,
             "ok": True,
-            "detalhe": "Teste opt-in desativado ou nenhum pytest/npm test configurado no projeto -- pulado.",
+            "detalhe": "Nenhum pytest/npm test foi detectado no projeto -- execução não aplicável.",
         }
 
     cfg_testes = cfg_testes or {}
@@ -578,7 +612,7 @@ def aplicar_patch(caminho_projeto, caminho_relativo, linha_inicio, linha_fim,
                 "outcome": "rollback_failed" if erro_rollback else "reverted",
             }
 
-    # Atualizacao 6 -- teste opt-in (pytest/npm test): so roda se
+    # Verificacao de testes (pytest/npm test): so roda se
     # cfg_testes vier com "ativado": true E o projeto ja tiver esse tipo
     # de teste configurado (ver _detectar_comando_teste). Roda no
     # PROJETO REAL, depois da escrita, porque teste precisa do projeto
@@ -613,7 +647,7 @@ def aplicar_patch(caminho_projeto, caminho_relativo, linha_inicio, linha_fim,
 
     detalhe = f"Patch aplicado em '{caminho_relativo}':{linha_inicio}-{linha_fim}."
     if teste["executado"]:
-        detalhe += f" Teste opt-in passou: {teste['detalhe']}"
+        detalhe += f" Teste detectado passou: {teste['detalhe']}"
 
     file_hash_final = _hash_texto(conteudo_final)
     linha_fim_final = linha_inicio + len(codigo_novo.split("\n")) - 1

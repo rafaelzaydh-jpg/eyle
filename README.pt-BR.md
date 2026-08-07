@@ -1,7 +1,7 @@
 <p align="center"><img src="assets/eyle-banner.svg" alt="Eyle — agente autônoma de programação" width="100%"></p>
 <p align="center"><strong>Uma agente de programação com um único cérebro LLM, ferramentas reais e escrita supervisionada.</strong></p>
 
-**Versão:** 2.7.4 · **Schema:** 4.11.2 · **Revisão:** 4.11.2-write-loop-fix
+**Versão:** 2.7.4 · **Schema:** 4.11.7 · **Revisão:** 4.11.7-sentence-markdown-directory-flow
 
 ## Arquitetura
 
@@ -12,6 +12,7 @@ Interface
 → LLM
 ↔ ferramentas
 ↔ memória externa sob demanda
+→ validação factual
 → resposta
 ```
 
@@ -24,8 +25,10 @@ O runtime não tenta pensar pela LLM. Ele controla somente fatos executáveis:
 - hashes das evidências;
 - dry-run e confirmação antes da escrita;
 - alterações atômicas e transações multi-arquivo;
-- testes, rollback e releitura;
-- prazo, chamadas, tokens, fila, cancelamento e telemetria.
+- compileall pós-escrita, testes detectados, rollback transacional, releitura integral e diagnóstico exato das falhas;
+- validação factual por referência numérica às frases, separação entre bug/risco/recomendação e limites “até N”;
+- Markdown seguro na interface e evidência estrutural fresca para perguntas sobre pastas;
+- prazo, chamadas, tokens totais/cacheados/efetivos, fila, cancelamento e telemetria.
 
 ## AgentSession
 
@@ -34,11 +37,14 @@ O estado da tarefa contém apenas:
 - pedido original;
 - plano opcional criado pela própria LLM;
 - último resultado das ferramentas;
+- últimos trechos de código relevantes, com limite de tamanho;
 - índice compacto das evidências;
-- contadores de turnos e ferramentas;
+- mapa interno entre afirmações finais e evidências, usando o número da frase visível sem duplicar seu texto; claims textuais antigas continuam compatíveis;
+- relatório estruturado da última escrita confirmada que falhou, quando existir;
+- fase atual, progresso semântico e contadores de turnos/ferramentas;
 - proposta pendente quando houver escrita.
 
-A repetição protegida é somente a mesma chamada exata várias vezes seguidas. O runtime não tenta decidir se duas investigações diferentes “significam a mesma coisa”.
+A sessão usa fases explícitas. Em escrita comum, a LLM pode investigar por até dois turnos; o próximo fica restrito ao patch. Leituras já cobertas por uma leitura integral ou faixa maior são bloqueadas mesmo quando a ferramenta ou a faixa muda. Dois turnos sem nova evidência encerram a investigação em vez de alimentar o loop.
 
 ## Memória externa
 
@@ -51,11 +57,13 @@ pedido
 → investigação e patch pela LLM
 → dry-run
 → confirmação do usuário
-→ aplicação
-→ testes quando habilitados
-→ rollback em falha
-→ releitura
-→ resposta final
+→ aplicação da transação
+→ compileall dos arquivos Python alterados
+→ detecção e execução de testes existentes ou recém-criados
+→ quando falhar, exibição da saída real e rollback completo
+→ preservação do relatório para perguntas posteriores
+→ releitura de todos os arquivos e confirmação de criações/exclusões
+→ resposta final com estado honesto de verificação
 ```
 
 Depois da confirmação, nenhuma chamada LLM é necessária.
@@ -79,8 +87,8 @@ python main.py serve
 
 ## Validação
 
-- 94 testes passam na suíte de validação empacotada;
+- 136 testes passam na suíte de validação empacotada;
 - 1 teste opcional da interface foi pulado porque Flask não está instalado no ambiente de empacotamento;
 - o smoke real com Qwen ainda precisa ser executado no ambiente final.
 
-Veja [Arquitetura](docs/architecture.md), [Configuração](docs/configuration.md), [Correção do loop de escrita](docs/rev4112-write-loop-fix.md) e [Changelog](CHANGELOG.md).
+Veja [Arquitetura](docs/architecture.md), [Configuração](docs/configuration.md), [Qualidade factual](docs/rev4114-factual-response-quality.md), [Verificação pós-escrita](docs/rev4113-post-write-verification.md) e [Changelog](CHANGELOG.md).

@@ -403,6 +403,14 @@ def _desempacotar_resultado_agente(resultado):
     return resultado
 
 
+
+
+def _metadata_resposta_agente(detalhes):
+    detalhes = detalhes if isinstance(detalhes, dict) else {}
+    falha = detalhes.get("write_failure")
+    if isinstance(falha, dict) and falha:
+        return {"write_failure": falha}
+    return None
 def _resultado_agente(status, texto, detalhes):
     detalhes = detalhes if isinstance(detalhes, dict) else {}
     return {
@@ -436,7 +444,7 @@ def _processar_agente(pergunta, config, projeto, task_id=None, conversation_cont
         config_execucao, "finalizing", "Montando a resposta final",
         partial_text=texto[-16000:] if isinstance(texto, str) else None,
     )
-    registrar_mensagem("assistant", texto)
+    registrar_mensagem("assistant", texto, metadata=_metadata_resposta_agente(detalhes))
     return _resultado_agente(status, texto, detalhes)
 
 
@@ -461,7 +469,7 @@ def _retomar_agente_pendente(pendente, config, resposta_usuario=None):
         texto = nova_pendencia["pergunta_ao_usuario"]
     else:
         limpar_agent_pendente()
-    registrar_mensagem("assistant", texto)
+    registrar_mensagem("assistant", texto, metadata=_metadata_resposta_agente(detalhes))
     return _resultado_agente(status, texto, detalhes)
 
 
@@ -494,8 +502,10 @@ def processar(pergunta, registrar_pergunta=True, historico_snapshot=None,
         "max_prompt_tokens": max(1, int(cfg_agent.get("max_prompt_tokens", 14000))),
         "max_total_tokens": max(1, int(cfg_agent.get("max_total_tokens", 18000))),
         "llm_calls": 0, "llm_requests": 0,
-        "prompt_tokens_reserved": 0, "prompt_tokens_actual": 0,
-        "prompt_tokens_effective": 0, "generated_tokens": 0,
+        "prompt_tokens_reserved": 0, "prompt_tokens_estimated_raw": 0,
+        "prompt_tokens_actual": 0, "prompt_tokens_cached": 0,
+        "prompt_tokens_uncached": 0, "prompt_tokens_effective": 0,
+        "generated_tokens": 0,
         "reasoning_tokens_actual": 0, "provider_reported_tokens": 0,
         "history_messages_omitted": 0,
     }

@@ -29,7 +29,8 @@
   },
   "context_engine": {
     "safety_margin_tokens": 500,
-    "chars_per_token_fallback": 3
+    "chars_per_token_fallback": 3,
+    "cached_prompt_weight": 0.2
   },
   "web": {
     "api_token": null,
@@ -43,8 +44,8 @@
     "ativado": true,
     "fazer_backup": true,
     "testes": {
-      "ativado": false,
-      "comando_python": "pytest -q",
+      "ativado": true,
+      "comando_python": "python -m pytest -q",
       "comando_node": "npm test --silent",
       "timeout_segundos": 60,
       "sandbox": {
@@ -102,13 +103,23 @@
     "max_prompt_tokens": 12000,
     "max_completion_tokens": 6000,
     "max_total_tokens": 18000,
-    "chat_history_token_budget": 1200,
+    "chat_history_token_budget": 700,
     "final_validation_retries": 1,
     "max_llm_turns": 6,
     "max_tool_calls": 12,
     "max_identical_tool_repeats": 2,
     "protocol_parse_retries": 1,
-    "max_patch_dry_run_failures": 2
+    "max_patch_dry_run_failures": 2,
+    "response_quality": {
+      "enabled": true,
+      "max_relevant_sources": 4,
+      "max_relevant_source_chars": 8000,
+      "reject_mid_list_corrections": true
+    },
+    "task_context_token_budget": 500,
+    "max_write_investigation_turns": 2,
+    "max_no_progress_turns": 2,
+    "max_phase_violations": 1
   },
   "worker": {
     "heartbeat_interval_seconds": 5,
@@ -126,6 +137,6 @@
     "window_seconds": 3600
   },
   "app_version": "2.7.4",
-  "config_schema_version": "4.11.2",
-  "revision": "4.11.2-write-loop-fix"
+  "config_schema_version": "4.11.7",
+  "revision": "4.11.7-sentence-markdown-directory-flow"
 }

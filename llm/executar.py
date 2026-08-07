@@ -3,6 +3,7 @@
 
 Transporta o único protocolo AgentSession para o backend configurado.
 """
+import hashlib
 import json
 import random
 import re
@@ -390,6 +391,7 @@ def _metadata_resposta_normalizada(normalizada):
     return {
         "finish_reason": normalizada.finish_reason,
         "prompt_tokens": normalizada.prompt_tokens,
+        "cached_prompt_tokens": normalizada.cached_prompt_tokens,
         "completion_tokens": normalizada.completion_tokens,
         "reasoning_tokens": normalizada.reasoning_tokens,
         "provider_model": normalizada.model,
@@ -690,22 +692,32 @@ def _reservar_orcamento_llm(config):
     runtime["llm_calls"] = atual + 1
 
 
+def _prompt_cache_weight(config):
+    context = (config or {}).get("context_engine") or {}
+    try:
+        value = float(context.get("cached_prompt_weight", 0.2))
+    except (TypeError, ValueError):
+        value = 0.2
+    return min(1.0, max(0.0, value))
+
+
 def _reservar_requisicao_llm(config, prompt_sistema, prompt_usuario, max_tokens):
     """Preflight and account one real backend request.
 
-    Cache hits never call this function. Retries and truncation retries do,
-    so repeated prompt cost is visible instead of being hidden behind one
-    logical LLM call.
+    The provider still receives the complete prompt on every request, but the
+    task-wide budget does not charge an identical system prefix at full weight
+    forever. Real provider cache metadata replaces this estimate after the
+    response arrives. Context-window safety remains based on the full prompt.
     """
     runtime = (config or {}).get("_runtime_agent_budget")
     if not isinstance(runtime, dict):
-        return {"estimated_prompt_tokens": 0}
+        return {"estimated_prompt_tokens": 0, "estimated_effective_tokens": 0}
     cfg_llm = (config or {}).get("llm", {})
     cfg_context = (config or {}).get("context_engine", {})
     chars_per_token = max(1, int(cfg_context.get("chars_per_token_fallback", 3) or 3))
-    prompt_tokens = estimar_tokens(prompt_sistema, chars_per_token) + estimar_tokens(
-        prompt_usuario, chars_per_token,
-    )
+    system_tokens = estimar_tokens(prompt_sistema, chars_per_token)
+    user_tokens = estimar_tokens(prompt_usuario, chars_per_token)
+    prompt_tokens = system_tokens + user_tokens
     response_reserved = max(0, int(max_tokens or 0))
     margin = max(0, int(cfg_context.get("safety_margin_tokens", 256) or 0))
     window = max(1, int(cfg_llm.get("context_window_tokens", 8192) or 8192))
@@ -715,25 +727,42 @@ def _reservar_requisicao_llm(config, prompt_sistema, prompt_usuario, max_tokens)
             transient=False, error_code="PROMPT_CONTEXT_BUDGET_EXCEEDED",
         )
 
+    system_hash = hashlib.sha256(str(prompt_sistema or "").encode("utf-8")).hexdigest()
+    seen_hashes = runtime.setdefault("system_prompt_hashes", [])
+    repeated_system = system_hash in seen_hashes
+    if not repeated_system:
+        seen_hashes.append(system_hash)
+        del seen_hashes[:-8]
+    cache_weight = _prompt_cache_weight(config)
+    effective_estimate = user_tokens + int(round(system_tokens * (cache_weight if repeated_system else 1.0)))
+
     current_prompt = int(runtime.get("prompt_tokens_effective", 0) or 0)
     max_prompt = int(runtime.get("max_prompt_tokens", 0) or 0)
-    if max_prompt > 0 and current_prompt + prompt_tokens > max_prompt:
+    if max_prompt > 0 and current_prompt + effective_estimate > max_prompt:
         raise ErroLLM(
-            "O limite global de tokens de entrada da tarefa seria excedido.",
+            "O limite global efetivo de tokens de entrada da tarefa seria excedido.",
             transient=False, error_code="MAX_PROMPT_TOKENS_EXCEEDED",
         )
     current_completion = int(runtime.get("generated_tokens", 0) or 0)
     max_total = int(runtime.get("max_total_tokens", 0) or 0)
-    if max_total > 0 and current_prompt + current_completion + prompt_tokens + response_reserved > max_total:
+    if max_total > 0 and current_prompt + current_completion + effective_estimate + response_reserved > max_total:
         raise ErroLLM(
-            "O limite global de tokens da tarefa seria excedido pela próxima chamada.",
+            "O limite global efetivo de tokens da tarefa seria excedido pela próxima chamada.",
             transient=False, error_code="MAX_TOTAL_TOKENS_EXCEEDED",
         )
 
     runtime["llm_requests"] = int(runtime.get("llm_requests", 0) or 0) + 1
     runtime["prompt_tokens_reserved"] = int(runtime.get("prompt_tokens_reserved", 0) or 0) + prompt_tokens
-    runtime["prompt_tokens_effective"] = current_prompt + prompt_tokens
-    return {"estimated_prompt_tokens": prompt_tokens, "finalized": False}
+    runtime["prompt_tokens_estimated_raw"] = int(runtime.get("prompt_tokens_estimated_raw", 0) or 0) + prompt_tokens
+    runtime["prompt_tokens_effective"] = current_prompt + effective_estimate
+    return {
+        "estimated_prompt_tokens": prompt_tokens,
+        "estimated_effective_tokens": effective_estimate,
+        "estimated_system_tokens": system_tokens,
+        "estimated_user_tokens": user_tokens,
+        "repeated_system_prompt": repeated_system,
+        "finalized": False,
+    }
 
 
 def _finalizar_requisicao_llm(config, reservation, metadata):
@@ -742,13 +771,30 @@ def _finalizar_requisicao_llm(config, reservation, metadata):
         return
     if reservation.get("finalized"):
         return
-    estimated = int(reservation.get("estimated_prompt_tokens", 0) or 0)
+    estimated_effective = int(reservation.get("estimated_effective_tokens", 0) or 0)
+    estimated_raw = int(reservation.get("estimated_prompt_tokens", 0) or 0)
     actual = (metadata or {}).get("prompt_tokens")
+    cached = (metadata or {}).get("cached_prompt_tokens")
     if isinstance(actual, (int, float)):
         actual = max(0, int(actual))
         runtime["prompt_tokens_actual"] = int(runtime.get("prompt_tokens_actual", 0) or 0) + actual
+        if isinstance(cached, (int, float)):
+            cached = min(actual, max(0, int(cached)))
+            uncached = max(0, actual - cached)
+            effective_actual = uncached + int(round(cached * _prompt_cache_weight(config)))
+            runtime["prompt_tokens_cached"] = int(runtime.get("prompt_tokens_cached", 0) or 0) + cached
+            runtime["prompt_tokens_uncached"] = int(runtime.get("prompt_tokens_uncached", 0) or 0) + uncached
+        elif estimated_raw > 0:
+            # Preserve the repeated-prefix discount when the provider reports
+            # only the total prompt count and no cache breakdown.
+            ratio = estimated_effective / estimated_raw
+            effective_actual = int(round(actual * ratio))
+            runtime["prompt_tokens_uncached"] = int(runtime.get("prompt_tokens_uncached", 0) or 0) + actual
+        else:
+            effective_actual = actual
+            runtime["prompt_tokens_uncached"] = int(runtime.get("prompt_tokens_uncached", 0) or 0) + actual
         runtime["prompt_tokens_effective"] = max(
-            0, int(runtime.get("prompt_tokens_effective", 0) or 0) + actual - estimated,
+            0, int(runtime.get("prompt_tokens_effective", 0) or 0) + effective_actual - estimated_effective,
         )
     reservation["finalized"] = True
 
@@ -1259,28 +1305,17 @@ def _chamar_llm(
 
 
 
-PROMPT_AGENTE = """You are Eyle, one autonomous programming agent. You receive the complete user request, recent conversation, the latest real tool results, an evidence index and the tools currently available. You decide the next useful action and write the final response in the user's language and tone.
+PROMPT_AGENTE = """You are Eyle, a coding agent. Return exactly one JSON object and no extra text.
 
-Return exactly one JSON decision:
-- {"final":"natural answer"}
-- {"final":{"answer":"natural answer","evidence_ids":["ev-..."] ,"limitations":[]}}
-- {"tool":"tool_name","arguments":{},"plan":["optional adaptive step", "..."]}
-- {"tool_calls":[{"tool":"...","arguments":{}}, ...],"plan":[...]} for up to four independent actions
-- {"patches":[...],"plan":[...]} for a transactional multi-file dry-run
-- {"needs_user":"one genuinely blocking question"}
+Valid decisions:
+- {"final":"answer"}
+- {"final":{"answer":"answer","claims":[{"kind":"bug|risk|recommendation|fact","sentence":1,"evidence_ids":["ev-..."]}],"limitations":[]}}
+- {"tool":"name","arguments":{},"plan":[]}
+- {"tool_calls":[{"tool":"name","arguments":{}}],"plan":[]}
+- {"patches":[{"operation":"replace|create|delete|update","path":"file","content":"complete file"}],"plan":[]}
+- {"needs_user":"blocking question"}
 
-Rules:
-1. You are the only planner and reasoner. Do not wait for another planner or interpreter. Planning is optional and may change as evidence appears.
-2. Use tools when project facts, execution results or source code are needed. Do not invent files, code, tests or tool outcomes.
-3. latest_tool_results contains the newest tool output, including source when just read. evidence_index contains older references and hashes. Re-read a file when exact source is needed again; disk reads are allowed.
-4. External memory is optional. Use memory_search only when earlier project knowledge could save investigation. Use memory_store only for durable, evidence-backed facts worth reusing.
-5. For a small existing file, prefer a full-file transaction after reading the whole file: {"patches":[{"operation":"replace","path":"app.py","content":"complete new file"}]}. To create use operation=create; to delete use operation=delete. Use range update only with line_start, line_end and new_code. The runtime fills hashes only from fresh matching evidence.
-6. The runtime—not you—handles confirmation, atomic writes, tests, rollback and rereads. Never claim a patch was applied before the runtime reports it.
-7. Respond directly for greetings, explanations or project-independent conversation. Keep your natural voice; do not expose internal JSON or operational stages in the answer.
-8. Return fewer findings than requested when only fewer are proved. Separate verified bugs from contextual risks or recommendations in natural prose.
-9. Use only available_tools. If a capability is absent, explain the limitation or choose another valid path.
-10. Avoid tool loops. After reading enough, answer or propose the patch. If a dry-run fails, correct it once from the returned error; do not restart the investigation.
-11. When the user explicitly asks to change files, do not stop at recommendations. Read the necessary files and produce one dry-run proposal for confirmation.
+Follow runtime_phase and action_policy. In structured finals, reference claims by the 1-based sentence number in answer; headings do not count. Read real files before project claims or edits. Batch independent reads. Never repeat a source already covered by evidence. When patch_required is true, prefer one transactional patch; when reads_allowed is false, do not call read tools. To remove a directory, list it, read its files, and delete those files in one transaction; empty parents are pruned automatically. Use only available_tools. The runtime enforces evidence, limits, confirmation, tests, rollback and rereads, so never claim a change was applied before runtime confirmation. If a patch is rejected, correct it once from the returned error instead of restarting investigation. Answer in the user's language and tone.
 """
 
 

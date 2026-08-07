@@ -105,6 +105,62 @@
     return t ? t.slice(0, 5) : "";
   }
 
+  function appendInlineMarkdown(parent, text) {
+    const source = String(text || "");
+    const pattern = /(\*\*([^*\n]+)\*\*|`([^`\n]+)`)/g;
+    let cursor = 0;
+    let match;
+    while ((match = pattern.exec(source)) !== null) {
+      if (match.index > cursor) {
+        parent.appendChild(document.createTextNode(source.slice(cursor, match.index)));
+      }
+      if (match[2] !== undefined) {
+        const strong = document.createElement("strong");
+        strong.textContent = match[2];
+        parent.appendChild(strong);
+      } else {
+        const code = document.createElement("code");
+        code.textContent = match[3];
+        parent.appendChild(code);
+      }
+      cursor = pattern.lastIndex;
+    }
+    if (cursor < source.length) {
+      parent.appendChild(document.createTextNode(source.slice(cursor)));
+    }
+  }
+
+  function renderMarkdownSafe(target, value) {
+    target.replaceChildren();
+    const lines = String(value || "").split("\n");
+    let codeLines = null;
+
+    function flushCode() {
+      if (codeLines === null) return;
+      const pre = document.createElement("pre");
+      const code = document.createElement("code");
+      code.textContent = codeLines.join("\n");
+      pre.appendChild(code);
+      target.appendChild(pre);
+      codeLines = null;
+    }
+
+    lines.forEach((line, index) => {
+      if (/^\s*```/.test(line)) {
+        if (codeLines === null) codeLines = [];
+        else flushCode();
+        return;
+      }
+      if (codeLines !== null) {
+        codeLines.push(line);
+        return;
+      }
+      appendInlineMarkdown(target, line);
+      if (index < lines.length - 1) target.appendChild(document.createElement("br"));
+    });
+    flushCode();
+  }
+
   function syncDeleteState(wrap, msg) {
     const del = wrap.querySelector(".msg-del");
     if (!del) return;
@@ -121,7 +177,7 @@
 
     const bubble = document.createElement("div");
     bubble.className = "msg-bubble";
-    bubble.textContent = msg.text;
+    renderMarkdownSafe(bubble, msg.text);
     wrap.appendChild(bubble);
 
     const meta = document.createElement("div");
@@ -243,7 +299,7 @@
     }
 
     const bubble = wrap.querySelector(".msg-bubble");
-    bubble.textContent = textoParcial || `◆ ${mensagem}`;
+    renderMarkdownSafe(bubble, textoParcial || `◆ ${mensagem}`);
     bubble.classList.toggle("status-only", !textoParcial);
 
     const metricas = [];

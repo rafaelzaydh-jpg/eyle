@@ -1,4 +1,4 @@
-# Publishing Eyle Rev4.11.2
+# Publishing Eyle Rev4.11.7
 
 ## Repository description
 
@@ -20,4 +20,4 @@ python -m pytest -q
 ```
 
 5. Review `release_manifest.json`, `CHANGELOG.md`, and the license.
-6. Tag the release as `v2.7.4-rev4.11.2`.
+6. Tag the release as `v2.7.4-rev4.11.7`.

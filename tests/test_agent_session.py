@@ -28,9 +28,9 @@ def config(tmp_path):
         "codar": {"ativado": True, "fazer_backup": False, "testes": {"ativado": False}},
         "_runtime_agent_budget": {
             "max_llm_calls": 20,
-            "max_prompt_tokens": 50000,
-            "max_completion_tokens": 50000,
-            "max_total_tokens": 100000,
+            "max_prompt_tokens": 12000,
+            "max_completion_tokens": 6000,
+            "max_total_tokens": 18000,
             "llm_calls": 0,
             "llm_requests": 0,
         },
@@ -525,3 +525,68 @@ def test_patch_path_is_rejected_before_workspace_escape(monkeypatch, tmp_path):
     assert details["failure_code"] == "PATCH_SCHEMA_INVALID"
     assert "unsafe patch path" in text
     assert outside.read_text(encoding="utf-8") == "KEEP = True\n"
+
+
+def test_write_request_cannot_escape_as_unsupported_factual_final(monkeypatch, tmp_path):
+    routes = tmp_path / "routes.py"
+    original = "def amor():\n    return '<h1>Amor</h1>'\n"
+    updated = "from flask import render_template\n\ndef amor():\n    return render_template('amor.html')\n"
+    template = "<h1>Amor</h1>\n"
+    routes.write_text(original, encoding="utf-8")
+    prompts = []
+
+    def fake(prompt, cfg):
+        payload = json.loads(prompt)
+        prompts.append(payload)
+        if len(prompts) == 1:
+            assert payload["response_quality"]["write_action_required"] is True
+            return json.dumps({"final": {
+                "answer": "O HTML foi extraído para templates/amor.html.",
+                "claims": [{
+                    "kind": "fact",
+                    "text": "O HTML foi extraído para templates/amor.html.",
+                    "evidence_ids": [],
+                }],
+            }})
+        if len(prompts) == 2:
+            assert "FINAL_WRITE_ACTION_REQUIRED" in payload["runtime_feedback"]
+            return '{"tool":"read_file","arguments":{"caminho_relativo":"routes.py"}}'
+        assert payload["latest_tool_results"][0]["detail"]["conteudo"] == original
+        return json.dumps({"patches": [
+            {"operation": "replace", "path": "routes.py", "content": updated},
+            {"operation": "create", "path": "templates/amor.html", "content": template},
+        ]})
+
+    monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
+    status, text, pending, details = core_agent.executar_agente(
+        "Extraia o html para templates/amor.html", config(tmp_path),
+        projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True,
+    )
+    assert status == "needs_user"
+    assert "Proposta transacional pronta" in text
+    assert pending["tool_pendente"]["tool"] == "apply_patch_set"
+    patches = pending["tool_pendente"]["arguments"]["patches"]
+    assert [item["path"] for item in patches] == ["routes.py", "templates/amor.html"]
+    assert details["failure_code"] is None
+
+
+def test_write_intent_gate_is_not_armed_when_editing_is_disabled(monkeypatch, tmp_path):
+    (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")
+    cfg = config(tmp_path)
+    cfg["codar"]["ativado"] = False
+    prompts = []
+
+    def fake(prompt, config_value):
+        payload = json.loads(prompt)
+        prompts.append(payload)
+        assert payload["response_quality"]["write_action_required"] is False
+        return '{"final":"Não posso alterar arquivos porque a escrita está desativada."}'
+
+    monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
+    status, text, pending, _ = core_agent.executar_agente(
+        "Altere app.py", cfg, projeto={"caminho_origem": str(tmp_path)},
+        retornar_detalhes=True,
+    )
+    assert status == "success"
+    assert "desativada" in text
+    assert pending is None

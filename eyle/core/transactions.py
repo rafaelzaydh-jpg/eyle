@@ -48,6 +48,26 @@ def _validate_python(path: str, content: str) -> None:
         ast.parse(content, filename=path)
 
 
+def _prune_empty_parents(directory: str, project_root: str) -> List[str]:
+    """Remove empty directories created only to hold deleted transaction files."""
+    root = os.path.realpath(project_root)
+    current = os.path.realpath(directory)
+    removed: List[str] = []
+    while current != root:
+        try:
+            if os.path.commonpath([root, current]) != root:
+                break
+        except ValueError:
+            break
+        try:
+            os.rmdir(current)
+        except OSError:
+            break
+        removed.append(os.path.relpath(current, root).replace("\\", "/"))
+        current = os.path.dirname(current)
+    return removed
+
+
 def dry_run_patch_set(project_root: str, raw_patches: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not isinstance(raw_patches, list) or not raw_patches:
         return {"ok": False, "error_code": "INVALID_ARGUMENT", "message": "patches must be a non-empty list"}
@@ -108,6 +128,8 @@ def dry_run_patch_set(project_root: str, raw_patches: List[Dict[str, Any]]) -> D
             })
     except (ValueError, TypeError, SyntaxError) as error:
         return {"ok": False, "error_code": "DRY_RUN_FAILED", "message": str(error)}
+    for item in prepared:
+        item["project_root"] = os.path.realpath(project_root)
     return {
         "ok": True,
         "message": f"dry-run approved for {len(prepared)} file(s)",
@@ -129,6 +151,9 @@ def apply_patch_set(project_root: str, prepared_patches: List[Dict[str, Any]]) -
             os.makedirs(os.path.dirname(absolute), exist_ok=True)
             if operation == "delete":
                 os.remove(absolute)
+                patch["pruned_directories"] = _prune_empty_parents(
+                    os.path.dirname(absolute), project_root,
+                )
             else:
                 _escrever_arquivo_atomico(absolute, patch["result_content"])
             applied.append(patch)
@@ -144,17 +169,30 @@ def apply_patch_set(project_root: str, prepared_patches: List[Dict[str, Any]]) -
 
 
 def rollback_patch_set(applied_patches: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Restore every member and verify that the transaction was fully undone."""
     failures = []
+    restored = []
     for patch in reversed(list(applied_patches or [])):
+        path = str(patch.get("path") or "")
         try:
             absolute = patch["absolute"]
             original = patch.get("original_content")
             if original is None:
                 if os.path.exists(absolute):
                     os.remove(absolute)
+                if os.path.exists(absolute):
+                    raise OSError("arquivo criado continua presente apos rollback")
+                project_root = patch.get("project_root")
+                if project_root:
+                    _prune_empty_parents(os.path.dirname(absolute), project_root)
             else:
                 os.makedirs(os.path.dirname(absolute), exist_ok=True)
                 _escrever_arquivo_atomico(absolute, original)
+                with open(absolute, "r", encoding="utf-8", errors="replace") as handle:
+                    restored_content = handle.read()
+                if hash_texto(restored_content) != hash_texto(original):
+                    raise OSError("conteudo restaurado diverge do snapshot original")
+            restored.append(path)
         except Exception as error:
-            failures.append(f"{patch.get('path')}: {error}")
-    return {"ok": not failures, "failures": failures}
+            failures.append(f"{path}: {error}")
+    return {"ok": not failures, "failures": failures, "restored": restored}

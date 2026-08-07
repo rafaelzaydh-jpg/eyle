@@ -57,8 +57,11 @@ def _carregar_gitignore(caminho_projeto, diretorio_abs, diretorio_rel=""):
     rel=os.path.join(diretorio_rel,".gitignore") if diretorio_rel else ".gitignore"
     safe=_resolver_caminho_seguro(caminho_projeto,rel)
     if safe is None or not os.path.isfile(safe): return []
-    try: lines=open(safe,"r",encoding="utf-8",errors="replace").read(1024*1024).splitlines()
-    except OSError: return []
+    try:
+        with open(safe, "r", encoding="utf-8", errors="replace") as arquivo:
+            lines = arquivo.read(1024 * 1024).splitlines()
+    except OSError:
+        return []
     rules=[]; base=diretorio_rel.replace(os.sep,"/").strip("/")
     for line in lines:
         line=line.rstrip()

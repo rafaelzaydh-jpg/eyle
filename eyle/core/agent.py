@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from json import JSONDecoder
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -17,7 +18,12 @@ from llm.executar import ErroLLM, PROMPT_AGENTE, executar_agente as executar_age
 from .session import AgentSession
 from .security import _resolver_caminho_seguro
 from .token_budget import available_user_prompt_tokens, estimate_tokens
-from .text_hash import extrair_faixa, hash_faixa
+from .text_hash import extrair_faixa, hash_faixa, hash_texto
+from .post_write import (
+    expected_outputs_from_patches,
+    run_compileall_for_changes,
+    verify_expected_outputs,
+)
 from .tools import (
     executar_tool,
     gerar_catalogo_tools,
@@ -26,11 +32,21 @@ from .tools import (
     validar_chamada_tool,
 )
 from .validation import validate_final
+from .response_quality import (
+    claim_evidence_ledger, quality_contract, request_needs_project_evidence,
+    request_requires_write,
+)
 
 READ_TOOLS = {"list_tree", "search_code", "find_symbol", "read_range", "read_file"}
 MEMORY_TOOLS = {"memory_search", "memory_store"}
 PATCH_TOOLS = {"test_patch_dry_run", "test_patch_set_dry_run"}
 TERMINAL_TOOL_ERRORS = {"UNSAFE_PATH", "PATH_OUTSIDE_PROJECT", "PERMISSION_DENIED", "WORKSPACE_NOT_AVAILABLE"}
+_PROJECT_TASK_HINT = re.compile(
+    r"\b(?:analise|análise|analize|analisar|analyze|review|revise|revisar|"
+    r"inspecione|inspect|verifique|verify|audite|audit|investigue|investigate|"
+    r"olhe|avalie|evaluate|teste|test|projeto|project|workspace|código|codigo|code)\b",
+    re.I,
+)
 
 
 def _return(status: str, text: str, pending: Any, details: Dict[str, Any], full: bool):
@@ -144,6 +160,36 @@ def _trim_history(context: Any, token_budget: int, chars_per_token: int) -> Dict
     return {"recent_messages": kept, "omitted_messages": max(0, len(messages) - len(kept))}
 
 
+def _build_context_anchor(
+    context: Any, request: str, token_budget: int, chars_per_token: int,
+) -> List[Dict[str, Any]]:
+    """Keep a tiny stable task anchor across turns without replaying full chat."""
+    messages = list((context or {}).get("recent_messages") or []) if isinstance(context, dict) else []
+    selected: List[Dict[str, Any]] = []
+    used = 0
+    for item in reversed(messages):
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "")
+        if role not in {"user", "assistant"}:
+            continue
+        content = item.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        compact = {"role": role, "content": content.strip()[:1800]}
+        if compact["content"] == str(request or "").strip():
+            continue
+        cost = estimate_tokens(compact, chars_per_token)
+        if used + cost > max(0, token_budget):
+            continue
+        selected.append(compact)
+        used += cost
+        if len(selected) >= 4:
+            break
+    selected.reverse()
+    return selected
+
+
 def _project_descriptor(project: Dict[str, Any]) -> Dict[str, Any]:
     root = (project or {}).get("caminho_origem")
     return {
@@ -156,20 +202,85 @@ def _tests_enabled(config: Dict[str, Any]) -> bool:
     return bool((((config or {}).get("codar") or {}).get("testes") or {}).get("ativado", False))
 
 
-def _allowed_tools(config: Dict[str, Any], project: Dict[str, Any]) -> set[str]:
+def _response_quality_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    raw = (((config or {}).get("agent") or {}).get("response_quality") or {})
+    return {
+        "enabled": bool(raw.get("enabled", False)),
+        "max_relevant_sources": max(1, int(raw.get("max_relevant_sources", 4) or 4)),
+        "max_relevant_source_chars": max(500, int(raw.get("max_relevant_source_chars", 8000) or 8000)),
+        "reject_mid_list_corrections": bool(raw.get("reject_mid_list_corrections", True)),
+    }
+
+
+def _phase_for_call(
+    session: AgentSession, config: Dict[str, Any], project: Dict[str, Any],
+) -> str:
+    descriptor = _project_descriptor(project)
+    if not descriptor["available"]:
+        return "chat"
+
+    agent_cfg = (config or {}).get("agent") or {}
+    write_required = request_requires_write(session.request, True)
+    max_investigation = max(1, int(agent_cfg.get("max_write_investigation_turns", 2) or 2))
+    max_no_progress = max(1, int(agent_cfg.get("max_no_progress_turns", 2) or 2))
+    max_turns = max(1, int(agent_cfg.get("max_llm_turns", 6) or 6))
+
+    if write_required:
+        if session.patch_failures and session.evidence:
+            return "write_patch_retry"
+        if (
+            session.turn > max_investigation
+            or (session.no_progress_turns >= max_no_progress and bool(session.evidence))
+            or session.turn >= max_turns
+        ):
+            return "write_patch_only"
+        if session.turn == 1:
+            return "write_investigate"
+        return "write_prepare"
+
+    needs_evidence = request_needs_project_evidence(session.request, True)
+    if not needs_evidence and not _PROJECT_TASK_HINT.search(str(session.request or "")):
+        return "chat"
+    if not session.evidence:
+        return "analysis_investigate"
+    if session.no_progress_turns >= max_no_progress or session.turn >= max_turns:
+        return "analysis_answer_only"
+    return "analysis_complete_or_read"
+
+
+def _phase_policy(phase: str) -> Dict[str, Any]:
+    policies = {
+        "chat": {"goal": "answer directly", "reads_allowed": False, "patch_required": False},
+        "analysis_investigate": {"goal": "read the minimum real source needed", "reads_allowed": True, "patch_required": False},
+        "analysis_complete_or_read": {"goal": "answer now unless one clearly missing source is essential", "reads_allowed": True, "patch_required": False},
+        "analysis_answer_only": {"goal": "answer from current evidence; no more tools", "reads_allowed": False, "patch_required": False},
+        "write_investigate": {"goal": "identify and batch-read every existing file needed for the edit", "reads_allowed": True, "patch_required": False},
+        "write_prepare": {"goal": "prefer one transactional patch; read only a genuinely missing file", "reads_allowed": True, "patch_required": True},
+        "write_patch_only": {"goal": "produce the transactional patch now; reads are closed", "reads_allowed": False, "patch_required": True},
+        "write_patch_retry": {"goal": "correct the rejected patch from the returned error; do not restart investigation", "reads_allowed": False, "patch_required": True},
+    }
+    return dict(policies.get(phase, policies["chat"]))
+
+
+def _allowed_tools(config: Dict[str, Any], project: Dict[str, Any], phase: str) -> set[str]:
     root = (project or {}).get("caminho_origem")
     if not root or not os.path.isdir(root):
         return set()
+    if phase in {"chat", "analysis_answer_only"}:
+        return set()
+    if phase in {"write_patch_only", "write_patch_retry"}:
+        return set(PATCH_TOOLS) if bool(((config or {}).get("codar") or {}).get("ativado", True)) else set()
+
     names = set(READ_TOOLS) | set(MEMORY_TOOLS)
-    if bool(((config or {}).get("codar") or {}).get("ativado", True)):
+    if phase == "write_prepare" and bool(((config or {}).get("codar") or {}).get("ativado", True)):
         names |= PATCH_TOOLS
-    if _tests_enabled(config):
+    if phase.startswith("analysis") and _tests_enabled(config):
         names.add("run_tests")
     return names
 
 
-def _tool_catalog(config: Dict[str, Any], project: Dict[str, Any]) -> Tuple[set[str], List[Dict[str, Any]]]:
-    allowed = _allowed_tools(config, project)
+def _tool_catalog(config: Dict[str, Any], project: Dict[str, Any], phase: str) -> Tuple[set[str], List[Dict[str, Any]]]:
+    allowed = _allowed_tools(config, project, phase)
     catalog = gerar_catalogo_tools(
         config=config, allowed_names=allowed, compact=True, minimal=True,
     ) if allowed else []
@@ -181,7 +292,11 @@ def _tool_catalog(config: Dict[str, Any], project: Dict[str, Any]) -> Tuple[set[
                 "delete": {"operation": "delete", "path": "old.py"},
                 "range_update": {"operation": "update", "path": "app.py", "line_start": 1, "line_end": 3, "new_code": "replacement"},
             }
-            item["note"] = "Hashes are filled only from fresh evidence; read every existing file first."
+            item["note"] = (
+                "Hashes are filled only from fresh evidence; read every existing file first. "
+                "To remove a directory, delete each contained file in the same transaction; "
+                "the runtime prunes empty parent directories after confirmation."
+            )
     return allowed, catalog
 
 
@@ -210,6 +325,22 @@ def _register_evidence(session: AgentSession, tool: str, detail: Any) -> List[st
         candidates = [item for item in detail.get("resultados") or [] if isinstance(item, dict)]
     elif tool in {"read_file", "read_range", "find_symbol"} and isinstance(detail, dict):
         candidates = [detail]
+    elif tool == "list_tree" and isinstance(detail, dict) and detail.get("inventory_hash"):
+        inventory = json.dumps({
+            "entradas": detail.get("entradas") or [],
+            "truncado": bool(detail.get("truncado")),
+            "varredura_completa": bool(detail.get("varredura_completa")),
+            "filtro": detail.get("filtro"),
+        }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        candidates = [{
+            "arquivo": "<workspace-tree>",
+            "linha_inicio": None,
+            "linha_fim": None,
+            "file_hash": detail.get("inventory_hash"),
+            "content_hash": hash_texto(inventory),
+            "conteudo": inventory,
+            "source_type": "workspace_tree",
+        }]
     else:
         candidates = []
     ids: List[str] = []
@@ -230,6 +361,52 @@ def _register_evidence(session: AgentSession, tool: str, detail: Any) -> List[st
         session.evidence[evidence_id] = clone
         ids.append(evidence_id)
     return ids
+
+
+def _seed_runtime_failure_evidence(session: AgentSession, conversation_context: Any) -> None:
+    """Promote the latest real post-write failure into citable runtime evidence."""
+    messages = list((conversation_context or {}).get("recent_messages") or []) if isinstance(conversation_context, dict) else []
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        failure = message.get("write_failure")
+        if not isinstance(failure, dict) or not failure:
+            continue
+        detail = str(failure.get("detail") or "").strip()
+        if not detail:
+            continue
+        evidence_id = "ev-runtime-0001"
+        item = {
+            "id": evidence_id,
+            "arquivo": "<runtime-validation>",
+            "linha_inicio": None,
+            "linha_fim": None,
+            "file_hash": None,
+            "content_hash": hash_texto(detail),
+            "conteudo": detail,
+            "source_type": "runtime_validation",
+            "stage": failure.get("stage"),
+            "error_code": failure.get("error_code"),
+            "paths": list(failure.get("paths") or []),
+            "rollback_confirmed": failure.get("rollback_confirmed"),
+        }
+        session.evidence[evidence_id] = item
+        session.relevant_sources.append({
+            "tool": "runtime_validation",
+            "evidence_id": evidence_id,
+            "arquivo": item["arquivo"],
+            "linha_inicio": None,
+            "linha_fim": None,
+            "file_hash": None,
+            "content_hash": item["content_hash"],
+            "conteudo": detail,
+            "source_type": item["source_type"],
+            "stage": item["stage"],
+            "error_code": item["error_code"],
+            "paths": item["paths"],
+            "rollback_confirmed": item["rollback_confirmed"],
+        })
+        return
 
 
 def _model_tool_result(session: AgentSession, tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
@@ -260,6 +437,69 @@ def _model_tool_result(session: AgentSession, tool: str, result: Dict[str, Any])
     if evidence_ids:
         compact["evidence_ids"] = evidence_ids
     return compact
+
+
+def _remember_relevant_sources(
+    session: AgentSession,
+    tool: str,
+    model_result: Dict[str, Any],
+    config: Dict[str, Any],
+) -> None:
+    if tool not in READ_TOOLS or model_result.get("ok") is not True:
+        return
+    quality = _response_quality_config(config)
+    detail = model_result.get("detail")
+    candidates: List[Dict[str, Any]] = []
+    if tool == "search_code" and isinstance(detail, dict):
+        candidates = [item for item in detail.get("resultados") or [] if isinstance(item, dict)]
+    elif isinstance(detail, dict):
+        candidates = [detail]
+
+    for item in candidates:
+        evidence_id = item.get("evidence_id")
+        if not evidence_id:
+            continue
+        compact = {
+            "tool": tool,
+            "evidence_id": evidence_id,
+            "arquivo": item.get("arquivo"),
+            "linha_inicio": item.get("linha_inicio"),
+            "linha_fim": item.get("linha_fim"),
+            "file_hash": item.get("file_hash"),
+            "content_hash": item.get("content_hash"),
+        }
+        for key in ("conteudo", "trecho_numerado", "conteudo_raw"):
+            value = item.get(key)
+            if isinstance(value, str) and value:
+                limit = quality["max_relevant_source_chars"]
+                compact[key] = value if len(value) <= limit else value[:limit] + "\n...[source cropped]"
+        session.relevant_sources = [
+            source for source in session.relevant_sources
+            if source.get("evidence_id") != evidence_id
+        ]
+        session.relevant_sources.append(compact)
+    del session.relevant_sources[:-quality["max_relevant_sources"]]
+
+
+def _retained_sources_for_prompt(session: AgentSession) -> List[Dict[str, Any]]:
+    """Avoid sending the same raw source in latest results and retention."""
+    latest_ids: set[str] = set()
+    for result in session.latest_tool_results:
+        if not isinstance(result, dict):
+            continue
+        latest_ids.update(str(item) for item in result.get("evidence_ids") or [] if item)
+        detail = result.get("detail")
+        if not isinstance(detail, dict):
+            continue
+        if detail.get("evidence_id"):
+            latest_ids.add(str(detail["evidence_id"]))
+        for item in detail.get("resultados") or []:
+            if isinstance(item, dict) and item.get("evidence_id"):
+                latest_ids.add(str(item["evidence_id"]))
+    return [
+        source for source in session.relevant_sources
+        if str(source.get("evidence_id") or "") not in latest_ids
+    ]
 
 
 def _crop_payload(payload: Dict[str, Any], budget: int, chars_per_token: int) -> Dict[str, Any]:
@@ -293,6 +533,25 @@ def _crop_payload(payload: Dict[str, Any], budget: int, chars_per_token: int) ->
                 break
         if cropped:
             continue
+        relevant = payload.get("relevant_sources") or []
+        relevant_cropped = False
+        for source in relevant:
+            if not isinstance(source, dict):
+                continue
+            for key in ("conteudo", "trecho_numerado", "conteudo_raw"):
+                value = source.get(key)
+                if isinstance(value, str) and len(value) > 1000:
+                    source[key] = value[: max(1000, len(value) // 2)]
+                    source["context_truncated"] = True
+                    relevant_cropped = True
+                    break
+            if relevant_cropped:
+                break
+        if relevant_cropped:
+            continue
+        if len(relevant) > 1:
+            payload["relevant_sources"] = relevant[1:]
+            continue
         if len(payload.get("evidence_index") or []) > 8:
             payload["evidence_index"] = payload["evidence_index"][-8:]
             continue
@@ -300,7 +559,7 @@ def _crop_payload(payload: Dict[str, Any], budget: int, chars_per_token: int) ->
     return payload
 
 
-def _agent_config(config: Dict[str, Any], session: AgentSession) -> Dict[str, Any]:
+def _agent_config(config: Dict[str, Any], session: AgentSession, project: Dict[str, Any]) -> Dict[str, Any]:
     clone = dict(config)
     llm = dict(config.get("llm") or {})
     latest_has_source = any(
@@ -309,18 +568,22 @@ def _agent_config(config: Dict[str, Any], session: AgentSession) -> Dict[str, An
         and isinstance(item.get("detail"), dict)
         for item in session.latest_tool_results
     )
+    phase = _phase_for_call(session, config, project)
     decision_limit = int(llm.get("agent_decision_max_tokens", 1400) or 1400)
     patch_limit = int(llm.get("agent_patch_max_tokens", 4200) or 4200)
-    if latest_has_source:
+    patch_phase = phase in {"write_prepare", "write_patch_only", "write_patch_retry"}
+    if latest_has_source or (patch_phase and bool(session.evidence)):
         source_chars = 0
-        for item in session.latest_tool_results:
+        for item in list(session.latest_tool_results) + list(session.relevant_sources):
             detail = item.get("detail") if isinstance(item, dict) else None
-            if not isinstance(detail, dict):
-                continue
-            source_chars += sum(
-                len(value) for key, value in detail.items()
-                if key in {"conteudo", "trecho_numerado", "conteudo_raw"} and isinstance(value, str)
-            )
+            containers = [detail] if isinstance(detail, dict) else [item]
+            for container in containers:
+                if not isinstance(container, dict):
+                    continue
+                source_chars += sum(
+                    len(value) for key, value in container.items()
+                    if key in {"conteudo", "trecho_numerado", "conteudo_raw"} and isinstance(value, str)
+                )
         chars_per_token = max(1, int((config.get("context_engine") or {}).get("chars_per_token_fallback", 3) or 3))
         adaptive = max(1800, (source_chars // chars_per_token) + 1000)
         llm["agent_max_tokens"] = min(patch_limit, adaptive)
@@ -345,18 +608,34 @@ def _compile_prompt(
         _trim_history(conversation_context, history_budget, chars_per_token)
         if session.turn <= 1 else {"recent_messages": [], "omitted_messages": 0}
     )
+    if not session.context_anchor:
+        anchor_budget = int((call_config.get("agent") or {}).get("task_context_token_budget", 500) or 500)
+        session.context_anchor = _build_context_anchor(
+            conversation_context, session.request, anchor_budget, chars_per_token,
+        )
     runtime = call_config.get("_runtime_agent_budget")
     if isinstance(runtime, dict):
         runtime["history_messages_omitted"] = history.get("omitted_messages", 0)
-    allowed, tools = _tool_catalog(call_config, project)
+    phase = _phase_for_call(session, call_config, project)
+    session.phase = phase
+    allowed, tools = _tool_catalog(call_config, project, phase)
     payload = {
         "request": session.request,
-        "turn": session.turn + 1,
+        "turn": session.turn,
         "plan": session.plan,
         "project": _project_descriptor(project),
+        "runtime_phase": phase,
+        "action_policy": _phase_policy(phase),
+        "task_context": session.context_anchor,
         "recent_context": history,
         "latest_tool_results": session.latest_tool_results,
+        "relevant_sources": _retained_sources_for_prompt(session),
         "evidence_index": session.evidence_index(),
+        "response_quality": quality_contract(
+            session.request, _project_descriptor(project)["available"],
+            _response_quality_config(call_config)["enabled"],
+            write_available=bool(((call_config or {}).get("codar") or {}).get("ativado", True)),
+        ),
         "available_tools": tools,
         "runtime_feedback": feedback or None,
     }
@@ -378,7 +657,7 @@ def _call_agent(
     conversation_context: Any,
     feedback: str = "",
 ) -> Tuple[Dict[str, Any], set[str]]:
-    call_config = _agent_config(config, session)
+    call_config = _agent_config(config, session, project)
     prompt, allowed = _compile_prompt(session, call_config, project, conversation_context, feedback)
     raw = executar_agente_llm(prompt, call_config)
     return _parse_decision(raw), allowed
@@ -390,10 +669,13 @@ def _details(
     config: Dict[str, Any],
     limitations: Optional[List[str]] = None,
     failure_code: Optional[str] = None,
+    write_failure: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     runtime = config.get("_runtime_agent_budget") or {}
     usage_keys = (
-        "llm_calls", "llm_requests", "prompt_tokens_actual", "prompt_tokens_effective",
+        "llm_calls", "llm_requests", "prompt_tokens_reserved",
+        "prompt_tokens_estimated_raw", "prompt_tokens_actual", "prompt_tokens_cached",
+        "prompt_tokens_uncached", "prompt_tokens_effective",
         "completion_tokens_actual", "generated_tokens", "reasoning_tokens_actual",
         "total_tokens_effective", "history_messages_omitted",
     )
@@ -404,11 +686,16 @@ def _details(
         "tool_calls": session.tool_calls,
         "tools_used": [item.get("tool") for item in session.tool_history],
         "evidence": session.evidence_index(),
+        "claim_evidence": claim_evidence_ledger(session.final_claims, session.evidence),
         "limitations": list(limitations or []),
         "failure_code": failure_code,
+        "write_failure": dict(write_failure or {}) if write_failure else None,
         "llm_usage": {key: runtime.get(key, 0) for key in usage_keys},
         "llm_responses": list(runtime.get("llm_responses") or []),
         "parse_failures": session.parse_failures,
+        "runtime_phase": session.phase,
+        "no_progress_turns": session.no_progress_turns,
+        "phase_violations": session.phase_violations,
         "prompt_snapshots": session.prompt_snapshots,
     }
 
@@ -467,10 +754,12 @@ def _pending_single_patch(session: AgentSession, args: Dict[str, Any], evidence:
         f"{apply_args['linha_inicio']}-{apply_args['linha_fim']}. Dry-run aprovado. "
         "A aplicação exige confirmação do usuário."
     )
+    state = session.to_dict()
+    state["relevant_sources"] = []
     pending = {
         "continuation_kind": "write_confirmation",
         "pergunta_ao_usuario": text,
-        "estado": session.to_dict(),
+        "estado": state,
         "tool_pendente": {"tool": "apply_patch", "arguments": apply_args},
     }
     return text, pending
@@ -507,10 +796,12 @@ def _pending_patch_set(session: AgentSession, detail: Dict[str, Any]):
         f"{', '.join(files)}. Dry-run aprovado para o conjunto completo. "
         "A aplicação exige confirmação do usuário."
     )
+    state = session.to_dict()
+    state["relevant_sources"] = []
     pending = {
         "continuation_kind": "write_confirmation",
         "pergunta_ao_usuario": text,
-        "estado": session.to_dict(),
+        "estado": state,
         "tool_pendente": {"tool": "apply_patch_set", "arguments": {"patches": patches}},
     }
     return text, pending
@@ -520,9 +811,105 @@ def _run_tests_after_write(config: Dict[str, Any], context: Dict[str, Any]) -> D
     if not _tests_enabled(config):
         return {
             "status": "skipped", "ok": True, "executed": False,
-            "error_code": "TESTS_DISABLED", "detail": "Execução de testes desativada.",
+            "error_code": "TESTS_DISABLED", "detail": "Execução de testes desativada explicitamente.",
         }
     return executar_tool("run_tests", {}, context)
+
+
+def _compile_after_write(config: Dict[str, Any], project: Dict[str, Any], paths: List[str]) -> Dict[str, Any]:
+    timeout = int(((((config or {}).get("codar") or {}).get("testes") or {}).get("timeout_segundos", 60)))
+    return run_compileall_for_changes(project.get("caminho_origem"), paths, timeout_seconds=timeout)
+
+
+def _rollback_failure_text(prefix: str, rollback: Dict[str, Any], restored_text: str) -> Tuple[str, str]:
+    if rollback.get("ok"):
+        return f"{prefix} {restored_text}", "ROLLED_BACK"
+    return f"{prefix} O rollback não pôde ser confirmado.", "ROLLBACK_FAILED"
+
+
+def _diagnostic_text(result: Dict[str, Any], max_chars: int = 4000) -> str:
+    """Return a readable bounded diagnostic without hiding the useful tail."""
+    detail = (result or {}).get("detail")
+    if isinstance(detail, (dict, list)):
+        text = json.dumps(detail, ensure_ascii=False, indent=2, default=str)
+    else:
+        text = str(detail or "").strip()
+    if not text:
+        return "Nenhum detalhe técnico foi retornado pela etapa de validação."
+    max_chars = max(800, int(max_chars))
+    if len(text) <= max_chars:
+        return text
+    head = max_chars // 3
+    tail = max_chars - head
+    return f"{text[:head]}\n... [diagnóstico truncado] ...\n{text[-tail:]}"
+
+
+def _write_failure_response(
+    prefix: str,
+    stage: str,
+    result: Dict[str, Any],
+    rollback: Dict[str, Any],
+    restored_text: str,
+    paths: List[str],
+) -> Tuple[str, str, Dict[str, Any]]:
+    """Build the user-visible and structured report for a failed confirmed write."""
+    base, suffix = _rollback_failure_text(prefix, rollback, restored_text)
+    diagnostic = _diagnostic_text(result)
+    error_code = str((result or {}).get("error_code") or f"{stage.upper()}_FAILED")
+    normalized_paths = [str(path) for path in paths or [] if str(path)]
+    report = {
+        "stage": stage,
+        "error_code": error_code,
+        "executed": bool((result or {}).get("executed")),
+        "detail": diagnostic,
+        "rollback_confirmed": bool((rollback or {}).get("ok")),
+        "rollback_error_code": (rollback or {}).get("error_code"),
+        "paths": normalized_paths,
+    }
+    text = (
+        f"{base}\n\nErro real da tentativa:\n"
+        f"- etapa: {stage};\n"
+        f"- código: {error_code};\n"
+        f"- arquivos envolvidos: {', '.join(normalized_paths) if normalized_paths else 'não informado'}.\n\n"
+        f"Saída da validação:\n{diagnostic}"
+    )
+    return text, suffix, report
+
+
+def _test_verification_line(tests: Dict[str, Any]) -> Tuple[str, List[str], bool]:
+    if tests.get("executed") and tests.get("ok") is True:
+        return "testes executados com sucesso", [], True
+    detail = str(tests.get("detail") or "Testes não executados.")
+    if tests.get("error_code") == "TESTS_NOT_FOUND":
+        return "nenhuma suíte de testes detectada", [detail], False
+    if tests.get("error_code") == "TESTS_DISABLED":
+        return "testes desativados; não houve verificação por testes", [detail], False
+    return "testes não executados", [detail], False
+
+
+def _reread_with_tools(context: Dict[str, Any], outputs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Keep the public read path in the verification chain before full hashes."""
+    failures = []
+    for item in outputs or []:
+        if item.get("operation") == "delete":
+            continue
+        path = str(item.get("path") or "")
+        result = executar_tool("read_file", {"caminho_relativo": path}, context)
+        if not result.get("ok"):
+            failures.append(path)
+    return {
+        "ok": not failures,
+        "failures": failures,
+        "detail": (
+            "Releitura pela ferramenta concluída."
+            if not failures else
+            "Falha na releitura pela ferramenta: " + ", ".join(failures)
+        ),
+    }
+
+
+def _clean_check_line(value: Any) -> str:
+    return str(value or "").strip().rstrip(".;")
 
 
 def _resume_single(session: AgentSession, pending: Dict[str, Any], config: Dict[str, Any], project: Dict[str, Any], full: bool):
@@ -533,37 +920,92 @@ def _resume_single(session: AgentSession, pending: Dict[str, Any], config: Dict[
         return _return("failed", text, None, _details(session, "failed", config, failure_code="PATCH_RESPONSE_INVALID"), full)
     applied = executar_tool("apply_patch", args, context)
     if not applied.get("ok"):
-        text = f"A alteração confirmada não foi aplicada: {applied.get('error_code') or 'PATCH_FAILED'}."
-        return _return("failed", text, None, _details(session, "failed", config, failure_code=applied.get("error_code") or "PATCH_FAILED"), full)
-    snapshot = (applied.get("detail") or {}).get("rollback_snapshot") if isinstance(applied.get("detail"), dict) else None
+        code = applied.get("error_code") or "PATCH_FAILED"
+        diagnostic = _diagnostic_text(applied)
+        report = {
+            "stage": "apply",
+            "error_code": code,
+            "executed": bool(applied.get("executed")),
+            "detail": diagnostic,
+            "rollback_confirmed": None,
+            "rollback_error_code": None,
+            "paths": [args.get("caminho_relativo")],
+        }
+        text = f"A alteração confirmada não foi aplicada: {code}.\n\nErro real da tentativa:\n{diagnostic}"
+        return _return("failed", text, None, _details(
+            session, "failed", config, failure_code=code, write_failure=report,
+        ), full)
+
+    detail = applied.get("detail") if isinstance(applied.get("detail"), dict) else {}
+    snapshot = detail.get("rollback_snapshot")
+    compile_result = _compile_after_write(config, project, [args["caminho_relativo"]])
+    if compile_result.get("ok") is not True:
+        rollback = reverter_patch_confirmado(snapshot, context) if snapshot else {"ok": False}
+        text, suffix, report = _write_failure_response(
+            "compileall falhou após a escrita.", "compileall", compile_result, rollback,
+            "O arquivo foi restaurado automaticamente.", [args["caminho_relativo"]],
+        )
+        return _return("failed", text, None, _details(
+            session, "failed", config,
+            failure_code=f"{compile_result.get('error_code') or 'COMPILEALL_FAILED'}_{suffix}",
+            limitations=[str(compile_result.get("detail") or "compileall falhou")],
+            write_failure=report,
+        ), full)
+
     tests = _run_tests_after_write(config, context)
-    if tests.get("executed") and tests.get("ok") is not True:
+    if tests.get("ok") is not True:
         rollback = reverter_patch_confirmado(snapshot, context) if snapshot else {"ok": False}
-        text = "Os testes falharam após a escrita. " + ("O arquivo foi restaurado automaticamente." if rollback.get("ok") else "O rollback não pôde ser confirmado.")
-        return _return("failed", text, None, _details(session, "failed", config, failure_code="TESTS_FAILED_ROLLED_BACK"), full)
-    end = (applied.get("detail") or {}).get("linha_fim_final") if isinstance(applied.get("detail"), dict) else None
-    if not isinstance(end, int):
-        end = max(args["linha_inicio"], args["linha_inicio"] + max(0, len(str(args.get("codigo_novo") or "").splitlines()) - 1))
-    reread = executar_tool("read_range", {
-        "caminho_relativo": args["caminho_relativo"],
-        "linha_inicio": args["linha_inicio"],
-        "linha_fim": max(args["linha_inicio"], end),
-    }, context)
-    if not reread.get("ok"):
+        text, suffix, report = _write_failure_response(
+            "A verificação por testes falhou após a escrita.", "tests", tests, rollback,
+            "O arquivo foi restaurado automaticamente.", [args["caminho_relativo"]],
+        )
+        return _return("failed", text, None, _details(
+            session, "failed", config,
+            failure_code=f"{tests.get('error_code') or 'TESTS_FAILED'}_{suffix}",
+            limitations=[str(tests.get("detail") or "testes falharam")],
+            write_failure=report,
+        ), full)
+
+    expected_outputs = [{
+        "path": args["caminho_relativo"],
+        "operation": "update",
+        "expected_hash": detail.get("file_hash_depois"),
+    }]
+    tool_reread = _reread_with_tools(context, expected_outputs)
+    reread = verify_expected_outputs(project.get("caminho_origem"), expected_outputs)
+    if not tool_reread.get("ok") or not reread.get("ok"):
         rollback = reverter_patch_confirmado(snapshot, context) if snapshot else {"ok": False}
-        if rollback.get("ok"):
-            text = "A releitura obrigatória falhou após a escrita. O arquivo foi restaurado automaticamente."
-            failure_code = "POST_WRITE_READ_FAILED_ROLLED_BACK"
-        else:
-            text = "A releitura obrigatória falhou após a escrita e o rollback não pôde ser confirmado."
-            failure_code = "POST_WRITE_READ_FAILED"
-        return _return("failed", text, None, _details(session, "failed", config, failure_code=failure_code), full)
-    verification = "testes executados com sucesso" if tests.get("executed") else "testes não executados; verificação por dry-run e releitura"
-    text = (
-        f"Alteração aplicada em {args['caminho_relativo']}.\n\nVerificação:\n"
-        f"- dry-run aprovado;\n- patch aplicado;\n- {verification};\n- arquivo relido após a alteração."
+        reread_failure = tool_reread if not tool_reread.get("ok") else reread
+        reread_failure = dict(reread_failure)
+        reread_failure.setdefault("error_code", "POST_WRITE_READ_FAILED")
+        text, suffix, report = _write_failure_response(
+            "A releitura integral obrigatória falhou após a escrita.", "reread", reread_failure, rollback,
+            "O arquivo foi restaurado automaticamente.", [args["caminho_relativo"]],
+        )
+        return _return("failed", text, None, _details(
+            session, "failed", config,
+            failure_code=f"POST_WRITE_READ_FAILED_{suffix}",
+            limitations=[str(reread_failure.get("detail") or "releitura falhou")],
+            write_failure=report,
+        ), full)
+
+    compile_line = (
+        _clean_check_line(compile_result.get("detail"))
+        if compile_result.get("executed") else
+        "compileall não era aplicável porque nenhum arquivo Python final foi alterado"
     )
-    limitations = [] if tests.get("executed") else [str(tests.get("detail") or verification)]
+    test_line, limitations, fully_verified = _test_verification_line(tests)
+    state_line = (
+        "Estado: alteração verificada após escrita."
+        if fully_verified else
+        "Estado: alteração aplicada com validação parcial; não foi chamada de verificada."
+    )
+    text = (
+        f"Alteração aplicada em {args['caminho_relativo']}.\n\nValidação pós-escrita:\n"
+        f"- {compile_line};\n- {test_line};\n"
+        f"- releitura pela ferramenta concluída;\n"
+        f"- arquivo inteiro relido e hash final confirmado.\n- {state_line}"
+    )
     return _return("success", text, None, _details(session, "success", config, limitations=limitations), full)
 
 
@@ -575,43 +1017,96 @@ def _resume_set(session: AgentSession, pending: Dict[str, Any], config: Dict[str
         return _return("failed", text, None, _details(session, "failed", config, failure_code="PATCH_RESPONSE_INVALID"), full)
     applied = executar_tool("apply_patch_set", args, context)
     if not applied.get("ok"):
-        text = f"A transação não foi aplicada: {applied.get('error_code') or 'PATCH_TRANSACTION_FAILED'}."
-        return _return("failed", text, None, _details(session, "failed", config, failure_code=applied.get("error_code") or "PATCH_TRANSACTION_FAILED"), full)
+        code = applied.get("error_code") or "PATCH_TRANSACTION_FAILED"
+        diagnostic = _diagnostic_text(applied)
+        attempted_paths = [str(item.get("path") or "") for item in args.get("patches") or []]
+        report = {
+            "stage": "apply",
+            "error_code": code,
+            "executed": bool(applied.get("executed")),
+            "detail": diagnostic,
+            "rollback_confirmed": None,
+            "rollback_error_code": None,
+            "paths": [path for path in attempted_paths if path],
+        }
+        text = f"A transação não foi aplicada: {code}.\n\nErro real da tentativa:\n{diagnostic}"
+        return _return("failed", text, None, _details(
+            session, "failed", config, failure_code=code, write_failure=report,
+        ), full)
+
     applied_patches = (applied.get("detail") or {}).get("applied_patches") or []
+    paths = [str(item.get("path") or "") for item in applied_patches]
+    compile_result = _compile_after_write(config, project, paths)
+    if compile_result.get("ok") is not True:
+        rollback = reverter_patch_set_confirmado(applied_patches, context)
+        text, suffix, report = _write_failure_response(
+            "compileall falhou após a transação.", "compileall", compile_result, rollback,
+            "Todos os arquivos foram restaurados.", paths,
+        )
+        return _return("failed", text, None, _details(
+            session, "failed", config,
+            failure_code=f"{compile_result.get('error_code') or 'COMPILEALL_FAILED'}_{suffix}",
+            limitations=[str(compile_result.get("detail") or "compileall falhou")],
+            write_failure=report,
+        ), full)
+
     tests = _run_tests_after_write(config, context)
-    if tests.get("executed") and tests.get("ok") is not True:
+    if tests.get("ok") is not True:
         rollback = reverter_patch_set_confirmado(applied_patches, context)
-        text = "Os testes falharam após a transação. " + ("Todos os arquivos foram restaurados." if rollback.get("ok") else "O rollback completo não pôde ser confirmado.")
-        return _return("failed", text, None, _details(session, "failed", config, failure_code="TESTS_FAILED_ROLLED_BACK"), full)
-    root = project.get("caminho_origem")
-    failures = []
-    for patch in applied_patches:
-        path = patch.get("path")
-        if patch.get("operation") == "delete":
-            absolute = _resolver_caminho_seguro(root, path)
-            if absolute is None or os.path.exists(absolute):
-                failures.append(path)
-            continue
-        reread = executar_tool("read_file", {"caminho_relativo": path}, context)
-        if not reread.get("ok"):
-            failures.append(path)
-    if failures:
+        text, suffix, report = _write_failure_response(
+            "A verificação por testes falhou após a transação.", "tests", tests, rollback,
+            "Todos os arquivos foram restaurados.", paths,
+        )
+        return _return("failed", text, None, _details(
+            session, "failed", config,
+            failure_code=f"{tests.get('error_code') or 'TESTS_FAILED'}_{suffix}",
+            limitations=[str(tests.get("detail") or "testes falharam")],
+            write_failure=report,
+        ), full)
+
+    expected_outputs = expected_outputs_from_patches(applied_patches)
+    tool_reread = _reread_with_tools(context, expected_outputs)
+    reread = verify_expected_outputs(project.get("caminho_origem"), expected_outputs)
+    if not tool_reread.get("ok") or not reread.get("ok"):
         rollback = reverter_patch_set_confirmado(applied_patches, context)
-        if rollback.get("ok"):
-            text = "A verificação final falhou em " + ", ".join(failures) + ". Todos os arquivos foram restaurados."
-            failure_code = "POST_WRITE_READ_FAILED_ROLLED_BACK"
-        else:
-            text = "A verificação final falhou em " + ", ".join(failures) + "; o rollback completo não pôde ser confirmado."
-            failure_code = "POST_WRITE_READ_FAILED"
-        return _return("failed", text, None, _details(session, "failed", config, failure_code=failure_code), full)
-    files = [str(item.get("path") or "") for item in applied_patches]
-    verification = "testes executados com sucesso" if tests.get("executed") else "testes não executados; verificação por dry-run e releitura"
-    text = (
-        f"Transação aplicada em {len(files)} arquivo(s): {', '.join(files)}.\n\nVerificação:\n"
-        f"- dry-run conjunto aprovado;\n- alterações aplicadas como transação;\n"
-        f"- {verification};\n- arquivos alterados relidos e exclusões confirmadas."
+        reread_failure = tool_reread if not tool_reread.get("ok") else reread
+        reread_failure = dict(reread_failure)
+        reread_failure.setdefault("error_code", "POST_WRITE_READ_FAILED")
+        text, suffix, report = _write_failure_response(
+            "A releitura integral da transação falhou.", "reread", reread_failure, rollback,
+            "Todos os arquivos foram restaurados.", paths,
+        )
+        return _return("failed", text, None, _details(
+            session, "failed", config,
+            failure_code=f"POST_WRITE_READ_FAILED_{suffix}",
+            limitations=[str(reread_failure.get("detail") or "releitura falhou")],
+            write_failure=report,
+        ), full)
+
+    compile_line = (
+        _clean_check_line(compile_result.get("detail"))
+        if compile_result.get("executed") else
+        "compileall não era aplicável porque nenhum arquivo Python final foi alterado"
     )
-    limitations = [] if tests.get("executed") else [str(tests.get("detail") or verification)]
+    test_line, limitations, fully_verified = _test_verification_line(tests)
+    created = [str(item.get("path") or "") for item in applied_patches if item.get("operation") == "create"]
+    creation_line = (
+        f"arquivos prometidos criados e confirmados: {', '.join(created)}"
+        if created else
+        "nenhum arquivo novo foi prometido pela transação"
+    )
+    state_line = (
+        "Estado: transação verificada após escrita."
+        if fully_verified else
+        "Estado: transação aplicada com validação parcial; não foi chamada de verificada."
+    )
+    text = (
+        f"Transação aplicada em {len(paths)} arquivo(s): {', '.join(paths)}.\n\nValidação pós-escrita:\n"
+        f"- {compile_line};\n- {test_line};\n"
+        f"- releitura de todos os arquivos pela ferramenta concluída;\n"
+        f"- todos os arquivos alterados foram relidos integralmente;\n"
+        f"- {creation_line};\n- exclusões prometidas foram confirmadas;\n- {state_line}"
+    )
     return _return("success", text, None, _details(session, "success", config, limitations=limitations), full)
 
 
@@ -754,7 +1249,7 @@ def _enrich_patch_set(session: AgentSession, project: Dict[str, Any], arguments:
 def _preserve_source_for_retry(previous: List[Dict[str, Any]], current: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     needs_source = any(
         (item.get("tool") in PATCH_TOOLS and item.get("ok") is False)
-        or item.get("error_code") == "IDENTICAL_READ_BLOCKED"
+        or item.get("error_code") in {"IDENTICAL_READ_BLOCKED", "SEMANTIC_READ_BLOCKED", "READ_PHASE_CLOSED"}
         for item in current if isinstance(item, dict)
     )
     if not needs_source:
@@ -765,8 +1260,102 @@ def _preserve_source_for_retry(previous: List[Dict[str, Any]], current: List[Dic
     ][-2:]
     return sources + current
 
+def _normalized_path(value: Any) -> str:
+    return str(value or "").replace("\\", "/").strip().lstrip("./").lower()
+
+
+def _semantic_read_signature(tool: str, arguments: Dict[str, Any]) -> Optional[str]:
+    if tool == "list_tree":
+        return "tree:" + json.dumps({
+            "filtro": str(arguments.get("filtro") or "").strip().lower(),
+            "profundidade": arguments.get("profundidade"),
+            "limite": arguments.get("limite"),
+        }, sort_keys=True, separators=(",", ":"), default=str)
+    if tool == "search_code":
+        query = " ".join(str(arguments.get("pergunta") or "").lower().split())
+        return f"search:{query}"
+    if tool == "find_symbol":
+        path = _normalized_path(arguments.get("caminho_relativo"))
+        symbol = str(arguments.get("simbolo") or "").strip().lower()
+        return f"symbol:{path}:{symbol}"
+    if tool == "read_file":
+        return f"file:{_normalized_path(arguments.get('caminho_relativo'))}:all"
+    if tool == "read_range":
+        path = _normalized_path(arguments.get("caminho_relativo"))
+        return f"file:{path}:{arguments.get('linha_inicio')}:{arguments.get('linha_fim')}"
+    return None
+
+
+def _read_already_covered(
+    session: AgentSession, tool: str, arguments: Dict[str, Any],
+) -> bool:
+    signature = _semantic_read_signature(tool, arguments)
+    if not signature:
+        return False
+    if tool in {"list_tree", "search_code", "find_symbol"}:
+        return any(
+            item.get("semantic_signature") == signature and item.get("status") == "success"
+            for item in session.tool_history
+            if isinstance(item, dict)
+        )
+
+    path = _normalized_path(arguments.get("caminho_relativo"))
+    if not path:
+        return False
+    requested_start = 1 if tool == "read_file" else int(arguments.get("linha_inicio") or 0)
+    requested_end = None if tool == "read_file" else int(arguments.get("linha_fim") or 0)
+    for item in session.evidence.values():
+        if not isinstance(item, dict) or _normalized_path(item.get("arquivo")) != path:
+            continue
+        start = int(item.get("linha_inicio") or 0)
+        end = int(item.get("linha_fim") or 0)
+        total = int(item.get("total_linhas_arquivo") or 0)
+        whole = start == 1 and total > 0 and end >= total
+        if tool == "read_file" and whole:
+            return True
+        if tool == "read_range" and start <= requested_start and end >= int(requested_end or 0):
+            return True
+    return False
+
+
+def _turn_made_progress(
+    evidence_before: int, results: List[Dict[str, Any]], session: AgentSession,
+) -> bool:
+    if len(session.evidence) > evidence_before:
+        return True
+    return any(
+        isinstance(item, dict)
+        and item.get("ok") is True
+        and item.get("tool") not in READ_TOOLS
+        for item in results
+    )
+
+
 def _action_signature(tool: str, arguments: Dict[str, Any]) -> str:
     return json.dumps({"tool": tool, "arguments": arguments}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _final_validation_feedback(reason: str) -> str:
+    if str(reason).startswith((
+        "FINAL_CLAIM_SENTENCE_INVALID:",
+        "FINAL_CLAIM_SENTENCE_OUT_OF_RANGE:",
+        "FINAL_CLAIM_REFERENCE_REQUIRED:",
+    )):
+        return (
+            f"FINAL_VALIDATION_ERROR: {reason}. In each claim use sentence as the "
+            "1-based index of a non-heading sentence already present in final.answer."
+        )
+    if str(reason).startswith("FINAL_CLAIM_NOT_IN_ANSWER:"):
+        return (
+            f"FINAL_VALIDATION_ERROR: {reason}. Prefer sentence indexes. Legacy "
+            "claims[].text must match one sentence already present in final.answer."
+        )
+    if str(reason).startswith("FINAL_CLAIM_REQUIRES_EVIDENCE:"):
+        return (
+            f"FINAL_VALIDATION_ERROR: {reason}. Attach real evidence_ids to every "
+            "fact, bug, and risk claim; recommendations may remain without evidence."
+        )
+    return f"FINAL_VALIDATION_ERROR: {reason}. Return a corrected final answer."
 
 
 def _deadline_exceeded(config: Dict[str, Any]) -> bool:
@@ -788,6 +1377,8 @@ def _run(
     parse_retries = max(0, int(cfg.get("protocol_parse_retries", 1) or 1))
     final_retries = max(0, int(cfg.get("final_validation_retries", 1) or 1))
     max_patch_failures = max(1, int(cfg.get("max_patch_dry_run_failures", 2) or 2))
+    max_no_progress = max(1, int(cfg.get("max_no_progress_turns", 2) or 2))
+    max_phase_violations = max(0, int(cfg.get("max_phase_violations", 1) or 1))
     feedback = ""
     final_failures = 0
 
@@ -796,6 +1387,7 @@ def _run(
             text = "A tarefa excedeu o prazo de execução."
             return _return("failed", text, None, _details(session, "failed", config, failure_code="TASK_DEADLINE_EXCEEDED"), full)
         session.turn += 1
+        evidence_before = len(session.evidence)
         try:
             decision, allowed = _call_agent(session, config, project, conversation_context, feedback)
             session.parse_failures = 0
@@ -824,12 +1416,35 @@ def _run(
             return _return("needs_user", text, pending, _details(session, "needs_user", config), full)
 
         if "final" in decision:
-            ok, reason, answer, limitations = validate_final(decision["final"], session.evidence)
+            quality = _response_quality_config(config)
+            project_available = _project_descriptor(project)["available"]
+            write_required = request_requires_write(session.request, project_available)
+            write_available = bool(((config or {}).get("codar") or {}).get("ativado", True))
+            if write_required and write_available:
+                ok = False
+                reason = "FINAL_WRITE_ACTION_REQUIRED"
+                answer, limitations, claims = "", [], []
+            else:
+                ok, reason, answer, limitations, claims, _finding_limit = validate_final(
+                    decision["final"], session.evidence,
+                    request=session.request,
+                    project_available=project_available,
+                    quality_enabled=quality["enabled"],
+                    reject_mid_list_corrections=quality["reject_mid_list_corrections"],
+                )
             if ok:
+                session.final_claims = claims
                 return _return("success", answer, None, _details(session, "success", config, limitations=limitations), full)
             final_failures += 1
             if final_failures <= final_retries:
-                feedback = f"FINAL_VALIDATION_ERROR: {reason}. Return a corrected final answer."
+                if reason == "FINAL_WRITE_ACTION_REQUIRED":
+                    feedback = (
+                        "FINAL_WRITE_ACTION_REQUIRED: the user requested a file change. "
+                        "Do not return final prose. Read the necessary existing files and "
+                        "produce one patch dry-run for user confirmation."
+                    )
+                else:
+                    feedback = _final_validation_feedback(reason)
                 continue
             text = f"A conclusão final ficou inválida: {reason}."
             return _return("failed", text, None, _details(session, "failed", config, failure_code=reason), full)
@@ -847,6 +1462,35 @@ def _run(
                 return _return("failed", text, None, _details(session, "failed", config, failure_code="MAX_TOOL_CALLS_EXCEEDED"), full)
             tool = str(call.get("tool") or "")
             arguments = call.get("arguments") or {}
+            if tool not in allowed:
+                phase_error = None
+                phase_detail = "A ferramenta não está disponível neste workspace/configuração."
+                if tool in PATCH_TOOLS and session.phase == "write_investigate":
+                    phase_error = "WRITE_REQUIRES_SOURCE_READ"
+                    phase_detail = "Leia os arquivos existentes necessários antes de propor a transação."
+                elif tool in READ_TOOLS and session.phase in {"write_patch_only", "write_patch_retry"}:
+                    phase_error = "READ_PHASE_CLOSED"
+                    phase_detail = "A fase de leitura terminou. Use as evidências atuais e produza a transação agora."
+                elif session.phase == "analysis_answer_only":
+                    phase_error = "FINAL_PHASE_REQUIRES_ANSWER"
+                    phase_detail = "A investigação terminou. Responda usando as evidências atuais, sem novas ferramentas."
+                if phase_error in {"READ_PHASE_CLOSED", "FINAL_PHASE_REQUIRES_ANSWER"}:
+                    session.phase_violations += 1
+                next_results.append({
+                    "tool": tool, "status": "failed", "ok": False,
+                    "error_code": phase_error or "TOOL_NOT_AVAILABLE",
+                    "detail": phase_detail,
+                })
+                if (
+                    phase_error in {"READ_PHASE_CLOSED", "FINAL_PHASE_REQUIRES_ANSWER"}
+                    and session.phase_violations > max_phase_violations
+                ):
+                    text = "A LLM continuou tentando investigar depois que a fase de leitura foi encerrada."
+                    return _return(
+                        "failed", text, None,
+                        _details(session, "failed", config, failure_code=phase_error), full,
+                    )
+                continue
             if tool == "test_patch_dry_run":
                 arguments, patch_error = _enrich_single_patch(session, arguments)
                 if patch_error:
@@ -871,13 +1515,6 @@ def _run(
                         text = f"A proposta de escrita continuou inválida após {session.patch_failures} tentativa(s): {patch_error}."
                         return _return("failed", text, None, _details(session, "failed", config, failure_code="PATCH_SCHEMA_INVALID"), full)
                     continue
-            if tool not in allowed:
-                next_results.append({
-                    "tool": tool, "status": "failed", "ok": False,
-                    "error_code": "TOOL_NOT_AVAILABLE",
-                    "detail": "A ferramenta não está disponível neste workspace/configuração.",
-                })
-                continue
             normalized, error = validar_chamada_tool(tool, arguments)
             if error:
                 next_results.append(_compact_non_read_result(tool, error))
@@ -887,6 +1524,7 @@ def _run(
                         text = f"A proposta de escrita continuou inválida após {session.patch_failures} tentativa(s): {error.get('detail')}."
                         return _return("failed", text, None, _details(session, "failed", config, failure_code=error.get("error_code") or "PATCH_SCHEMA_INVALID"), full)
                 continue
+            semantic_signature = _semantic_read_signature(tool, normalized)
             signature = _action_signature(tool, normalized)
             if signature == session.last_tool_signature:
                 session.consecutive_identical_calls += 1
@@ -904,6 +1542,19 @@ def _run(
                     "detail": "A mesma leitura fresca já está disponível. Use o resultado atual, conclua ou escolha outra faixa/arquivo.",
                 })
                 continue
+            if tool in READ_TOOLS and _read_already_covered(session, tool, normalized):
+                next_results.append({
+                    "tool": tool, "status": "skipped", "ok": False,
+                    "executed": False, "changed": False,
+                    "error_code": "SEMANTIC_READ_BLOCKED",
+                    "detail": "Essa fonte ou faixa já está coberta por evidência fresca. Use o conteúdo atual e avance.",
+                })
+                session.tool_history.append({
+                    "tool": tool, "status": "skipped",
+                    "error_code": "SEMANTIC_READ_BLOCKED",
+                    "semantic_signature": semantic_signature,
+                })
+                continue
 
             context = {"config": config, "projeto": project, "evidence": session.evidence}
             result = executar_tool(tool, normalized, context)
@@ -912,8 +1563,10 @@ def _run(
                 "tool": tool,
                 "status": result.get("status"),
                 "error_code": result.get("error_code"),
+                "semantic_signature": semantic_signature,
             })
             model_result = _model_tool_result(session, tool, result)
+            _remember_relevant_sources(session, tool, model_result, config)
             next_results.append(model_result)
             if tool in PATCH_TOOLS and result.get("ok") is not True:
                 session.patch_failures += 1
@@ -940,7 +1593,32 @@ def _run(
                 return _return("failed", text, None, _details(session, "failed", config, failure_code=result.get("error_code")), full)
 
         session.latest_tool_results = _preserve_source_for_retry(session.latest_tool_results, next_results)
-        feedback = ""
+        if session.phase.startswith("write") and any(
+            isinstance(item, dict) and item.get("tool") in READ_TOOLS for item in next_results
+        ):
+            session.investigation_turns += 1
+
+        if _turn_made_progress(evidence_before, next_results, session):
+            session.no_progress_turns = 0
+            feedback = ""
+        else:
+            session.no_progress_turns += 1
+            if session.no_progress_turns >= max_no_progress:
+                if session.evidence and request_requires_write(session.request, _project_descriptor(project)["available"]):
+                    feedback = (
+                        "NO_PROGRESS_WRITE: investigation is closed. Use retained evidence and "
+                        "produce one transactional patch now."
+                    )
+                elif session.evidence:
+                    feedback = "NO_PROGRESS_ANALYSIS: stop using tools and answer from current evidence."
+                else:
+                    text = "A tarefa não produziu evidência nem progresso após tentativas consecutivas."
+                    return _return(
+                        "failed", text, None,
+                        _details(session, "failed", config, failure_code="AGENT_NO_PROGRESS"), full,
+                    )
+            else:
+                feedback = "The last action added no new evidence. Do not repeat it; advance to the next phase."
 
     text = "A tarefa atingiu o limite de turnos do agente antes de concluir."
     return _return("failed", text, None, _details(session, "failed", config, failure_code="MAX_LLM_TURNS_EXCEEDED"), full)
@@ -970,4 +1648,5 @@ def executar_agente(
             return _run(session, config, project, full, conversation_context=None)
         return _resume(session, retomar, config, project, full)
     session = AgentSession(str(objetivo or ""), task_id=task_id)
+    _seed_runtime_failure_evidence(session, conversation_context)
     return _run(session, config, project, full, conversation_context=conversation_context)
