@@ -1,2 +1,2 @@
 -r requirements.txt
-pytest==8.2.2
+# Rev4.12.2 keeps pytest in runtime because run_tests depends on it.

@@ -1,7 +1,7 @@
 <p align="center"><img src="assets/eyle-banner.svg" alt="Eyle autonomous programming agent" width="100%"></p>
 <p align="center"><strong>One LLM brain. Real tools. Supervised writes. Observable execution.</strong></p>
 
-**Version:** 2.7.4 · **Schema:** 4.12.1 · **Revision:** 4.12.1-runtime-tools-observability
+**Version:** 2.7.4 · **Schema:** 4.12.2 · **Revision:** 4.12.2-context-runner-hardening
 
 Eyle is a local programming agent built around a deliberately small idea: the LLM decides what to do, deterministic tools measure and execute reality, and the runtime protects the few boundaries that must never be guessed.
 
@@ -19,12 +19,12 @@ user
 → answer
 ```
 
-## Rev4.12.1: runtime tools + observable decisions
+## Rev4.12.2: context + test-runner hardening
 
-Rev4.12.1 keeps the Rev4.12 expandable history and adds decision outcomes plus stronger deterministic tools. Every assistant response created by a job can expose an on-demand **history** panel in the web UI. The panel is loaded only when opened and shows runtime facts such as:
+Rev4.12.2 keeps the Rev4.12.1 tools and expandable history, then fixes two failures found in real 245k-token project tests: large structured tool outputs overflowing the next prompt, and `run_tests` existing while `pytest` was only a development dependency. Every assistant response created by a job can expose an on-demand **history** panel in the web UI. The panel is loaded only when opened and shows runtime facts such as:
 
 - agent turns and final phase;
-- LLM call count, latency and finish metadata;
+- LLM logical attempts, requests actually sent, preflight blocks, latency and finish metadata;
 - prompt tokens, cached tokens, new/uncached tokens, output and effective totals;
 - accepted/rejected decision type per turn, including validation rejection reason;
 - tools called, their safe observable arguments and summarized results;
@@ -43,12 +43,12 @@ The model does not need to calculate or estimate everything mentally. Rev4.11.8+
 - `inspect_project` — objective entrypoint/import/route/test/CI/framework signals without deciding which file is “important”;
 - `search_code`, `read_file`, `read_range`, `find_symbol`, `list_tree` — live source inspection;
 - `agent_info` — current identity and executable tool registry;
-- `run_tests` — sandboxed real test execution with optional focused pytest scope and bounded diagnostic output;
+- `run_tests` — sandboxed real test execution with optional focused pytest scope, bounded diagnostic output and explicit `TEST_RUNNER_UNAVAILABLE` diagnostics;
 - `git_status` — read-only working-tree state;
 - `git_diff` — read-only bounded diff inspection;
 - external memory tools that are used only when the model asks for them.
 
-The tool observes. The LLM decides what the observation means for the current task. Deterministic utility results such as `calculate` are evidence-backed, but the final response is still written by the LLM so tone and explanation remain natural.
+Large tool results are compacted generically before entering the next prompt; the complete runtime result remains recoverable in session/history. The tool observes. The LLM decides what the observation means for the current task. Deterministic utility results such as `calculate` are evidence-backed, but the final response is still written by the LLM so tone and explanation remain natural.
 
 ## Supervised editing
 
@@ -94,9 +94,15 @@ The web data endpoints use a Bearer token. `python main.py serve` prints where t
 
 ## Validation
 
-- 157 tests pass in the packaged deterministic suite;
+- 162 tests pass in the packaged deterministic suite;
 - 1 optional Flask interface test is skipped when Flask is not installed in the packaging environment;
 - the real Qwen smoke test remains deployment-only.
+
+## License
+
+Eyle is **source-available, not open-source software**. The repository may be viewed publicly, and the license permits individuals to download, install, run, and privately modify Eyle for personal, non-commercial use. Redistribution, publication of copies or modified versions, sale, sublicensing, commercial use, and offering Eyle as a service require prior written permission.
+
+See [LICENSE.md](LICENSE.md) for the controlling terms and [CONTRIBUTING.md](CONTRIBUTING.md) for contributor terms. Limited rights that arise from using GitHub itself remain subject to GitHub's Terms of Service.
 
 ## Documentation
 
@@ -104,7 +110,7 @@ The web data endpoints use a Bearer token. `python main.py serve` prints where t
 - [Technical overview](docs/technical-overview.md)
 - [Configuration](docs/configuration.md)
 - [Benchmarking](docs/benchmark.md)
-- [Rev4.12.1 release notes](docs/releases/2.7.4-rev4.12.1.md)
+- [Rev4.12.2 release notes](docs/releases/2.7.4-rev4.12.2.md)
 - [Update history: removed designs and why](UPDATE_HISTORY.md)
 - [Changelog](CHANGELOG.md)
 - [Português](README.pt-BR.md)

@@ -142,6 +142,6 @@
     "window_seconds": 3600
   },
   "app_version": "2.7.4",
-  "config_schema_version": "4.12.1",
-  "revision": "4.12.1-runtime-tools-observability"
+  "config_schema_version": "4.12.2",
+  "revision": "4.12.2-context-runner-hardening"
 }

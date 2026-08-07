@@ -315,4 +315,42 @@ A regra arquitetural resultante é simples:
 **Substituição atual:** `git_status` e `git_diff` são tools somente leitura. Elas dão retrovisor para a Eyle distinguir estado e mudanças sem assumir propriedade sobre o histórico Git.
 
 **Só reconsiderar se:** houver uma feature explicitamente solicitada pelo usuário, com escopo/branch isolado, confirmação e testes que provem que mudanças preexistentes nunca são tocadas.
+---
 
+## 18. Dumps estruturados completos de tools no prompt
+
+**Removido:** enviar ao turno seguinte listas e mapas estruturados completos de tools grandes, como 100 entradas de `list_tree` ou dezenas de relações/imports de `inspect_project`, apenas porque a tool conseguiu produzi-los.
+
+**Por que saiu:** a tool pode processar muito mais informação do que a LLM precisa receber. Em projeto real, a combinação de árvore + inspeção + README gerou um payload de ~7,3k tokens e foi bloqueada pela janela de contexto antes de chegar ao Qwen.
+
+**Substituição atual:** compactação genérica e progressiva de strings/listas/maps aninhados somente na visão enviada à LLM. O resultado completo permanece na sessão e no histórico recuperável.
+
+**Só reconsiderar se:** um benchmark demonstrar que a perda do detalhe compactado causa erro real e houver aumento de janela/custo claramente justificado. A resposta preferida deve ser busca/leitura focada, não despejar novamente o inventário inteiro.
+
+## 19. `pytest` apenas como dependência de desenvolvimento
+
+**Removido:** manter `pytest` exclusivamente em `requirements-dev.txt` enquanto `run_tests` era anunciado como tool oficial de runtime.
+
+**Por que saiu:** uma instalação normal podia oferecer `run_tests` e falhar antes de executar qualquer teste com `No module named pytest`, classificando incorretamente o caso como falha da suíte.
+
+**Substituição atual:** pytest é dependência de runtime; ausência de runner é diagnosticada como `TEST_RUNNER_UNAVAILABLE`, distinta de `TESTS_FAILED`.
+
+**Só reconsiderar se:** `run_tests` se tornar uma capacidade opcional detectada dinamicamente e a interface deixar explícito que o runner não está instalado.
+
+
+## Source-available personal-use licensing
+
+**Current decision:** Eyle is public source code under a custom personal-use, non-commercial license. It is not open-source software.
+
+**Why this exists:** the earlier placeholder effectively granted no practical local-use permission while simultaneously telling maintainers to replace it with an OSI license. That contradicted the intended model: people should be able to download and use Eyle privately, while redistribution, publication of modified copies, resale, sublicensing, commercial use, and hosted-service use remain restricted.
+
+**What was removed:** the template instruction telling maintainers to replace `LICENSE.md` with MIT, Apache-2.0, GPL-3.0, or another OSI license. The blanket wording that no copying was permitted was also replaced because installation and personal use necessarily require limited copying.
+
+**Do not reintroduce:**
+
+- an OSI/open-source license merely because the repository is public;
+- blanket “no copying” language that conflicts with the personal-use permission;
+- contribution rules that leave maintainers unable to use, relicense, or commercialize accepted contributions;
+- README wording that describes Eyle as open source when the license has not explicitly changed.
+
+**Reconsider only if:** the project intentionally decides to allow broader redistribution/commercial use, or legal review recommends a different licensing structure. Any such change should be explicit, repository-wide, and documented here before publication.

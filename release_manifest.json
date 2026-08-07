@@ -1,10 +1,10 @@
 {
   "release": "2.7.4",
   "app_version": "2.7.4",
-  "config_schema_version": "4.12.1",
-  "revision": "4.12.1-runtime-tools-observability",
+  "config_schema_version": "4.12.2",
+  "revision": "4.12.2-context-runner-hardening",
   "released_at": "2026-08-07",
-  "title": "Runtime tools, two-call utilities, Git inspection and decision observability",
+  "title": "Structured context compaction, runner diagnostics and truthful LLM request history",
   "architecture": {
     "path": "interface -> eyle.runtime.service -> AgentSession phase machine -> LLM <-> phase-specific tools/project observations/tests/Git/external memory -> quality validation -> supervised writes -> persisted observable job history -> response",
     "reasoning_loops": 1,
@@ -16,8 +16,8 @@
     "write_model": "supervised dry-run, confirmation, apply, compileall, detected tests, rollback, exact reread",
     "model_response_cache": false,
     "response_model": "natural prose with sentence-indexed typed claims and an internal claim-to-evidence ledger",
-    "active_source_context": "latest tool result, bounded retained snippets, and a compact stable task anchor",
-    "observable_history": "on-demand sanitized runtime facts including accepted/rejected decision types; no chain-of-thought/raw prompts/raw model responses/source contents"
+    "active_source_context": "latest tool result through generic bounded structured compaction, retained snippets, and a compact stable task anchor",
+    "observable_history": "on-demand sanitized runtime facts distinguishing logical LLM attempts, provider requests and preflight blocks; no chain-of-thought/raw prompts/raw model responses/source contents"
   },
   "removed_from_ecosystem": [
     "engine package as a misleading reasoning layer",
@@ -78,7 +78,11 @@
       "failed executed tests promoted to runtime evidence for diagnosis",
       "read-only git_status working-tree inspection",
       "read-only bounded git_diff inspection",
-      "observable accepted/rejected decision history with validation reasons"
+      "observable accepted/rejected decision history with validation reasons",
+      "generic nested tool-result compaction before model context",
+      "pytest available as a runtime dependency for run_tests",
+      "TEST_RUNNER_UNAVAILABLE distinct from TESTS_FAILED",
+      "provider-request versus preflight-attempt observability"
     ],
     "runtime": [
       "application service",
@@ -139,7 +143,7 @@
     ]
   },
   "validation": {
-    "tests_passed": 157,
+    "tests_passed": 162,
     "tests_skipped": 1,
     "skip_reason": "Flask is not installed in the packaging environment",
     "compileall": true,
@@ -157,7 +161,10 @@
     "runtime_tool_regressions": 7,
     "git_tool_regressions": true,
     "scoped_pytest_regressions": true,
-    "two_call_calculator_regression": true
+    "two_call_calculator_regression": true,
+    "context_compaction_regressions": 1,
+    "test_runner_regressions": 2,
+    "preflight_history_regressions": 1
   },
   "known_limits": [
     "The real Qwen smoke test must run in the deployment environment.",
@@ -279,7 +286,10 @@
     "run_tests": {
       "agent_callable": true,
       "pytest_scope": true,
-      "bounded_output_tail_chars": 3000
+      "bounded_output_tail_chars": 3000,
+      "runtime_pytest_dependency": true,
+      "runner_unavailable_error": "TEST_RUNNER_UNAVAILABLE",
+      "answer_only_after_observation": true
     },
     "git_status": {
       "read_only": true
@@ -291,6 +301,11 @@
     "decision_history": {
       "public": true,
       "raw_reasoning": false
+    },
+    "llm_request_history": {
+      "logical_attempts": true,
+      "provider_requests": true,
+      "preflight_blocked": true
     }
   }
 }

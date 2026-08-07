@@ -1,4 +1,4 @@
-# Configuration — Eyle Rev4.12.1
+# Configuration — Eyle Rev4.12.2
 
 The default configuration describes capacity, tools and executable safety. It does not enable hidden planners or alternate reasoning pipelines.
 
@@ -60,13 +60,13 @@ After confirmation, Python changes are checked by `compileall`, tests are detect
 
 ## Test and Git tools
 
-`run_tests` is available during analysis and first-turn write investigation when tests are enabled. It can focus a safe relative path for pytest; other runners keep their configured full-suite behavior. Failed executed tests are valid runtime evidence.
+`run_tests` is available during analysis and first-turn write investigation when tests are enabled. It can focus a safe relative path for pytest; other runners keep their configured full-suite behavior. Failed executed tests are valid runtime evidence. A missing test runner is reported separately as `TEST_RUNNER_UNAVAILABLE`; it is not mislabeled as a failing suite. Pytest is a runtime dependency because `run_tests` exposes it as an official capability.
 
 `git_status` and `git_diff` are read-only. `git_diff` is bounded before reaching the model and should be narrowed by path when needed.
 
 ## Observable history
 
-Rev4.12.1 adds no large prompt or model-side history feature. The expandable history is derived from already available runtime data plus a bounded sanitized tool trace.
+Rev4.12.2 adds no large prompt or model-side history feature. The expandable history is derived from already available runtime data plus a bounded sanitized tool trace.
 
 Hard privacy rules for the public history surface:
 

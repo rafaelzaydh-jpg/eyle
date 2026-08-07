@@ -418,6 +418,7 @@ def _tool_run_tests(arguments, ctx):
         "returncode": resultado.get("codigo"),
         "scope": resultado.get("scope"),
         "backend": resultado.get("backend"),
+        "runner": resultado.get("runner"),
         "tests_detected": bool(resultado.get("tests_detected")),
         "summary": _pytest_summary(output) or str(resultado.get("detalhe") or "")[:500],
         "output_tail": output[-3000:],
@@ -426,10 +427,11 @@ def _tool_run_tests(arguments, ctx):
         return _pulado(detail, error_code="TESTS_NOT_FOUND")
     if resultado.get("ok") is True:
         return _sucesso(detail)
+    error_code = resultado.get("error_code") or (
+        "TESTS_REFUSED" if resultado.get("recusado") else "TESTS_FAILED"
+    )
     return _falha(
-        "TESTS_REFUSED" if resultado.get("recusado") else "TESTS_FAILED",
-        detail,
-        executed=resultado.get("executado") is True,
+        error_code, detail, executed=resultado.get("executado") is True,
     )
 
 

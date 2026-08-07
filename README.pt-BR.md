@@ -1,7 +1,7 @@
 <p align="center"><img src="assets/eyle-banner.svg" alt="Eyle — agente autônoma de programação" width="100%"></p>
 <p align="center"><strong>Um cérebro LLM. Ferramentas reais. Escrita supervisionada. Execução observável.</strong></p>
 
-**Versão:** 2.7.4 · **Schema:** 4.12.1 · **Revisão:** 4.12.1-runtime-tools-observability
+**Versão:** 2.7.4 · **Schema:** 4.12.2 · **Revisão:** 4.12.2-context-runner-hardening
 
 A Eyle é uma agente local de programação construída em torno de uma ideia simples: a LLM decide o que fazer, ferramentas determinísticas medem e executam a realidade, e o runtime protege apenas os limites que não podem depender de adivinhação.
 
@@ -19,9 +19,9 @@ usuário
 → resposta
 ```
 
-## Rev4.12.1: ferramentas de runtime + decisões observáveis
+## Rev4.12.2: contexto + robustez do executor de testes
 
-A Rev4.12.1 preserva o histórico expansível da Rev4.12 e adiciona o resultado das decisões do agente e ferramentas determinísticas mais fortes. Cada resposta da Eyle ligada a um job pode mostrar um botão **histórico** na interface web. O conteúdo só é buscado quando você abre a aba, portanto não aumenta o polling normal.
+A Rev4.12.2 preserva as tools e o histórico expansível da Rev4.12.1 e corrige duas falhas encontradas em testes reais com projeto grande: resultados estruturados de tools estourando o prompt seguinte e `run_tests` disponível enquanto `pytest` ainda era apenas dependência de desenvolvimento. Cada resposta da Eyle ligada a um job pode mostrar um botão **histórico** na interface web. O conteúdo só é buscado quando você abre a aba, portanto não aumenta o polling normal.
 
 O histórico mostra fatos observáveis do runtime:
 
@@ -96,9 +96,15 @@ Os endpoints de dados da interface usam Bearer token. O comando `serve` informa 
 
 ## Validação
 
-- 157 testes passam na suíte determinística empacotada;
+- 162 testes passam na suíte determinística empacotada;
 - 1 teste opcional da interface é pulado quando Flask não está instalado no ambiente de empacotamento;
 - o smoke real com Qwen continua sendo executado apenas no ambiente de deploy.
+
+## Licença
+
+A Eyle tem o **código-fonte disponível, mas não é software open source**. A licença permite que pessoas baixem, instalem, executem e modifiquem a Eyle de forma privada para uso pessoal e não comercial. Redistribuição, publicação de cópias ou versões modificadas, venda, sublicenciamento, uso comercial e oferta da Eyle como serviço exigem autorização prévia por escrito.
+
+Consulte [LICENSE.md](LICENSE.md) para os termos que regem o software e [CONTRIBUTING.md](CONTRIBUTING.md) para os termos de contribuição. Os direitos limitados decorrentes do próprio uso do GitHub continuam sujeitos aos Termos de Serviço do GitHub.
 
 ## Documentação
 
@@ -106,6 +112,6 @@ Os endpoints de dados da interface usam Bearer token. O comando `serve` informa 
 - [Visão técnica](docs/technical-overview.md)
 - [Configuração](docs/configuration.md)
 - [Benchmark](docs/benchmark.md)
-- [Notas da Rev4.12.1](docs/releases/2.7.4-rev4.12.1.md)
+- [Notas da Rev4.12.2](docs/releases/2.7.4-rev4.12.2.md)
 - [Histórico de decisões removidas](UPDATE_HISTORY.md)
 - [Changelog](CHANGELOG.md)

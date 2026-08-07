@@ -6,6 +6,7 @@ and executes concrete actions.
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -256,6 +257,21 @@ def _phase_for_call(
         return "chat"
     if not session.evidence:
         return "analysis_investigate"
+    # A real test execution (including a deterministic runner-unavailable
+    # diagnostic) is terminal evidence for a read-only "run/test" request.
+    # Close the tool catalog on the next turn so the model explains the result
+    # instead of inspecting unrelated files again. Write requests keep their
+    # normal patch flow above.
+    if any(
+        isinstance(item, dict)
+        and item.get("tool") == "run_tests"
+        and (
+            item.get("executed") is True
+            or item.get("error_code") in {"TEST_RUNNER_UNAVAILABLE", "TESTS_NOT_FOUND"}
+        )
+        for item in session.latest_tool_results
+    ):
+        return "analysis_answer_only"
     if session.no_progress_turns >= max_no_progress or session.turn >= max_turns:
         return "analysis_answer_only"
     return "analysis_complete_or_read"
@@ -669,7 +685,9 @@ def _seed_runtime_failure_evidence(session: AgentSession, conversation_context: 
 
 def _model_tool_result(session: AgentSession, tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     evidence_worthy = bool(result.get("ok")) or (
-        tool == "run_tests" and result.get("executed") is True and isinstance(result.get("detail"), dict)
+        tool == "run_tests"
+        and isinstance(result.get("detail"), dict)
+        and (result.get("executed") is True or result.get("error_code") == "TEST_RUNNER_UNAVAILABLE")
     )
     evidence_ids = _register_evidence(session, tool, result.get("detail")) if evidence_worthy else []
     if tool in EVIDENCE_TOOLS and isinstance(result.get("detail"), dict):
@@ -711,7 +729,8 @@ def _remember_relevant_sources(
     if tool not in EVIDENCE_TOOLS:
         return
     if model_result.get("ok") is not True and not (
-        tool == "run_tests" and model_result.get("executed") is True
+        tool == "run_tests"
+        and (model_result.get("executed") is True or model_result.get("error_code") == "TEST_RUNNER_UNAVAILABLE")
     ):
         return
     quality = _response_quality_config(config)
@@ -769,58 +788,173 @@ def _retained_sources_for_prompt(session: AgentSession) -> List[Dict[str, Any]]:
     ]
 
 
+def _shrink_structured_once(value: Any) -> bool:
+    """Shrink one large nested value while preserving deterministic summaries.
+
+    Tool results are allowed to inspect a large project, but the LLM should not
+    receive every row of that inspection. This reducer is intentionally generic:
+    it understands strings, lists and nested mappings instead of hard-coding
+    every current tool field name. One reduction is made per call so
+    ``_crop_payload`` can stop as soon as the prompt fits.
+    """
+    if isinstance(value, dict):
+        # Prefer the largest list anywhere in this mapping. This covers
+        # list_tree entries, inspect_project relation/test signals and future
+        # structured tools without adding one special case per schema.
+        list_candidates = [
+            (len(item), key, item)
+            for key, item in value.items()
+            if isinstance(item, list) and len(item) > 4
+        ]
+        if list_candidates:
+            _, key, item = max(list_candidates, key=lambda candidate: candidate[0])
+            keep = max(4, len(item) // 2)
+            value[key] = item[:keep]
+            value[f"{key}_context_original_count"] = max(
+                int(value.get(f"{key}_context_original_count", 0) or 0), len(item),
+            )
+            value["context_truncated"] = True
+            return True
+
+        # Raw strings can still dominate a prompt (README/read_file/diff tails).
+        string_candidates = [
+            (len(item), key, item)
+            for key, item in value.items()
+            if isinstance(item, str) and len(item) > 1000
+        ]
+        if string_candidates:
+            _, key, item = max(string_candidates, key=lambda candidate: candidate[0])
+            keep = max(1000, len(item) // 2)
+            value[key] = item[:keep] + "\n...[context cropped]"
+            value[f"{key}_context_original_chars"] = max(
+                int(value.get(f"{key}_context_original_chars", 0) or 0), len(item),
+            )
+            value["context_truncated"] = True
+            return True
+
+        # Then recurse into nested containers. Dicts such as
+        # inspect_project.relation_signals may hide the large arrays one level
+        # below the top-level detail object.
+        nested_candidates = []
+        for key, item in value.items():
+            if isinstance(item, (dict, list)):
+                try:
+                    size = len(json.dumps(item, ensure_ascii=False, default=str))
+                except (TypeError, ValueError):
+                    size = 0
+                nested_candidates.append((size, key, item))
+        for _, _, item in sorted(nested_candidates, reverse=True, key=lambda candidate: candidate[0]):
+            if _shrink_structured_once(item):
+                value["context_truncated"] = True
+                return True
+        return False
+
+    if isinstance(value, list):
+        if len(value) > 4:
+            del value[max(4, len(value) // 2):]
+            return True
+        nested = []
+        for item in value:
+            if isinstance(item, (dict, list)):
+                try:
+                    size = len(json.dumps(item, ensure_ascii=False, default=str))
+                except (TypeError, ValueError):
+                    size = 0
+                nested.append((size, item))
+        for _, item in sorted(nested, reverse=True, key=lambda candidate: candidate[0]):
+            if _shrink_structured_once(item):
+                return True
+    return False
+
+
+def _minimal_tool_context(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Last-resort bounded representation of one tool result for the model.
+
+    Scalars and evidence IDs are preserved. Structured detail is reduced to a
+    small sample, while the full result remains in AgentSession/history.
+    """
+    compact = {
+        key: result.get(key)
+        for key in ("tool", "status", "ok", "executed", "changed", "error_code", "evidence_ids")
+        if result.get(key) is not None
+    }
+    detail = copy.deepcopy(result.get("detail"))
+    if isinstance(detail, dict):
+        for _ in range(64):
+            if len(json.dumps(detail, ensure_ascii=False, default=str)) <= 3000:
+                break
+            if not _shrink_structured_once(detail):
+                break
+        compact["detail"] = detail
+    elif isinstance(detail, str):
+        compact["detail"] = detail[:2000] + ("\n...[context cropped]" if len(detail) > 2000 else "")
+    else:
+        compact["detail"] = detail
+    compact["context_compacted"] = True
+    return compact
+
+
 def _crop_payload(payload: Dict[str, Any], budget: int, chars_per_token: int) -> Dict[str, Any]:
-    """Fit a prompt by dropping old chat and cropping only the latest raw source."""
+    """Fit a prompt without destroying the full tool results kept in session.
+
+    Rev4.12.2 generalizes context compaction to arbitrary nested tool output.
+    The prompt receives a deep-copied, bounded view; session evidence and public
+    history keep the original runtime data.
+    """
     while estimate_tokens(payload, chars_per_token) > budget:
         history = (payload.get("recent_context") or {}).get("recent_messages") or []
         if history:
             payload["recent_context"]["recent_messages"] = history[1:]
             payload["recent_context"]["omitted_messages"] = int(payload["recent_context"].get("omitted_messages", 0)) + 1
             continue
+
         results = payload.get("latest_tool_results") or []
-        cropped = False
-        for result in results:
-            detail = result.get("detail") if isinstance(result, dict) else None
-            if not isinstance(detail, dict):
-                continue
-            for key in ("conteudo", "trecho_numerado", "conteudo_raw"):
-                value = detail.get(key)
-                if isinstance(value, str) and len(value) > 1000:
-                    detail[key] = value[: max(1000, len(value) // 2)]
-                    detail["context_truncated"] = True
-                    cropped = True
-                    break
-            if cropped:
+        reduced = False
+        for result in sorted(
+            [item for item in results if isinstance(item, dict)],
+            key=lambda item: len(json.dumps(item.get("detail"), ensure_ascii=False, default=str)),
+            reverse=True,
+        ):
+            detail = result.get("detail")
+            if isinstance(detail, (dict, list)) and _shrink_structured_once(detail):
+                result["context_compacted"] = True
+                reduced = True
                 break
-            nested = detail.get("resultados")
-            if isinstance(nested, list) and len(nested) > 1:
-                detail["resultados"] = nested[: max(1, len(nested) // 2)]
-                detail["context_truncated"] = True
-                cropped = True
+            if isinstance(detail, str) and len(detail) > 1000:
+                result["detail"] = detail[: max(1000, len(detail) // 2)] + "\n...[context cropped]"
+                result["context_compacted"] = True
+                reduced = True
                 break
-        if cropped:
+        if reduced:
             continue
+
         relevant = payload.get("relevant_sources") or []
-        relevant_cropped = False
         for source in relevant:
-            if not isinstance(source, dict):
-                continue
-            for key in ("conteudo", "trecho_numerado", "conteudo_raw"):
-                value = source.get(key)
-                if isinstance(value, str) and len(value) > 1000:
-                    source[key] = value[: max(1000, len(value) // 2)]
-                    source["context_truncated"] = True
-                    relevant_cropped = True
-                    break
-            if relevant_cropped:
+            if isinstance(source, dict) and _shrink_structured_once(source):
+                source["context_truncated"] = True
+                reduced = True
                 break
-        if relevant_cropped:
+        if reduced:
             continue
         if len(relevant) > 1:
             payload["relevant_sources"] = relevant[1:]
             continue
         if len(payload.get("evidence_index") or []) > 8:
             payload["evidence_index"] = payload["evidence_index"][-8:]
+            continue
+
+        # Last resort: keep the observable/evidence envelope but replace bulky
+        # result details with bounded structured samples. This is preferable to
+        # failing locally after the tools already did useful work.
+        compacted_any = False
+        for index, result in enumerate(list(results)):
+            if not isinstance(result, dict):
+                continue
+            compact = _minimal_tool_context(result)
+            if len(json.dumps(compact, ensure_ascii=False, default=str)) < len(json.dumps(result, ensure_ascii=False, default=str)):
+                results[index] = compact
+                compacted_any = True
+        if compacted_any:
             continue
         break
     return payload
@@ -874,7 +1008,7 @@ def _tool_guidance(tools: List[Dict[str, Any]]) -> Optional[str]:
     if "inspect_project" in names:
         hints.append("inspect_project: objective structure/relation signals only; it never ranks file importance")
     if "run_tests" in names:
-        hints.append("run_tests: execute real tests only when they answer the task; prefer a narrow pytest scope when known")
+        hints.append("run_tests: for an explicit request to run/test the project, call it directly; it detects the suite itself. Prefer a narrow pytest scope only when already known")
     if "git_status" in names:
         hints.append("git_status: inspect existing user/worktree changes before edits when repository state matters")
     if "git_diff" in names:
@@ -931,7 +1065,7 @@ def _compile_prompt(
     }
     output_tokens = int((call_config.get("llm") or {}).get("agent_max_tokens", 1400) or 1400)
     prompt_budget = available_user_prompt_tokens(call_config, PROMPT_AGENTE, output_tokens=output_tokens)
-    payload = _crop_payload(payload, prompt_budget, chars_per_token)
+    payload = _crop_payload(copy.deepcopy(payload), prompt_budget, chars_per_token)
     prompt = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
     session.record_prompt(
         mode="agent", characters=len(prompt),

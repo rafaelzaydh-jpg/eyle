@@ -1,3 +1,4 @@
+- [2.7.4 Rev4.12.2 — Context and test-runner hardening](2.7.4-rev4.12.2.md)
 # Releases
 
 - [2.7.4 Rev4.12.1 — Runtime tools and decision observability](2.7.4-rev4.12.1.md)

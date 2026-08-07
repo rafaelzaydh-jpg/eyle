@@ -26,10 +26,13 @@ def build_public_job_history(registro):
     responses = details.get("llm_responses") if isinstance(details.get("llm_responses"), list) else []
 
     llm_calls = []
-    total_calls = max(len(snapshots), len(responses))
+    sent_requests = max(0, int(usage.get("llm_requests", len(responses)) or 0))
+    logical_attempts = max(0, int(usage.get("llm_calls", len(snapshots)) or 0))
+    total_calls = max(len(snapshots), len(responses), logical_attempts)
     for index in range(total_calls):
         snap = snapshots[index] if index < len(snapshots) and isinstance(snapshots[index], dict) else {}
         response = responses[index] if index < len(responses) and isinstance(responses[index], dict) else {}
+        request_status = "sent" if index < sent_requests else "preflight_blocked"
         prompt_tokens = response.get("prompt_tokens")
         cached_tokens = response.get("cached_prompt_tokens")
         uncached_tokens = None
@@ -40,6 +43,7 @@ def build_public_job_history(registro):
             "call": index + 1,
             "turn": snap.get("turn"),
             "phase": snap.get("phase"),
+            "request_status": request_status,
             "prompt_estimated_tokens": snap.get("estimated_tokens"),
             "prompt_characters": snap.get("characters"),
             "tool_count_available": snap.get("tool_count"),
@@ -118,6 +122,11 @@ def build_public_job_history(registro):
             "phase_violations": details.get("phase_violations"),
         },
         "tokens": {key: value for key, value in token_summary.items() if value is not None},
+        "llm": {
+            "logical_attempts": logical_attempts,
+            "requests_sent": sent_requests,
+            "preflight_blocked": max(0, logical_attempts - sent_requests),
+        },
         "llm_calls": llm_calls,
         "decisions": decisions,
         "tools": tools,

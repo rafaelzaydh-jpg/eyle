@@ -398,6 +398,46 @@ def _detectar_comando_teste(caminho_projeto, cfg_testes):
     return None
 
 
+
+
+def _test_runner_name(argv):
+    if not argv:
+        return None
+    first = os.path.basename(str(argv[0])).lower()
+    if first in {"pytest", "pytest.exe"}:
+        return "pytest"
+    if len(argv) >= 3 and first.startswith("python") and list(argv[1:3]) == ["-m", "pytest"]:
+        return "pytest"
+    if first in {"npm", "npm.cmd", "npm.exe"}:
+        return "npm"
+    return first or None
+
+
+def _runner_unavailable_message(argv, resultado):
+    """Return a deterministic unavailable-runner diagnostic when applicable."""
+    runner = _test_runner_name(argv)
+    combined = "\n".join(
+        str(value or "") for value in (resultado.get("erro"), resultado.get("saida"))
+    ).lower()
+    if runner == "pytest" and any(token in combined for token in (
+        "no module named pytest",
+        "pytest: command not found",
+        "pytest: not found",
+        "'pytest' is not recognized",
+        '"pytest" is not recognized',
+    )):
+        return runner, "pytest não está disponível no ambiente Python usado pela Eyle."
+    if runner == "npm" and any(token in combined for token in (
+        "npm: command not found",
+        "npm: not found",
+        "'npm' is not recognized",
+        '"npm" is not recognized',
+        "no such file or directory: 'npm'",
+        'no such file or directory: "npm"',
+    )):
+        return runner, "npm não está disponível no ambiente de execução da Eyle."
+    return None, None
+
 def rodar_testes_projeto(caminho_projeto, cfg_testes, scope=None):
     """Run the detected real test suite, optionally narrowed to one safe pytest scope.
 
@@ -476,6 +516,16 @@ def rodar_testes_projeto(caminho_projeto, cfg_testes, scope=None):
     saida_resumida = (resultado.get("saida") or "").strip()[-4000:]
     backend = resultado.get("backend", "sandbox")
     codigo = resultado.get("codigo")
+    runner, runner_detail = _runner_unavailable_message(argv, resultado)
+    if runner_detail:
+        return {
+            "executado": False, "ok": False, "recusado": False,
+            "error_code": "TEST_RUNNER_UNAVAILABLE",
+            "runner": runner, "detalhe": runner_detail,
+            "comando": descricao_comando, "codigo": codigo,
+            "saida_resumida": saida_resumida, "backend": backend,
+            "scope": normalized_scope, "tests_detected": True,
+        }
 
     if resultado.get("executado") is not True:
         detalhe = f"Teste recusado pelo sandbox: {resultado.get('erro') or 'erro desconhecido'}."

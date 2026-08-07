@@ -236,7 +236,11 @@
 
     const llmCalls = Array.isArray(history.llm_calls) ? history.llm_calls : [];
     if (llmCalls.length) {
-      const llmSection = historySection(`LLM · ${llmCalls.length} chamada(s)`);
+      const llmMeta = history.llm || {};
+      const sent = llmMeta.requests_sent != null ? llmMeta.requests_sent : llmCalls.filter((item) => item.request_status !== "preflight_blocked").length;
+      const blocked = llmMeta.preflight_blocked != null ? llmMeta.preflight_blocked : llmCalls.filter((item) => item.request_status === "preflight_blocked").length;
+      const blockedText = blocked ? ` · ${blocked} bloqueada(s) no preflight` : "";
+      const llmSection = historySection(`LLM · ${sent} enviada(s)${blockedText}`);
       llmCalls.forEach((call) => {
         const details = document.createElement("details");
         details.className = "history-item";
@@ -244,7 +248,8 @@
         const phase = call.phase ? ` · ${call.phase}` : "";
         const prompt = call.prompt_tokens != null ? ` · ${call.prompt_tokens} prompt` : "";
         const cached = call.cached_prompt_tokens != null ? ` · ${call.cached_prompt_tokens} cache` : "";
-        summaryEl.textContent = `LLM #${call.call}${phase}${prompt}${cached}`;
+        const requestState = call.request_status === "preflight_blocked" ? " · preflight bloqueado" : "";
+        summaryEl.textContent = `LLM #${call.call}${phase}${prompt}${cached}${requestState}`;
         details.appendChild(summaryEl);
         const body = { ...call };
         delete body.call;

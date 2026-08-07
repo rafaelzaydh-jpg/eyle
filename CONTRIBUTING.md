@@ -2,6 +2,8 @@
 
 Thanks for helping improve Eyle.
 
+Eyle is source-available under the **Eyle Personal Use License** in `LICENSE.md`; it is not an open-source project. Please read the license and the contributor terms below before submitting a contribution.
+
 ## Development setup
 
 ```bash
@@ -19,6 +21,17 @@ python -m pytest -q
 4. Never commit generated data from `memory/`, `context/`, or `workspace/`.
 5. Run the full test suite before opening the pull request.
 6. Before reintroducing a removed architecture or guardrail, read `UPDATE_HISTORY.md` and document the new evidence that makes the old tradeoff valid now.
+7. Do not submit code, assets, documentation, or other material that you do not have the right to contribute under these terms.
+
+## Contribution terms
+
+By submitting a pull request, patch, commit, or other contribution to Eyle, you represent that you have the right to submit it.
+
+You retain copyright in your original contribution. In addition, you grant the Eyle project maintainers a perpetual, worldwide, non-exclusive, irrevocable, royalty-free license to use, reproduce, modify, adapt, distribute, sublicense, relicense, and commercialize your contribution as part of Eyle or related works.
+
+You also agree that accepted contributions may be made available to users under the repository's current license or under a future license selected by the project maintainers, without requiring additional permission from you.
+
+If you do not agree to these contributor terms, do not submit a contribution.
 
 ## Commit style
 

@@ -16,7 +16,7 @@ Eyle is designed to fail closed around project writes and command execution:
 - writes require fresh evidence, hashes, a dry run, and explicit confirmation;
 - tests run through a configured sandbox and are refused when isolation cannot
   satisfy the requested policy;
-- `git_status` and `git_diff` are inspection-only; Rev4.12.1 does not expose Git mutation commands to the LLM;
+- `git_status` and `git_diff` are inspection-only; Rev4.12.2 does not expose Git mutation commands to the LLM;
 - test and diff text returned to the model is bounded to reduce context flooding;
 - patches are applied atomically and can be rolled back;
 - the web API requires a bearer token and rate-limits invalid authentication.

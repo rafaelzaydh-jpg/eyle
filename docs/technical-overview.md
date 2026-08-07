@@ -1,4 +1,4 @@
-# Technical overview — Eyle 2.7.4 Rev4.12.1
+# Technical overview — Eyle 2.7.4 Rev4.12.2
 
 Eyle is a single LLM-driven programming agent. One model decides whether to answer, inspect the live workspace, use a deterministic utility, consult external memory, or propose a supervised write. Tool results return to the same `AgentSession`.
 
@@ -15,7 +15,7 @@ Deterministic tools reduce mental arithmetic and repository guessing:
 - `count_tokens` reports measured characters and explicitly marks heuristic token conversion as `exact: false` when no exact tokenizer exists;
 - `inspect_project` emits objective structure/relation signals;
 - `agent_info` exposes current runtime identity and available tools;
-- `run_tests` executes the detected suite in sandbox and may focus pytest on one safe path;
+- `run_tests` executes the detected suite in sandbox, may focus pytest on one safe path, and distinguishes unavailable runners from failing tests;
 - `git_status` and `git_diff` inspect repository state without modifying Git.
 
 ## Token efficiency
@@ -34,7 +34,7 @@ Cache accounting never replaces loop control. The phase machine does.
 
 ## Observable execution history
 
-Rev4.12.1 exposes a sanitized runtime trace for each persisted job. The trace is not a reasoning transcript. It is a structured record of observable actions:
+Rev4.12.2 exposes a sanitized runtime trace for each persisted job. The trace is not a reasoning transcript. It is a structured record of observable actions:
 
 1. prompt/call metadata by turn and phase;
 2. tools actually attempted/executed with redacted arguments;

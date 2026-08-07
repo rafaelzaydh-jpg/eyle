@@ -1,4 +1,4 @@
-# Eyle Rev4.12.1 architecture
+# Eyle Rev4.12.2 architecture
 
 ## Active path
 
@@ -108,7 +108,11 @@ apply
 
 A failed confirmed write preserves bounded real diagnostic output and rollback state for follow-up questions.
 
-## Rev4.12.1 observable history
+## Rev4.12.2 context compaction
+
+Structured tool output is allowed to be large inside the runtime, but the next LLM prompt receives a deep-copied bounded view. Lists, maps and long strings are reduced generically until the prompt fits the configured context budget. Full results stay in session/history.
+
+## Rev4.12.2 observable history
 
 The job result already contains deterministic execution metadata. Rev4.12 turns a sanitized subset into an on-demand API/UI view.
 

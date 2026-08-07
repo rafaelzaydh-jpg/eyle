@@ -1,5 +1,7 @@
-# O core AgentSession e o runtime usam apenas a biblioteca padrão do Python.
-# Flask é necessário somente para o painel web (`python main.py serve`).
+# Runtime dependencies.
+# Flask powers the optional web panel; pytest is also a runtime dependency
+# because `run_tests` is an official deterministic tool exposed to the agent.
 Flask==3.0.3
+pytest==8.2.2
 
-# Para desenvolvimento e CI, instale também requirements-dev.txt.
+# For development/CI, requirements-dev.txt extends this file.

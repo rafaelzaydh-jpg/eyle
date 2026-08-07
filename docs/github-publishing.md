@@ -1,4 +1,4 @@
-# Publishing Eyle Rev4.12.1
+# Publishing Eyle Rev4.12.2
 
 ## Repository description
 
@@ -21,17 +21,20 @@ python -m pytest -q
 node --check web/static/app.js
 ```
 
-6. Review `release_manifest.json`, `CHANGELOG.md`, `README.md`, `README.pt-BR.md`, `SECURITY.md`, and the license.
-7. Verify the expandable job history exposes only sanitized runtime facts.
-8. Confirm Git/test tools are read-only/bounded and the decision history contains no raw reasoning.
-9. Tag the release as `v2.7.4-rev4.12.1`.
+6. Review `release_manifest.json`, `CHANGELOG.md`, `README.md`, `README.pt-BR.md`, `SECURITY.md`, `LICENSE.md`, and `CONTRIBUTING.md`.
+7. Confirm the repository is described as **source-available, not open source**, unless the licensing decision has explicitly changed.
+8. Confirm the README license summaries match `LICENSE.md`, and that contributor terms still grant maintainers the rights needed to use and relicense accepted contributions.
+9. Do not replace the custom personal-use license with an OSI template merely because the repository is public. A licensing change must be intentional and documented in `UPDATE_HISTORY.md`.
+10. Verify the expandable job history exposes only sanitized runtime facts.
+11. Confirm Git/test tools are read-only/bounded and the decision history contains no raw reasoning.
+12. Tag the release as `v2.7.4-rev4.12.2`.
 
 ## Suggested Git commands
 
 ```bash
 git add -A
-git commit -m "Rev4.12.1 - runtime tools and decision observability"
-git tag -a v2.7.4-rev4.12.1 -m "Stable Rev4.12.1 runtime tools and decision observability"
+git commit -m "Rev4.12.2 - context and test-runner hardening"
+git tag -a v2.7.4-rev4.12.2 -m "Stable Rev4.12.2 context and test-runner hardening"
 git push origin HEAD
-git push origin v2.7.4-rev4.12.1
+git push origin v2.7.4-rev4.12.2
 ```
