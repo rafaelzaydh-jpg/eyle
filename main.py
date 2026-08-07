@@ -258,7 +258,7 @@ def main():
     )
     p_benchmark.add_argument(
         "--baseline-model", default=None,
-        help="Nome exato do Q4 4B carregado no backend (opcional, so compatibilidade)",
+        help="Nome exato do modelo baseline carregado no backend (opcional)",
     )
     p_benchmark.add_argument(
         "--output", default=None,

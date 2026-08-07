@@ -1,4 +1,4 @@
-# Configuration — Eyle Rev4.12.2
+# Configuration — Eyle Rev4.12.4.1
 
 The default configuration describes capacity, tools and executable safety. It does not enable hidden planners or alternate reasoning pipelines.
 
@@ -7,7 +7,8 @@ The default configuration describes capacity, tools and executable safety. It do
 Key settings:
 
 - `llm.context_window_tokens` — model context window used for each request;
-- `llm.agent_decision_max_tokens` — normal decision/final allowance;
+- `llm.agent_decision_max_tokens` — chat/utility decision allowance;
+- `llm.agent_analysis_max_tokens` — stable analysis/final allowance independent of source volume;
 - `llm.agent_patch_max_tokens` — larger allowance when a code patch is expected;
 - provider/model, timeouts, retries and concurrency.
 
@@ -25,7 +26,7 @@ Key settings:
 - read/tree/scan limits;
 - task deadline and aggregate token budgets.
 
-The global turn limit is a final cap. Common write loops are controlled earlier by phase transitions and semantic read coverage.
+The global turn limit is a final cap. Common write loops are controlled earlier by phase transitions and semantic read coverage. Lexical classification no longer decides whether ordinary workspace questions receive investigation tools; only obvious chat/utilities use the cheap fast path.
 
 ## Token accounting
 
@@ -45,7 +46,7 @@ Each individual model request is still checked against the full context window. 
 
 ## Response quality
 
-`agent.response_quality` controls the compact factual gate:
+`agent.response_quality` controls the compact factual gate. The fixed agent contract also distinguishes verified project claims from free reasoning: hypotheses, opinions, tradeoffs and recommendations may be expressed without pretending they are confirmed project facts.
 
 - evidence is required for concrete project facts, confirmed bugs and contextual risks;
 - explicit limits such as “up to 3” are enforced;
@@ -60,13 +61,13 @@ After confirmation, Python changes are checked by `compileall`, tests are detect
 
 ## Test and Git tools
 
-`run_tests` is available during analysis and first-turn write investigation when tests are enabled. It can focus a safe relative path for pytest; other runners keep their configured full-suite behavior. Failed executed tests are valid runtime evidence. A missing test runner is reported separately as `TEST_RUNNER_UNAVAILABLE`; it is not mislabeled as a failing suite. Pytest is a runtime dependency because `run_tests` exposes it as an official capability.
+`run_tests` is available during analysis and first-turn write investigation when tests are enabled. It can focus a safe relative path for pytest; other runners keep their configured full-suite behavior. Failed executed tests are valid runtime evidence. A missing test runner is reported separately as `TEST_RUNNER_UNAVAILABLE`; it is not mislabeled as a failing suite. Pytest is a runtime dependency because `run_tests` exposes it as an official capability. The answer-only optimization is state-aware: it applies only when the request itself is clearly test-only and `run_tests` is the sole project observation.
 
 `git_status` and `git_diff` are read-only. `git_diff` is bounded before reaching the model and should be narrowed by path when needed.
 
 ## Observable history
 
-Rev4.12.2 adds no large prompt or model-side history feature. The expandable history is derived from already available runtime data plus a bounded sanitized tool trace.
+Rev4.12.4.1 uses a 32,768-token default per-request window and a 96,000-token effective prompt budget per task. These are separate limits: no individual call may exceed the model window. Shared tool taxonomy plus compact per-tool contracts remain model input; execution history remains derived from runtime data and fetched on demand. The expandable history is derived from already available runtime data plus a bounded sanitized tool trace.
 
 Hard privacy rules for the public history surface:
 

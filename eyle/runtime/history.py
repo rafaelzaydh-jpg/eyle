@@ -77,9 +77,11 @@ def build_public_job_history(registro):
     for index, item in enumerate(details.get("tool_history") or []):
         if not isinstance(item, dict):
             continue
+        result = item.get("result") if isinstance(item.get("result"), dict) else {}
+        tool_name = item.get("tool") or result.get("tool") or "unknown_tool"
         tools.append({
             "call": index + 1,
-            "tool": item.get("tool"),
+            "tool": tool_name,
             "turn": item.get("turn"),
             "phase": item.get("phase"),
             "status": item.get("status"),

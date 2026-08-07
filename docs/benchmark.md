@@ -1,8 +1,8 @@
-# Benchmark — Eyle Rev4.12.2
+# Benchmark — Eyle Rev4.12.4.1
 
 The benchmark remains a development tool under `eyle/devtools/`; it is not part of the agent's reasoning path.
 
-A useful Rev4.12.2 benchmark measures the public behavior of the active `AgentSession` loop and the new observable execution record:
+A useful Rev4.12.4.1 benchmark measures the public behavior of the active `AgentSession` loop and the new observable execution record:
 
 - request preservation and correct phase transitions;
 - tool selection and fresh evidence;
@@ -35,7 +35,7 @@ python main.py compare-efficiency baseline.json candidate.json --tolerance 0.10
 
 For architecture decisions that were intentionally removed, read [`../UPDATE_HISTORY.md`](../UPDATE_HISTORY.md) before proposing a reintroduction.
 
-## Rev4.12.2 regression targets
+## Rev4.12.4.1 regression targets
 
 - tree + README + project inspection must compact below the model context budget instead of raising `PROMPT_CONTEXT_BUDGET_EXCEEDED`;
 - missing pytest must return `TEST_RUNNER_UNAVAILABLE`, not `TESTS_FAILED`;

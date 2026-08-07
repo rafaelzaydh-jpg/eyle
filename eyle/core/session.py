@@ -25,6 +25,7 @@ class AgentSession:
     last_tool_signature: Optional[str] = None
     consecutive_identical_calls: int = 0
     prompt_snapshots: List[Dict[str, Any]] = field(default_factory=list)
+    phase_history: List[Dict[str, Any]] = field(default_factory=list)
     relevant_sources: List[Dict[str, Any]] = field(default_factory=list)
     final_claims: List[Dict[str, Any]] = field(default_factory=list)
     phase: str = "start"
@@ -55,16 +56,34 @@ class AgentSession:
             index.append(entry)
         return index
 
-    def record_prompt(self, mode: str, characters: int, estimated_tokens: int, tool_count: int, *, phase: str | None = None, turn: int | None = None) -> None:
-        self.prompt_snapshots.append({
+    def record_prompt(self, mode: str, characters: int, estimated_tokens: int, tool_count: int, *, phase: str | None = None, turn: int | None = None, metadata: Dict[str, Any] | None = None) -> None:
+        snapshot = {
             "mode": mode,
             "characters": int(characters),
             "estimated_tokens": int(estimated_tokens),
             "tool_count": int(tool_count),
             "phase": phase or self.phase,
             "turn": int(self.turn if turn is None else turn),
-        })
+        }
+        if isinstance(metadata, dict):
+            snapshot.update({key: value for key, value in metadata.items() if value is not None})
+        self.prompt_snapshots.append(snapshot)
         del self.prompt_snapshots[:-20]
+
+    def record_phase(self, phase: str, *, turn: int | None = None, reason: str = "runtime_state") -> None:
+        phase = str(phase or "start")
+        previous = str(self.phase or "start")
+        if previous == phase and self.phase_history:
+            self.phase = phase
+            return
+        self.phase_history.append({
+            "turn": int(self.turn if turn is None else turn),
+            "from": previous,
+            "to": phase,
+            "reason": str(reason or "runtime_state"),
+        })
+        del self.phase_history[:-50]
+        self.phase = phase
 
     def to_dict(self) -> Dict[str, Any]:
         evidence = {
@@ -99,6 +118,7 @@ class AgentSession:
             "parse_failures": self.parse_failures,
             "patch_failures": self.patch_failures,
             "prompt_snapshots": self.prompt_snapshots,
+            "phase_history": self.phase_history,
             "relevant_sources": self.relevant_sources,
             "final_claims": self.final_claims,
             "phase": self.phase,
@@ -125,6 +145,7 @@ class AgentSession:
         session.parse_failures = int(data.get("parse_failures") or 0)
         session.patch_failures = int(data.get("patch_failures") or 0)
         session.prompt_snapshots = list(data.get("prompt_snapshots") or [])
+        session.phase_history = list(data.get("phase_history") or [])
         session.relevant_sources = list(data.get("relevant_sources") or [])
         session.final_claims = list(data.get("final_claims") or [])
         session.phase = str(data.get("phase") or "start")

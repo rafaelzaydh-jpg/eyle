@@ -32,21 +32,25 @@ _LIMIT_KIND_PATTERNS = (
 
 _PROJECT_ANCHORS = (
     "projeto", "project", "codebase", "repositorio", "repositório", "repository",
-    "workspace", "arquivo", "file", "runtime", "modulo", "módulo", "module",
-    "estrutura", "architecture", "arquitetura", "implementacao", "implementação",
-    "implementation", "dependencia", "dependência", "dependency",
-    "pasta", "pastas", "diretorio", "diretório", "diretorios", "diretórios",
-    "folder", "folders", "directory", "directories", "template", "templates",
+    "workspace", "código-fonte", "codigo-fonte", "source code",
+    "neste arquivo", "nesse arquivo", "este arquivo", "esse arquivo",
+    "neste módulo", "nesse módulo", "este módulo", "esse módulo",
+    "neste modulo", "nesse modulo", "este modulo", "esse modulo",
 )
 _ANALYSIS_ACTIONS = (
     "analise", "análise", "analize", "analisar", "analyze", "review", "revisao",
     "revisão", "inspecione", "inspect", "verifique", "verify", "check", "audite",
-    "audit", "investigue", "investigate", "encontre", "find",
+    "audit", "investigue", "investigate", "encontre", "find", "identifique",
+    "identify", "localize", "locate", "definido", "definida", "defined",
+    "utilizado", "utilizada", "usado", "usada", "used", "referencias",
+    "referências", "references", "chama", "calls", "onde", "where",
+    "deletou", "removeu", "apagou", "deleted", "removed", "existe", "exists",
 )
 _CODE_ELEMENTS = (
     "codigo", "código", "code", "funcao", "função", "function", "classe", "class",
-    "teste", "test", "bug", "erro", "error", "falha", "failure", "rota", "route",
-    "metodo", "método", "method", "api",
+    "teste", "testes", "test", "tests", "bug", "bugs", "erro", "erros", "error", "errors", "falha", "falhas", "failure", "failures", "rota", "rotas", "route", "routes",
+    "metodo", "método", "method", "api", "pasta", "pastas", "diretorio",
+    "diretório", "directory", "directories", "folder", "folders", "template", "templates",
 )
 _EVALUATION_TERMS = (
     "correto", "correta", "correct", "funciona", "works", "quebra", "breaks",
@@ -85,6 +89,15 @@ _ADVISORY_OPENING = re.compile(
     r"qual|quais|what|por\s+que|porque|why)\b",
     re.I,
 )
+_WRITE_TARGETS = (
+    "arquivo", "arquivos", "file", "files", "codigo", "código", "code",
+    "funcao", "função", "function", "classe", "class", "modulo", "módulo",
+    "module", "rota", "route", "endpoint", "template", "html", "css",
+    "javascript", "python", "teste", "test", "config", "configuracao",
+    "configuração", "readme", "documentacao", "documentação", "pasta",
+    "diretorio", "diretório", "folder", "directory", "projeto", "project",
+    "workspace", "dependencia", "dependência", "dependency",
+)
 
 
 _CORRECTION_MARKERS = re.compile(
@@ -98,6 +111,26 @@ _SOURCE_PATH = re.compile(
     r"(?:^|[\s`'\"])(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\."
     r"(?:py|pyi|js|jsx|ts|tsx|java|go|rs|rb|php|cs|cpp|c|h|hpp|kt|swift|vue|svelte|json|toml|ya?ml)\b",
     re.I,
+)
+_CODE_IDENTIFIER = re.compile(
+    r"(?:`[^`]{1,120}`|\b[A-Z][A-Za-z0-9]+[A-Z][A-Za-z0-9]*\b|\b[a-z][a-z0-9]+_[a-z0-9_]+\b)"
+)
+_LOCATION_USE_HINT = re.compile(
+    r"\b(?:onde|where|definid[oa]|defined|declarad[oa]|declared|utilizad[oa]|usad[oa]|used|"
+    r"refer[eê]ncias?|references?|quem\s+chama|who\s+calls|fluxo|flow)\b", re.I,
+)
+_IMPLEMENTATION_FLOW_HINT = re.compile(
+    r"(?=.*\b(?:mensagem|message|request|prompt)\b)(?=.*\b(?:llm|modelo|model)\b)"
+    r"(?=.*\b(?:resposta|response|fluxo|flow|caminho|path|chega|reach|travessa|passa)\b)",
+    re.I,
+)
+_NON_WORKSPACE_TARGET = re.compile(
+    r"\b(?:n[aã]o|not|sem|without)\s+(?:(?:o|a|os|as|the)\s+)?"
+    r"(?:c[oó]digo|code|arquivo|files?|projeto|project|workspace)\b", re.I,
+)
+_BARE_CODE_MUTATION = re.compile(
+    r"\b(?:mude|altere|corrija|substitua|renomeie|change|fix|replace|rename)\s+"
+    r"[A-Za-z_][A-Za-z0-9_.]*\s+(?:para|por|to|as)\b", re.I,
 )
 
 
@@ -295,10 +328,38 @@ def request_requires_write(request: Any, project_available: bool = True) -> bool
     raw = str(request or "").strip()
     if not raw or _ADVISORY_OPENING.search(raw):
         return False
-    return bool(_WRITE_IMPERATIVE.search(raw) or _WRITE_NOUN_COMMAND.search(_fold(raw)))
+    if _WRITE_NOUN_COMMAND.search(_fold(raw)):
+        return True
+    if not _WRITE_IMPERATIVE.search(raw):
+        return False
+    # A mutation verb alone is not enough. Natural-language words such as
+    # "separe" can describe how to present an analysis ("separe riscos de
+    # bugs") without requesting any workspace change. Require a concrete
+    # project/code target or a source path before arming the prose-only write
+    # completion guard. The LLM can still choose dry-run patch tools in the
+    # general project flow when wording is ambiguous.
+    if _SOURCE_PATH.search(raw):
+        return True
+    if _BARE_CODE_MUTATION.search(raw):
+        return True
+    # A direct mutation verb still needs an affirmative workspace/code target.
+    # Ignore explicitly negated targets such as "mude sua explicação, não o código".
+    target_text = _NON_WORKSPACE_TARGET.sub(" ", raw)
+    words = _normalized_words(target_text)
+    return any(
+        _phrase_in_words(_normalized_words(term), words)
+        for term in _WRITE_TARGETS
+    )
 
 
 def request_needs_project_evidence(request: Any, project_available: bool) -> bool:
+    """Require grounding for concrete claims about the active workspace.
+
+    This is deliberately narrower than a topic classifier: broad opinions about
+    architecture/implementation remain free reasoning, while explicit project
+    references, bug/code investigations and named-symbol location/use questions
+    must be backed by fresh project evidence.
+    """
     if not project_available:
         return False
     raw = str(request or "")
@@ -323,7 +384,13 @@ def request_needs_project_evidence(request: Any, project_available: bool) -> boo
         _phrase_in_words(_normalized_words(term), words)
         for term in _EVALUATION_TERMS
     )
-    return has_element and (has_action or has_evaluation)
+    if has_element and (has_action or has_evaluation):
+        return True
+    if _CODE_IDENTIFIER.search(raw) and _LOCATION_USE_HINT.search(raw):
+        return True
+    if _IMPLEMENTATION_FLOW_HINT.search(raw):
+        return True
+    return False
 
 
 def quality_contract(

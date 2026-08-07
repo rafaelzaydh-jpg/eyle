@@ -1,12 +1,12 @@
 {
   "release": "2.7.4",
   "app_version": "2.7.4",
-  "config_schema_version": "4.12.2",
-  "revision": "4.12.2-context-runner-hardening",
+  "config_schema_version": "4.12.4.1",
+  "revision": "4.12.4.1-context-budget-hardening",
   "released_at": "2026-08-07",
-  "title": "Structured context compaction, runner diagnostics and truthful LLM request history",
+  "title": "32k context window and task budget hardening",
   "architecture": {
-    "path": "interface -> eyle.runtime.service -> AgentSession phase machine -> LLM <-> phase-specific tools/project observations/tests/Git/external memory -> quality validation -> supervised writes -> persisted observable job history -> response",
+    "path": "interface -> eyle.runtime.service -> AgentSession -> LLM <-> state-filtered taxonomy-described tools/live workspace/tests/Git/external memory/execution_trace -> quality validation -> supervised writes -> persisted observable history -> response",
     "reasoning_loops": 1,
     "separate_mission_interpreter": false,
     "automatic_project_memory": false,
@@ -16,8 +16,8 @@
     "write_model": "supervised dry-run, confirmation, apply, compileall, detected tests, rollback, exact reread",
     "model_response_cache": false,
     "response_model": "natural prose with sentence-indexed typed claims and an internal claim-to-evidence ledger",
-    "active_source_context": "latest tool result through generic bounded structured compaction, retained snippets, and a compact stable task anchor",
-    "observable_history": "on-demand sanitized runtime facts distinguishing logical LLM attempts, provider requests and preflight blocks; no chain-of-thought/raw prompts/raw model responses/source contents"
+    "active_source_context": "latest tool result through bounded structured compaction, retained snippets, compact task anchor, shared tool taxonomy, and compact tool-specific contracts",
+    "observable_history": "on-demand sanitized runtime facts plus execution_trace for current/persisted jobs; no chain-of-thought/raw prompts/raw model responses/source or patch bodies/secrets/memory bodies"
   },
   "removed_from_ecosystem": [
     "engine package as a misleading reasoning layer",
@@ -82,7 +82,15 @@
       "generic nested tool-result compaction before model context",
       "pytest available as a runtime dependency for run_tests",
       "TEST_RUNNER_UNAVAILABLE distinct from TESTS_FAILED",
-      "provider-request versus preflight-attempt observability"
+      "provider-request versus preflight-attempt observability",
+      "shared READ_ONLY/EDIT tool taxonomy with effect tags plus compact purpose/inputs/returns/caveats/limits contracts",
+      "LLM-led default workspace investigation outside obvious chat/utilities",
+      "state-aware run_tests answer-only optimization",
+      "epistemic separation between verified project claims and clearly framed hypotheses/opinions/recommendations",
+      "stable-floor context string compaction",
+      "execution_trace read-only self-observability over current or persisted jobs",
+      "per-prompt context-component size metadata before and after compaction",
+      "observable phase-transition history without reasoning text"
     ],
     "runtime": [
       "application service",
@@ -94,7 +102,8 @@
       "telemetry",
       "on-demand public job history serializer",
       "expandable web execution-history surface",
-      "expandable decision outcome history per LLM turn"
+      "expandable decision outcome history per LLM turn",
+      "persisted execution facts reusable by execution_trace without a second trace store"
     ],
     "execution_guards": [
       "safe paths",
@@ -139,11 +148,14 @@
       "utility tools keep LLM-authored final responses",
       "Git inspection tools are read-only",
       "test output sent to the model is bounded",
-      "decision history excludes reasoning and raw model content"
+      "decision history excludes reasoning and raw model content",
+      "write-intent mutation guard requires strong mutation or concrete project target for ambiguous presentation verbs",
+      "tool-specific caveats state what each observation does not prove beyond shared taxonomy semantics",
+      "compound analysis remains open after run_tests unless execution state is test-only"
     ]
   },
   "validation": {
-    "tests_passed": 162,
+    "tests_passed": 195,
     "tests_skipped": 1,
     "skip_reason": "Flask is not installed in the packaging environment",
     "compileall": true,
@@ -157,14 +169,23 @@
     "project_tool_regressions": true,
     "self_capability_regressions": true,
     "token_estimate_truthfulness_regressions": true,
-    "observable_history_regressions": 6,
+    "observable_history_regressions": 7,
     "runtime_tool_regressions": 7,
     "git_tool_regressions": true,
     "scoped_pytest_regressions": true,
     "two_call_calculator_regression": true,
-    "context_compaction_regressions": 1,
-    "test_runner_regressions": 2,
-    "preflight_history_regressions": 1
+    "context_compaction_regressions": 2,
+    "test_runner_regressions": 3,
+    "preflight_history_regressions": 1,
+    "fixed_prompt_estimated_tokens_fallback": 447,
+    "rev4123_foundation_regressions": 9,
+    "rev41231_hotfix_regressions": 7,
+    "execution_trace_regressions": 5,
+    "registered_tools": 20,
+    "rev4124_tool_taxonomy_regressions": 3,
+    "rev41241_context_budget_regressions": 11,
+    "windows_failure_preservation_regression": true,
+    "execution_trace_real_investigation_regression": true
   },
   "known_limits": [
     "The real Qwen smoke test must run in the deployment environment.",
@@ -180,7 +201,8 @@
     "The history is operational observability, not a reasoning transcript; raw prompts, raw model responses, source contents and chain-of-thought are intentionally excluded.",
     "Git tools require the git executable and an active Git work tree; otherwise they return an explicit unavailable/not-repository result.",
     "run_tests can focus a path only for pytest; other detected test runners still execute their configured full suite.",
-    "git_diff intentionally truncates diff text before it reaches the model; use a narrower path when the relevant hunk is outside the bound."
+    "git_diff intentionally truncates diff text before it reaches the model; use a narrower path when the relevant hunk is outside the bound.",
+    "execution_trace observes recorded runtime facts and does not diagnose them; the LLM must inspect code/tests separately to establish causes."
   ],
   "write_protocol": {
     "full_file_replace": true,
@@ -205,7 +227,7 @@
     "relevant_source_retention": true,
     "claim_evidence_ledger": true,
     "per_kind_finding_limits": true,
-    "write_intent_gate": true,
+    "write_intent_gate": "conservative completion guard, not primary capability router",
     "prose_only_write_completion_rejected": true,
     "failure_output_exposed": true,
     "write_failure_context_retained": true,
@@ -220,30 +242,58 @@
     "workspace_tree_evidence": true,
     "empty_parent_directory_pruning": true,
     "broadened_portuguese_write_intent": true,
-    "general_claims_do_not_fake_project_evidence": true
+    "general_claims_do_not_fake_project_evidence": true,
+    "general_analysis_can_offer_dry_run_after_evidence": false,
+    "analysis_patch_tools_auto_exposed": false
   },
   "loop_control": {
     "max_write_investigation_turns": 2,
     "patch_only_after_investigation": true,
     "semantic_read_coverage": true,
     "max_no_progress_turns": 2,
-    "stable_task_context": true
+    "stable_task_context": true,
+    "run_tests_answer_only": "only when the request itself is clearly test-only and run_tests is the sole project observation"
   },
   "token_accounting": {
-    "fixed_prompt_estimated_tokens": 446,
+    "fixed_prompt_estimated_tokens": 447,
     "phase_specific_tool_catalogs": true,
     "provider_cached_tokens_supported": true,
     "cached_prompt_weight": 0.2,
     "raw_cached_uncached_effective_counters": true,
     "cache_not_used_as_loop_control": true,
-    "measurement_tools_do_not_expand_fixed_prompt": true
+    "measurement_tools_do_not_expand_fixed_prompt": true,
+    "semantic_tool_contracts": true,
+    "per_tool_guidance_layer": false,
+    "shared_tool_taxonomy": true,
+    "tool_authority_categories": [
+      "READ_ONLY",
+      "EDIT"
+    ],
+    "tool_effect_tags": [
+      "NONE",
+      "EXEC",
+      "TEMP",
+      "MEMORY_WRITE",
+      "WORKSPACE_WRITE",
+      "VERIFY",
+      "ROLLBACK"
+    ],
+    "full_catalog_chars_rev41231": 12492,
+    "full_catalog_plus_taxonomy_chars_rev4124": 10241,
+    "analysis_catalog_chars_rev41231": 8353,
+    "analysis_catalog_plus_taxonomy_chars_rev4124": 7049,
+    "default_context_window_tokens": 32768,
+    "max_prompt_tokens_per_job": 96000,
+    "max_total_tokens_per_job": 102000,
+    "analysis_output_reserve_tokens": 1800,
+    "output_reserve_depends_on_source_volume": false
   },
   "project_intelligence": {
     "calculate": "safe deterministic decimal arithmetic with exact/approximate metadata",
     "project_stats": "safe text files/directories/lines/characters/bytes/languages",
     "count_tokens": "measured characters converted by configured fallback; exact=false without exact tokenizer",
     "inspect_project": "objective entrypoint/import/route/test/CI/framework signals; no importance ranking",
-    "agent_info": "runtime identity and executable tool registry"
+    "agent_info": "runtime identity plus complete registered_tools separated from phase-local available_tools"
   },
   "observability": {
     "job_history_endpoint": "GET /jobs/<id>/history",
@@ -270,7 +320,9 @@
     ],
     "chain_of_thought_exposed": false,
     "raw_prompts_exposed": false,
-    "raw_model_responses_exposed": false
+    "raw_model_responses_exposed": false,
+    "tool_name_explicit_in_history": true,
+    "execution_trace_agent_callable": true
   },
   "documentation": {
     "github_readme_rewritten": true,
@@ -289,7 +341,8 @@
       "bounded_output_tail_chars": 3000,
       "runtime_pytest_dependency": true,
       "runner_unavailable_error": "TEST_RUNNER_UNAVAILABLE",
-      "answer_only_after_observation": true
+      "answer_only_after_observation": false,
+      "answer_only_policy": "only when the request itself is clearly test-only and run_tests is the sole project observation"
     },
     "git_status": {
       "read_only": true
@@ -306,6 +359,30 @@
       "logical_attempts": true,
       "provider_requests": true,
       "preflight_blocked": true
+    },
+    "tool_catalog": {
+      "model_visible_contract_fields": [
+        "purpose",
+        "inputs",
+        "returns",
+        "caveats",
+        "limits"
+      ],
+      "per_tool_guidance_layer": false,
+      "shared_taxonomy_fields": [
+        "READ_ONLY",
+        "EDIT",
+        "NONE",
+        "EXEC",
+        "TEMP",
+        "MEMORY_WRITE",
+        "WORKSPACE_WRITE",
+        "VERIFY",
+        "ROLLBACK"
+      ],
+      "categories_are_router": false
     }
-  }
+  },
+  "tool_policy": {},
+  "features": []
 }
