@@ -1,89 +1,76 @@
-<p align="center"><img src="assets/eyle-banner.svg" alt="Eyle — agente autônoma de programação" width="100%"></p>
-<p align="center"><strong>Um cérebro LLM. Ferramentas reais. Escrita supervisionada. Execução observável.</strong></p>
+<p align="center">
+  <img src="assets/eyle-banner.svg" alt="Eyle" width="760">
+</p>
 
-**Versão:** 2.7.4 · **Schema:** 4.12.4.1 · **Revisão:** 4.12.4.1-context-budget-hardening
+# Eyle
 
-A Eyle é uma agente local de programação construída em torno de uma ideia simples: a LLM decide o que fazer, ferramentas determinísticas medem e executam a realidade, e o runtime protege apenas os limites que não podem depender de adivinhação.
+**Versão:** 2.7.4 · **Schema:** 5.1 · **Revisão:** rev5.1-context-boundaries-investigation-continuity
+
+A Eyle é um agente de código local-first construído em torno de uma única `AgentSession`, tools determinísticas, Evidence mantida pelo runtime, escrita transacional supervisionada e um Claim Review semântico antes da aceitação de respostas fundamentadas no projeto.
+
+> **A LLM decide semântica. O runtime valida contratos.**
 
 ## Por que a Eyle existe
 
-Ela foi pensada para repositórios reais, inclusive projetos grandes demais para caber em um único prompt. A Eyle não despeja o projeto inteiro no contexto e não usa um comitê de agentes. Ela investiga somente o necessário para a tarefa, preserva as evidências úteis e consegue alterar vários arquivos numa única transação supervisionada.
+A Eyle permite que a LLM conectada investigue e raciocine sobre um workspace real sem transformar o runtime em um segundo agente escondido. O runtime controla segurança, estrutura, budgets, hashes, freshness, confirmação, persistência e validação. A LLM controla escolhas de investigação, interpretação semântica, redação e intenção de patch.
+
+O core é independente de provider. Qwen, Llama e outros modelos compatíveis usam o mesmo protocolo da Eyle; somente a fronteira `llm/` se adapta à capacidade de structured output que a conexão realmente entrega.
+
+## Arquitetura
 
 ```text
-usuário
+interface
+→ runtime/service
 → AgentSession
-→ decisão da LLM
-↔ ferramentas determinísticas / workspace real / memória externa sob demanda
-→ dry-run + confirmação para escrita
-→ compile/testes/releitura/rollback
-→ resposta
+→ handshake estruturado administrativo
+→ LLM principal ↔ 16 tools determinísticas + workspace real
+→ Evidence Core
+→ Final Gate determinístico
+→ Claim Review (único 2FA semântico)
+   ├─ supported → resposta
+   ├─ contradicted → Repair local → Reverify
+   └─ insufficient / semantic gap → nova investigação dirigida
 ```
 
-## Rev4.12.4.1: endurecimento do orçamento de contexto
+O handshake administrativo não é uma tool do agente. Ele verifica por comportamento `json_schema`, depois `json_object`, depois JSON guiado por prompt, e salva o modo comprovado por conexão/modelo. A Eyle nunca confia apenas no enforcement do servidor: toda saída estruturada é validada localmente.
 
-A Rev4.12.4.1 mantém a taxonomia compartilhada da Rev4.12.4 e eleva a janela padrão por chamada de 10k para 32k. O orçamento cumulativo efetivo de prompt por tarefa passa a 96k, enquanto cada chamada continua obrigada a caber na janela real do modelo. Análises usam reserva de saída estável por tipo de trabalho, fases analíticas não recebem dry-run de patch automaticamente, e `agent_info` separa o registro completo das tools do subconjunto disponível na fase atual. Falhas de pytest em estilo Windows continuam sendo reportadas como falhas reais, e `execution_trace` é testada dentro de uma investigação multi-tool real.
+## Tools
 
-## Rev4.12.4: taxonomia compartilhada de tools
+A LLM principal recebe atualmente 16 tools públicas:
 
-A Rev4.12.4 mantém o modelo de execução da Rev4.12.3.1 e a `execution_trace`, mas compacta como as ferramentas são descritas para a LLM. O runtime continua expondo de uma vez todas as tools permitidas pela fase executável atual e a própria LLM continua escolhendo qual usar; não foi criado roteador de categoria nem chamada extra ao modelo.
+`calculate`, `agent_info`, `project_stats`, `count_tokens`, `inspect_project`, `list_tree`, `search_code`, `find_symbol`, `read_range`, `read_file`, `memory_search`, `memory_store`, `run_tests`, `execution_trace`, `git_status` e `git_diff`.
 
-A autoridade compartilhada é declarada uma única vez por chamada em duas categorias: `READ_ONLY` (sem alteração persistente intencional em arquivos do projeto ou memória do projeto) e `EDIT` (pode persistir arquivos ou memória). Os efeitos também viraram tags compartilhadas: `NONE` por padrão, além de `EXEC`, `TEMP`, `MEMORY_WRITE`, `WORKSPACE_WRITE`, `VERIFY` e `ROLLBACK` quando aplicável. Cada contrato individual mantém apenas finalidade, assinatura compacta dos argumentos, retorno, ressalvas específicas e limites numéricos configurados.
-
-Isso remove repetições como “does not modify files” e `side_effects: none` sem enfraquecer os limites das tools. No catálogo completo de 20 ferramentas, catálogo + taxonomia caem de 12.492 caracteres na Rev4.12.3.1 para cerca de 10.241; numa investigação normal com 15 tools, de 8.353 para cerca de 7.049 caracteres na mesma medição.
-
-A `execution_trace` continua sendo a única tool de auto-observabilidade: ela expõe fatos sanitizados de fases/contexto/tokens/tools/decisões/validações, não diagnósticos, chain-of-thought, prompts brutos, corpos de fonte/patch/memória ou segredos.
-
-## Raciocínio assistido por ferramentas
-
-A LLM não precisa fazer tudo “de cabeça”. A Eyle pode usar:
-
-- `calculate` — cálculo decimal determinístico;
-- `project_stats` — arquivos, linhas, caracteres, bytes e linguagens;
-- `count_tokens` — tamanho medido com indicação explícita de contagem exata ou heurística;
-- `inspect_project` — sinais objetivos de entrypoints, imports, rotas, testes, CI e frameworks, sem declarar qual arquivo é “importante”;
-- `search_code`, `read_file`, `read_range`, `find_symbol`, `list_tree` — inspeção do workspace real;
-- `agent_info` — identidade atual e ferramentas realmente disponíveis;
-- `run_tests` — execução real em sandbox, com escopo pytest opcional e saída diagnóstica limitada;
-- `git_status` — estado do working tree em modo somente leitura;
-- `git_diff` — diff somente leitura com tamanho limitado;
-- `execution_trace` — fatos sanitizados da execução atual/jobs persistidos para self-debugging;
-- memória externa somente quando a própria LLM decide consultar ou armazenar algo.
-
-A ferramenta observa. A Eyle interpreta a observação conforme a tarefa. Resultados determinísticos como `calculate` viram evidência real, mas a resposta final continua sendo escrita pela LLM para preservar tom, explicação e personalidade.
+A escrita não é exposta como patch tools. O modelo emite o protocolo canônico `action=patches` e o runtime executa um único caminho transacional.
 
 ## Escrita supervisionada
 
 ```text
 pedido
-→ ler o código necessário
-→ gerar uma transação
-→ dry-run
+→ investigar código
+→ action=patches
+→ dry-run transacional
 → confirmação do usuário
-→ aplicar
-→ compileall dos Python alterados
-→ detectar e executar testes
-→ rollback se compile/testes/releitura falharem
-→ reler e confirmar a saída real
-→ informar honestamente se foi verificado ou parcialmente validado
+→ aplicar transação
+→ compile/testes/releitura
+→ rollback em falha de validação
+→ resposta verificada
 ```
 
-Tarefas comuns de escrita usam fases. Depois do orçamento de investigação, leituras são fechadas e o próximo turno fica reservado ao patch. Leituras equivalentes também são bloqueadas quando já existe evidência fresca.
+## Evidence e Claim Review
 
-## Qualidade factual
+A Evidence completa permanece no runtime. A LLM recebe visões limitadas e pode pedir ranges mais profundos. Claims e Evidence são proporcionais ao conteúdo material da resposta: números como ~6, 12 ou 20+ são orientação, nunca quotas.
 
-Fatos sobre o projeto, bugs confirmados e riscos contextuais precisam nascer de observações reais. O runtime mantém um ledger compacto entre afirmações e evidências e aplica limites explícitos como “até 3”. As claims apontam para o número da frase visível, sem repetir o texto completo dentro do protocolo.
-
-## Estrutura
-
-```text
-eyle/core/       AgentSession, tools, inspeção, memória e edição segura
-eyle/runtime/    serviço, fila, worker, persistência, telemetria e histórico público
-llm/             transporte, normalização e contabilidade de tokens
-web/             chat Flask e histórico expansível
-docs/            arquitetura, configuração, releases e notas de engenharia
-```
+Claim Review é o único verificador semântico final. Ele verifica Claims atômicas e Semantic Gaps da conclusão. A recuperação local preserva o Review válido e reavalia somente a Claim ou Semantic Gap malformado; o runtime nunca inventa verdict, tipo de gap, Evidence ou correção semântica.
 
 ## Uso
+
+Instale as dependências:
+
+```bash
+python -m pip install -r requirements.lock
+```
+
+Comandos úteis:
 
 ```bash
 python main.py status
@@ -91,19 +78,48 @@ python main.py perguntar "Analise o projeto"
 python main.py serve
 ```
 
-Os endpoints de dados da interface usam Bearer token. O comando `serve` informa no terminal onde obter o token local da API.
+Para desenvolvimento:
+
+```bash
+python -m pip install -r requirements-dev.lock
+python -m pytest -q
+```
+
+## Configuração
+
+Edite `config.json` para endpoint da LLM, modelo e limites do runtime. Não é necessário configurar manualmente o tipo de structured output por provider: a Eyle testa o comportamento real e salva o resultado local em `context/llm_capabilities.json`, ignorado pelo Git.
+
+Veja [Configuração](docs/configuration.md).
+
+## Estrutura do projeto
+
+```text
+eyle/core/       AgentSession, tools, Evidence, Claim Review e edição segura
+eyle/runtime/    serviço, fila, worker, persistência, telemetria e histórico
+llm/             transporte, capacidades adaptativas e contratos estruturados
+web/             interface web local
+tests/           suíte de regressão canônica
+docs/            arquitetura, configuração, benchmarks e publicação atuais
+```
 
 ## Validação
 
-- 178 testes passam na suíte determinística empacotada;
-- 1 teste opcional da interface é pulado quando Flask não está instalado no ambiente de empacotamento;
-- o smoke real com Qwen continua sendo executado apenas no ambiente de deploy.
+A Rev5.1 deve ser publicada somente depois que o artefato extraído passar:
+
+```bash
+python -m eyle.devtools.release_identity
+python -m compileall -q .
+python -m pytest -q
+node --check web/static/app.js
+```
+
+Veja [Benchmark](docs/benchmark.md) para o cenário real de aceitação da AgentSession.
 
 ## Licença
 
-A Eyle tem o **código-fonte disponível, mas não é software open source**. A licença permite que pessoas baixem, instalem, executem e modifiquem a Eyle de forma privada para uso pessoal e não comercial. Redistribuição, publicação de cópias ou versões modificadas, venda, sublicenciamento, uso comercial e oferta da Eyle como serviço exigem autorização prévia por escrito.
+A Eyle tem **código-fonte disponível, mas não é software open source**. Uso pessoal, privado e não comercial é permitido conforme [LICENSE.md](LICENSE.md). Redistribuição, publicação de versões modificadas, uso comercial, sublicenciamento, venda ou oferta da Eyle como serviço exigem autorização prévia por escrito.
 
-Consulte [LICENSE.md](LICENSE.md) para os termos que regem o software e [CONTRIBUTING.md](CONTRIBUTING.md) para os termos de contribuição. Os direitos limitados decorrentes do próprio uso do GitHub continuam sujeitos aos Termos de Serviço do GitHub.
+Veja também [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) e [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 ## Documentação
 
@@ -111,10 +127,6 @@ Consulte [LICENSE.md](LICENSE.md) para os termos que regem o software e [CONTRIB
 - [Visão técnica](docs/technical-overview.md)
 - [Configuração](docs/configuration.md)
 - [Benchmark](docs/benchmark.md)
-- [Notas da Rev4.12.4.1](docs/releases/2.7.4-rev4.12.4.1.md)
-- [Notas da Rev4.12.4](docs/releases/2.7.4-rev4.12.4.md)
-- [Notas da Rev4.12.3.1](docs/releases/2.7.4-rev4.12.3.1.md)
-- [Notas da Rev4.12.3](docs/releases/2.7.4-rev4.12.3.md)
-- [Notas da Rev4.12.2](docs/releases/2.7.4-rev4.12.2.md)
-- [Histórico de decisões removidas](UPDATE_HISTORY.md)
+- [Publicação no Git](docs/github-publishing.md)
 - [Changelog](CHANGELOG.md)
+- [English](README.md)

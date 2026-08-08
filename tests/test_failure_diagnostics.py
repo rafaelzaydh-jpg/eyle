@@ -6,7 +6,7 @@ from eyle.core.session import AgentSession
 from eyle.runtime import service
 
 
-def _config(tests_enabled=True, quality_enabled=True):
+def _config(tests_enabled=True):
     return {
         "llm": {
             "context_window_tokens": 10000,
@@ -18,15 +18,15 @@ def _config(tests_enabled=True, quality_enabled=True):
             "max_llm_turns": 4,
             "max_tool_calls": 8,
             "max_identical_tool_repeats": 2,
-            "protocol_parse_retries": 1,
+            "structured_protocol_retries": 1,
             "final_validation_retries": 1,
             "chat_history_token_budget": 2400,
             "max_read_range_lines": 400,
-            "response_quality": {"enabled": quality_enabled},
+            "claims": {"mode": "off"},
+            "context_view": {"max_relevant_sources": 4, "max_relevant_source_chars": 3500, "max_symbol_preview_chars": 2600, "max_search_source_chars": 600},
         },
         "codar": {
             "ativado": True,
-            "fazer_backup": False,
             "testes": {"ativado": tests_enabled, "timeout_segundos": 30},
         },
         "_runtime_agent_budget": {
@@ -43,10 +43,9 @@ def _config(tests_enabled=True, quality_enabled=True):
 def _pending_replace_and_create(root):
     original = (root / "routes.py").read_text(encoding="utf-8")
     return {
-        "tool_pendente": {
-            "tool": "apply_patch_set",
-            "arguments": {
-                "patches": [
+        "continuation_kind": "write_confirmation",
+        "write_transaction": {
+            "patches": [
                     {
                         "operation": "replace",
                         "path": "routes.py",
@@ -59,7 +58,6 @@ def _pending_replace_and_create(root):
                         "content": "<h1>Amor</h1>\n",
                     },
                 ]
-            },
         }
     }
 
@@ -108,10 +106,10 @@ def test_service_preserves_write_failure_as_message_metadata():
         "paths": ["routes.py"],
     }
 
-    assert service._metadata_resposta_agente({"write_failure": failure}) == {
-        "write_failure": failure
+    assert service._metadata_resposta_agente("failed", {"write_failure": failure}) == {
+        "agent_status": "failed", "write_failure": failure
     }
-    assert service._metadata_resposta_agente({}) is None
+    assert service._metadata_resposta_agente("success", {}) == {"agent_status": "success"}
 
 
 def test_follow_up_can_cite_runtime_failure_instead_of_restored_code(monkeypatch, tmp_path):
@@ -129,16 +127,13 @@ def test_follow_up_can_cite_runtime_failure_instead_of_restored_code(monkeypatch
         ]
         assert runtime_sources
         assert runtime_sources[0]["error_code"] == "TESTS_FAILED"
-        return json.dumps({
+        return {
             "final": {
                 "answer": "Os testes falharam porque render_template não estava definido.",
-                "claims": [{
-                    "kind": "fact",
-                    "text": "Os testes falharam porque render_template não estava definido.",
-                    "evidence_ids": ["ev-runtime-0001"],
-                }],
-            }
-        })
+                "evidence_ids": ["ev-runtime-0001"],
+            },
+            "plan": [],
+        }
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
     context = {
@@ -166,4 +161,4 @@ def test_follow_up_can_cite_runtime_failure_instead_of_restored_code(monkeypatch
     assert status == "success"
     assert "render_template" in text
     assert prompts[0]["evidence_index"][0]["source_type"] == "runtime_validation"
-    assert details["claim_evidence"][0]["sources"][0]["source_type"] == "runtime_validation"
+    assert details["evidence"][0]["source_type"] == "runtime_validation"

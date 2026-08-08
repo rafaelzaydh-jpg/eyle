@@ -306,7 +306,7 @@ def carregar_agent_pendente():
 def salvar_agent_pendente(estado_pendente, projeto=None, config=None):
     dados = _preparar_pendencia(estado_pendente, projeto or carregar_projeto(), config)
     pergunta = str(dados.get("pergunta_ao_usuario") or "Como deseja continuar?").rstrip()
-    confirmavel = (dados.get("tool_pendente") or {}).get("tool") not in (None, "__user_response__")
+    confirmavel = dados.get("continuation_kind") == "write_confirmation"
     instrucao = (
         f"Para confirmar: confirmar {dados['id']}"
         if confirmavel else
@@ -369,10 +369,25 @@ def _resultado_controle_pendencia(resposta):
 
 
 def _historico_sem_erros_llm(mensagens):
+    failed_origin_ids = {
+        item.get("reply_to_message_id")
+        for item in mensagens
+        if isinstance(item, dict)
+        and item.get("role") == "assistant"
+        and item.get("agent_status") == "failed"
+        and not item.get("write_failure")
+        and item.get("reply_to_message_id") is not None
+    }
     return [
         item for item in mensagens
         if not str(item.get("text") or "").startswith("[erro]")
         and not item.get("pending_delete")
+        and not (
+            item.get("role") == "assistant"
+            and item.get("agent_status") == "failed"
+            and not item.get("write_failure")
+        )
+        and item.get("id") not in failed_origin_ids
     ]
 
 
@@ -405,12 +420,13 @@ def _desempacotar_resultado_agente(resultado):
 
 
 
-def _metadata_resposta_agente(detalhes):
+def _metadata_resposta_agente(status, detalhes):
     detalhes = detalhes if isinstance(detalhes, dict) else {}
+    metadata = {"agent_status": str(status or "unknown")}
     falha = detalhes.get("write_failure")
     if isinstance(falha, dict) and falha:
-        return {"write_failure": falha}
-    return None
+        metadata["write_failure"] = falha
+    return metadata
 def _resultado_agente(status, texto, detalhes):
     detalhes = detalhes if isinstance(detalhes, dict) else {}
     return {
@@ -444,7 +460,7 @@ def _processar_agente(pergunta, config, projeto, task_id=None, conversation_cont
         config_execucao, "finalizing", "Montando a resposta final",
         partial_text=texto[-16000:] if isinstance(texto, str) else None,
     )
-    registrar_mensagem("assistant", texto, metadata=_metadata_resposta_agente(detalhes))
+    registrar_mensagem("assistant", texto, metadata=_metadata_resposta_agente(status, detalhes))
     return _resultado_agente(status, texto, detalhes)
 
 
@@ -469,14 +485,13 @@ def _retomar_agente_pendente(pendente, config, resposta_usuario=None):
         texto = nova_pendencia["pergunta_ao_usuario"]
     else:
         limpar_agent_pendente()
-    registrar_mensagem("assistant", texto, metadata=_metadata_resposta_agente(detalhes))
+    registrar_mensagem("assistant", texto, metadata=_metadata_resposta_agente(status, detalhes))
     return _resultado_agente(status, texto, detalhes)
 
 
 def _cancelar_agente_pendente(pendente):
     limpar_agent_pendente()
-    tool = (pendente.get("tool_pendente") or {}).get("tool", "?")
-    resposta = f"Ok, cancelado. A ferramenta '{tool}' não foi executada."
+    resposta = "Ok, cancelado. A alteração pendente não foi aplicada."
     registrar_mensagem("assistant", resposta)
     detalhes = {"status": "blocked", "failure_code": "CANCELLED"}
     return _resultado_agente("blocked", resposta, detalhes)
@@ -497,10 +512,10 @@ def processar(pergunta, registrar_pergunta=True, historico_snapshot=None,
         "task_id": task_id,
         "source_job_id": source_job_id,
         "max_llm_calls": max(1, int(cfg_agent.get("max_llm_calls", 12))),
-        "max_generated_tokens": max(1, int(cfg_agent.get("max_completion_tokens", 6000))),
-        "max_completion_tokens": max(1, int(cfg_agent.get("max_completion_tokens", 6000))),
+        "max_generated_tokens": max(1, int(cfg_agent.get("max_completion_tokens", 9000))),
+        "max_completion_tokens": max(1, int(cfg_agent.get("max_completion_tokens", 9000))),
         "max_prompt_tokens": max(1, int(cfg_agent.get("max_prompt_tokens", 96000))),
-        "max_total_tokens": max(1, int(cfg_agent.get("max_total_tokens", 102000))),
+        "max_total_tokens": max(1, int(cfg_agent.get("max_total_tokens", 105000))),
         "llm_calls": 0, "llm_requests": 0,
         "prompt_tokens_reserved": 0, "prompt_tokens_estimated_raw": 0,
         "prompt_tokens_actual": 0, "prompt_tokens_cached": 0,

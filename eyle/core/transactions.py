@@ -11,35 +11,44 @@ from .editing import _escrever_arquivo_atomico, _substituir_linhas
 
 
 def _normalize_patch(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate one canonical transaction patch shape."""
     if not isinstance(raw, dict):
         raise ValueError("each patch must be an object")
-    operation = str(raw.get("operation") or raw.get("operacao") or "update").strip().lower()
-    aliases = {"modify": "update", "write": "replace", "overwrite": "replace", "add": "create", "remove": "delete"}
-    operation = aliases.get(operation, operation)
-    has_full_content = any(key in raw for key in ("content", "conteudo", "new_code", "codigo_novo"))
-    has_range = any(key in raw for key in ("line_start", "linha_inicio", "line_end", "linha_fim"))
-    if operation == "update" and has_full_content and not has_range:
-        operation = "replace"
+    operation = str(raw.get("operation") or "").strip().lower()
     if operation not in {"update", "replace", "create", "delete"}:
-        raise ValueError(f"unsupported patch operation: {operation}")
-    path = raw.get("path") or raw.get("caminho_relativo") or raw.get("file")
+        raise ValueError(f"unsupported patch operation: {operation or 'missing'}")
+    path = raw.get("path")
     if not isinstance(path, str) or not path.strip():
         raise ValueError("patch path is required")
     patch = {"operation": operation, "path": path.strip().replace("\\", "/")}
     if operation == "update":
+        required = ("line_start", "line_end", "new_code", "file_hash_expected", "range_hash_expected")
+        missing = [key for key in required if key not in raw]
+        if missing:
+            raise ValueError("update patch missing: " + ", ".join(missing))
         patch.update({
-            "line_start": int(raw.get("line_start", raw.get("linha_inicio"))),
-            "line_end": int(raw.get("line_end", raw.get("linha_fim"))),
-            "new_code": str(raw.get("new_code", raw.get("codigo_novo", ""))),
-            "file_hash_expected": str(raw.get("file_hash_expected", raw.get("file_hash_esperado", ""))),
-            "range_hash_expected": str(raw.get("range_hash_expected", raw.get("range_hash_esperado", ""))),
+            "line_start": int(raw["line_start"]),
+            "line_end": int(raw["line_end"]),
+            "new_code": str(raw["new_code"]),
+            "file_hash_expected": str(raw["file_hash_expected"]),
+            "range_hash_expected": str(raw["range_hash_expected"]),
         })
     elif operation in {"replace", "create"}:
-        patch["content"] = str(raw.get("content", raw.get("conteudo", raw.get("new_code", raw.get("codigo_novo", "")))))
+        if "content" not in raw or not isinstance(raw.get("content"), str):
+            raise ValueError(f"{operation} patch requires string content")
+        patch["content"] = raw["content"]
         if operation == "replace":
-            patch["file_hash_expected"] = str(raw.get("file_hash_expected", raw.get("file_hash_esperado", "")))
+            if "file_hash_expected" not in raw:
+                raise ValueError("replace patch requires file_hash_expected")
+            patch["file_hash_expected"] = str(raw["file_hash_expected"])
     else:
-        patch["file_hash_expected"] = str(raw.get("file_hash_expected", raw.get("file_hash_esperado", "")))
+        if "file_hash_expected" not in raw:
+            raise ValueError("delete patch requires file_hash_expected")
+        patch["file_hash_expected"] = str(raw["file_hash_expected"])
+    allowed = set(patch)
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ValueError("unknown patch field(s): " + ", ".join(unknown))
     return patch
 
 
@@ -138,8 +147,9 @@ def dry_run_patch_set(project_root: str, raw_patches: List[Dict[str, Any]]) -> D
     }
 
 
-def apply_patch_set(project_root: str, prepared_patches: List[Dict[str, Any]]) -> Dict[str, Any]:
-    check = dry_run_patch_set(project_root, prepared_patches)
+def apply_patch_set(project_root: str, confirmed_patches: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Apply one canonical confirmed transaction after revalidating freshness."""
+    check = dry_run_patch_set(project_root, confirmed_patches)
     if not check.get("ok"):
         return check
     prepared = check["prepared_patches"]

@@ -9,6 +9,7 @@ explicit user confirmation.
 
 ``ctx`` supplies the validated config and the live project root. Indexed retrieval is not required.
 """
+import json
 import os
 import re
 import sys
@@ -27,13 +28,7 @@ from eyle.core.workspace_io import (  # noqa: E402
 from eyle.core.editing import (  # noqa: E402
     localizar_simbolo,
     localizar_simbolo_no_projeto,
-    testar_patch_em_copia,
     rodar_testes_projeto,
-    aplicar_patch,
-    restaurar_snapshot_patch,
-)
-from eyle.core.transactions import (  # noqa: E402
-    dry_run_patch_set, apply_patch_set, rollback_patch_set,
 )
 from eyle.core.memory import search_memory, store_memory  # noqa: E402
 from eyle.core.project_inspection import (  # noqa: E402
@@ -47,7 +42,6 @@ from eyle.core.execution_trace import build_execution_trace, filter_execution_tr
 
 PROJECT_BASE_DIR = os.path.dirname(BASE_DIR)
 MEMORY_DIR = os.path.join(PROJECT_BASE_DIR, "memory")
-CONTEXT_DIR = os.path.join(PROJECT_BASE_DIR, "context")
 
 _CAMPOS_RESULTADO = ("status", "ok", "executed", "changed", "error_code", "detail")
 
@@ -90,48 +84,235 @@ def _caminho_projeto(ctx):
 # Tools READ
 # ---------------------------------------------------------------------------
 
+_CODE_SEARCH_GLOBS = (
+    "*.py", "*.pyi", "*.js", "*.jsx", "*.ts", "*.tsx", "*.java", "*.c", "*.cpp",
+    "*.h", "*.hpp", "*.cs", "*.go", "*.rb", "*.php", "*.rs", "*.swift", "*.kt",
+    "*.sql", "*.html", "*.css", "*.sh", "*.bat",
+)
+
+
+def _parse_rg_json(stdout):
+    parsed = []
+    for row in str(stdout or "").splitlines():
+        try:
+            event = json.loads(row)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if event.get("type") != "match":
+            continue
+        data = event.get("data") or {}
+        path_data = data.get("path") or {}
+        path = path_data.get("text") if isinstance(path_data, dict) else None
+        line = data.get("line_number")
+        if not path or not isinstance(line, int):
+            continue
+        submatches = data.get("submatches") or []
+        column = None
+        if submatches and isinstance(submatches[0], dict):
+            start = submatches[0].get("start")
+            if isinstance(start, int):
+                column = start + 1
+        rel = str(path).replace("\\", "/")
+        while rel.startswith("./"):
+            rel = rel[2:]
+        parsed.append({"arquivo": rel, "linha": line, "coluna": column})
+    return parsed
+
+
+def _run_rg_json(root, query, globs=()):
+    command = ["rg", "--json", "--fixed-strings", "--color", "never"]
+    for pattern in globs:
+        command.extend(["-g", pattern])
+    command.extend([query, "."])
+    completed = subprocess.run(
+        command, cwd=root, capture_output=True, text=True, timeout=20, check=False,
+    )
+    if completed.returncode not in {0, 1}:
+        raise OSError(f"ripgrep failed with exit code {completed.returncode}")
+    return _parse_rg_json(completed.stdout)
+
+
+def _search_match_priority(item):
+    path = str(item.get("arquivo") or "").replace("\\", "/").lower()
+    parts = set(path.split("/"))
+    if "tests" in parts or path.startswith("test_") or "/test_" in path:
+        group = 3
+    elif "devtools" in parts or "benchmarks" in parts or "examples" in parts:
+        group = 2
+    else:
+        group = 0
+    return (group, path, int(item.get("linha") or 0), int(item.get("coluna") or 0))
+
+
+def _search_matches_with_rg(root, query, limit):
+    """Return structured literal matches, prioritizing product code before tests/docs.
+
+    ``rg --json`` avoids parsing ``path:line:column`` strings, which broke on
+    Windows drive letters. Running with ``cwd=root`` keeps paths project-relative.
+    A code-first pass plus deterministic path ranking prevents tests/documentation
+    mentions from consuming the bounded result budget before implementation sites.
+    """
+    selected = []
+    seen = set()
+    observed = 0
+
+    def absorb(items):
+        nonlocal observed
+        for item in items:
+            key = (item.get("arquivo"), item.get("linha"), item.get("coluna"))
+            if key in seen:
+                continue
+            seen.add(key)
+            observed += 1
+            if len(selected) < limit:
+                selected.append(item)
+
+    code_matches = sorted(_run_rg_json(root, query, _CODE_SEARCH_GLOBS), key=_search_match_priority)
+    absorb(code_matches)
+    if len(selected) < limit:
+        remaining = sorted(_run_rg_json(root, query), key=_search_match_priority)
+        absorb(remaining)
+
+    truncated = observed > len(selected) or len(code_matches) > limit
+    return selected, observed, truncated
+
+
+def _search_matches_fallback(root, query, limit):
+    """Portable structured fallback used when ripgrep is unavailable."""
+    matches = []
+    observed = 0
+    truncated = False
+    for current, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in {".git", "node_modules", "__pycache__", ".venv", "venv"}]
+        for name in files:
+            path = os.path.join(current, name)
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                    for number, line in enumerate(fh, 1):
+                        if query not in line:
+                            continue
+                        observed += 1
+                        if len(matches) >= limit:
+                            truncated = True
+                            return matches, observed, truncated
+                        rel = os.path.relpath(path, root).replace("\\", "/")
+                        matches.append({"arquivo": rel, "linha": number, "coluna": line.find(query) + 1})
+            except OSError:
+                continue
+    return matches, observed, truncated
+
+
+def _group_search_ranges(raw_matches, max_lines, max_ranges):
+    """Merge nearby hits and return a diverse bounded set of source ranges."""
+    by_file = {}
+    file_order = []
+    for item in raw_matches:
+        path = str(item.get("arquivo") or "")
+        line = item.get("linha")
+        if not path or not isinstance(line, int):
+            continue
+        if path not in by_file:
+            by_file[path] = set()
+            file_order.append(path)
+        by_file[path].add(line)
+
+    grouped_by_file = {}
+    total_ranges = 0
+    for path in file_order:
+        file_ranges = []
+        current = None
+        for line in sorted(by_file[path]):
+            start, end = max(1, line - 3), line + 3
+            if current is None:
+                current = {"arquivo": path, "linha_inicio": start, "linha_fim": end, "match_lines": [line]}
+                continue
+            merged_end = max(current["linha_fim"], end)
+            overlaps = start <= current["linha_fim"] + 1
+            fits = merged_end - current["linha_inicio"] + 1 <= max_lines
+            if overlaps and fits:
+                current["linha_fim"] = merged_end
+                current["match_lines"].append(line)
+            else:
+                file_ranges.append(current)
+                current = {"arquivo": path, "linha_inicio": start, "linha_fim": end, "match_lines": [line]}
+        if current is not None:
+            file_ranges.append(current)
+        grouped_by_file[path] = file_ranges
+        total_ranges += len(file_ranges)
+
+    # Round-robin keeps one noisy file from consuming the whole context budget.
+    selected = []
+    depth = 0
+    while len(selected) < max_ranges:
+        added = False
+        for path in file_order:
+            ranges = grouped_by_file.get(path) or []
+            if depth < len(ranges):
+                selected.append(ranges[depth])
+                added = True
+                if len(selected) >= max_ranges:
+                    break
+        if not added:
+            break
+        depth += 1
+    return selected, total_ranges > max_ranges, total_ranges
+
+
 def _tool_search_code(arguments, ctx):
-    """Search the live workspace directly and return verifiable source ranges."""
+    """Search exact literal code/text and return compact fresh source ranges."""
     query = arguments["query"].strip()
     root = _caminho_projeto(ctx)
     if not root:
         return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
     config = (ctx or {}).get("config") or {}
-    max_lines = int(config.get("agent", {}).get("max_read_range_lines", 400))
-    matches = []
+    agent_cfg = config.get("agent", {})
+    # search_code is a locator/breadcrumb tool. Keep each returned range small;
+    # the model can request read_range when a wider source window is needed.
+    max_lines = max(7, int(agent_cfg.get("max_search_range_lines", 16) or 16))
+    max_matches = max(1, int(agent_cfg.get("max_search_matches", 40) or 40))
+    max_ranges = max(1, int(agent_cfg.get("max_search_ranges", 12) or 12))
+
     try:
-        completed = subprocess.run(
-            ["rg", "--line-number", "--column", "--no-heading", "--color", "never", "--fixed-strings", query, root],
-            capture_output=True, text=True, timeout=20, check=False,
-        )
-        rows = completed.stdout.splitlines()[:40]
-    except (FileNotFoundError, subprocess.SubprocessError):
-        rows = []
-        for current, dirs, files in os.walk(root):
-            dirs[:] = [d for d in dirs if d not in {".git","node_modules","__pycache__",".venv","venv"}]
-            for name in files:
-                path=os.path.join(current,name)
-                try:
-                    with open(path,"r",encoding="utf-8") as fh:
-                        for number,line in enumerate(fh,1):
-                            if query in line:
-                                rows.append(f"{path}:{number}:1:{line.rstrip()}")
-                                if len(rows)>=40: break
-                except (OSError,UnicodeError): pass
-                if len(rows)>=40: break
-            if len(rows)>=40: break
-    for row in rows:
-        parts=row.split(":",4)
-        if len(parts)<4: continue
-        path, line_text = parts[0], parts[1]
-        try: line=int(line_text)
-        except ValueError: continue
-        rel=os.path.relpath(path,root).replace("\\","/")
+        raw_matches, observed, match_truncated = _search_matches_with_rg(root, query, max_matches)
+        backend = "ripgrep-json"
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        raw_matches, observed, match_truncated = _search_matches_fallback(root, query, max_matches)
+        backend = "python-fallback"
+
+    grouped, range_truncated, ranges_observed = _group_search_ranges(raw_matches, max_lines, max_ranges)
+    results = []
+    read_failures = []
+    for item in grouped:
         try:
-            reading=ler_faixa_projeto(root,rel,max(1,line-3),line+3,max_linhas=max_lines)
-        except ErroLeituraProjeto: continue
-        matches.append(reading)
-    return _sucesso({"resultados":matches,"arquivos_relevantes":sorted({m.get("arquivo") for m in matches if m.get("arquivo")}),"falhas_leitura":[]})
+            reading = ler_faixa_projeto(
+                root, item["arquivo"], item["linha_inicio"], item["linha_fim"],
+                max_linhas=max_lines,
+            )
+        except ErroLeituraProjeto as error:
+            read_failures.append({"arquivo": item["arquivo"], "error_code": error.error_code})
+            continue
+        reading = dict(reading)
+        reading["match_lines"] = [
+            line for line in item["match_lines"]
+            if reading["linha_inicio"] <= line <= reading["linha_fim"]
+        ]
+        results.append(reading)
+
+    files = sorted({item.get("arquivo") for item in raw_matches if item.get("arquivo")})
+    truncated = bool(match_truncated or range_truncated)
+    return _sucesso({
+        "query": query,
+        "resultados": results,
+        "arquivos_relevantes": files,
+        "matches_observed": observed,
+        "matches_returned": len(raw_matches),
+        "ranges_observed": ranges_observed,
+        "ranges_returned": len(results),
+        "truncated": truncated,
+        "coverage_complete": not truncated,
+        "backend": backend,
+        "falhas_leitura": read_failures,
+    })
 
 
 def _tool_find_symbol(arguments, ctx):
@@ -141,10 +322,13 @@ def _tool_find_symbol(arguments, ctx):
     symbol=arguments["simbolo"]
     rel=arguments.get("caminho_relativo")
     result=localizar_simbolo(root,rel,symbol) if rel else localizar_simbolo_no_projeto(root,symbol)
-    if result is None:
+    if result is None or (isinstance(result, list) and not result):
         return _falha("SYMBOL_NOT_FOUND",f"símbolo '{symbol}' não encontrado",executed=True)
     if isinstance(result,list): result=result[0] if len(result)==1 else {"matches":result}
-    if result.get("matches") is not None: return _sucesso(result)
+    if result.get("matches") is not None:
+        if not result.get("matches"):
+            return _falha("SYMBOL_NOT_FOUND",f"símbolo '{symbol}' não encontrado",executed=True)
+        return _sucesso(result)
     result=dict(result); rel=result.get("arquivo") or rel; result["arquivo"]=rel; result["simbolo"]=symbol
     try:
         reading=ler_faixa_projeto(root,rel,int(result["linha_inicio"]),int(result["linha_fim"]),max_linhas=((ctx or {}).get("config") or {}).get("agent",{}).get("max_read_range_lines",400))
@@ -154,13 +338,7 @@ def _tool_find_symbol(arguments, ctx):
 
 
 def _tool_read_file(arguments, ctx):
-    """Le o inicio do arquivo e, quando possivel, devolve evidencia com hashes.
-
-    ``read_file`` continua compativel com as chaves antigas ``conteudo`` e
-    ``truncado``, mas agora tambem usa o mesmo envelope verificavel de
-    ``read_range``. Assim uma leitura real nao e descartada pelo gate de
-    validação apenas porque o modelo escolheu um alias de leitura.
-    """
+    """Le o inicio do arquivo usando o envelope canonico de ``read_range``."""
     caminho_projeto = _caminho_projeto(ctx)
     if not caminho_projeto:
         return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
@@ -177,7 +355,6 @@ def _tool_read_file(arguments, ctx):
         return _falha(erro.error_code, erro.detail, executed=True)
 
     leitura = dict(leitura)
-    leitura["conteudo"] = leitura.get("conteudo") or leitura.get("conteudo_raw") or leitura.get("trecho") or ""
     leitura["truncado"] = bool(
         leitura.get("linha_fim", 0) < leitura.get("total_linhas_arquivo", 0)
     )
@@ -288,9 +465,6 @@ def _tool_agent_info(arguments, ctx):
         "revision": config.get("revision"),
         "registered_tools": registered,
         "available_tools": available,
-        # Compatibility alias for older UI/history consumers. It deliberately
-        # means the complete registry now, not the phase-local subset.
-        "tools": registered,
         "write_enabled": bool(((config.get("codar") or {}).get("ativado", True))),
         "write_confirmation_required": True,
         "note": (
@@ -323,82 +497,6 @@ def _tool_read_range(arguments, ctx):
         } else erro.error_code
         return _falha(codigo, erro.detail, executed=True)
     return _sucesso(resultado)
-
-
-def _tool_test_patch_dry_run(arguments, ctx):
-    """
-    Testa uma substituicao de linhas NUMA COPIA temporaria -- nunca
-    escreve no arquivo real; usa a camada de edição segura do core.
-    Usado pelo Agente pra validar uma mudanca ANTES de propor apply_patch
-    (que e WRITE e para o loop em needs_user).
-    """
-    caminho_projeto = _caminho_projeto(ctx)
-    if not caminho_projeto:
-        return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
-
-    obrigatorios = ("caminho_relativo", "linha_inicio", "linha_fim", "codigo_novo")
-    faltando = [
-        campo for campo in obrigatorios
-        if campo not in arguments or arguments.get(campo) is None
-        or (campo != "codigo_novo" and arguments.get(campo) == "")
-    ]
-    if faltando:
-        return _falha("INVALID_ARGUMENT", f"argumentos obrigatorios faltando: {', '.join(faltando)}")
-
-    try:
-        linha_inicio = int(arguments["linha_inicio"])
-        linha_fim = int(arguments["linha_fim"])
-    except (TypeError, ValueError):
-        return _falha("INVALID_ARGUMENT", "'linha_inicio' e 'linha_fim' precisam ser numeros inteiros")
-
-    resultado = testar_patch_em_copia(
-        caminho_projeto, arguments["caminho_relativo"], linha_inicio, linha_fim,
-        arguments["codigo_novo"],
-        file_hash_esperado=arguments["file_hash_esperado"],
-        range_hash_esperado=arguments["range_hash_esperado"],
-    )
-    detail = {
-        "message": resultado.get("detalhe", ""),
-        "conteudo_resultante": resultado.get("conteudo_resultante"),
-    }
-    if resultado.get("ok") is True:
-        return _sucesso(detail)
-    return _falha(resultado.get("error_code") or "DRY_RUN_FAILED", detail, executed=True)
-
-
-def _tool_test_patch_set_dry_run(arguments, ctx):
-    """Validate a free-form multi-file transaction without writing."""
-    caminho_projeto = _caminho_projeto(ctx)
-    if not caminho_projeto:
-        return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
-    patches = arguments.get("patches")
-    resultado = dry_run_patch_set(caminho_projeto, patches)
-    if resultado.get("ok"):
-        return _sucesso({
-            "message": resultado.get("message"),
-            "prepared_patches": resultado.get("prepared_patches") or [],
-            "files": resultado.get("files") or [],
-        })
-    return _falha(resultado.get("error_code") or "DRY_RUN_FAILED", resultado.get("message"), executed=True)
-
-
-def _tool_apply_patch_set(arguments, ctx):
-    """Apply a previously dry-run transaction after user confirmation."""
-    caminho_projeto = _caminho_projeto(ctx)
-    if not caminho_projeto:
-        return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
-    resultado = apply_patch_set(caminho_projeto, arguments.get("patches") or [])
-    if resultado.get("ok"):
-        return _sucesso({
-            "message": resultado.get("message"),
-            "applied_patches": resultado.get("applied_patches") or [],
-            "files": resultado.get("files") or [],
-        }, changed=True)
-    return _falha(resultado.get("error_code") or "PATCH_TRANSACTION_FAILED", resultado.get("message"), executed=True)
-
-
-def reverter_patch_set_confirmado(snapshot, ctx):
-    return rollback_patch_set(snapshot or [])
 
 
 def _pytest_summary(output):
@@ -569,81 +667,6 @@ def _tool_memory_store(arguments, ctx):
 # Tool WRITE -- invoked only by the core runtime after confirmation.
 # ---------------------------------------------------------------------------
 
-def _tool_apply_patch(arguments, ctx):
-    """
-    Write to the live file only after the core confirmation pause.
-    The editing layer rereads preconditions, writes atomically, preserves a
-    rollback snapshot, and reports the exact result.
-    """
-    caminho_projeto = _caminho_projeto(ctx)
-    if not caminho_projeto:
-        return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
-
-    obrigatorios = (
-        "caminho_relativo", "linha_inicio", "linha_fim",
-        "codigo_original_esperado", "codigo_novo",
-        "file_hash_esperado", "range_hash_esperado",
-    )
-    faltando = [
-        campo for campo in obrigatorios
-        if campo not in arguments or arguments.get(campo) is None
-        or (campo not in {"codigo_original_esperado", "codigo_novo"} and arguments.get(campo) == "")
-    ]
-    if faltando:
-        return _falha("INVALID_ARGUMENT", f"argumentos obrigatorios faltando: {', '.join(faltando)}")
-    if not isinstance(arguments.get("codigo_original_esperado"), str):
-        return _falha("INVALID_ARGUMENT", "'codigo_original_esperado' precisa ser texto")
-
-    try:
-        linha_inicio = int(arguments["linha_inicio"])
-        linha_fim = int(arguments["linha_fim"])
-    except (TypeError, ValueError):
-        return _falha("INVALID_ARGUMENT", "'linha_inicio' e 'linha_fim' precisam ser numeros inteiros")
-
-    config = (ctx or {}).get("config") or {}
-    cfg_codar = config.get("codar", {})
-    backups_dir = os.path.join(CONTEXT_DIR, "backups") if cfg_codar.get("fazer_backup", True) else None
-    cfg_testes = cfg_codar.get("testes", {})
-
-    resultado = aplicar_patch(
-        caminho_projeto, arguments["caminho_relativo"], linha_inicio, linha_fim,
-        arguments["codigo_original_esperado"], arguments["codigo_novo"],
-        backups_dir=backups_dir, cfg_testes=cfg_testes,
-        cfg_retention=config.get("retention", {}),
-        file_hash_esperado=arguments["file_hash_esperado"],
-        range_hash_esperado=arguments["range_hash_esperado"],
-        incluir_snapshot=True,
-        executar_testes=False,
-    )
-    detail = {
-        "message": resultado.get("detalhe", ""),
-        "backup_path": resultado.get("backup_path"),
-        "outcome": resultado.get("outcome"),
-        "rollback_snapshot": resultado.get("rollback_snapshot"),
-        "file_hash_antes": resultado.get("file_hash_antes"),
-        "range_hash_antes": resultado.get("range_hash_antes"),
-        "file_hash_depois": resultado.get("file_hash_depois"),
-        "linha_fim_final": resultado.get("linha_fim_final"),
-    }
-    if resultado.get("ok") is True:
-        return _sucesso(detail, changed=True)
-    return _falha(
-        resultado.get("error_code") or "PATCH_FAILED", detail, executed=True,
-        changed=resultado.get("changed") is True,
-    )
-
-
-def reverter_patch_confirmado(snapshot, ctx):
-    """Rollback interno do ciclo 46; nao e uma tool disponivel a LLM."""
-    caminho_projeto = _caminho_projeto(ctx)
-    if not caminho_projeto:
-        return {
-            "ok": False, "changed": False, "error_code": "WORKSPACE_NOT_AVAILABLE",
-            "detalhe": "nenhum workspace ativo para restaurar a edição",
-        }
-    return restaurar_snapshot_patch(caminho_projeto, snapshot)
-
-
 # ---------------------------------------------------------------------------
 # Registry consumed by eyle.core.agent. Tool names are the public protocol.
 # ---------------------------------------------------------------------------
@@ -684,7 +707,6 @@ TOOLS = {
             "expression": {"type": "string", "minLength": 1, "maxLength": 500, "description": "Arithmetic expression containing numeric values and supported operators."},
         }, ["expression"]),
         "output_schema": "Standard envelope; detail contains expression, deterministic decimal result, exact/approximate status, and precision metadata.",
-        "compat_aliases": {"expressao": "expression"},
         "fn": _tool_calculate,
     },
     "agent_info": {
@@ -693,7 +715,6 @@ TOOLS = {
         "permission": "READ",
         "input_schema": _schema_objeto(),
         "output_schema": "Standard envelope; detail contains name, release identity, tool names/permissions/categories/effects/descriptions, and write policy.",
-        "compat_aliases": {},
         "fn": _tool_agent_info,
     },
     "project_stats": {
@@ -702,7 +723,6 @@ TOOLS = {
         "permission": "READ",
         "input_schema": _schema_objeto(),
         "output_schema": "Standard envelope; detail contains deterministic project measurements and scan completeness.",
-        "compat_aliases": {},
         "fn": _tool_project_stats,
     },
     "count_tokens": {
@@ -714,7 +734,6 @@ TOOLS = {
             "tokenizer": {"type": "string", "minLength": 1, "description": "Optional tokenizer/model identifier; if unavailable, the configured truthful fallback is reported."},
         }),
         "output_schema": "Standard envelope; detail includes exact=false when using the configured character/token fallback.",
-        "compat_aliases": {"path": "caminho_relativo", "model": "tokenizer"},
         "fn": _tool_count_tokens,
     },
     "inspect_project": {
@@ -723,7 +742,6 @@ TOOLS = {
         "permission": "READ",
         "input_schema": _schema_objeto(),
         "output_schema": "Standard envelope; detail contains objective structural and relation signals with hashes and scan completeness.",
-        "compat_aliases": {},
         "fn": _tool_inspect_project,
     },
     "list_tree": {
@@ -736,7 +754,6 @@ TOOLS = {
             "filtro": {"type": "string", "minLength": 1, "description": "Optional filename/path glob-style filter applied to returned tree entries."},
         }),
         "output_schema": "Standard envelope; detail contains tree entries, truncation, and ignored_by_reason counts.",
-        "compat_aliases": {"max_depth": "profundidade"},
         "fn": _tool_list_tree,
     },
     "search_code": {
@@ -746,8 +763,7 @@ TOOLS = {
         "input_schema": _schema_objeto(
             {"query": {"type": "string", "minLength": 1, "description": "Literal text or code fragment to match exactly in project files."}}, ["query"],
         ),
-        "output_schema": "Standard envelope; detail.resultados contains file, range, symbol, score, numbered snippet, content_hash, and file_hash.",
-        "compat_aliases": {"pergunta": "query"},
+        "output_schema": "Standard envelope; detail contains literal-match counts plus compact merged source ranges with match_lines, numbered snippets and hashes.",
         "fn": _tool_search_code,
     },
     "find_symbol": {
@@ -759,7 +775,6 @@ TOOLS = {
             "simbolo": {"type": "string", "minLength": 1, "description": "Exact code symbol name whose definition/location should be found."},
         }, ["simbolo"]),
         "output_schema": "Standard envelope; detail contains the range, original code, and total line count.",
-        "compat_aliases": {"arquivo": "caminho_relativo"},
         "fn": _tool_find_symbol,
     },
     "read_range": {
@@ -772,10 +787,6 @@ TOOLS = {
             "linha_fim": _LINHA,
         }, ["caminho_relativo", "linha_inicio", "linha_fim"]),
         "output_schema": "Standard envelope; detail contains the actual range, numbered snippet, total lines, content_hash, and file_hash.",
-        "compat_aliases": {
-            "arquivo": "caminho_relativo",
-            "linha_inicial": "linha_inicio",
-        },
         "fn": _tool_read_range,
     },
     "read_file": {
@@ -786,38 +797,7 @@ TOOLS = {
             {"caminho_relativo": _CAMINHO}, ["caminho_relativo"],
         ),
         "output_schema": "Standard envelope; detail preserves content/truncation and, when readable, includes a numbered range, content_hash, and file_hash.",
-        "compat_aliases": {"arquivo": "caminho_relativo"},
         "fn": _tool_read_file,
-    },
-    "test_patch_dry_run": {
-        "name": "test_patch_dry_run",
-        "description": "Test a range replacement in a temporary copy without writing to the project.",
-        "permission": "READ",
-        "input_schema": _schema_objeto({
-            "caminho_relativo": _CAMINHO,
-            "linha_inicio": _LINHA,
-            "linha_fim": _LINHA,
-            "codigo_novo": _CODIGO_NOVO,
-            "file_hash_esperado": _HASH,
-            "range_hash_esperado": _HASH,
-        }, [
-            "caminho_relativo", "linha_inicio", "linha_fim", "codigo_novo",
-            "file_hash_esperado", "range_hash_esperado",
-        ]),
-        "output_schema": "Standard envelope; detail contains the dry-run result and resulting content.",
-        "compat_aliases": {"arquivo": "caminho_relativo"},
-        "fn": _tool_test_patch_dry_run,
-    },
-    "test_patch_set_dry_run": {
-        "name": "test_patch_set_dry_run",
-        "description": "Dry-run a transactional set of free-form file updates, creations, or deletions.",
-        "permission": "READ",
-        "input_schema": _schema_objeto({
-            "patches": {"type": "array", "description": "Transactional list of create/delete/replace/update patch objects to validate without writing."},
-        }, ["patches"]),
-        "output_schema": "Standard envelope; detail contains prepared patches and affected files.",
-        "compat_aliases": {},
-        "fn": _tool_test_patch_set_dry_run,
     },
     "memory_search": {
         "name": "memory_search",
@@ -828,7 +808,6 @@ TOOLS = {
             "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "Maximum number of matching memory entries to return."},
         }),
         "output_schema": "Standard envelope; detail.entries contains compact, hash-validated project facts.",
-        "compat_aliases": {},
         "fn": _tool_memory_search,
     },
     "memory_store": {
@@ -841,7 +820,6 @@ TOOLS = {
             "evidence_ids": {"type": "array", "description": "Current-task evidence IDs that substantiate the stored fact."},
         }, ["text", "evidence_ids"]),
         "output_schema": "Standard envelope containing the stored memory entry.",
-        "compat_aliases": {},
         "fn": _tool_memory_store,
     },
     "run_tests": {
@@ -852,7 +830,6 @@ TOOLS = {
             "scope": {"type": "string", "minLength": 1, "description": "Optional safe project-relative pytest file or directory; omitted means the detected full suite."},
         }),
         "output_schema": "Standard envelope; detail contains command, return code, concise pytest summary, bounded output tail, scope and execution status.",
-        "compat_aliases": {"path": "scope", "caminho_relativo": "scope"},
         "fn": _tool_run_tests,
     },
     "execution_trace": {
@@ -866,7 +843,6 @@ TOOLS = {
             "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "Event limit."},
         }),
         "output_schema": "Standard envelope with selected sanitized trace facts.",
-        "compat_aliases": {"job": "job_id"},
         "fn": _tool_execution_trace,
     },
     "git_status": {
@@ -877,7 +853,6 @@ TOOLS = {
             "max_entries": {"type": "integer", "minimum": 1, "maximum": 500, "description": "Maximum number of changed-path status entries to return."},
         }),
         "output_schema": "Standard envelope; detail contains branch, clean flag, category counts and bounded changed-file entries.",
-        "compat_aliases": {},
         "fn": _tool_git_status,
     },
     "git_diff": {
@@ -890,38 +865,7 @@ TOOLS = {
             "context_lines": {"type": "integer", "minimum": 0, "maximum": 10, "description": "Number of unchanged context lines around each returned diff hunk."},
         }),
         "output_schema": "Standard envelope; detail contains changed files, added/removed line counts, bounded diff text and truncation state.",
-        "compat_aliases": {"caminho_relativo": "path", "arquivo": "path"},
         "fn": _tool_git_diff,
-    },
-    "apply_patch": {
-        "name": "apply_patch",
-        "description": "Apply a confirmed range replacement with original-content preconditions, rollback, and tests.",
-        "permission": "WRITE",
-        "input_schema": _schema_objeto({
-            "caminho_relativo": _CAMINHO,
-            "linha_inicio": _LINHA,
-            "linha_fim": _LINHA,
-            "codigo_original_esperado": _CODIGO_ORIGINAL,
-            "codigo_novo": _CODIGO_NOVO,
-            "file_hash_esperado": _HASH,
-            "range_hash_esperado": _HASH,
-        }, [
-            "caminho_relativo", "linha_inicio", "linha_fim",
-            "codigo_original_esperado", "codigo_novo",
-            "file_hash_esperado", "range_hash_esperado",
-        ]),
-        "output_schema": "Standard envelope; STALE_PATCH aborts without writing; detail keeps hashes, final range, and the internal rollback snapshot.",
-        "compat_aliases": {"arquivo": "caminho_relativo"},
-        "fn": _tool_apply_patch,
-    },
-    "apply_patch_set": {
-        "name": "apply_patch_set",
-        "description": "Apply a confirmed multi-file transaction with rollback.",
-        "permission": "WRITE",
-        "input_schema": _schema_objeto({"patches": {"type": "array", "description": "Prepared multi-file transaction previously confirmed by the user."}}, ["patches"]),
-        "output_schema": "Standard envelope; detail contains applied patches for rollback and reread.",
-        "compat_aliases": {},
-        "fn": _tool_apply_patch_set,
     },
 }
 
@@ -934,7 +878,9 @@ TOOLS["list_tree"]["limits"] = {
     "max_profundidade": {"config_key": "agent.max_tree_depth", "default": 6},
 }
 TOOLS["search_code"]["limits"] = {
-    "max_linhas_por_resultado": {"config_key": "agent.max_read_range_lines", "default": 400},
+    "max_linhas_por_resultado": {"config_key": "agent.max_search_range_lines", "default": 16},
+    "max_matches": {"config_key": "agent.max_search_matches", "default": 40},
+    "max_ranges": {"config_key": "agent.max_search_ranges", "default": 12},
 }
 TOOLS["read_range"]["limits"] = {
     "max_linhas": {"config_key": "agent.max_read_range_lines", "default": 400},
@@ -1009,8 +955,8 @@ _TOOL_CONTRACTS = {
     "search_code": {
         "category": "READ_ONLY",
         "effects": ["NONE"],
-        "returns": "Fresh bounded matches with file, line range, numbered snippet and hashes.",
-        "caveats": ["Literal text/code search only; not semantic or natural-language search."],
+        "returns": "Literal-match counts plus fresh merged source ranges, match lines, truncation state and hashes.",
+        "caveats": ["Literal text/code search only; not semantic or natural-language search. Nearby matches are merged and large result sets are explicitly truncated."],
     },
     "find_symbol": {
         "category": "READ_ONLY",
@@ -1028,18 +974,6 @@ _TOOL_CONTRACTS = {
         "effects": ["NONE"],
         "returns": "Bounded file content, truncation state, line metadata and hashes.",
         "caveats": ["The returned content may be truncated by configured read limits."],
-    },
-    "test_patch_dry_run": {
-        "category": "READ_ONLY",
-        "effects": ["TEMP"],
-        "returns": "Temporary validation result and resulting content without applying the change.",
-        "caveats": ["Fresh-read preconditions still apply; dry-run never confirms a write for the user."],
-    },
-    "test_patch_set_dry_run": {
-        "category": "READ_ONLY",
-        "effects": ["TEMP"],
-        "returns": "Prepared/validated patch transaction and affected-file metadata without applying it.",
-        "caveats": ["Existing files still require fresh evidence; dry-run never confirms a write for the user."],
     },
     "memory_search": {
         "category": "READ_ONLY",
@@ -1076,18 +1010,6 @@ _TOOL_CONTRACTS = {
         "effects": ["NONE"],
         "returns": "Changed files, added/removed line counts, bounded diff text and truncation state.",
         "caveats": ["Bounded output may omit truncated hunks."],
-    },
-    "apply_patch": {
-        "category": "EDIT",
-        "effects": ["WORKSPACE_WRITE", "VERIFY", "ROLLBACK"],
-        "returns": "Applied change plus verification, reread and rollback metadata.",
-        "caveats": ["Requires runtime confirmation, fresh-content preconditions and a path inside the project root."],
-    },
-    "apply_patch_set": {
-        "category": "EDIT",
-        "effects": ["WORKSPACE_WRITE", "VERIFY", "ROLLBACK"],
-        "returns": "Applied transaction plus verification, reread and rollback metadata.",
-        "caveats": ["Requires runtime confirmation, transaction preconditions and paths inside the project root."],
     },
 }
 
@@ -1126,14 +1048,14 @@ def _compact_input_contract(schema):
     """
     schema = schema if isinstance(schema, dict) else _schema_objeto()
     required = set(schema.get("required") or [])
-    aliases = {
+    type_labels = {
         "string": "str", "integer": "int", "number": "num",
         "boolean": "bool", "object": "obj", "array": "list",
     }
     inputs = {}
     for name, spec in (schema.get("properties") or {}).items():
         spec = spec if isinstance(spec, dict) else {}
-        kind = aliases.get(spec.get("type", "any"), spec.get("type", "any"))
+        kind = type_labels.get(spec.get("type", "any"), spec.get("type", "any"))
         if name not in required:
             kind += "?"
         bounds = []
@@ -1147,13 +1069,12 @@ def _compact_input_contract(schema):
     return inputs
 
 
-def gerar_catalogo_tools(registro=None, config=None, allowed_names=None, compact=False, minimal=False):
+def gerar_catalogo_tools(registro=None, config=None, allowed_names=None, compact=False):
     """Generate the public catalog from the executable registry.
 
     ``allowed_names`` only filters actions that are impossible in the current
-    runtime state. ``compact`` keeps each tool's semantic contract while
-    removing implementation-only schema detail. ``minimal`` is retained only
-    for compatibility tests/consumers that explicitly request names/arguments.
+    runtime state. ``compact`` keeps each tool's canonical semantic contract
+    while removing implementation-only schema detail.
     """
     catalogo = []
     fonte = TOOLS if registro is None else registro
@@ -1168,13 +1089,7 @@ def gerar_catalogo_tools(registro=None, config=None, allowed_names=None, compact
                 config, origem["config_key"], origem["default"],
             )
         schema = entrada.get("input_schema", _schema_objeto())
-        if minimal:
-            catalogo.append({
-                "name": public_name,
-                "required": list(schema.get("required") or []),
-                "arguments": list((schema.get("properties") or {}).keys()),
-            })
-        elif compact:
+        if compact:
             item = {
                 "name": public_name,
                 "purpose": entrada.get("description", "")[:200],
@@ -1262,7 +1177,7 @@ def _tipo_json_valido(valor, tipo):
 
 
 def validar_chamada_tool(nome, arguments, registro=None):
-    """Normaliza aliases e valida argumentos antes de qualquer execucao."""
+    """Validate one canonical tool call before execution; aliases are not accepted."""
     registro = TOOLS if registro is None else registro
     entrada = registro.get(nome)
     if entrada is None:
@@ -1274,22 +1189,10 @@ def validar_chamada_tool(nome, arguments, registro=None):
     if not isinstance(arguments, dict):
         return None, _falha("INVALID_ARGUMENT", "arguments precisa ser um objeto JSON")
 
-    # Registros minimos usados por integracoes antigas/testes continuam
-    # aceitos; o registro real e testado para sempre possuir schema.
     schema = entrada.get("input_schema")
     if not isinstance(schema, dict):
-        return dict(arguments), None
-
-    aliases = entrada.get("compat_aliases") or {}
-    normalizados = {}
-    for chave, valor in arguments.items():
-        canonica = aliases.get(chave, chave)
-        if canonica in normalizados and normalizados[canonica] != valor:
-            return None, _falha(
-                "INVALID_ARGUMENT",
-                f"argumentos conflitantes para '{canonica}'",
-            )
-        normalizados[canonica] = valor
+        return None, _falha("INVALID_TOOL_SCHEMA", f"tool '{nome}' nao possui input_schema canonico")
+    normalizados = dict(arguments)
 
     propriedades = schema.get("properties") or {}
     if schema.get("additionalProperties") is False:

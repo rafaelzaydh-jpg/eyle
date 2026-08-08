@@ -56,6 +56,14 @@ def build_public_job_history(registro):
             "provider_model": response.get("provider_model"),
             "latency_ms": response.get("orchestration_latency_ms", response.get("latency_ms")),
             "streaming": response.get("streaming"),
+            "structured_profile": response.get("structured_profile"),
+            "structured_mode": response.get("structured_mode"),
+            "structured_capability_source": response.get("structured_capability_source"),
+            "structured_parse_status": response.get("structured_parse_status"),
+            "structured_parse_error": response.get("structured_parse_error"),
+            "structured_parse_detail": response.get("structured_parse_detail"),
+            "structured_top_level_keys": response.get("structured_top_level_keys"),
+            "structured_missing_keys": response.get("structured_missing_keys"),
         }
         llm_calls.append({key: value for key, value in call.items() if value is not None})
 
@@ -101,6 +109,10 @@ def build_public_job_history(registro):
         "completion": usage.get("completion_tokens_actual", usage.get("generated_tokens")),
         "reasoning": usage.get("reasoning_tokens_actual"),
         "effective_total": usage.get("total_tokens_effective"),
+        "administrative_calls": usage.get("administrative_llm_calls"),
+        "administrative_prompt": usage.get("administrative_prompt_tokens"),
+        "administrative_completion": usage.get("administrative_completion_tokens"),
+        "administrative_reasoning": usage.get("administrative_reasoning_tokens"),
     }
 
     write_validation = details.get("write_validation")
@@ -132,6 +144,10 @@ def build_public_job_history(registro):
         "llm_calls": llm_calls,
         "decisions": decisions,
         "tools": tools,
+        "administrative": {
+            "structured_capability": details.get("structured_capability") if isinstance(details.get("structured_capability"), dict) else {},
+            "llm_history": list(details.get("administrative_llm_history") or [])[-30:],
+        },
         "write_validation": write_validation,
         "write_failure": details.get("write_failure") if isinstance(details.get("write_failure"), dict) else None,
         "privacy": {

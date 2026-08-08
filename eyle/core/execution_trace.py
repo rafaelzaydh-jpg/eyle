@@ -61,6 +61,14 @@ def _safe_llm_calls(details: Dict[str, Any], limit: int) -> List[Dict[str, Any]]
             "provider_model": response.get("provider_model"),
             "latency_ms": response.get("orchestration_latency_ms", response.get("latency_ms")),
             "streaming": response.get("streaming"),
+            "structured_profile": response.get("structured_profile"),
+            "structured_mode": response.get("structured_mode"),
+            "structured_capability_source": response.get("structured_capability_source"),
+            "structured_parse_status": response.get("structured_parse_status"),
+            "structured_parse_error": response.get("structured_parse_error"),
+            "structured_parse_detail": response.get("structured_parse_detail"),
+            "structured_top_level_keys": response.get("structured_top_level_keys"),
+            "structured_missing_keys": response.get("structured_missing_keys"),
         }
         calls.append({key: value for key, value in call.items() if value is not None})
     return calls[-max(1, int(limit)):]
@@ -125,8 +133,17 @@ def build_execution_trace(
         "prompt_new": usage.get("prompt_tokens_uncached"),
         "prompt_effective": usage.get("prompt_tokens_effective"),
         "completion": usage.get("completion_tokens_actual", usage.get("generated_tokens")),
+        "completion_remaining": usage.get("completion_tokens_remaining"),
         "reasoning": usage.get("reasoning_tokens_actual"),
         "effective_total": usage.get("total_tokens_effective"),
+        "completion_remaining_pre_call": usage.get("completion_tokens_remaining_pre_call"),
+        "completion_requested_pre_call": usage.get("completion_tokens_requested_pre_call"),
+        "completion_pending_pre_call": usage.get("completion_tokens_pending_pre_call"),
+        "downstream_completion_reserve": usage.get("downstream_completion_reserve_tokens"),
+        "administrative_calls": usage.get("administrative_llm_calls"),
+        "administrative_prompt": usage.get("administrative_prompt_tokens"),
+        "administrative_completion": usage.get("administrative_completion_tokens"),
+        "administrative_reasoning": usage.get("administrative_reasoning_tokens"),
     }
     tokens = {key: value for key, value in tokens.items() if value is not None}
 
@@ -152,9 +169,14 @@ def build_execution_trace(
         "llm_calls": _safe_llm_calls(details, limit),
         "decisions": decisions,
         "tools": tools,
+        "administrative": {
+            "structured_capability": details.get("structured_capability") if isinstance(details.get("structured_capability"), dict) else {},
+            "llm_history": _bounded_list(details.get("administrative_llm_history"), limit),
+        },
         "validation": {
             "write_validation": details.get("write_validation") if isinstance(details.get("write_validation"), dict) else {},
             "write_failure": details.get("write_failure") if isinstance(details.get("write_failure"), dict) else None,
+            "claim_review": details.get("claim_review") if isinstance(details.get("claim_review"), dict) else {},
         },
         "privacy": {
             "chain_of_thought_exposed": False,
@@ -192,8 +214,8 @@ def filter_execution_trace(
         "tools": ["tools"],
         "decisions": ["decisions"],
         "phases": ["phases"],
-        "validation": ["validation"],
-        "all": ["tokens", "phases", "context", "llm_calls", "decisions", "tools", "validation"],
+        "validation": ["administrative", "validation"],
+        "all": ["tokens", "phases", "context", "llm_calls", "decisions", "tools", "administrative", "validation"],
     }
     for key in mapping[section]:
         value = trace.get(key)

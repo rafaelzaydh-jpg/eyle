@@ -1,86 +1,29 @@
-# Configuration — Eyle Rev4.12.4.1
+# Configuration — Eyle Rev5.1
 
-The default configuration describes capacity, tools and executable safety. It does not enable hidden planners or alternate reasoning pipelines.
+Rev5.1 accepts only the current public configuration schema. Unknown fields fail with `UNKNOWN_CONFIG_FIELD`; removed compatibility keys are not interpreted or translated.
 
-## LLM
+## LLM connection
 
-Key settings:
+`llm.openai_compatible=true` selects OpenAI-compatible Chat Completions; `false` selects Ollama `/api/chat`. `llm.model` is an explicit model name or `auto` for model discovery. An explicit model is never silently substituted.
 
-- `llm.context_window_tokens` — model context window used for each request;
-- `llm.agent_decision_max_tokens` — chat/utility decision allowance;
-- `llm.agent_analysis_max_tokens` — stable analysis/final allowance independent of source volume;
-- `llm.agent_patch_max_tokens` — larger allowance when a code patch is expected;
-- provider/model, timeouts, retries and concurrency.
+Structured-output capability is discovered empirically. No provider-specific `structured_output` setting is required. Eyle probes `json_schema`, `json_object`, then prompt JSON and stores the verified result in machine-local `context/llm_capabilities.json`.
 
-## AgentSession
+## Context and budgets
 
-- `agent.max_llm_turns`;
-- `agent.max_tool_calls`;
-- `agent.max_identical_tool_repeats`;
-- `agent.max_patch_dry_run_failures`;
-- `agent.chat_history_token_budget`;
-- `agent.task_context_token_budget`;
-- `agent.max_write_investigation_turns`;
-- `agent.max_no_progress_turns`;
-- `agent.max_phase_violations`;
-- read/tree/scan limits;
-- task deadline and aggregate token budgets.
+The default active working-set target is 12,000 tokens. Canonical task ceilings are 8 main-agent turns, 12 LLM calls, 12 tool calls, 96,000 cumulative prompt tokens, 9,000 cumulative completion tokens, and 105,000 total tokens. Ceilings are elastic: actual provider usage is charged.
 
-The global turn limit is a final cap. Common write loops are controlled earlier by phase transitions and semantic read coverage. Lexical classification no longer decides whether ordinary workspace questions receive investigation tools; only obvious chat/utilities use the cheap fast path.
+`agent.context_view` contains only preview/working-set limits; it is not a semantic quality gate. `agent.chat_history_token_budget` bounds the stable per-job `conversation_background`; the removed `task_context_token_budget` is no longer part of the schema.
 
-## Token accounting
+## Claim Review
 
-`context_engine.cached_prompt_weight` defaults to `0.2`.
+`agent.claims.mode` may be `off`, `self_check`, or `verified`. `self_check` uses the main connection. `verified` requires an explicit distinct verifier connection/model.
 
-Each individual model request is still checked against the full context window. Task-wide accounting separately tracks raw prompt tokens, provider-cached prompt tokens, uncached/new prompt tokens and effective prompt tokens. Provider cache discounts are accounting only; they do not grant more investigation turns.
-
-## Project inspection
-
-- `agent.max_project_scan_entries` — safe maximum entries inspected by deterministic project tools;
-- `agent.max_project_scan_depth` — maximum scan depth;
-- `agent.max_project_file_bytes` — largest text file measured by project-stat/token tools;
-- `agent.max_inspect_relation_edges` — bounded relation edges returned by `inspect_project`;
-- `agent.max_git_diff_chars` — maximum Git diff text returned to the model per `git_diff` call (default `6000`).
-
-`count_tokens` does not claim an exact model-token count unless an exact tokenizer implementation exists. The shipped fallback reports measured characters converted by `context_engine.chars_per_token_fallback` with `exact: false`.
-
-## Response quality
-
-`agent.response_quality` controls the compact factual gate. The fixed agent contract also distinguishes verified project claims from free reasoning: hypotheses, opinions, tradeoffs and recommendations may be expressed without pretending they are confirmed project facts.
-
-- evidence is required for concrete project facts, confirmed bugs and contextual risks;
-- explicit limits such as “up to 3” are enforced;
-- useful source snippets are retained within configured bounds;
-- the final answer uses sentence-indexed claims internally to avoid duplicating prose.
+Claims use the canonical fields `id`, `answer_ref`, `statement`, `kind`, `evidence_ids`, `verdict`, and `reason`. There is no fixed Claim or Evidence item count. Semantic Gaps use `material_omission`, `conflicting_evidence`, or `scope_gap`; the first two require relevant visible Evidence, while `scope_gap` may be evidence-empty when the problem is missing/partial investigation.
 
 ## Writes
 
-`codar.testes.ativado` defaults to `true`.
+The LLM never calls public patch tools. It emits `action=patches`; runtime performs transactional dry-run, asks for confirmation, applies, validates, rereads and rolls back on failure.
 
-After confirmation, Python changes are checked by `compileall`, tests are detected and executed when applicable, and any syntax/test/reread failure rolls back the full transaction. A write without an applicable executed test suite is reported as partial verification rather than verified.
+## Machine-local state
 
-## Test and Git tools
-
-`run_tests` is available during analysis and first-turn write investigation when tests are enabled. It can focus a safe relative path for pytest; other runners keep their configured full-suite behavior. Failed executed tests are valid runtime evidence. A missing test runner is reported separately as `TEST_RUNNER_UNAVAILABLE`; it is not mislabeled as a failing suite. Pytest is a runtime dependency because `run_tests` exposes it as an official capability. The answer-only optimization is state-aware: it applies only when the request itself is clearly test-only and `run_tests` is the sole project observation.
-
-`git_status` and `git_diff` are read-only. `git_diff` is bounded before reaching the model and should be narrowed by path when needed.
-
-## Observable history
-
-Rev4.12.4.1 uses a 32,768-token default per-request window and a 96,000-token effective prompt budget per task. These are separate limits: no individual call may exceed the model window. Shared tool taxonomy plus compact per-tool contracts remain model input; execution history remains derived from runtime data and fetched on demand. The expandable history is derived from already available runtime data plus a bounded sanitized tool trace.
-
-Hard privacy rules for the public history surface:
-
-- no chain-of-thought;
-- no raw prompts;
-- no raw model response bodies;
-- no source-code contents;
-- no evidence hashes;
-- no external-memory bodies;
-- no raw model decision body. Only decision type/outcome/rejection code is public.
-
-The web client fetches job history only when the user opens it. Normal `/conversa`, `/status` and active-job polling remain compact.
-
-## Removed settings and architectures
-
-Settings tied to Scouts, Mission Interpreter, automatic ProjectMemory injection, legacy evidence replay, response caches and historical pipelines are not part of the active architecture. See [`UPDATE_HISTORY.md`](../UPDATE_HISTORY.md) before reintroducing any equivalent mechanism.
+The repository intentionally keeps only `.gitkeep` files in `context/`, `memory/`, and `workspace/`. Generated databases, capability cache, Python caches, logs and runtime artifacts must not be committed.

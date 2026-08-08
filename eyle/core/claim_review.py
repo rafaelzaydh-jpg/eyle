@@ -1,0 +1,1009 @@
+"""Semantic verification over runtime-owned EvidenceRecords.
+
+Semantic interpretation stays in LLM calls while every boundary that can be
+proven deterministically stays in the runtime:
+- omitted Claims config resolves to self_check; off is explicit;
+- verifier citations are confined to the EvidenceRecords actually shown;
+- file Evidence is checked for freshness before and after verification;
+- contradicted content is repaired as local replacements, never as a rewritten
+  full answer;
+- repaired claims can be reverified without reviewing the untouched answer.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+from .request_policy import requested_finding_constraints
+from .security import _resolver_caminho_seguro
+from .text_hash import hash_texto, normalizar_quebras
+
+CLAIM_MODES = {"off", "self_check", "verified"}
+_CLAIMS_FIELDS = {"mode", "verifier", "evidence", "repair", "require_supported"}
+_VERIFIER_COMMON_FIELDS = {"max_tokens", "temperature"}
+_VERIFIER_VERIFIED_FIELDS = _VERIFIER_COMMON_FIELDS | {"base_url", "model", "openai_compatible"}
+_EVIDENCE_FIELDS = {"max_chars_per_item"}
+_REPAIR_FIELDS = {"enabled", "max_attempts"}
+
+CLAIM_VERDICTS = {"supported", "contradicted", "insufficient"}
+CLAIM_KINDS = {"fact", "bug", "risk", "recommendation"}
+AUDIT_FINDING_TYPES = {"bug", "risk", "recommendation", "fact"}
+SEMANTIC_GAP_TYPES = {"material_omission", "conflicting_evidence", "scope_gap"}
+
+
+ANSWER_ANCHOR_MAX_CHARS = 700
+
+
+def build_answer_anchors(answer: str, *, max_chars: int = ANSWER_ANCHOR_MAX_CHARS) -> List[Dict[str, Any]]:
+    """Create deterministic literal anchors over the provisional answer.
+
+    Anchors are transport coordinates, not semantic claims. The runtime splits
+    only on observable text boundaries (line/sentence punctuation) and never
+    decides which anchor is important. Every ``text`` value is an exact
+    substring of ``answer``.
+    """
+    text = str(answer or "")
+    cap = max(120, int(max_chars or ANSWER_ANCHOR_MAX_CHARS))
+    anchors: List[Dict[str, Any]] = []
+    cursor = 0
+    length = len(text)
+    boundary = re.compile(r"(?:[.!?;:](?=\s|$)|\n)")
+
+    while cursor < length:
+        while cursor < length and text[cursor].isspace():
+            cursor += 1
+        if cursor >= length:
+            break
+
+        hard_end = min(length, cursor + cap)
+        match = boundary.search(text, cursor, hard_end)
+        if match is not None:
+            end = match.end()
+        elif hard_end < length:
+            # Prefer a whitespace cut before the hard cap when available.
+            whitespace = max(text.rfind(" ", cursor, hard_end), text.rfind("\t", cursor, hard_end))
+            end = whitespace if whitespace > cursor else hard_end
+        else:
+            end = length
+
+        # Keep the anchor literal while excluding transport-only surrounding
+        # whitespace. ``start:end`` remains a true substring of the answer.
+        start = cursor
+        while end > start and text[end - 1].isspace():
+            end -= 1
+        if end <= start:
+            cursor = max(cursor + 1, hard_end)
+            continue
+
+        anchor_id = f"a{len(anchors) + 1}"
+        anchors.append({
+            "id": anchor_id,
+            "text": text[start:end],
+            "start": start,
+            "end": end,
+        })
+        cursor = max(end, cursor + 1)
+
+    return anchors
+
+
+def answer_anchor_map(answer_anchors: Optional[Sequence[Dict[str, Any]]]) -> Dict[str, str]:
+    """Return the deterministic ``answer_ref -> literal text`` map."""
+    result: Dict[str, str] = {}
+    for item in answer_anchors or []:
+        if not isinstance(item, dict):
+            continue
+        anchor_id = str(item.get("id") or "").strip()
+        text = str(item.get("text") or "")
+        if anchor_id and anchor_id not in result:
+            result[anchor_id] = text
+    return result
+
+
+def verifier_answer_anchors(
+    answer: str, target_claims: Optional[Sequence[Dict[str, Any]]] = None,
+) -> Tuple[bool, str, List[Dict[str, Any]]]:
+    """Build anchors for initial review or exact repaired-Claim reverify.
+
+    Reverify reuses the original Claim anchor reference and maps it to the
+    repaired literal quote. This keeps semantic scope local without resending
+    unrelated answer text.
+    """
+    if not target_claims:
+        return True, "ok", build_answer_anchors(answer)
+
+    anchors: List[Dict[str, Any]] = []
+    seen: Dict[str, str] = {}
+    for index, item in enumerate(target_claims, start=1):
+        if not isinstance(item, dict):
+            return False, f"CLAIM_REVERIFY_TARGET_INVALID:{index}", []
+        anchor_id = str(item.get("answer_ref") or "").strip()
+        quote = str(item.get("answer_quote") or "")
+        if not anchor_id or not quote:
+            return False, f"CLAIM_REVERIFY_ANCHOR_REQUIRED:{index}", []
+        previous = seen.get(anchor_id)
+        if previous is not None and previous != quote:
+            return False, f"CLAIM_REVERIFY_ANCHOR_CONFLICT:{anchor_id}", []
+        if previous is None:
+            seen[anchor_id] = quote
+            anchors.append({"id": anchor_id, "text": quote})
+    return True, "ok", anchors
+
+
+class ClaimConfigError(ValueError):
+    """Invalid Claims configuration; never silently repaired semantically."""
+
+
+def _object_field(parent: Dict[str, Any], key: str) -> Dict[str, Any]:
+    if key not in parent:
+        return {}
+    value = parent.get(key)
+    if not isinstance(value, dict):
+        raise ClaimConfigError(f"agent.claims.{key} precisa ser um objeto")
+    return value
+
+
+def _bool_field(parent: Dict[str, Any], key: str, default: bool, prefix: str) -> bool:
+    if key not in parent:
+        return default
+    value = parent.get(key)
+    if not isinstance(value, bool):
+        raise ClaimConfigError(f"{prefix}.{key} precisa ser booleano")
+    return value
+
+
+def _int_field(
+    parent: Dict[str, Any], key: str, default: int, minimum: int, prefix: str,
+) -> int:
+    if key not in parent:
+        return default
+    value = parent.get(key)
+    if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+        comparator = "não negativo" if minimum == 0 else f">= {minimum}"
+        raise ClaimConfigError(f"{prefix}.{key} precisa ser inteiro {comparator}")
+    return value
+
+
+def _float_field(parent: Dict[str, Any], key: str, default: float, prefix: str) -> float:
+    if key not in parent:
+        return default
+    value = parent.get(key)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ClaimConfigError(f"{prefix}.{key} precisa ser numérico")
+    return float(value)
+
+
+def claim_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Resolve and validate the single active Claims configuration.
+
+    Syntactic normalization is intentionally small and deterministic (for
+    example ``SELF_CHECK`` -> ``self_check``). Invalid semantics are rejected
+    instead of being silently converted to defaults.
+    """
+    agent = ((config or {}).get("agent") or {})
+    if not isinstance(agent, dict):
+        raise ClaimConfigError("agent precisa ser um objeto")
+    if "claims" in agent and not isinstance(agent.get("claims"), dict):
+        raise ClaimConfigError("agent.claims precisa ser um objeto")
+    raw = dict(agent.get("claims") or {})
+    unknown_claims = sorted(set(raw) - _CLAIMS_FIELDS)
+    if unknown_claims:
+        raise ClaimConfigError("UNKNOWN_CONFIG_FIELD:agent.claims:" + ",".join(unknown_claims))
+
+    mode_raw = raw.get("mode", "self_check")
+    if not isinstance(mode_raw, str):
+        raise ClaimConfigError("agent.claims.mode precisa ser string")
+    mode = mode_raw.strip().lower()
+    if mode not in CLAIM_MODES:
+        raise ClaimConfigError(f"agent.claims.mode inválido: {mode_raw}")
+
+    verifier = _object_field(raw, "verifier")
+    evidence = _object_field(raw, "evidence")
+    repair = _object_field(raw, "repair")
+
+    unknown_evidence = sorted(set(evidence) - _EVIDENCE_FIELDS)
+    if unknown_evidence:
+        raise ClaimConfigError("UNKNOWN_CONFIG_FIELD:agent.claims.evidence:" + ",".join(unknown_evidence))
+    unknown_repair = sorted(set(repair) - _REPAIR_FIELDS)
+    if unknown_repair:
+        raise ClaimConfigError("UNKNOWN_CONFIG_FIELD:agent.claims.repair:" + ",".join(unknown_repair))
+
+    transport_keys = {"base_url", "model", "openai_compatible"}
+    present_transport = sorted(set(verifier) & transport_keys)
+    allowed_verifier = _VERIFIER_VERIFIED_FIELDS if mode == "verified" else _VERIFIER_COMMON_FIELDS
+    unknown_verifier = sorted(set(verifier) - allowed_verifier)
+    if unknown_verifier:
+        raise ClaimConfigError("UNKNOWN_CONFIG_FIELD:agent.claims.verifier:" + ",".join(unknown_verifier))
+    if mode == "self_check" and present_transport:
+        raise ClaimConfigError(
+            "agent.claims.verifier em self_check herda diretamente a LLM principal; remova: "
+            + ", ".join(present_transport)
+        )
+    verified_transport = {}
+    if mode == "verified":
+        missing = sorted(transport_keys - set(verifier))
+        if missing:
+            raise ClaimConfigError(
+                "agent.claims.verifier em verified exige configuração explícita: " + ", ".join(missing)
+            )
+        base_url = verifier.get("base_url")
+        model = verifier.get("model")
+        openai_compatible = verifier.get("openai_compatible")
+        for key, value in (("base_url", base_url), ("model", model)):
+            if not isinstance(value, str) or not value.strip():
+                raise ClaimConfigError(f"agent.claims.verifier.{key} precisa ser string não vazia")
+        if not isinstance(openai_compatible, bool):
+            raise ClaimConfigError("agent.claims.verifier.openai_compatible precisa ser booleano")
+        verified_transport = {
+            "base_url": base_url.strip(),
+            "model": model.strip(),
+            "openai_compatible": openai_compatible,
+        }
+
+    resolved = {
+        "mode": mode,
+        "verifier": {
+            **verified_transport,
+            "max_tokens": _int_field(verifier, "max_tokens", 900, 128, "agent.claims.verifier"),
+            "temperature": _float_field(verifier, "temperature", 0.0, "agent.claims.verifier"),
+        },
+        "evidence": {
+            "max_chars_per_item": _int_field(
+                evidence, "max_chars_per_item", 2200, 200, "agent.claims.evidence"
+            ),
+        },
+        "repair": {
+            "enabled": _bool_field(repair, "enabled", True, "agent.claims.repair"),
+            "max_attempts": _int_field(repair, "max_attempts", 1, 0, "agent.claims.repair"),
+        },
+        "require_supported": _bool_field(raw, "require_supported", True, "agent.claims"),
+    }
+
+    if mode == "verified":
+        llm = ((config or {}).get("llm") or {})
+        if not isinstance(llm, dict):
+            raise ClaimConfigError("llm precisa ser um objeto")
+        main_base = str(llm.get("base_url") or "http://localhost:11434").rstrip("/")
+        main_model = str(llm.get("model") or "").strip()
+        verifier_base = str(verified_transport["base_url"]).rstrip("/")
+        verifier_model = str(verified_transport["model"]).strip()
+        if (verifier_base, verifier_model) == (main_base, main_model):
+            raise ClaimConfigError("VERIFIED_REQUIRES_DISTINCT_VERIFIER")
+
+    return resolved
+
+
+def _excerpt(item: Dict[str, Any], max_chars: int) -> str:
+    text = str(item.get("trecho_numerado") or item.get("conteudo") or "")
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "\n...[evidence excerpt cropped]"
+
+
+def compact_evidence(
+    evidence: Dict[str, Any], evidence_ids: Optional[Iterable[str]], *,
+    max_chars_per_item: int,
+) -> List[Dict[str, Any]]:
+    """Build only the explicitly selected bounded verifier view.
+
+    An empty selection stays empty. The canonical contract removes the old
+    semantic fallback that exposed the last N runtime EvidenceRecords.
+    """
+    wanted = [str(item) for item in (evidence_ids or []) if str(item)]
+    if not wanted:
+        return []
+    result: List[Dict[str, Any]] = []
+    for evidence_id in wanted:
+        item = evidence.get(evidence_id)
+        if not isinstance(item, dict):
+            continue
+        entry = {
+            "id": evidence_id,
+            "file": item.get("arquivo"),
+            "lines": [item.get("linha_inicio"), item.get("linha_fim")],
+            "cropped": bool(
+                item.get("truncado") or item.get("context_truncated")
+                or len(str(item.get("trecho_numerado") or item.get("conteudo") or "")) > max_chars_per_item
+            ),
+            "excerpt": _excerpt(item, max_chars_per_item),
+        }
+        result.append({key: value for key, value in entry.items() if value not in (None, "", [], [None, None])})
+    return result
+
+
+def _ids(value: Any) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    seen = set()
+    result = []
+    for item in value:
+        value_str = str(item or "").strip()
+        if value_str and value_str not in seen:
+            seen.add(value_str)
+            result.append(value_str)
+    return result
+
+
+def validate_file_evidence_freshness(
+    evidence: Dict[str, Any], evidence_ids: Iterable[str], project_root: Any,
+) -> Tuple[bool, str]:
+    """Recheck live file hashes for the EvidenceRecords selected for review."""
+    if not project_root:
+        return True, "ok"
+    root = os.path.realpath(os.fspath(project_root))
+    for evidence_id in _ids(list(evidence_ids or [])):
+        item = evidence.get(evidence_id)
+        if not isinstance(item, dict):
+            continue
+        relative = str(item.get("arquivo") or "")
+        expected = str(item.get("file_hash") or "")
+        if not relative or not expected or relative.startswith("<"):
+            continue
+        absolute = _resolver_caminho_seguro(root, relative)
+        if absolute is None or not os.path.isfile(absolute):
+            return False, f"EVIDENCE_STALE:{evidence_id}"
+        try:
+            with open(absolute, "r", encoding="utf-8", errors="replace") as handle:
+                current = hash_texto(normalizar_quebras(handle.read()))
+        except OSError:
+            return False, f"EVIDENCE_STALE:{evidence_id}"
+        if current != expected:
+            return False, f"EVIDENCE_STALE:{evidence_id}"
+    return True, "ok"
+
+
+def _finding_signature(finding_type: str, evidence_ids: Sequence[str], reason: str) -> str:
+    """Build an observational semantic-gap signature without interpreting it."""
+    normalized_reason = re.sub(r"\s+", " ", str(reason or "")).strip().lower()
+    payload = json.dumps({
+        "type": str(finding_type or ""),
+        "evidence_ids": sorted(_ids(list(evidence_ids or []))),
+        "reason": normalized_reason,
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hash_texto(normalizar_quebras(payload))
+
+
+def semantic_gap_findings(review: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [
+        item for item in (review or {}).get("semantic_gaps") or []
+        if isinstance(item, dict) and str(item.get("type") or "") in SEMANTIC_GAP_TYPES
+    ]
+
+
+def _review_summary(
+    claims: Sequence[Dict[str, Any]],
+    semantic_gaps: Optional[Sequence[Dict[str, Any]]] = None,
+) -> Dict[str, int]:
+    semantic = [
+        item for item in (semantic_gaps or [])
+        if isinstance(item, dict) and str(item.get("type") or "") in SEMANTIC_GAP_TYPES
+    ]
+    summary = {
+        "supported": sum(1 for claim in claims if claim.get("verdict") == "supported"),
+        "contradicted": sum(1 for claim in claims if claim.get("verdict") == "contradicted"),
+        "insufficient": sum(1 for claim in claims if claim.get("verdict") == "insufficient"),
+    }
+    if semantic:
+        summary.update({
+            "semantic_gaps": len(semantic),
+            "material_omission": sum(1 for item in semantic if item.get("type") == "material_omission"),
+            "conflicting_evidence": sum(1 for item in semantic if item.get("type") == "conflicting_evidence"),
+            "scope_gap": sum(1 for item in semantic if item.get("type") == "scope_gap"),
+        })
+    return summary
+
+
+def normalize_claim_review(
+    raw: Dict[str, Any],
+    evidence: Dict[str, Any],
+    *,
+    request: Any = "",
+    answer: Optional[str] = None,
+    answer_anchors: Optional[Sequence[Dict[str, Any]]] = None,
+    visible_evidence_ids: Optional[Iterable[str]] = None,
+    expected_claim_ids: Optional[Iterable[str]] = None,
+    enforce_finding_coverage: bool = True,
+) -> Tuple[bool, str, Dict[str, Any]]:
+    """Apply deterministic authority checks after strict structured parsing.
+
+    JSON shape, required fields, enums and primitive types belong exclusively
+    to ``llm.structured``. This function validates relationships the schema
+    cannot know: anchors, Evidence authority/visibility, identity uniqueness,
+    requested Finding limits and verdict/Evidence consistency.
+    """
+    visible = set(_ids(list(visible_evidence_ids or []))) if visible_evidence_ids is not None else None
+    expected = set(_ids(list(expected_claim_ids or []))) if expected_claim_ids is not None else None
+    answer_text = None if answer is None else str(answer)
+    resolved_anchors = answer_anchors
+    if resolved_anchors is None and answer_text is not None:
+        resolved_anchors = build_answer_anchors(answer_text)
+    anchors = answer_anchor_map(resolved_anchors)
+
+    claims: List[Dict[str, Any]] = []
+    claim_ids: set[str] = set()
+    for index, item in enumerate(raw["claims"], start=1):
+        claim_id = item["id"].strip()
+        answer_ref = item["answer_ref"].strip()
+        statement = item["statement"].strip()
+        kind = item["kind"]
+        verdict = item["verdict"]
+        evidence_ids = _ids(item["evidence_ids"])
+        reason = item["reason"].strip()[:160]
+
+        if claim_id in claim_ids:
+            return False, f"CLAIM_REVIEW_ID_DUPLICATE:{index}", {}
+        if expected is not None and claim_id not in expected:
+            return False, f"CLAIM_REVIEW_UNEXPECTED_CLAIM:{claim_id}", {}
+        if answer_ref not in anchors:
+            return False, f"CLAIM_REVIEW_ANSWER_REF_INVALID:{index}:{answer_ref}", {}
+        answer_quote = anchors[answer_ref]
+
+        missing = [evidence_id for evidence_id in evidence_ids if evidence_id not in evidence]
+        if missing:
+            return False, "CLAIM_REVIEW_UNKNOWN_EVIDENCE:" + ",".join(missing), {}
+        if visible is not None:
+            invisible = [evidence_id for evidence_id in evidence_ids if evidence_id not in visible]
+            if invisible:
+                return False, "CLAIM_REVIEW_EVIDENCE_NOT_VISIBLE:" + ",".join(invisible), {}
+        if verdict == "supported" and kind in {"fact", "bug", "risk"} and not evidence_ids:
+            return False, f"CLAIM_REVIEW_SUPPORTED_REQUIRES_EVIDENCE:{index}", {}
+        if verdict == "contradicted" and kind in {"fact", "bug", "risk"} and not evidence_ids:
+            return False, f"CLAIM_REVIEW_CONTRADICTED_REQUIRES_EVIDENCE:{index}", {}
+
+        claim_ids.add(claim_id)
+        claims.append({
+            "id": claim_id,
+            "answer_ref": answer_ref,
+            "answer_quote": answer_quote,
+            "statement": statement,
+            "kind": kind,
+            "evidence_ids": evidence_ids,
+            "verdict": verdict,
+            "reason": reason,
+        })
+
+    if expected is not None and claim_ids != expected:
+        missing_claims = sorted(expected - claim_ids)
+        return False, "CLAIM_REVIEW_EXPECTED_CLAIMS_MISSING:" + ",".join(missing_claims), {}
+
+    findings: List[Dict[str, Any]] = []
+    finding_ids: set[str] = set()
+    for index, item in enumerate(raw["findings"], start=1):
+        finding_id = item["id"].strip()
+        finding_type = item["type"]
+        refs = _ids(item["claim_ids"])
+        if finding_id in finding_ids:
+            return False, f"CLAIM_REVIEW_FINDING_ID_DUPLICATE:{index}", {}
+        unknown = [claim_id for claim_id in refs if claim_id not in claim_ids]
+        if unknown:
+            return False, "CLAIM_REVIEW_UNKNOWN_CLAIM:" + ",".join(unknown), {}
+        findings.append({"id": finding_id, "type": finding_type, "claim_ids": refs})
+        finding_ids.add(finding_id)
+
+    semantic_gaps: List[Dict[str, Any]] = []
+    semantic_ids: set[str] = set()
+    for index, item in enumerate(raw["semantic_gaps"], start=1):
+        gap_id = item["id"].strip()
+        gap_type = item["type"]
+        gap_evidence_ids = _ids(item["evidence_ids"])
+        gap_reason = item["reason"].strip()[:240]
+        if gap_id in semantic_ids:
+            return False, f"CLAIM_REVIEW_SEMANTIC_GAP_ID_DUPLICATE:{index}", {}
+        missing = [evidence_id for evidence_id in gap_evidence_ids if evidence_id not in evidence]
+        if missing:
+            return False, "CLAIM_REVIEW_UNKNOWN_EVIDENCE:" + ",".join(missing), {}
+        if visible is not None:
+            invisible = [evidence_id for evidence_id in gap_evidence_ids if evidence_id not in visible]
+            if invisible:
+                return False, "CLAIM_REVIEW_EVIDENCE_NOT_VISIBLE:" + ",".join(invisible), {}
+        if gap_type in {"material_omission", "conflicting_evidence"} and not gap_evidence_ids:
+            return False, f"CLAIM_REVIEW_SEMANTIC_GAP_EVIDENCE_REQUIRED:{index}:{gap_type}", {}
+        semantic_gaps.append({
+            "id": gap_id,
+            "type": gap_type,
+            "evidence_ids": gap_evidence_ids,
+            "reason": gap_reason,
+            "signature": _finding_signature(gap_type, gap_evidence_ids, gap_reason),
+        })
+        semantic_ids.add(gap_id)
+
+    constraints = requested_finding_constraints(request)
+    structured_claims = [claim for claim in claims if claim.get("kind") in {"bug", "risk", "recommendation"}]
+    findings_mode = bool(findings) or bool(constraints.get("overall") is not None or constraints.get("by_kind"))
+    if enforce_finding_coverage and findings_mode and structured_claims:
+        coverage: Dict[str, set[str]] = {}
+        for finding in findings:
+            for claim_id in finding.get("claim_ids") or []:
+                coverage.setdefault(claim_id, set()).add(str(finding.get("type") or ""))
+        for claim in structured_claims:
+            claim_id = str(claim.get("id"))
+            kind = str(claim.get("kind"))
+            if kind not in coverage.get(claim_id, set()):
+                return False, f"CLAIM_REVIEW_FINDING_COVERAGE_REQUIRED:{claim_id}:{kind}", {}
+
+    overall = constraints.get("overall")
+    if overall is not None and len(findings) > int(overall):
+        return False, f"CLAIM_REVIEW_FINDING_LIMIT_EXCEEDED:{len(findings)}>{overall}", {}
+    by_kind = constraints.get("by_kind") or {}
+    for kind, limit in by_kind.items():
+        count = sum(1 for finding in findings if finding.get("type") == kind)
+        if count > int(limit):
+            return False, f"CLAIM_REVIEW_KIND_LIMIT_EXCEEDED:{kind}:{count}>{limit}", {}
+
+    return True, "ok", {
+        "claims": claims,
+        "findings": findings,
+        "semantic_gaps": semantic_gaps,
+        "summary": _review_summary(claims, semantic_gaps),
+    }
+
+
+def problematic_claims(review: Dict[str, Any], verdict: Optional[str] = None) -> List[Dict[str, Any]]:
+    claims = [item for item in (review or {}).get("claims") or [] if isinstance(item, dict)]
+    if verdict:
+        return [item for item in claims if item.get("verdict") == verdict]
+    return [item for item in claims if item.get("verdict") in {"contradicted", "insufficient"}]
+
+
+def claim_evidence_ledger(review: Dict[str, Any], evidence: Dict[str, Any]) -> List[Dict[str, Any]]:
+    ledger = []
+    for claim in (review or {}).get("claims") or []:
+        if not isinstance(claim, dict):
+            continue
+        sources = []
+        for evidence_id in claim.get("evidence_ids") or []:
+            item = evidence.get(evidence_id) or {}
+            sources.append({
+                "evidence_id": evidence_id,
+                "file": item.get("arquivo"),
+                "lines": [item.get("linha_inicio"), item.get("linha_fim")],
+                "source_type": item.get("source_type"),
+            })
+        ledger.append({
+            "id": claim.get("id"),
+            "kind": claim.get("kind"),
+            "answer_ref": claim.get("answer_ref"),
+            "answer_quote": claim.get("answer_quote"),
+            "statement": claim.get("statement"),
+            "verdict": claim.get("verdict"),
+            "reason": claim.get("reason"),
+            "sources": sources,
+        })
+    return ledger
+
+
+def claim_review_output_budget(
+    answer: str,
+    *,
+    base_tokens: int = 900,
+    available_tokens: Optional[int] = None,
+    target_claims: Optional[Sequence[Dict[str, Any]]] = None,
+    target_semantic_gaps: Optional[Sequence[Dict[str, Any]]] = None,
+    answer_anchor_count: Optional[int] = None,
+) -> int:
+    """Choose an elastic verifier completion ceiling.
+
+    Claim count has no semantic quota. The runtime estimates only physical
+    capacity from the answer/anchors (or the explicit local reverify targets)
+    and clips that estimate solely to the job's remaining completion budget.
+    Unused ceiling is never charged.
+    """
+    base = max(128, int(base_tokens or 900))
+    if target_claims or target_semantic_gaps:
+        estimated_material_claims = max(1, len(list(target_claims or target_semantic_gaps or [])))
+        desired = 620 + (estimated_material_claims * 220)
+    else:
+        answer_chars = len(str(answer or ""))
+        by_text = max(1, (answer_chars + 159) // 160)
+        by_anchor = max(1, int(answer_anchor_count or 0)) if answer_anchor_count else 1
+        estimated_material_claims = max(by_text, by_anchor)
+        desired = 720 + (estimated_material_claims * 180)
+    desired = max(base, int(desired))
+    if available_tokens is None:
+        return desired
+    physical = max(1, int(available_tokens))
+    return min(desired, physical)
+
+
+_RECOVERABLE_CLAIM_PROTOCOL_PREFIXES = (
+    "CLAIM_REVIEW_SUPPORTED_REQUIRES_EVIDENCE:",
+    "CLAIM_REVIEW_CONTRADICTED_REQUIRES_EVIDENCE:",
+)
+_RECOVERABLE_SEMANTIC_GAP_PROTOCOL_PREFIXES = (
+    "CLAIM_REVIEW_SEMANTIC_GAP_EVIDENCE_REQUIRED:",
+)
+
+
+def claim_protocol_recovery_target(
+    raw: Any, reason: str, answer_anchors: Optional[Sequence[Dict[str, Any]]],
+) -> Tuple[bool, str, Dict[str, Any], Optional[int]]:
+    """Build one safe local reverify target for a malformed verifier Claim.
+
+    Recovery is allowed only when Claim identity and answer_ref already provide
+    an exact deterministic scope. The runtime never invents a verdict, kind or
+    Evidence selection; the verifier must decide those again locally.
+    """
+    text_reason = str(reason or "")
+    if not text_reason.startswith(_RECOVERABLE_CLAIM_PROTOCOL_PREFIXES):
+        return False, "CLAIM_PROTOCOL_RECOVERY_NOT_APPLICABLE", {}, None
+    match = re.search(r":(\d+)(?::|$)", text_reason)
+    if not match:
+        return False, "CLAIM_PROTOCOL_RECOVERY_INDEX_REQUIRED", {}, None
+    index = int(match.group(1))
+    claims_raw = raw["claims"]
+    if index < 1 or index > len(claims_raw):
+        return False, "CLAIM_PROTOCOL_RECOVERY_TARGET_MISSING", {}, None
+    item = claims_raw[index - 1]
+    claim_id = item["id"].strip()
+    answer_ref = item["answer_ref"].strip()
+    anchors = answer_anchor_map(answer_anchors)
+    answer_quote = anchors.get(answer_ref, "")
+    if not claim_id or not answer_ref or not answer_quote:
+        return False, "CLAIM_PROTOCOL_RECOVERY_SCOPE_UNAVAILABLE", {}, None
+    target = {
+        "claim_id": claim_id,
+        "answer_ref": answer_ref,
+        "answer_quote": answer_quote,
+        "kind": item["kind"],
+        "evidence_ids": [],
+    }
+    return True, "ok", target, index
+
+
+def semantic_gap_protocol_recovery_target(
+    raw: Any, reason: str,
+) -> Tuple[bool, str, Dict[str, Any], Optional[int]]:
+    """Build one exact local re-evaluation target for a malformed Semantic Gap.
+
+    The runtime identifies only the malformed array element. It never changes
+    the gap type, chooses Evidence, or decides whether the gap should exist.
+    Those semantic decisions remain with the verifier.
+    """
+    text_reason = str(reason or "")
+    if not text_reason.startswith(_RECOVERABLE_SEMANTIC_GAP_PROTOCOL_PREFIXES):
+        return False, "SEMANTIC_GAP_PROTOCOL_RECOVERY_NOT_APPLICABLE", {}, None
+    match = re.search(r":(\d+)(?::|$)", text_reason)
+    if not match:
+        return False, "SEMANTIC_GAP_PROTOCOL_RECOVERY_INDEX_REQUIRED", {}, None
+    index = int(match.group(1))
+    gaps_raw = raw["semantic_gaps"]
+    if index < 1 or index > len(gaps_raw):
+        return False, "SEMANTIC_GAP_PROTOCOL_RECOVERY_TARGET_MISSING", {}, None
+    item = gaps_raw[index - 1]
+    gap_id = item["id"].strip()
+    if not gap_id:
+        return False, "SEMANTIC_GAP_PROTOCOL_RECOVERY_SCOPE_UNAVAILABLE", {}, None
+    return True, "ok", {
+        "id": gap_id,
+        "type": item["type"],
+        "evidence_ids": list(item["evidence_ids"]),
+        "reason": item["reason"],
+    }, index
+
+
+def finding_protocol_recovery_target(
+    raw: Any, reason: str,
+) -> Tuple[bool, str, Dict[str, Any]]:
+    """Identify the Claim whose Finding coverage is inconsistent.
+
+    The runtime only isolates the deterministic relation that failed. It never
+    creates or retypes a Finding; the verifier must regenerate Findings.
+    """
+    text_reason = str(reason or "")
+    prefix = "CLAIM_REVIEW_FINDING_COVERAGE_REQUIRED:"
+    if not text_reason.startswith(prefix):
+        return False, "FINDING_PROTOCOL_RECOVERY_NOT_APPLICABLE", {}
+    parts = text_reason[len(prefix):].split(":", 1)
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        return False, "FINDING_PROTOCOL_RECOVERY_TARGET_REQUIRED", {}
+    claim_id, kind = parts[0], parts[1]
+    claims = [item for item in raw.get("claims") or [] if isinstance(item, dict)] if isinstance(raw, dict) else []
+    claim = next((item for item in claims if str(item.get("id") or "") == claim_id), None)
+    if not claim or str(claim.get("kind") or "") != kind:
+        return False, "FINDING_PROTOCOL_RECOVERY_SCOPE_UNAVAILABLE", {}
+    return True, "ok", {
+        "claim_id": claim_id,
+        "kind": kind,
+        "claim": dict(claim),
+    }
+
+
+def finding_recovery_prompt(request: Any, raw_review: Dict[str, Any], target: Dict[str, Any]) -> str:
+    """Ask the verifier to regenerate only the complete Findings array."""
+    claims = []
+    for item in raw_review.get("claims") or []:
+        if not isinstance(item, dict):
+            continue
+        claims.append({
+            "id": item.get("id"),
+            "kind": item.get("kind"),
+            "statement": item.get("statement"),
+            "verdict": item.get("verdict"),
+        })
+    payload = {
+        "task": "reverify_findings",
+        "request": str(request or ""),
+        "target_claim_id": target.get("claim_id"),
+        "target_kind": target.get("kind"),
+        "preserved_claims": claims,
+        "existing_findings": [
+            dict(item) for item in raw_review.get("findings") or [] if isinstance(item, dict)
+        ],
+    }
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
+def review_prompt(
+    answer: str,
+    evidence_view: List[Dict[str, Any]],
+    request: Any,
+    *,
+    target_claims: Optional[List[Dict[str, Any]]] = None,
+    target_semantic_gaps: Optional[List[Dict[str, Any]]] = None,
+    answer_anchors: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """Build the minimum semantic-review packet with deterministic anchors.
+
+    The verifier receives one literal representation of the answer: anchors.
+    The full answer is not duplicated beside them. The LLM chooses ``answer_ref``
+    semantically; the runtime resolves the exact quote after the call.
+    """
+    if answer_anchors is not None:
+        anchors = answer_anchors
+    else:
+        anchors_ok, _anchors_reason, anchors = verifier_answer_anchors(answer, target_claims)
+        if not anchors_ok:
+            anchors = []
+    public_anchors = [
+        {"id": str(item.get("id") or ""), "text": str(item.get("text") or "")}
+        for item in anchors
+        if isinstance(item, dict) and item.get("id")
+    ]
+    if target_semantic_gaps:
+        task = "reverify_semantic_gap"
+    elif target_claims:
+        task = "reverify_repaired_claims"
+    else:
+        task = "verify_claims"
+    payload: Dict[str, Any] = {
+        "task": task,
+        "answer_anchors": public_anchors,
+        "evidence": evidence_view,
+    }
+    if target_claims:
+        payload["target_claims"] = [
+            {
+                "claim_id": item.get("claim_id"),
+                "answer_ref": item.get("answer_ref"),
+                "kind": item.get("kind"),
+                "evidence_ids": list(item.get("evidence_ids") or []),
+            }
+            for item in target_claims
+            if isinstance(item, dict)
+        ]
+    elif target_semantic_gaps:
+        payload["request"] = str(request or "")
+        payload["target_semantic_gaps"] = [
+            {
+                "id": item.get("id"),
+                "type": item.get("type"),
+                "evidence_ids": list(item.get("evidence_ids") or []),
+                "reason": item.get("reason", ""),
+            }
+            for item in target_semantic_gaps
+            if isinstance(item, dict)
+        ]
+    else:
+        # The request is needed only on the initial pass to decide materiality,
+        # bounded Findings and semantic gaps in the conclusion as a whole.
+        payload["request"] = str(request or "")
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+
+def repair_prompt(
+    answer: str,
+    review: Dict[str, Any],
+    evidence_view: List[Dict[str, Any]],
+    evidence_ids: List[str],
+) -> str:
+    contradicted = problematic_claims(review, "contradicted")
+    payload = {
+        "task": "repair_claims",
+        "answer": str(answer or ""),
+        "contradicted_claims": contradicted,
+        "evidence": evidence_view,
+        "allowed_evidence_ids": list(evidence_ids or []),
+        "instructions": (
+            "Return repairs only. For each contradicted claim that can be corrected, return "
+            "claim_id, target (a literal substring inside that contradicted claim's answer_quote, "
+            "occurring exactly once in the answer), replacement, and evidence_ids. Do not rewrite "
+            "the full answer. Do not touch supported content."
+        ),
+    }
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
+def normalize_claim_repairs(
+    raw: Any,
+    answer: str,
+    review: Dict[str, Any],
+    *,
+    allowed_evidence_ids: Iterable[str],
+    evidence: Dict[str, Any],
+) -> Tuple[bool, str, List[Dict[str, Any]]]:
+    if not isinstance(raw, dict) or not isinstance(raw.get("repairs"), list):
+        return False, "CLAIM_REPAIR_REPAIRS_REQUIRED", []
+    contradicted = {
+        str(claim.get("id")): claim
+        for claim in problematic_claims(review, "contradicted")
+        if claim.get("id")
+    }
+    allowed = set(_ids(list(allowed_evidence_ids or [])))
+    repairs: List[Dict[str, Any]] = []
+    seen_claims = set()
+    seen_targets = set()
+    for index, item in enumerate(raw.get("repairs") or [], start=1):
+        if not isinstance(item, dict):
+            return False, f"CLAIM_REPAIR_INVALID:{index}", []
+        claim_id = str(item.get("claim_id") or "").strip()
+        target = str(item.get("target") or "")
+        replacement = str(item.get("replacement") or "")
+        evidence_ids = _ids(item.get("evidence_ids"))
+        if claim_id not in contradicted:
+            return False, f"CLAIM_REPAIR_CLAIM_NOT_CONTRADICTED:{claim_id or index}", []
+        if claim_id in seen_claims:
+            return False, f"CLAIM_REPAIR_DUPLICATE_CLAIM:{claim_id}", []
+        if not target:
+            return False, f"CLAIM_REPAIR_TARGET_REQUIRED:{claim_id}", []
+        if answer.count(target) != 1:
+            return False, f"CLAIM_REPAIR_TARGET_NOT_UNIQUE:{claim_id}", []
+        claim_quote = str((contradicted.get(claim_id) or {}).get("answer_quote") or "")
+        if not claim_quote or claim_quote.count(target) != 1:
+            return False, f"CLAIM_REPAIR_TARGET_OUTSIDE_CLAIM:{claim_id}", []
+        if target in seen_targets:
+            return False, f"CLAIM_REPAIR_DUPLICATE_TARGET:{claim_id}", []
+        if replacement == target:
+            return False, f"CLAIM_REPAIR_NO_CHANGE:{claim_id}", []
+        unknown = [item_id for item_id in evidence_ids if item_id not in evidence]
+        if unknown:
+            return False, "CLAIM_REPAIR_UNKNOWN_EVIDENCE:" + ",".join(unknown), []
+        out_of_scope = [item_id for item_id in evidence_ids if item_id not in allowed]
+        if out_of_scope:
+            return False, "CLAIM_REPAIR_EVIDENCE_OUT_OF_SCOPE:" + ",".join(out_of_scope), []
+        if not evidence_ids:
+            return False, f"CLAIM_REPAIR_EVIDENCE_REQUIRED:{claim_id}", []
+        repairs.append({
+            "claim_id": claim_id,
+            "target": target,
+            "replacement": replacement,
+            "evidence_ids": evidence_ids,
+        })
+        seen_claims.add(claim_id)
+        seen_targets.add(target)
+
+    missing = [claim_id for claim_id in contradicted if claim_id not in seen_claims]
+    if missing:
+        return False, "CLAIM_REPAIR_MISSING_CLAIMS:" + ",".join(sorted(missing)), []
+    return True, "ok", repairs
+
+
+def apply_claim_repairs(answer: str, repairs: Sequence[Dict[str, Any]]) -> Tuple[bool, str, str]:
+    repaired = str(answer or "")
+    for item in repairs:
+        target = str(item.get("target") or "")
+        replacement = str(item.get("replacement") or "")
+        if repaired.count(target) != 1:
+            return False, f"CLAIM_REPAIR_TARGET_NOT_UNIQUE:{item.get('claim_id')}", answer
+        repaired = repaired.replace(target, replacement, 1)
+    return True, "ok", repaired
+
+
+def build_repaired_claim_targets(
+    original_review: Dict[str, Any], repairs: Sequence[Dict[str, Any]], repaired_answer: str,
+) -> Tuple[bool, str, List[Dict[str, Any]]]:
+    """Build the exact repaired Claim quotes and preserve untouched Claim scope.
+
+    Repair authority is local: a repair may change only the contradicted Claim's
+    literal ``answer_quote``. Reverification receives that repaired quote, not
+    the replacement token/substring by itself.
+    """
+    original_claims = {
+        str(item.get("id")): item
+        for item in (original_review or {}).get("claims") or []
+        if isinstance(item, dict) and item.get("id")
+    }
+    repaired_ids = {str(item.get("claim_id") or "") for item in repairs if item.get("claim_id")}
+    targets: List[Dict[str, Any]] = []
+
+    for repair in repairs:
+        claim_id = str(repair.get("claim_id") or "")
+        original = original_claims.get(claim_id)
+        if not isinstance(original, dict):
+            return False, f"CLAIM_REPAIR_CLAIM_NOT_FOUND:{claim_id}", []
+        original_quote = str(original.get("answer_quote") or "")
+        target = str(repair.get("target") or "")
+        replacement = str(repair.get("replacement") or "")
+        if not original_quote or original_quote.count(target) != 1:
+            return False, f"CLAIM_REPAIR_TARGET_OUTSIDE_CLAIM:{claim_id}", []
+        repaired_quote = original_quote.replace(target, replacement, 1)
+        if not repaired_quote or repaired_quote not in str(repaired_answer or ""):
+            return False, f"CLAIM_REPAIR_RESULT_NOT_IN_ANSWER:{claim_id}", []
+        targets.append({
+            "claim_id": claim_id,
+            "answer_ref": original.get("answer_ref"),
+            "answer_quote": repaired_quote,
+            "kind": original.get("kind", "fact"),
+            "evidence_ids": list(repair.get("evidence_ids") or []),
+        })
+
+    # A local repair must not erase the literal scope of any untouched Claim.
+    for claim_id, claim in original_claims.items():
+        if claim_id in repaired_ids:
+            continue
+        quote = str(claim.get("answer_quote") or "")
+        if quote and quote not in str(repaired_answer or ""):
+            return False, f"CLAIM_REPAIR_TOUCHED_PRESERVED_CLAIM:{claim_id}", []
+
+    return True, "ok", targets
+
+
+def merge_reverified_claims(
+    original_review: Dict[str, Any], reverified_review: Dict[str, Any], repaired_claim_ids: Iterable[str],
+) -> Dict[str, Any]:
+    """Preserve untouched claims/findings and replace only repaired claims."""
+    repaired_ids = set(_ids(list(repaired_claim_ids or [])))
+    replacements = {
+        str(claim.get("id")): dict(claim)
+        for claim in (reverified_review or {}).get("claims") or []
+        if isinstance(claim, dict) and str(claim.get("id")) in repaired_ids
+    }
+    claims = []
+    for claim in (original_review or {}).get("claims") or []:
+        if not isinstance(claim, dict):
+            continue
+        claim_id = str(claim.get("id") or "")
+        claims.append(replacements.get(claim_id, dict(claim)))
+    semantic_gaps = [dict(item) for item in (original_review or {}).get("semantic_gaps") or [] if isinstance(item, dict)]
+    return {
+        "claims": claims,
+        "findings": [dict(item) for item in (original_review or {}).get("findings") or [] if isinstance(item, dict)],
+        "semantic_gaps": semantic_gaps,
+        "summary": _review_summary(claims, semantic_gaps),
+        "mode": original_review.get("mode"),
+        "evidence_ids": list(original_review.get("evidence_ids") or []),
+    }
+
+
+def insufficient_feedback(review: Dict[str, Any]) -> str:
+    """Return only the semantic issue; Evidence bodies stay runtime-owned.
+
+    The agent already receives the session evidence index in its normal prompt,
+    so repeating verifier excerpts here would defeat working-set compaction.
+    Evidence IDs preserve the link while the LLM decides whether to read more,
+    search elsewhere, narrow the statement, or report the limitation.
+    """
+    claims = []
+    for claim in problematic_claims(review, "insufficient"):
+        claims.append({
+            "id": claim.get("id"),
+            "statement": claim.get("statement"),
+            "evidence_ids": list(claim.get("evidence_ids") or []),
+            "reason": claim.get("reason", ""),
+        })
+    findings = []
+    for finding in semantic_gap_findings(review):
+        findings.append({
+            "id": finding.get("id"),
+            "type": finding.get("type"),
+            "evidence_ids": list(finding.get("evidence_ids") or []),
+            "reason": finding.get("reason", ""),
+            "signature": finding.get("signature"),
+        })
+    payload = {
+        "code": "CLAIM_REVIEW_INSUFFICIENT",
+        "claims": claims,
+        "semantic_gaps": findings,
+        "instruction": "Address the exact unsupported statements and semantic gaps reported here. You decide the next action: investigate with available tools, narrow/remove a statement, cover a material omission/conflict/scope gap, or explicitly state the limitation. The verifier does not choose tools.",
+    }
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)

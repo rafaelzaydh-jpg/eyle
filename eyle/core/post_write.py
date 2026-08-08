@@ -1,6 +1,6 @@
 """Deterministic post-write verification for confirmed edits.
 
-Rev4.11.3 keeps verification outside the LLM loop. After a confirmed write the
+Verification stays outside the LLM loop. After a confirmed write the
 runtime compiles changed Python files in an isolated temporary copy, runs the
 project test suite when one exists, and rereads every promised output from the
 live workspace before it can report success.
@@ -128,7 +128,7 @@ def expected_outputs_from_patches(applied_patches: Iterable[Dict[str, Any]]) -> 
     outputs: List[Dict[str, Any]] = []
     for patch in applied_patches or []:
         path = str(patch.get("path") or "").replace("\\", "/")
-        operation = str(patch.get("operation") or "update")
+        operation = str(patch.get("operation") or "")
         item: Dict[str, Any] = {"path": path, "operation": operation}
         if operation != "delete":
             content = patch.get("result_content")
@@ -146,7 +146,7 @@ def verify_expected_outputs(project_root: str, outputs: Iterable[Dict[str, Any]]
     failures: List[Dict[str, str]] = []
     for expected in outputs or []:
         path = str(expected.get("path") or "").replace("\\", "/")
-        operation = str(expected.get("operation") or "update")
+        operation = str(expected.get("operation") or "")
         absolute = _resolver_caminho_seguro(project_root, path)
         if absolute is None:
             failures.append({"path": path, "reason": "unsafe_path"})

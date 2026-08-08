@@ -1,4 +1,4 @@
-"""Deterministic project inspection helpers for Eyle Rev4.12.
+"""Deterministic project inspection helpers for Eyle.
 
 These helpers measure and expose objective signals. They deliberately do not
 rank files or decide what is "important" for a task; relevance remains an LLM
@@ -13,8 +13,7 @@ import os
 import re
 from collections import Counter, defaultdict
 from decimal import Decimal, InvalidOperation, localcontext
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 from .security import _resolver_caminho_seguro
 from .text_hash import hash_texto

@@ -15,13 +15,12 @@ from eyle.runtime import queue as runtime_queue
 def _config():
     return {
         "app_version": "2.7.4",
-        "revision": "4.12.3.1-foundation-hardening-execution-trace",
+        "revision": "rev5.1-context-boundaries-investigation-continuity",
         "llm": {
             "model": "auto",
             "context_window_tokens": 10000,
             "agent_decision_max_tokens": 1100,
             "agent_patch_max_tokens": 3600,
-            "agent_max_tokens": 1100,
         },
         "context_engine": {
             "safety_margin_tokens": 500,
@@ -32,19 +31,19 @@ def _config():
             "max_llm_turns": 6,
             "max_tool_calls": 12,
             "max_identical_tool_repeats": 2,
-            "protocol_parse_retries": 1,
+            "structured_protocol_retries": 1,
             "final_validation_retries": 1,
             "max_patch_dry_run_failures": 2,
             "max_write_investigation_turns": 2,
             "max_no_progress_turns": 2,
             "max_phase_violations": 1,
             "chat_history_token_budget": 700,
-            "task_context_token_budget": 500,
             "max_tree_entries": 200,
             "max_tree_depth": 6,
             "max_read_range_lines": 400,
             "max_git_diff_chars": 6000,
-            "response_quality": {"enabled": True},
+            "claims": {"mode": "off"},
+            "context_view": {"max_relevant_sources": 4, "max_relevant_source_chars": 3500, "max_symbol_preview_chars": 2600, "max_search_source_chars": 600},
         },
         "codar": {"ativado": True, "testes": {"ativado": False}},
         "_runtime_agent_budget": {
@@ -77,7 +76,7 @@ def test_execution_trace_is_one_registered_read_only_observer():
     assert item["effects"] == ["NONE"]
     assert "diagnos" in contract
     assert "chain-of-thought" in contract
-    assert len(tools.TOOLS) == 20
+    assert len(tools.TOOLS) == 16
 
 
 def test_compile_prompt_records_context_composition_without_raw_content(tmp_path):
@@ -112,7 +111,7 @@ def test_current_execution_trace_returns_facts_up_to_before_tool_call():
         "llm_usage": {"llm_calls": 2, "llm_requests": 2, "prompt_tokens_actual": 2100, "prompt_tokens_uncached": 2100},
         "prompt_snapshots": [{
             "turn": 1, "phase": "analysis_investigate", "characters": 3000, "estimated_tokens": 1000,
-            "tool_count": 20, "components_after": {"available_tools": {"characters": 900, "estimated_tokens": 300, "items": 20}},
+            "tool_count": 16, "components_after": {"available_tools": {"characters": 900, "estimated_tokens": 300, "items": 16}},
         }],
         "decision_history": [{"turn": 1, "phase": "analysis_investigate", "decision": "tool", "outcome": "validated", "tools": ["project_stats"]}],
         "tool_history": [{"turn": 1, "phase": "analysis_investigate", "tool": "project_stats", "status": "success", "arguments": {}, "result": {"ok": True, "files": 92}}],
@@ -127,7 +126,7 @@ def test_current_execution_trace_returns_facts_up_to_before_tool_call():
     trace = result["detail"]
     assert trace["summary"]["job_id"] == 44
     assert trace["tokens"]["prompt_total"] == 2100
-    assert trace["context"][0]["components_after"]["available_tools"]["items"] == 20
+    assert trace["context"][0]["components_after"]["available_tools"]["items"] == 16
     assert trace["tools"][0]["tool"] == "project_stats"
     assert trace["privacy"]["raw_prompts_exposed"] is False
     assert "diagnosis" not in trace
@@ -145,7 +144,7 @@ def test_execution_trace_can_read_one_persisted_job(monkeypatch):
             "status": "success", "turns": 3, "tool_calls": 2,
             "runtime_phase": "analysis_complete_or_read",
             "llm_usage": {"llm_calls": 3, "llm_requests": 3, "prompt_tokens_actual": 5866},
-            "prompt_snapshots": [{"turn": 1, "phase": "analysis_investigate", "characters": 2500, "estimated_tokens": 834, "tool_count": 20}],
+            "prompt_snapshots": [{"turn": 1, "phase": "analysis_investigate", "characters": 2500, "estimated_tokens": 834, "tool_count": 16}],
             "phase_history": [{"turn": 1, "from": "start", "to": "analysis_investigate", "reason": "phase_for_call"}],
         }},
     }
@@ -170,15 +169,15 @@ def test_agent_can_choose_execution_trace_and_cite_it(monkeypatch, tmp_path):
         if len(prompts) == 1:
             names = {item["name"] for item in payload["available_tools"]}
             assert "execution_trace" in names
-            return '{"tool":"execution_trace","arguments":{"section":"context","limit":20}}'
+            return {"tool_calls": [{"tool": "execution_trace", "arguments": {"section": "context", "limit": 20}}], "plan": []}
         result = payload["latest_tool_results"][0]
         assert result["tool"] == "execution_trace"
         assert result["detail"]["context"]
         evidence_id = result["evidence_ids"][0]
-        return json.dumps({"final": {
+        return {"final": {
             "answer": "O trace atual registra a composição do contexto sem expor o prompt bruto.",
-            "claims": [{"kind": "fact", "sentence": 1, "evidence_ids": [evidence_id]}],
-        }})
+            "evidence_ids": [evidence_id],
+        }, "plan": []}
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
     status, text, _, details = core_agent.executar_agente(

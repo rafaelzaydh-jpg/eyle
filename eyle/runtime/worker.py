@@ -312,7 +312,7 @@ def processar_proximo(
         duracao = time.monotonic() - started
         if job_id is not None:
             falhou = queue.falhar(
-                job_id, error,
+                job_id, error, resultado=None,
                 duracao_segundos=duracao,
             )
             if not falhou:

@@ -261,7 +261,7 @@
 
     const decisions = Array.isArray(history.decisions) ? history.decisions : [];
     if (decisions.length) {
-      const decisionSection = historySection(`Decisões · ${decisions.length} turno(s)`);
+      const decisionSection = historySection(`Decisões · ${decisions.length} ação(ões)`);
       decisions.forEach((item) => {
         const details = document.createElement("details");
         details.className = "history-item";

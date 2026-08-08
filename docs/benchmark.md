@@ -1,43 +1,33 @@
-# Benchmark — Eyle Rev4.12.4.1
+# Benchmark — Eyle Rev5.1
 
-The benchmark remains a development tool under `eyle/devtools/`; it is not part of the agent's reasoning path.
+Benchmarks measure public AgentSession behavior, grounding and operating cost. They are not a hidden reasoning subsystem.
 
-A useful Rev4.12.4.1 benchmark measures the public behavior of the active `AgentSession` loop and the new observable execution record:
+## Canonical AgentSession benchmark
 
-- request preservation and correct phase transitions;
-- tool selection and fresh evidence;
-- factual correctness and claim-to-evidence quality;
-- explicit finding-limit compliance;
-- supervised write confirmation, dry-run, hashes, atomic apply, tests, rollback, and reread;
-- false-success rate;
-- logical LLM calls, backend requests, raw/cached/new/effective tokens, and latency;
-- common multi-file writes completing within the phase budget;
-- patch-only enforcement after write investigation;
-- semantic blocking of overlapping reads;
-- observable-history completeness without raw prompts, model responses, source bodies, or chain-of-thought;
-- calculator tasks completing in two LLM calls even when the final is structured;
-- focused `run_tests` output staying bounded while preserving the failing summary;
-- `git_status`/`git_diff` remaining read-only and compact;
-- rejected final/protocol decisions appearing in public history with a reason code.
+Use the real configured model:
 
-```bash
-python main.py benchmark --output context/benchmark_latest.json
-```
+> Analise o projeto e explique onde AgentSession é definida, onde ela é utilizada e qual é o papel dela no fluxo real da Eyle. Mostre apenas conclusões sustentadas por evidências do código, citando arquivos, símbolos e trechos relevantes. Se alguma conclusão não puder ser confirmada com as evidências disponíveis, diga que é insuficiente e investigue mais antes de responder. Não faça nenhuma alteração no projeto.
 
-The packaged suite uses deterministic doubles. A real Qwen benchmark must run in the deployment environment because model interpretation, tool selection, patch quality, latency, token usage, cache behavior, and JSON conformance cannot be proven offline.
+Record agent turns, tools, administrative capability probes, Claim Review/Repair/recovery calls, token usage, duration, Evidence/Claim counts, Semantic Gaps and final outcome.
 
-Coverage and efficiency comparisons remain development commands:
+Expected invariants:
 
-```bash
-python main.py compare-coverage baseline.json candidate.json
-python main.py compare-efficiency baseline.json candidate.json --tolerance 0.10
-```
+1. structured capability is behaviorally verified and locally validated;
+2. the verifier returns the canonical `claims/findings/semantic_gaps` envelope;
+3. malformed local Claims or Semantic Gaps are recovered in isolation without discarding valid siblings;
+4. definition-only Evidence cannot justify claims about runtime usage/flow;
+5. incomplete scope must return `insufficient`/`scope_gap` feedback, preserve `investigation_map`, and allow the Main Agent to investigate a different source/range instead of repeating the same search;
+6. no fixed Claim or Evidence count quota exists;
+7. final acceptance requires supported surviving material Claims and no unresolved material Semantic Gap;
+8. prior conversation may provide ongoing instructions but must not silently replace the current request as the active task;
+9. no agent turn may silently truncate more than four requested tool calls.
 
-For architecture decisions that were intentionally removed, read [`../UPDATE_HISTORY.md`](../UPDATE_HISTORY.md) before proposing a reintroduction.
+## Bug-audit benchmark
 
-## Rev4.12.4.1 regression targets
+Use: `Procure bugs no projeto.` A marker-only search (`TODO`, `FIXME`, `BUG`) may locate candidates but cannot support a broad absence conclusion. Claim Review should detect a scope gap if executable behavior/error paths were not investigated enough.
 
-- tree + README + project inspection must compact below the model context budget instead of raising `PROMPT_CONTEXT_BUDGET_EXCEEDED`;
-- missing pytest must return `TEST_RUNNER_UNAVAILABLE`, not `TESTS_FAILED`;
-- a preflight-blocked prompt must not be counted as a provider request;
-- an explicit test request should normally call `run_tests` directly and answer from that observation.
+## Write benchmark
+
+Test one single-file and one multi-file edit. Both must use the same path:
+
+`action=patches → transaction dry-run → confirmation → apply → compile/tests/reread → rollback on failure`.

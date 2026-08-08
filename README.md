@@ -1,89 +1,83 @@
-<p align="center"><img src="assets/eyle-banner.svg" alt="Eyle autonomous programming agent" width="100%"></p>
-<p align="center"><strong>One LLM brain. Real tools. Supervised writes. Observable execution.</strong></p>
+<p align="center">
+  <img src="assets/eyle-banner.svg" alt="Eyle" width="760">
+</p>
 
-**Version:** 2.7.4 · **Schema:** 4.12.4.1 · **Revision:** 4.12.4.1-context-budget-hardening
+# Eyle
 
-Eyle is a local programming agent built around a deliberately small idea: the LLM decides what to do, deterministic tools measure and execute reality, and the runtime protects the few boundaries that must never be guessed.
+**Version:** 2.7.4 · **Schema:** 5.1 · **Revision:** rev5.1-context-boundaries-investigation-continuity
+
+Eyle is a local-first coding agent built around one `AgentSession`, deterministic tools, runtime-owned Evidence, supervised transactional writes, and a semantic Claim Review before grounded answers are accepted.
+
+> **The LLM decides semantics. The runtime validates contracts.**
 
 ## Why Eyle exists
 
-Eyle is designed for real repositories, including projects too large to place in one prompt. It does not preload the whole codebase or run a committee of agents. It inspects only what the current task needs, keeps useful evidence available, and can edit several files through one supervised transaction.
+Eyle is designed to let the connected LLM investigate and reason about a real workspace without turning the runtime into a second hidden agent. The runtime owns safety, structure, budgets, hashes, freshness, confirmation, persistence and validation. The LLM owns investigation choices, semantic interpretation, answer wording and patch intent.
+
+The core is provider-agnostic. Qwen, Llama and other compatible models can use the same Eyle protocol; only the `llm/` boundary adapts to the structured-output capability actually delivered by the connection.
+
+## Architecture
 
 ```text
-user
+interface
+→ runtime/service
 → AgentSession
-→ LLM decision
-↔ deterministic tools / live workspace / external memory on demand
-→ dry-run + confirmation for writes
-→ compile/tests/reread/rollback
-→ answer
+→ administrative structured handshake
+→ main LLM ↔ 16 deterministic tools + live workspace
+→ Evidence Core
+→ deterministic Final Gate
+→ Claim Review (single semantic 2FA)
+   ├─ supported → response
+   ├─ contradicted → local Repair → Reverify
+   └─ insufficient / semantic gap → directed main-agent follow-up
 ```
 
-## Rev4.12.4.1: context-budget hardening
+The administrative handshake is not an agent tool. It behaviorally verifies `json_schema`, then `json_object`, then prompt-driven JSON and caches the verified mode per connection/model. Provider enforcement is never trusted by itself: every structured response is validated locally by Eyle.
 
-Rev4.12.4.1 keeps the Rev4.12.4 shared tool taxonomy and raises the default per-request model window from 10k to 32k. Task-wide effective prompt accounting is now capped at 96k, while each request must still fit the configured model window. Analysis uses a stable output reserve based on work type rather than source volume, analysis phases never gain patch dry-run tools automatically, and `agent_info` separates the full registered registry from the tools available in the current phase. Windows-style pytest failures remain failures, and `execution_trace` is covered inside a real multi-tool investigation.
+## Tools
 
-## Rev4.12.4: shared tool taxonomy
+The Main Agent currently sees 16 public tools:
 
-Rev4.12.4 keeps the Rev4.12.3.1 execution model and `execution_trace`, but compacts how tools are described to the LLM. The runtime still exposes every tool allowed by the current executable phase at once and the LLM still chooses the tool; no category router or extra model call was added.
+`calculate`, `agent_info`, `project_stats`, `count_tokens`, `inspect_project`, `list_tree`, `search_code`, `find_symbol`, `read_range`, `read_file`, `memory_search`, `memory_store`, `run_tests`, `execution_trace`, `git_status`, and `git_diff`.
 
-Shared authority is declared once per call through two categories: `READ_ONLY` (no intentional persistent project-file/project-memory change) and `EDIT` (may persist project files or project memory). Side effects are also shared tags: `NONE` by default, plus `EXEC`, `TEMP`, `MEMORY_WRITE`, `WORKSPACE_WRITE`, `VERIFY`, and `ROLLBACK` when applicable. Individual tool contracts now carry only their purpose, compact argument signatures, returned observation, tool-specific caveats, and configured numeric limits.
+Writing is intentionally not exposed as patch tools. The model emits the canonical `action=patches` protocol and the runtime executes one transactional path.
 
-This removes repeated phrases such as “does not modify files” and `side_effects: none` without weakening tool boundaries. In the full 20-tool catalog, the serialized model-visible catalog plus taxonomy drops from 12,492 characters in Rev4.12.3.1 to about 10,241 characters; a normal 15-tool investigation drops from 8,353 to about 7,049 characters in the same measurement.
 
-`execution_trace` remains the single self-observability tool: it exposes sanitized phase/context/token/tool/decision/validation facts, not diagnoses, chain-of-thought, raw prompts, source/patch/memory bodies, or secrets.
+## Context boundaries and investigation continuity
 
-## Tool-assisted reasoning
+`request` is the only active task. `conversation_background` is a bounded, non-authoritative conversation view that remains stable across every turn of the current job, so explicit ongoing user instructions can survive tool use without an older task silently becoming the new objective. `investigation_map` is derived from observable successful tool history and preserves the current task's navigation state across `CLAIM_INSUFFICIENT` follow-up.
 
-The model does not need to calculate or estimate everything mentally. Rev4.11.8+ includes deterministic tools for:
+Blocked duplicate/covered reads are not counted as executed identical tools. They return the existing observable map and contribute to generic no-progress control. Agent batches are contractually limited to four tool calls per turn; larger batches are rejected instead of silently truncated.
 
-- `calculate` — bounded decimal arithmetic;
-- `project_stats` — files, lines, characters, bytes and languages;
-- `count_tokens` — measured text size with explicit exact/heuristic metadata;
-- `inspect_project` — objective entrypoint/import/route/test/CI/framework signals without deciding which file is “important”;
-- `search_code`, `read_file`, `read_range`, `find_symbol`, `list_tree` — live source inspection;
-- `agent_info` — current identity and executable tool registry;
-- `run_tests` — sandboxed real test execution with optional focused pytest scope, bounded diagnostic output and explicit `TEST_RUNNER_UNAVAILABLE` diagnostics;
-- `git_status` — read-only working-tree state;
-- `git_diff` — read-only bounded diff inspection;
-- `execution_trace` — read-only sanitized facts from current/persisted executions for self-debugging;
-- external memory tools that are used only when the model asks for them.
-
-Large tool results are compacted generically before entering the next prompt; the complete runtime result remains recoverable in session/history. The tool observes. The LLM decides what the observation means for the current task. Deterministic utility results such as `calculate` are evidence-backed, but the final response is still written by the LLM so tone and explanation remain natural.
-
-## Supervised editing
+## Supervised writes
 
 ```text
 request
-→ inspect required source
-→ generate one transaction
-→ dry-run
+→ inspect source
+→ action=patches
+→ transaction dry-run
 → user confirmation
-→ apply
-→ compile changed Python files
-→ detect and run tests
-→ rollback on compile/test/reread failure
-→ reread exact outputs
-→ report verified or partial-verification state honestly
+→ transaction apply
+→ compile/tests/reread
+→ rollback on validation failure
+→ verified response
 ```
 
-Common write investigations are phase-controlled so the agent cannot spend every turn rereading the same repository. Equivalent reads are blocked from fresh evidence and normal writes move to a patch-only phase after the investigation budget.
+## Evidence and Claim Review
 
-## Evidence and answer quality
+Full Evidence remains runtime-owned. The model receives bounded views and can request deeper ranges. Claims and Evidence are proportional to the material content of the answer: numbers such as ~6, 12 or 20+ are guidance, never quotas.
 
-Project facts, confirmed bugs and contextual risks must come from real project observations. The runtime keeps a compact claim-to-evidence ledger and enforces explicit limits such as “up to 3”. Claims reference visible answer sentences by index instead of duplicating the sentence text inside the model protocol.
-
-## Project layout
-
-```text
-eyle/core/       AgentSession, tools, project inspection, memory and safe editing
-eyle/runtime/    service, queue, worker, persistence, telemetry and public history
-llm/             backend transport, normalization and token accounting
-web/             Flask chat UI and expandable execution history
-docs/            architecture, configuration, release and engineering notes
-```
+Claim Review is the only semantic final verifier. It checks atomic Claims and conclusion-level Semantic Gaps. Local protocol recovery preserves valid review content and re-evaluates malformed Claims or Semantic Gaps; Finding coverage can also be regenerated from preserved Claims; the runtime never invents verdicts, gap types, Evidence or semantic fixes.
 
 ## Run
+
+Create your environment and install dependencies:
+
+```bash
+python -m pip install -r requirements.lock
+```
+
+Useful commands:
 
 ```bash
 python main.py status
@@ -91,19 +85,48 @@ python main.py perguntar "Analyze the project"
 python main.py serve
 ```
 
-The web data endpoints use a Bearer token. `python main.py serve` prints where the local API token can be obtained.
+For development:
+
+```bash
+python -m pip install -r requirements-dev.lock
+python -m pytest -q
+```
+
+## Configuration
+
+Edit `config.json` for the LLM endpoint, model and runtime limits. Structured-output capability does not need a provider-specific setting: Eyle probes the actual behavior and stores the machine-local result in `context/llm_capabilities.json`, which is ignored by Git.
+
+See [Configuration](docs/configuration.md) for details.
+
+## Project layout
+
+```text
+eyle/core/       AgentSession, tools, Evidence, Claim Review and safe editing
+eyle/runtime/    service, queue, worker, persistence, telemetry and history
+llm/             transport, adaptive capabilities and structured contracts
+web/             local web interface
+tests/           canonical regression suite
+docs/            current architecture, configuration, benchmarks and publishing
+```
 
 ## Validation
 
-- 178 tests pass in the packaged deterministic suite;
-- 1 optional Flask interface test is skipped when Flask is not installed in the packaging environment;
-- the real Qwen smoke test remains deployment-only.
+The Rev5.1 release is intended to be published only after the extracted artifact passes:
+
+```bash
+python -m eyle.devtools.release_identity
+python -m compileall -q .
+python -m pytest -q
+node --check web/static/app.js
+```
+
+See [Benchmarking](docs/benchmark.md) for the real AgentSession acceptance scenario.
 
 ## License
 
-Eyle is **source-available, not open-source software**. The repository may be viewed publicly, and the license permits individuals to download, install, run, and privately modify Eyle for personal, non-commercial use. Redistribution, publication of copies or modified versions, sale, sublicensing, commercial use, and offering Eyle as a service require prior written permission.
+Eyle is **source-available, not open-source software**. Personal, private, non-commercial use is permitted under the terms in [LICENSE.md](LICENSE.md). Redistribution, publication of modified copies, commercial use, sublicensing, sale, or offering Eyle as a service require prior written permission.
 
-See [LICENSE.md](LICENSE.md) for the controlling terms and [CONTRIBUTING.md](CONTRIBUTING.md) for contributor terms. Limited rights that arise from using GitHub itself remain subject to GitHub's Terms of Service.
+See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 ## Documentation
 
@@ -111,11 +134,6 @@ See [LICENSE.md](LICENSE.md) for the controlling terms and [CONTRIBUTING.md](CON
 - [Technical overview](docs/technical-overview.md)
 - [Configuration](docs/configuration.md)
 - [Benchmarking](docs/benchmark.md)
-- [Rev4.12.4.1 release notes](docs/releases/2.7.4-rev4.12.4.1.md)
-- [Rev4.12.4 release notes](docs/releases/2.7.4-rev4.12.4.md)
-- [Rev4.12.3.1 release notes](docs/releases/2.7.4-rev4.12.3.1.md)
-- [Rev4.12.3 release notes](docs/releases/2.7.4-rev4.12.3.md)
-- [Rev4.12.2 release notes](docs/releases/2.7.4-rev4.12.2.md)
-- [Update history: removed designs and why](UPDATE_HISTORY.md)
+- [Publishing to Git](docs/github-publishing.md)
 - [Changelog](CHANGELOG.md)
 - [Português](README.pt-BR.md)

@@ -20,7 +20,7 @@ python -m pytest -q
 3. Preserve the fail-closed write, execution, and sandbox guarantees.
 4. Never commit generated data from `memory/`, `context/`, or `workspace/`.
 5. Run the full test suite before opening the pull request.
-6. Before reintroducing a removed architecture or guardrail, read `UPDATE_HISTORY.md` and document the new evidence that makes the old tradeoff valid now.
+6. Before reintroducing a removed architecture or compatibility path, document the concrete current failure and add a regression test or metric that justifies the change; consult Git history and `CHANGELOG.md` for prior removals.
 7. Do not submit code, assets, documentation, or other material that you do not have the right to contribute under these terms.
 
 ## Contribution terms

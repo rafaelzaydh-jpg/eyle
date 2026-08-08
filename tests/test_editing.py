@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Testes da Atualizacao 19: rollback sem backup e escrita atomica."""
+"""Atomic-write primitives used by the canonical transaction engine."""
 import os
 import stat
 import sys
@@ -7,29 +7,6 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import eyle.core.editing as codar_mod  # noqa: E402
-
-
-def test_rollback_restaura_bytes_originais_sem_backup(monkeypatch, tmp_path):
-    arquivo = tmp_path / "modulo.py"
-    original = b"def valor():\n    return 1\n"
-    arquivo.write_bytes(original)
-
-    def falhar_parse(*args, **kwargs):
-        raise SyntaxError("falha simulada", ("modulo.py", 1, 1, "def valor():"))
-
-    monkeypatch.setattr(codar_mod.ast, "parse", falhar_parse)
-
-    resultado = codar_mod.aplicar_patch(
-        str(tmp_path), "modulo.py", 1, 2,
-        "def valor():\n    return 1", "def valor():\n    return 2",
-        backups_dir=None, cfg_testes={"ativado": False},
-    )
-
-    assert resultado["ok"] is False
-    assert resultado["changed"] is False
-    assert resultado["backup_path"] is None
-    assert "Revertido automaticamente" in resultado["detalhe"]
-    assert arquivo.read_bytes() == original
 
 
 def test_escrita_atomica_usa_replace_e_preserva_permissoes(monkeypatch, tmp_path):

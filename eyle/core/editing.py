@@ -1,43 +1,9 @@
-#!/usr/bin/env python3
+"""Low-level editing primitives used by the canonical transaction path.
+
+This module locates symbols, performs atomic writes, substitutes line ranges,
+and runs detected test suites. Transaction planning/apply/rollback lives in
+``eyle.core.transactions``; transaction execution has one canonical path.
 """
-codar.py
---------
-Atualizacao 5 -- "Codar de verdade" (engenheira assistente).
-
-Ate a Atualizacao 4, a Eyle so EXPLICAVA ou SUGERIA -- nunca escrevia
-nada no projeto do usuario. Este modulo e o que torna uma mudanca real
-possivel, com seguranca:
-
-    Proposta gerada pelo ciclo LLM-first em eyle/core/agent.py
-        -> Impacto        (calcular_impacto: depende_de invertido)
-        -> Patch           (localizar_simbolo: recorte exato por linha,
-                             lido FRESCO do disco -- nunca da memoria
-                             indexada, que pode estar desatualizada)
-        -> Teste            (testar_patch_em_copia: NUNCA escreve no
-                             arquivo real -- so numa copia temporaria.
-                             Verificacao minima viavel: ast.parse() para
-                             .py; arquivos web (.js/.html/.css) so
-                             confirmam que o recorte de linha e a escrita
-                             funcionaram, sem parser de sintaxe real --
-                             isso e' deliberado, nao um TODO.)
-        -> Aplicar          (aplicar_patch: SO chamado depois que o
-                             usuario confirma explicitamente, em
-                             eyle/core/agent.py:_resume_single.
-                             Confere se o arquivo nao mudou desde a
-                             proposta, faz backup, escreve, roda uma
-                             segunda checagem no arquivo real -- se
-                             falhar, reverte sozinho -- e, se
-                             config["codar"]["testes"]["ativado"]=true E
-                             o projeto tiver pytest/npm test configurado,
-                             roda a suite real no projeto e reverte se
-                             ela quebrar.)
-
-Nenhuma funcao aqui decide SE deve aplicar algo -- isso e' sempre
-decisão do runtime em eyle/core/agent.py, que só chama apply_patch após confirmação
-depois de ver "sim"/"aplica" do usuario numa mensagem separada da
-proposta original.
-"""
-import ast
 import json
 import os
 import shlex
@@ -45,7 +11,6 @@ import shutil
 import stat
 import sys
 import tempfile
-import time
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR = os.path.dirname(_THIS_DIR)
@@ -55,12 +20,7 @@ if BASE_DIR not in sys.path:
 from .workspace_policy import PASTAS_IGNORADAS
 from .symbols import extract_python_definitions, extract_symbols
 from .security import _resolver_caminho_seguro
-from .text_hash import hash_faixa as _hash_faixa_canonica, hash_texto as _hash_texto_canonico
 from .sandbox import executar_no_sandbox
-from .retention import limpar_backups
-
-
-EXTENSOES_COM_VERIFICACAO_SINTAXE = {".py"}  # so Python tem checagem real de sintaxe por enquanto
 
 
 def localizar_simbolo(caminho_projeto, caminho_relativo, simbolo):
@@ -169,26 +129,6 @@ def _substituir_linhas(conteudo, linha_inicio, linha_fim, codigo_novo):
     return "\n".join(novas_linhas)
 
 
-def _hash_texto(conteudo):
-    return _hash_texto_canonico(conteudo)
-
-
-def _hash_faixa(conteudo, linha_inicio, linha_fim):
-    """Hash canonico compativel com ``project_reader.ler_faixa_projeto``."""
-    return _hash_faixa_canonica(conteudo, linha_inicio, linha_fim)
-
-
-def _validar_hashes_patch(conteudo, linha_inicio, linha_fim,
-                          file_hash_esperado=None, range_hash_esperado=None):
-    file_hash_atual = _hash_texto(conteudo)
-    range_hash_atual = _hash_faixa(conteudo, linha_inicio, linha_fim)
-    if file_hash_esperado and file_hash_atual != file_hash_esperado:
-        return False, file_hash_atual, range_hash_atual
-    if range_hash_esperado and range_hash_atual != range_hash_esperado:
-        return False, file_hash_atual, range_hash_atual
-    return True, file_hash_atual, range_hash_atual
-
-
 def _escrever_arquivo_atomico(caminho, conteudo):
     """Substitui ``caminho`` sem expor um arquivo parcialmente escrito.
 
@@ -223,110 +163,12 @@ def _escrever_arquivo_atomico(caminho, conteudo):
             os.unlink(caminho_temporario)
 
 
-def testar_patch_em_copia(caminho_projeto, caminho_relativo, linha_inicio,
-                          linha_fim, codigo_novo, file_hash_esperado=None,
-                          range_hash_esperado=None):
-    """
-    NUNCA escreve no arquivo real. Copia o conteudo atual pra um arquivo
-    temporario, aplica a substituicao de linhas [linha_inicio, linha_fim]
-    (1-indexado, inclusive) por `codigo_novo`, e roda uma verificacao
-    minima sobre o RESULTADO:
-
-      - .py          -> ast.parse() inteiro (garante sintaxe Python valida)
-      - outras exts  -> so confirma que o arquivo/linha/patch foram
-                        recortados e escritos corretamente na copia.
-                        Deliberado (Atualizacao 6): nao ha parser de
-                        sintaxe real pra .js/.html/.css aqui -- rodar um
-                        parser JS/HTML/CSS decente exigiria dependencia
-                        nova (node, um parser HTML/CSS em Python etc.)
-                        so pra verificacao, o que contradiz a filosofia
-                        de "minima viavel". Quem quer verificacao real de
-                        JS/HTML/CSS usa o teste opt-in (pytest/npm test)
-                        via rodar_testes_projeto(), que roda no PROJETO
-                        REAL depois do patch aplicado -- rodar suite de
-                        teste numa copia de um arquivo isolado nao faz
-                        sentido (o teste precisa do projeto inteiro).
-
-    Devolve {"ok": bool, "detalhe": str, "conteudo_resultante": str|None}.
-    """
-    caminho_abs = _resolver_caminho_seguro(caminho_projeto, caminho_relativo)
-    if caminho_abs is None or not os.path.isfile(caminho_abs):
-        return {"ok": False, "detalhe": f"Arquivo '{caminho_relativo}' nao existe mais no disco.",
-                "conteudo_resultante": None}
-
-    with open(caminho_abs, "r", encoding="utf-8", errors="replace") as f:
-        conteudo_atual = f.read()
-
-    hashes_ok, file_hash_atual, range_hash_atual = _validar_hashes_patch(
-        conteudo_atual, linha_inicio, linha_fim,
-        file_hash_esperado=file_hash_esperado,
-        range_hash_esperado=range_hash_esperado,
-    )
-    if not hashes_ok:
-        return {
-            "ok": False,
-            "error_code": "STALE_PATCH",
-            "detalhe": (
-                "O arquivo ou a faixa mudou desde a leitura usada na proposta; "
-                "o dry-run foi abortado sem tocar no projeto."
-            ),
-            "conteudo_resultante": None,
-            "file_hash_atual": file_hash_atual,
-            "range_hash_atual": range_hash_atual,
-        }
-
-    conteudo_resultante = _substituir_linhas(conteudo_atual, linha_inicio, linha_fim, codigo_novo)
-    if conteudo_resultante is None:
-        total_linhas = len(conteudo_atual.split("\n"))
-        return {
-            "ok": False,
-            "detalhe": f"Faixa de linhas invalida ({linha_inicio}-{linha_fim}) para um arquivo com {total_linhas} linhas.",
-            "conteudo_resultante": None,
-        }
-
-    tmp_dir = tempfile.mkdtemp(prefix="eyle_teste_patch_")
-    try:
-        caminho_copia = os.path.join(tmp_dir, os.path.basename(caminho_relativo))
-        with open(caminho_copia, "w", encoding="utf-8") as f:
-            f.write(conteudo_resultante)
-
-        ext = os.path.splitext(caminho_relativo)[1].lower()
-        if ext in EXTENSOES_COM_VERIFICACAO_SINTAXE:
-            try:
-                ast.parse(conteudo_resultante, filename=caminho_relativo)
-            except SyntaxError as e:
-                return {
-                    "ok": False,
-                    "detalhe": f"ast.parse() encontrou erro de sintaxe na versao proposta: {e.msg} (linha {e.lineno}).",
-                    "conteudo_resultante": conteudo_resultante,
-                }
-            return {
-                "ok": True,
-                "detalhe": "ast.parse() confirmou sintaxe Python valida na copia temporaria (arquivo real nao foi tocado).",
-                "conteudo_resultante": conteudo_resultante,
-            }
-
-        return {
-            "ok": True,
-            "detalhe": (
-                f"Recorte e escrita testados numa copia temporaria (arquivo real nao foi tocado). "
-                f"Arquivos '{ext}' nao tem parser de sintaxe real aqui (verificacao minima viavel) -- "
-                f"confirma so que a faixa de linhas e a escrita funcionaram. Se o projeto tiver "
-                f"pytest/npm test for detectado e a execução de testes estiver ativada, a suite real roda "
-                f"apos aplicar o patch (rodar_testes_projeto)."
-            ),
-            "conteudo_resultante": conteudo_resultante,
-        }
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-
 
 _MARCADORES_PYTEST_DIRETOS = ("pytest.ini", "conftest.py")
 _DIRETORIOS_TESTE_IGNORADOS = {
     ".git", ".hg", ".svn", ".venv", "venv", "env", "node_modules",
     "__pycache__", ".pytest_cache", ".tox", ".nox", "build", "dist",
 }
-
 
 def _arquivo_contem(caminho, marcador):
     try:
@@ -554,254 +396,3 @@ def rodar_testes_projeto(caminho_projeto, cfg_testes, scope=None):
     }
 
 
-def aplicar_patch(caminho_projeto, caminho_relativo, linha_inicio, linha_fim,
-                   codigo_original_esperado, codigo_novo, backups_dir=None,
-                   cfg_testes=None, cfg_retention=None,
-                   file_hash_esperado=None, range_hash_esperado=None,
-                   incluir_snapshot=False, executar_testes=True):
-    """
-    SO deve ser chamado depois que o usuario confirmou explicitamente a
-    proposta numa mensagem separada (nunca na mesma resposta que a gerou).
-
-    Re-le o arquivo NA HORA (nao confia no `codigo_original_esperado`
-    guardado na proposta): se as linhas [linha_inicio, linha_fim] nao
-    baterem mais com ele, ABORTA sem escrever nada -- o arquivo mudou
-    desde a proposta (edicao manual do usuario, outro patch ou edição externa
-    etc.), aplicar por cima seria destrutivo as cegas.
-
-    Se `backups_dir` for passado, salva uma copia do arquivo INTEIRO
-    original ali antes de escrever qualquer coisa. O arquivo real e'
-    substituido atomicamente (temporario no mesmo diretorio + os.replace),
-    nunca truncado em escrita direta. Depois da troca, roda uma segunda
-    verificacao no ARQUIVO REAL final (.py -> ast.parse): se falhar,
-    restaura `conteudo_atual`, que ja esta em memoria, mesmo quando backup
-    em disco esta desativado. O backup e' historico adicional, nao um
-    pre-requisito do rollback.
-
-    Devolve {"ok": bool, "detalhe": str, "backup_path": str|None}.
-    """
-    caminho_abs = _resolver_caminho_seguro(caminho_projeto, caminho_relativo)
-    if caminho_abs is None or not os.path.isfile(caminho_abs):
-        return {"ok": False, "detalhe": f"Arquivo '{caminho_relativo}' nao existe mais no disco.", "backup_path": None}
-
-    with open(caminho_abs, "r", encoding="utf-8", errors="replace") as f:
-        conteudo_atual = f.read()
-    linhas = conteudo_atual.split("\n")
-
-    hashes_ok, file_hash_atual, range_hash_atual = _validar_hashes_patch(
-        conteudo_atual, linha_inicio, linha_fim,
-        file_hash_esperado=file_hash_esperado,
-        range_hash_esperado=range_hash_esperado,
-    )
-    if not hashes_ok:
-        return {
-            "ok": False,
-            "changed": False,
-            "error_code": "STALE_PATCH",
-            "outcome": "blocked",
-            "detalhe": (
-                f"O arquivo ou a faixa de '{caminho_relativo}':{linha_inicio}-{linha_fim} "
-                "mudou desde a proposta. Patch abortado sem escrita."
-            ),
-            "backup_path": None,
-            "file_hash_atual": file_hash_atual,
-            "range_hash_atual": range_hash_atual,
-        }
-
-    if linha_inicio < 1 or linha_fim > len(linhas) or linha_inicio > linha_fim:
-        return {
-            "ok": False,
-            "detalhe": (
-                f"Faixa de linhas invalida ({linha_inicio}-{linha_fim}) para o arquivo atual "
-                f"({len(linhas)} linhas) -- o arquivo pode ter mudado desde a proposta."
-            ),
-            "backup_path": None,
-        }
-
-    codigo_atual_no_arquivo = "\n".join(linhas[linha_inicio - 1:linha_fim])
-    if codigo_atual_no_arquivo != codigo_original_esperado:
-        return {
-            "ok": False,
-            "changed": False,
-            "error_code": "STALE_PATCH",
-            "outcome": "blocked",
-            "detalhe": (
-                f"O conteudo de '{caminho_relativo}':{linha_inicio}-{linha_fim} mudou desde que a proposta "
-                f"foi gerada -- aplicar por cima seria destrutivo. Peca a sugestao/mudanca de novo."
-            ),
-            "backup_path": None,
-        }
-
-    backup_path = None
-    if backups_dir:
-        os.makedirs(backups_dir, exist_ok=True)
-        carimbo = time.strftime("%Y%m%d-%H%M%S") + f"-{time.time_ns() % 1_000_000_000:09d}"
-        nome_seguro = caminho_relativo.replace("/", "__").replace("\\", "__")
-        backup_path = os.path.join(backups_dir, f"{carimbo}__{nome_seguro}.bak")
-        with open(backup_path, "w", encoding="utf-8") as f:
-            f.write(conteudo_atual)
-        cfg_retention = cfg_retention or {}
-        limpar_backups(
-            backups_dir,
-            max_files=cfg_retention.get("backups_max_files", 50),
-            max_age_days=cfg_retention.get("backups_max_age_days", 30),
-            max_total_mb=cfg_retention.get("backups_max_total_mb", 256),
-        )
-        if not os.path.exists(backup_path):
-            backup_path = None
-
-    conteudo_final = _substituir_linhas(conteudo_atual, linha_inicio, linha_fim, codigo_novo)
-    try:
-        _escrever_arquivo_atomico(caminho_abs, conteudo_final)
-    except OSError as e:
-        return {
-            "ok": False,
-            "detalhe": f"Nao foi possivel substituir '{caminho_relativo}' atomicamente: {e}.",
-            "backup_path": backup_path,
-        }
-
-    def _reverter():
-        try:
-            _escrever_arquivo_atomico(caminho_abs, conteudo_atual)
-            return None
-        except OSError as e:
-            return str(e)
-
-    ext = os.path.splitext(caminho_relativo)[1].lower()
-    if ext in EXTENSOES_COM_VERIFICACAO_SINTAXE:
-        try:
-            ast.parse(conteudo_final, filename=caminho_relativo)
-        except SyntaxError as e:
-            # segunda checagem falhou no arquivo real (mesmo tendo passado
-            # na copia) -- reverte sozinho em vez de deixar quebrado
-            erro_rollback = _reverter()
-            detalhe_rollback = (
-                f" O rollback tambem falhou: {erro_rollback}."
-                if erro_rollback else
-                " Revertido automaticamente para o conteudo anterior."
-            )
-            return {
-                "ok": False,
-                # Se o rollback falhar, o arquivo pode continuar com o
-                # conteudo novo. O contrato da tool (Atualizacao 21)
-                # precisa refletir isso em `changed`, mesmo com ok=False.
-                "changed": erro_rollback is not None,
-                "detalhe": (
-                    f"ast.parse() falhou no arquivo real apos escrever ({e.msg}, linha {e.lineno})."
-                    f"{detalhe_rollback}"
-                ),
-                "backup_path": backup_path,
-                "error_code": "POST_WRITE_SYNTAX_FAILED",
-                "outcome": "rollback_failed" if erro_rollback else "reverted",
-            }
-
-    # Verificacao de testes (pytest/npm test): so roda se
-    # cfg_testes vier com "ativado": true E o projeto ja tiver esse tipo
-    # de teste configurado (ver _detectar_comando_teste). Roda no
-    # PROJETO REAL, depois da escrita, porque teste precisa do projeto
-    # inteiro -- nunca da copia temporaria de testar_patch_em_copia.
-    teste = (
-        rodar_testes_projeto(caminho_projeto, cfg_testes)
-        if executar_testes else
-        {
-            "executado": False,
-            "ok": True,
-            "detalhe": "Verificacao separada pendente no ciclo do Agente.",
-        }
-    )
-    if not teste["ok"]:
-        erro_rollback = _reverter()
-        detalhe_rollback = (
-            f" O rollback tambem falhou: {erro_rollback}."
-            if erro_rollback else
-            " Revertido automaticamente."
-        )
-        return {
-            "ok": False,
-            "changed": erro_rollback is not None,
-            "detalhe": (
-                f"Patch escrito, mas a suite de teste falhou.{detalhe_rollback} {teste['detalhe']}"
-            ),
-            "backup_path": backup_path,
-            "error_code": "TESTS_FAILED",
-            "outcome": "rollback_failed" if erro_rollback else "reverted",
-            "test_result": teste,
-        }
-
-    detalhe = f"Patch aplicado em '{caminho_relativo}':{linha_inicio}-{linha_fim}."
-    if teste["executado"]:
-        detalhe += f" Teste detectado passou: {teste['detalhe']}"
-
-    file_hash_final = _hash_texto(conteudo_final)
-    linha_fim_final = linha_inicio + len(codigo_novo.split("\n")) - 1
-    outcome = (
-        "verified" if teste.get("executado") is True
-        else "applied_without_suite" if executar_testes
-        else "applied_pending_verification"
-    )
-    retorno = {
-        "ok": True,
-        "detalhe": detalhe,
-        "backup_path": backup_path,
-        "changed": True,
-        "outcome": outcome,
-        "test_result": teste,
-        "file_hash_antes": file_hash_atual,
-        "range_hash_antes": range_hash_atual,
-        "file_hash_depois": file_hash_final,
-        "linha_fim_final": linha_fim_final,
-    }
-    if incluir_snapshot:
-        retorno["rollback_snapshot"] = {
-            "caminho_relativo": caminho_relativo,
-            "conteudo_original": conteudo_atual,
-            "file_hash_original": file_hash_atual,
-            "file_hash_aplicado": file_hash_final,
-        }
-    return retorno
-
-
-def restaurar_snapshot_patch(caminho_projeto, snapshot):
-    """Restaura uma edicao do Agente sem sobrescrever mudanca externa.
-
-    O rollback so acontece se o arquivo ainda tiver exatamente o hash que a
-    escrita confirmada produziu. Se alguem o editou depois, falha fechado.
-    """
-    snapshot = snapshot or {}
-    caminho_relativo = snapshot.get("caminho_relativo")
-    conteudo_original = snapshot.get("conteudo_original")
-    hash_aplicado = snapshot.get("file_hash_aplicado")
-    if not (
-        isinstance(caminho_relativo, str) and caminho_relativo
-        and isinstance(conteudo_original, str)
-        and isinstance(hash_aplicado, str) and hash_aplicado
-    ):
-        return {
-            "ok": False, "changed": False, "error_code": "INVALID_ROLLBACK",
-            "detalhe": "Snapshot de rollback ausente ou invalido.",
-        }
-    caminho_abs = _resolver_caminho_seguro(caminho_projeto, caminho_relativo)
-    if caminho_abs is None or not os.path.isfile(caminho_abs):
-        return {
-            "ok": False, "changed": False, "error_code": "ROLLBACK_TARGET_MISSING",
-            "detalhe": "Arquivo da edicao nao existe mais; rollback recusado.",
-        }
-    with open(caminho_abs, "r", encoding="utf-8", errors="replace") as arquivo:
-        conteudo_atual = arquivo.read()
-    if _hash_texto(conteudo_atual) != hash_aplicado:
-        return {
-            "ok": False, "changed": False, "error_code": "STALE_ROLLBACK",
-            "detalhe": "O arquivo mudou depois do patch; rollback automatico recusado.",
-        }
-    try:
-        _escrever_arquivo_atomico(caminho_abs, conteudo_original)
-    except OSError as erro:
-        return {
-            "ok": False, "changed": True, "error_code": "ROLLBACK_FAILED",
-            "detalhe": f"Falha ao restaurar o arquivo: {erro}.",
-        }
-    return {
-        "ok": True, "changed": False, "error_code": None,
-        "detalhe": "Conteudo original restaurado atomicamente apos falha de verificacao.",
-        "file_hash_restaurado": _hash_texto(conteudo_original),
-    }

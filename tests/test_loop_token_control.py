@@ -4,7 +4,7 @@ from pathlib import Path
 import eyle.core.agent as core_agent
 import llm.executar as llm_mod
 from eyle.core.token_budget import estimate_tokens
-from llm.response_adapter import normalize_model_response
+from llm.response_adapter import normalize_openai_chat_response
 
 
 def _config():
@@ -23,20 +23,20 @@ def _config():
             "max_llm_turns": 6,
             "max_tool_calls": 12,
             "max_identical_tool_repeats": 2,
-            "protocol_parse_retries": 1,
+            "structured_protocol_retries": 1,
             "final_validation_retries": 1,
             "max_patch_dry_run_failures": 2,
             "max_write_investigation_turns": 2,
             "max_no_progress_turns": 2,
             "max_phase_violations": 1,
             "chat_history_token_budget": 700,
-            "task_context_token_budget": 500,
             "max_tree_entries": 200,
             "max_tree_depth": 6,
             "max_read_range_lines": 400,
-            "response_quality": {"enabled": True},
+            "claims": {"mode": "off"},
+            "context_view": {"max_relevant_sources": 4, "max_relevant_source_chars": 3500, "max_symbol_preview_chars": 2600, "max_search_source_chars": 600},
         },
-        "codar": {"ativado": True, "fazer_backup": False, "testes": {"ativado": False}},
+        "codar": {"ativado": True, "testes": {"ativado": False}},
         "_runtime_agent_budget": {
             "max_llm_calls": 8,
             "max_prompt_tokens": 12000,
@@ -53,63 +53,46 @@ def _config():
 
 
 def test_fixed_agent_prompt_is_compact():
-    assert estimate_tokens(llm_mod.PROMPT_AGENTE, 3) <= 450
-    assert len(llm_mod.PROMPT_AGENTE) < 1500
-    assert "reference claims by the 1-based sentence number" in llm_mod.PROMPT_AGENTE
+    assert estimate_tokens(llm_mod.PROMPT_AGENTE, 3) <= 750
+    assert len(llm_mod.PROMPT_AGENTE) < 2300
+    assert "Claims are reviewed separately" in llm_mod.PROMPT_AGENTE
+    assert "1-based sentence" not in llm_mod.PROMPT_AGENTE
 
 
-def test_common_multifile_write_reaches_patch_in_three_calls(monkeypatch, tmp_path):
-    (tmp_path / "app.py").write_text(
-        "from flask import Flask\napp = Flask(__name__)\n", encoding="utf-8"
-    )
-    (tmp_path / "routes.py").write_text(
-        "def amor():\n    return '<h1>Amor</h1>'\n", encoding="utf-8"
-    )
+def test_common_multifile_write_reaches_transaction_in_three_calls(monkeypatch, tmp_path):
+    (tmp_path / "app.py").write_text("from flask import Flask\napp = Flask(__name__)\n", encoding="utf-8")
+    (tmp_path / "routes.py").write_text("def amor():\n    return '<h1>Amor</h1>'\n", encoding="utf-8")
     (tmp_path / "test_routes.py").write_text("def test_amor():\n    assert True\n", encoding="utf-8")
     prompts = []
-
-    merged = (
-        "from flask import Flask\n\n"
-        "app = Flask(__name__)\n\n"
-        "@app.get('/amor')\n"
-        "def amor():\n"
-        "    return '<h1>Amor</h1>'\n"
-    )
+    merged = "from flask import Flask\n\napp = Flask(__name__)\n\n@app.get('/amor')\ndef amor():\n    return '<h1>Amor</h1>'\n"
 
     def fake(prompt, cfg):
-        payload = json.loads(prompt)
-        prompts.append(payload)
+        payload = json.loads(prompt); prompts.append(payload)
         names = {item["name"] for item in payload["available_tools"]}
+        assert not {"apply_patch", "test_patch_dry_run", "apply_patch_set", "test_patch_set_dry_run"} & names
         if len(prompts) == 1:
-            assert payload["runtime_phase"] == "write_investigate"
-            assert "test_patch_set_dry_run" not in names
-            return '{"tool":"list_tree","arguments":{}}'
+            return {"tool_calls": [{"tool": "list_tree", "arguments": {}}], "plan": []}
         if len(prompts) == 2:
-            assert payload["runtime_phase"] == "write_prepare"
-            assert "test_patch_set_dry_run" in names
-            return json.dumps({"tool_calls": [
+            return {"tool_calls": [
                 {"tool": "read_file", "arguments": {"caminho_relativo": "app.py"}},
                 {"tool": "read_file", "arguments": {"caminho_relativo": "routes.py"}},
                 {"tool": "read_file", "arguments": {"caminho_relativo": "test_routes.py"}},
-            ]})
-        assert len(prompts) == 3
-        assert payload["runtime_phase"] == "write_patch_only"
-        assert names == {"test_patch_dry_run", "test_patch_set_dry_run"}
-        return json.dumps({"patches": [
+            ], "plan": []}
+        return {"patches": [
             {"operation": "replace", "path": "app.py", "content": merged},
             {"operation": "delete", "path": "routes.py"},
             {"operation": "delete", "path": "test_routes.py"},
-        ]})
+        ], "plan": []}
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
     status, _, pending, details = core_agent.executar_agente(
-        "Apague o teste e junte routes.py em app.py",
-        _config(), projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True,
+        "Apague o teste e junte routes.py em app.py", _config(),
+        projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True,
     )
     assert status == "needs_user"
-    assert pending is not None
+    assert pending["continuation_kind"] == "write_confirmation"
+    assert len(pending["write_transaction"]["patches"]) == 3
     assert len(prompts) == 3
-    assert details["runtime_phase"] == "write_patch_only"
     assert sum(item["estimated_tokens"] for item in details["prompt_snapshots"]) < 12000
 
 
@@ -121,14 +104,14 @@ def test_semantic_read_coverage_blocks_overlapping_range(monkeypatch, tmp_path):
         payload = json.loads(prompt)
         prompts.append(payload)
         if len(prompts) == 1:
-            return '{"tool":"read_file","arguments":{"caminho_relativo":"app.py"}}'
+            return {"tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "app.py"}}], "plan": []}
         if len(prompts) == 2:
-            return '{"tool":"read_range","arguments":{"caminho_relativo":"app.py","linha_inicio":1,"linha_fim":1}}'
+            return {"tool_calls": [{"tool": "read_range", "arguments": {"caminho_relativo": "app.py", "linha_inicio": 1, "linha_fim": 1}}], "plan": []}
         assert any(
             item.get("error_code") == "SEMANTIC_READ_BLOCKED"
             for item in payload["latest_tool_results"]
         )
-        return '{"final":{"answer":"app.py define x como 1.","claims":[{"kind":"fact","text":"app.py define x como 1.","evidence_ids":["ev-0001"]}]}}'
+        return {"final": {"answer": "app.py define x como 1.", "evidence_ids": ["ev-0001"]}, "plan": []}
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
     status, _, _, details = core_agent.executar_agente(
@@ -160,7 +143,7 @@ def test_provider_cache_metadata_reduces_effective_task_budget():
 
 
 def test_response_adapter_reads_openai_cached_prompt_tokens():
-    normalized = normalize_model_response({
+    normalized = normalize_openai_chat_response({
         "choices": [{"message": {"content": "ok"}}],
         "usage": {
             "prompt_tokens": 900,
@@ -181,21 +164,21 @@ def test_premature_patch_is_redirected_to_reads_without_poisoning_retry(monkeypa
         payload = json.loads(prompt)
         prompts.append(payload)
         if len(prompts) == 1:
-            return json.dumps({"patches": [
+            return {"patches": [
                 {"operation": "replace", "path": "app.py", "content": "x = 2\n"},
-            ]})
+            ], "plan": []}
         if len(prompts) == 2:
             assert payload["runtime_phase"] == "write_prepare"
-            assert payload["latest_tool_results"][0]["error_code"] == "WRITE_REQUIRES_SOURCE_READ"
+            assert "WRITE_REQUIRES_SOURCE_READ" in (payload.get("runtime_feedback") or "")
             assert any(
                 item.get("content") == "Não use arquivos de rotas separados."
-                for item in payload["task_context"]
+                for item in payload["conversation_background"]
             )
-            return '{"tool":"read_file","arguments":{"caminho_relativo":"app.py"}}'
+            return {"tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "app.py"}}], "plan": []}
         assert payload["runtime_phase"] == "write_patch_only"
-        return json.dumps({"patches": [
+        return {"patches": [
             {"operation": "replace", "path": "app.py", "content": "x = 2\n"},
-        ]})
+        ], "plan": []}
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
     status, _, pending, details = core_agent.executar_agente(

@@ -66,52 +66,6 @@ def test_openai_stream_monta_texto_e_ignora_reasoning_publico(monkeypatch):
     assert recebidos[-1][2] is True
 
 
-def test_chamada_estruturada_desativa_streaming_mesmo_com_job_ativo(monkeypatch):
-    def fake_openai(*args, **kwargs):
-        assert kwargs["on_chunk"] is None
-        return '{"tool":"list_tree","arguments":{}}'
-
-    publicados = []
-    monkeypatch.setattr(llm_mod, "_chamar_openai_com_fallback", fake_openai)
-    monkeypatch.setattr(llm_mod, "_resolver_modelo_openai", lambda *a, **k: "modelo")
-    monkeypatch.setattr(llm_mod.limiter, "acquire", lambda *a, **k: "slot")
-    monkeypatch.setattr(llm_mod.limiter, "release", lambda *a, **k: True)
-    monkeypatch.setattr(llm_mod, "_semaforo_backend", lambda *a, **k: type("S", (), {
-        "acquire": lambda self, timeout=None: True,
-        "release": lambda self: None,
-    })())
-    monkeypatch.setattr(
-        llm_mod.job_progress,
-        "publicar",
-        lambda config, phase, message, **campos: publicados.append(
-            {"phase": phase, "message": message, **campos}
-        ) or True,
-    )
-    monkeypatch.setattr(llm_mod.job_progress, "job_id_de", lambda config: 4)
-
-    config = {
-        "llm": {
-            "base_url": "http://127.0.0.1:8080",
-            "model": "modelo",
-            "openai_compatible": True,
-            "temperature": 0.2,
-            "retry_max_attempts": 1,
-            "agent_retry_max_attempts": 1,
-            "stream_responses": True,
-        },
-        "context_engine": {"chars_per_token_fallback": 3},
-        "_runtime_agent_budget": {"source_job_id": 4},
-    }
-
-    resposta = llm_mod._chamar_llm_impl(
-        "s", "u", config, forcar_json=True, perfil="agent", stream_visible=False,
-    )
-
-    assert json.loads(resposta)["tool"] == "list_tree"
-    assert any(item["phase"] == "validating" for item in publicados)
-    assert all(item.get("partial_text") in (None, "") for item in publicados)
-
-
 def test_navegador_nao_reabre_job_terminal_cacheado():
     fonte = (Path(__file__).parents[1] / "web" / "static" / "app.js").read_text(
         encoding="utf-8"

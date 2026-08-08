@@ -98,7 +98,7 @@ def upstream_headers() -> dict[str, str]:
         "Authorization": f"Bearer {settings.upstream_api_key}",
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
-        "User-Agent": "Eyle-Qwen-Proxy/1.0",
+        "User-Agent": "Eyle-Qwen-Proxy/1.1",
     }
 
 
@@ -146,7 +146,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Eyle Qwen Proxy",
-    version="1.0.0",
+    version="1.1.0",
     description="Proxy OpenAI-compatible para DashScope/Qwen.",
     lifespan=lifespan,
 )
@@ -193,12 +193,11 @@ async def models(request: Request) -> dict[str, Any]:
 
 
 def prepare_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Traduz o dialeto genérico da Eyle para o Chat Completions do DashScope.
+    """Prepare one transparent DashScope Chat Completions request.
 
-    A Eyle usa campos de compatibilidade de backends locais para tentar desligar
-    raciocínio em decisões JSON. O DashScope usa ``enable_thinking`` no topo do
-    corpo. Sem esta tradução, o proxy ligava pensamento novamente e criava
-    decisões lentas ou vazias após o orçamento de saída.
+    The proxy may select/override the model and define ``enable_thinking`` policy,
+    but it never weakens or rewrites Eyle's structured-output contract.
+    ``response_format`` is forwarded unchanged.
     """
     messages = payload.get("messages")
     if not isinstance(messages, list) or not messages:
@@ -207,38 +206,38 @@ def prepare_payload(payload: dict[str, Any]) -> dict[str, Any]:
     outgoing = dict(payload)
     outgoing["model"] = settings.model_override or outgoing.get("model") or settings.default_model
 
-    # A API do DashScope aceita JSON mode como {"type":"json_object"}.
-    # O schema adicional usado por alguns servidores locais não faz parte desse
-    # contrato e pode provocar 400/422 e várias chamadas de fallback.
+    # Rev1.1 removes legacy Eyle dialect translation.  The current Eyle sends
+    # native Chat Completions fields; old compatibility fields fail explicitly
+    # instead of being silently reinterpreted by the proxy.
+    legacy = sorted({"chat_template_kwargs", "reasoning_effort"} & set(outgoing))
+    if legacy:
+        raise HTTPException(
+            status_code=400,
+            detail="Campos legado não suportados pelo proxy 1.1: " + ", ".join(legacy),
+        )
+
     response_format = outgoing.get("response_format")
-    structured = isinstance(response_format, dict)
-    if structured:
+    structured = False
+    if response_format is not None:
+        if not isinstance(response_format, dict):
+            raise HTTPException(status_code=400, detail="response_format deve ser um objeto.")
         tipo = str(response_format.get("type") or "").strip().lower()
-        if tipo in {"json_object", "json_schema"}:
-            outgoing["response_format"] = {"type": "json_object"}
+        if tipo not in {"json_object", "json_schema"}:
+            raise HTTPException(status_code=400, detail=f"response_format.type não suportado: {tipo or 'vazio'}.")
+        if tipo == "json_schema":
+            block = response_format.get("json_schema")
+            if not isinstance(block, dict) or not isinstance(block.get("schema"), dict):
+                raise HTTPException(status_code=400, detail="json_schema requer um objeto schema.")
+        structured = True
+        # Critical invariant: do not mutate response_format.  Provider
+        # capability is negotiated and locally validated by Eyle.
 
-    # Traduz os controles usados pela Eyle para o parâmetro real do Qwen.
     explicit_thinking = outgoing.get("enable_thinking")
-    chat_kwargs = outgoing.pop("chat_template_kwargs", None)
-    reasoning_effort = outgoing.pop("reasoning_effort", None)
-
-    requested_disable = False
-    if isinstance(chat_kwargs, dict) and chat_kwargs.get("enable_thinking") is False:
-        requested_disable = True
-    if isinstance(reasoning_effort, str) and reasoning_effort.strip().lower() in {
-        "none", "off", "disabled", "disable",
-    }:
-        requested_disable = True
-
     if settings.force_enable_thinking:
         outgoing["enable_thinking"] = True
     elif isinstance(explicit_thinking, bool):
         outgoing["enable_thinking"] = explicit_thinking
-    elif requested_disable:
-        outgoing["enable_thinking"] = False
     elif structured:
-        # Decisões do agente são JSON curto. Pensamento aqui só aumenta latência
-        # e a chance de terminar sem conteúdo final.
         outgoing["enable_thinking"] = settings.structured_enable_thinking
     else:
         outgoing["enable_thinking"] = settings.default_enable_thinking
@@ -268,13 +267,19 @@ async def chat_completions(request: Request) -> Response:
     request_id = str(uuid.uuid4())
     url = f"{settings.upstream_base_url}/chat/completions"
 
+    response_format = payload.get("response_format") if isinstance(payload.get("response_format"), dict) else {}
+    format_type = response_format.get("type")
+    schema_block = response_format.get("json_schema") if isinstance(response_format.get("json_schema"), dict) else {}
     logger.info(
-        "request=%s model=%s stream=%s thinking=%s messages=%s",
+        "request=%s model=%s stream=%s thinking=%s messages=%s structured=%s schema_name=%s strict=%s",
         request_id,
         payload.get("model"),
         stream,
         payload.get("enable_thinking"),
         len(payload.get("messages", [])),
+        format_type or "none",
+        schema_block.get("name"),
+        schema_block.get("strict"),
     )
 
     client: httpx.AsyncClient = request.app.state.http

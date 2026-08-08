@@ -1,148 +1,50 @@
-# Eyle Rev4.12.4.1 architecture
-
-## Active path
+# Eyle Rev5.1 architecture
 
 ```text
-web / CLI
-→ runtime service
+interface
+→ runtime/service
 → AgentSession
-→ LLM decision
-↔ state-filtered deterministic tools with shared taxonomy + compact contracts / live workspace / external memory on demand
-↔ execution_trace over sanitized current/persisted runtime facts
-→ response-quality validation
-→ answer or supervised write
-
-completed job
-→ persisted runtime result
-→ on-demand observable history
-→ expandable web panel
+→ administrative structured handshake
+→ main LLM ↔ 16 deterministic tools + live workspace
+→ Evidence Core
+→ deterministic Final Gate
+→ Claim Review
+   ├─ supported + no unresolved material gap → response
+   ├─ contradicted → local Repair → local Reverify
+   └─ insufficient / semantic gap → main-agent follow-up
 ```
 
-There is one reasoning loop. No semantic router, Mission Interpreter, Scout, Finalizer agent, recovery agent or automatic project-memory injection sits in front of the model. Rev4.12.4.1 keeps per-tool routing hints removed. The runtime sends shared `READ_ONLY`/`EDIT` authority and effect-tag meanings once, then the LLM chooses among the phase-allowed tool contracts.
+## Responsibility boundaries
 
-## Responsibility split
+- **Main LLM:** semantic decisions, investigation, tool choice, answer wording, patch intent.
+- **Runtime:** contracts, paths, hashes, freshness, visibility, budgets, confirmation, transactions, persistence.
+- **Tools:** deterministic observations/actions; no semantic routing.
+- **Evidence Core:** complete runtime-owned EvidenceRecords and bounded model-visible views.
+- **Final Gate:** deterministic shape, Evidence identity/grounding, formatting and write authority.
+- **Claim Review:** the single semantic final verifier.
 
-### LLM
+The architectural rule is: **the LLM decides semantics; the runtime validates contracts.**
 
-The model owns:
+## Structured boundary
 
-- natural-language understanding;
-- deciding which observation is relevant to the current task;
-- optional planning;
-- choosing tools;
-- code generation;
-- explaining conclusions.
+`llm/structured.py` owns the canonical contracts for `agent`, `claim_verifier`, and `claim_repair`. Before the first structured use of a connection/model, `llm/capabilities.py` behaviorally verifies the best available mode: `json_schema`, `json_object`, then prompt-driven JSON. The result is machine-local and revalidated after restart or a structural failure.
 
-### Tools
+Provider enforcement is useful but never authoritative. Every structured result is parsed and validated locally by Eyle. The core never branches on Qwen/Llama/provider identity.
 
-Tools own deterministic observations or actions. Shared authority/effects are defined once through the tool taxonomy; each model-visible contract states purpose, compact inputs, returned observation, tool-specific caveats and configured limits without teaching one tool in terms of another:
+## Claims, Evidence and gaps
 
-- source reads/search/symbol lookup/tree inventory;
-- arithmetic with calculator evidence;
-- repository measurements and token estimates;
-- objective architecture signals;
-- test execution, including focused pytest investigation;
-- read-only Git working-tree and diff inspection;
-- dry-run and write operations;
-- external memory search/store;
-- `execution_trace` for sanitized phase/context/token/tool/decision/validation facts from current or persisted jobs.
+Claims and Evidence are proportional to material content, not repository size. Guidance such as ~6, 12, or 20+ is not a quota. Semantic Gaps represent material omission, conflicting Evidence, or scope/investigation gaps. Malformed local Claim/Gap contracts are re-evaluated in isolation while valid siblings are preserved.
 
-`inspect_project` reports signals, never an `important=true` judgment. Relevance remains task-dependent and belongs to the LLM.
+## Writes
 
-### Runtime
+There is one model-facing write path: `action=patches`. Runtime enriches the transaction with deterministic preconditions, performs dry-run, asks for explicit confirmation, applies the transaction, compiles/tests/rereads, and rolls back on validation failure. Patch operations are not public agent tools.
 
-The runtime owns executable boundaries:
+## Global guards
 
-- safe paths and scan/read limits;
-- concrete tool availability based on executable state, while lexical routing is limited to cheap obvious chat/utilities and a conservative write-completion guard;
-- task deadline and call/token budgets;
-- dry-run and explicit confirmation;
-- transactional apply and rollback;
-- post-write `compileall`;
-- test detection/execution;
-- exact reread and promised create/delete validation;
-- factual evidence ledger and explicit finding limits;
-- persistent queue, cancellation and telemetry.
+Default job guards remain bounded by working set, cumulative prompt/completion/total budgets, agent turns, LLM calls, tool calls, task deadline, no-progress detection and repeated-call protection. Output limits are ceilings; only actual provider usage is charged.
 
-## Phase machine
+## Context boundary
 
-Normal writes do not rely on the global turn limit as the anti-loop mechanism:
+`request` is the only active task. `conversation_background` is stable across turns but non-authoritative; previous goals do not become current goals automatically. `investigation_map` is current-session navigation state derived from observable successful tool history and survives semantic follow-up.
 
-- `write_investigate` — discover/read required sources;
-- `write_prepare` — fill genuinely missing source and prefer the transaction;
-- `write_patch_only` — reads disappear; only the patch proposal may complete the task;
-- `write_patch_retry` — one bounded correction after rejected dry-run;
-- `analysis_answer_only` — tools close and the model answers from current evidence.
-
-Equivalent fresh reads are rejected through semantic coverage. Consecutive no-progress turns force completion or fail with a specific runtime code. `run_tests` enters `analysis_answer_only` only when runtime state shows a narrow test-only request and no other project observation; compound investigations remain open.
-
-## Context model
-
-The session retains only what helps the current task:
-
-- original request;
-- compact stable task anchor;
-- optional plan;
-- latest tool result;
-- bounded relevant source snippets;
-- compact evidence index;
-- phase/progress counters;
-- pending supervised write state when required.
-
-Full conversation history is not replayed on every turn. External project memory is not injected automatically.
-
-## Factual response ledger
-
-Project facts, confirmed bugs and contextual risks must map to real evidence. The LLM may still form hypotheses, opinions, tradeoffs and recommendations when they are clearly framed as interpretation rather than verified project fact. Preferred claims reference visible non-heading sentences by 1-based index, avoiding a second copy of the answer. The ledger is internal execution metadata; the user receives natural prose.
-
-## Post-write verification
-
-```text
-apply
-→ compile changed Python files
-→ detect/run tests
-→ rollback on failure
-→ reread through workspace tool
-→ exact full-output verification
-→ confirm create/delete promises
-→ verified or partial-verification conclusion
-```
-
-A failed confirmed write preserves bounded real diagnostic output and rollback state for follow-up questions.
-
-## Rev4.12.4.1 context and budget model
-
-The default model window is 32,768 tokens per request. Analysis output reserve is stable and phase-based rather than growing with source volume. The task-wide effective prompt budget is 96,000 tokens, so several individually valid requests can complete one investigation without pretending that 96k tokens fit in a single 32k model context. Analysis phases remain observational and never receive patch dry-run tools automatically.
-
-
-Structured tool output is allowed to be large inside the runtime, but the next LLM prompt receives a deep-copied bounded view. Lists, maps and long strings are reduced generically until the prompt fits the configured context budget. Already-cropped strings now converge at a stable minimum instead of being re-suffixed indefinitely. Full results stay in session/history.
-
-## Rev4.12.4.1 observable history
-
-The job result already contains deterministic execution metadata. Rev4.12 turns a sanitized subset into an on-demand API/UI view.
-
-Visible:
-
-- job status/timing;
-- turns and runtime phase;
-- per-call LLM usage metadata and latency;
-- aggregate prompt/cached/new/effective/output token counts;
-- called tools with an explicit visible tool name, bounded safe arguments and summarized results;
-- compile/test/reread/rollback stages;
-- failure codes;
-- accepted/rejected decision type per turn and validation reason.
-
-Never visible through this surface:
-
-- chain-of-thought;
-- raw system/user prompts sent to the model;
-- raw model decisions/responses;
-- source contents or evidence snippets;
-- evidence hashes;
-- external-memory bodies.
-
-The web client requests `/jobs/<id>/history` only when the user expands **histórico**, so normal polling stays small. Decision records contain only protocol outcomes (`tool`, `final`, rejection code, etc.), never hidden reasoning or model prose.
-
-## Design-history rule
-
-Removed architectures and the reason they were removed are recorded in [`UPDATE_HISTORY.md`](../UPDATE_HISTORY.md). A removed mechanism should not be reintroduced without a concrete current failure, a test/metric proving it, and an explanation of what changed enough to prevent the old failure mode.
+Blocked reads are control feedback, not executions. The identical-tool loop counts only executable calls that actually ran. Claim, Semantic Gap and Finding consistency recoveries remain internal verifier operations.

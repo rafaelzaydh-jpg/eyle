@@ -57,11 +57,6 @@ def _owner_pid(owner):
         return None
 
 
-def _pid_alive(pid):
-    """Compatibilidade interna para o probe central e seguro de PID."""
-    return pid_ativo(pid)
-
-
 def _cleanup_stale(conn, now):
     conn.execute("DELETE FROM limiter_slots WHERE expires_at <= ?", (now,))
     rows = conn.execute("SELECT limiter_key, slot, owner FROM limiter_slots").fetchall()
@@ -69,7 +64,7 @@ def _cleanup_stale(conn, now):
     for row in rows:
         pid = _owner_pid(row["owner"])
         if pid not in estado_por_pid:
-            estado_por_pid[pid] = _pid_alive(pid)
+            estado_por_pid[pid] = pid_ativo(pid)
         if not estado_por_pid[pid]:
             conn.execute(
                 "DELETE FROM limiter_slots WHERE limiter_key=? AND slot=? AND owner=?",

@@ -27,12 +27,17 @@ class AgentSession:
     prompt_snapshots: List[Dict[str, Any]] = field(default_factory=list)
     phase_history: List[Dict[str, Any]] = field(default_factory=list)
     relevant_sources: List[Dict[str, Any]] = field(default_factory=list)
-    final_claims: List[Dict[str, Any]] = field(default_factory=list)
+    visible_source_ranges: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    claim_review: Dict[str, Any] = field(default_factory=dict)
+    claim_review_history: List[Dict[str, Any]] = field(default_factory=list)
+    claim_repair_attempts: int = 0
+    claim_followup_pending: bool = False
+    claim_followup_feedback: str = ""
     phase: str = "start"
     investigation_turns: int = 0
     no_progress_turns: int = 0
     phase_violations: int = 0
-    context_anchor: List[Dict[str, Any]] = field(default_factory=list)
+    conversation_background: List[Dict[str, Any]] = field(default_factory=list)
     write_validation: Dict[str, Any] = field(default_factory=dict)
 
     def evidence_index(self) -> List[Dict[str, Any]]:
@@ -89,7 +94,7 @@ class AgentSession:
         evidence = {
             key: {
                 field: value for field, value in item.items()
-                if field not in {"conteudo", "conteudo_raw", "trecho_numerado"}
+                if field not in {"conteudo", "trecho_numerado"}
             }
             for key, item in self.evidence.items() if isinstance(item, dict)
         }
@@ -102,7 +107,7 @@ class AgentSession:
             if isinstance(detail, dict):
                 clone["detail"] = {
                     key: value for key, value in detail.items()
-                    if key not in {"conteudo", "conteudo_raw", "trecho_numerado", "resultados"}
+                    if key not in {"conteudo", "trecho_numerado", "resultados"}
                 }
             latest_results.append(clone)
         return {
@@ -120,12 +125,17 @@ class AgentSession:
             "prompt_snapshots": self.prompt_snapshots,
             "phase_history": self.phase_history,
             "relevant_sources": self.relevant_sources,
-            "final_claims": self.final_claims,
+            "visible_source_ranges": self.visible_source_ranges,
+            "claim_review": self.claim_review,
+            "claim_review_history": self.claim_review_history[-10:],
+            "claim_repair_attempts": self.claim_repair_attempts,
+            "claim_followup_pending": self.claim_followup_pending,
+            "claim_followup_feedback": self.claim_followup_feedback,
             "phase": self.phase,
             "investigation_turns": self.investigation_turns,
             "no_progress_turns": self.no_progress_turns,
             "phase_violations": self.phase_violations,
-            "context_anchor": self.context_anchor,
+            "conversation_background": self.conversation_background,
             "write_validation": self.write_validation,
         }
 
@@ -147,11 +157,16 @@ class AgentSession:
         session.prompt_snapshots = list(data.get("prompt_snapshots") or [])
         session.phase_history = list(data.get("phase_history") or [])
         session.relevant_sources = list(data.get("relevant_sources") or [])
-        session.final_claims = list(data.get("final_claims") or [])
+        session.visible_source_ranges = dict(data.get("visible_source_ranges") or {})
+        session.claim_review = dict(data.get("claim_review") or {})
+        session.claim_review_history = list(data.get("claim_review_history") or [])
+        session.claim_repair_attempts = int(data.get("claim_repair_attempts") or 0)
+        session.claim_followup_pending = bool(data.get("claim_followup_pending", False))
+        session.claim_followup_feedback = str(data.get("claim_followup_feedback") or "")
         session.phase = str(data.get("phase") or "start")
         session.investigation_turns = int(data.get("investigation_turns") or 0)
         session.no_progress_turns = int(data.get("no_progress_turns") or 0)
         session.phase_violations = int(data.get("phase_violations") or 0)
-        session.context_anchor = list(data.get("context_anchor") or [])
+        session.conversation_background = list(data.get("conversation_background") or [])
         session.write_validation = dict(data.get("write_validation") or {})
         return session

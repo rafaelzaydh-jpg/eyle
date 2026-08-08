@@ -196,7 +196,7 @@ def test_runtime_assigns_confirmation_metadata_once(monkeypatch, tmp_path):
         "continuation_kind": "write_confirmation",
         "pergunta_ao_usuario": "Proposta pronta.",
         "estado": {"request": "mude o arquivo"},
-        "tool_pendente": {"tool": "apply_patch", "arguments": {}},
+        "write_transaction": {"patches": [{"operation": "create", "path": "x.txt", "content": "x"}]},
     }
     saved = service_mod.salvar_agent_pendente(
         core_pending,

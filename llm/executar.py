@@ -6,7 +6,6 @@ Transporta o único protocolo AgentSession para o backend configurado.
 import hashlib
 import json
 import random
-import re
 import socket
 import sys
 import threading
@@ -19,54 +18,53 @@ from eyle.core.token_budget import estimate_tokens as estimar_tokens  # noqa: E4
 from eyle.runtime import telemetry  # noqa: E402
 from eyle.runtime import limiter  # noqa: E402
 from eyle.runtime import progress as job_progress  # noqa: E402
-from llm.response_adapter import NormalizedModelResponse, normalize_model_response  # noqa: E402
+from llm.response_adapter import (  # noqa: E402
+    NormalizedModelResponse, ResponseEnvelopeError,
+    normalize_ollama_chat_response, normalize_openai_chat_response,
+)
+from llm.structured import (  # noqa: E402
+    StructuredResponseError, contract_instruction, json_schema_response_format,
+    mandatory_top_level_keys, observed_top_level, parse_profile_response,
+    retry_instruction, schema_for_profile,
+)
+from llm import capabilities as structured_capabilities  # noqa: E402
 
 
 class ErroLLM(RuntimeError):
     """Falha de transporte/backend; nunca representa uma resposta do modelo."""
 
     def __init__(self, mensagem, *, transient=False, status_code=None,
-                 retry_after=None, error_code=None):
+                 retry_after=None, error_code=None, structured_error=None,
+                 structured_observed=None):
         super().__init__(mensagem)
         self.transient = bool(transient)
         self.status_code = status_code
         self.retry_after = retry_after
         self.error_code = error_code
+        self.structured_error = structured_error
+        self.structured_observed = structured_observed
 
 
 # Deteccao basica, somente em memoria, do servidor OpenAI-compativel.
 # Evita gravar estado novo no projeto e reaprende a cada reinicio da Eyle.
-_CAPACIDADES_OPENAI = {}
 _MODELOS_OPENAI = {}
 _SEMAFOROS_LLM = {}
 _SEMAFOROS_LOCK = threading.Lock()
 _COOLDOWN_ATE = {}
 _COOLDOWN_LOCK = threading.Lock()
 _LLM_RESPONSE_LOCAL = threading.local()
-_RE_BLOCO_RACIOCINIO = re.compile(
-    r"<(?:think|analysis|reasoning)>.*?</(?:think|analysis|reasoning)>",
-    re.IGNORECASE | re.DOTALL,
-)
+# Structured schemas and validation live in llm.structured.  This transport
+# layer only chooses the empirically verified mechanism for the active connection.
 
-# Schema pequeno e estavel do protocolo interno do Agente. Em llama-server
-# moderno, enviar um schema explicito ativa a gramatica de JSON; o simples
-# {"type":"json_object"} pode ser aceito pelo HTTP sem realmente impedir
-# texto livre em algumas builds/modelos.
-_SCHEMA_DECISAO_AGENTE = {
-    "type": "object",
-    "properties": {
-        "tool": {"type": "string"},
-        "arguments": {"type": "object"},
-        "tool_call": {"type": "object", "additionalProperties": True},
-        "tool_calls": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
-        "actions": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
-        "patches": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
-        "decision": {"type": "object", "additionalProperties": True},
-        "final": {"anyOf": [{"type": "string"}, {"type": "object", "additionalProperties": True}]},
-        "needs_user": {"type": "string"}
-    },
-    "additionalProperties": True
-}
+def _schema_para_perfil(perfil):
+    try:
+        return schema_for_profile(perfil)
+    except StructuredResponseError as exc:
+        raise ErroLLM(
+            f"Perfil estruturado desconhecido: {perfil}",
+            transient=False, error_code=exc.code,
+        ) from exc
+
 
 
 def _diagnostico(codigo, **campos):
@@ -273,12 +271,11 @@ def _endpoint_openai(base_url, recurso):
 
 
 def _detectar_modelos_openai(base_url, timeout, negative_ttl=60):
-    """Consulta /v1/models com cache positivo e negativo temporario.
+    """Resolve the explicit ``model: auto`` contract through ``/v1/models``.
 
-    llama-server normalmente expoe um unico modelo/alias. A deteccao evita
-    que um nome antigo em config.json derrube a comunicacao depois de trocar
-    o GGUF carregado. Servidores sem esse endpoint continuam usando o nome
-    configurado, sem mudar o comportamento anterior.
+    Discovery is never used to repair an explicit configured model name. A
+    failed or empty discovery is therefore an explicit configuration/runtime
+    error instead of a silent substitution path.
     """
     chave = str(base_url or "").rstrip("/")
     if chave in _MODELOS_OPENAI:
@@ -311,7 +308,6 @@ def _detectar_modelos_openai(base_url, timeout, negative_ttl=60):
                 "base_url": chave,
                 "exception": type(erro).__name__,
                 "detail": str(erro)[:500],
-                "fallback_strategy": "configured_model",
             },
         )
         return []
@@ -320,8 +316,6 @@ def _detectar_modelos_openai(base_url, timeout, negative_ttl=60):
     for item in corpo.get("data", []) if isinstance(corpo, dict) else []:
         if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"].strip():
             modelos.append(item["id"].strip())
-    # Resposta valida, inclusive lista vazia, tambem recebe TTL negativo para
-    # impedir nova consulta em cada decisao do agente.
     if modelos:
         _MODELOS_OPENAI[chave] = tuple(modelos)
     else:
@@ -332,24 +326,28 @@ def _detectar_modelos_openai(base_url, timeout, negative_ttl=60):
         }
         telemetry.record(
             "internal", "model_discovery", "empty",
-            metadata={"base_url": chave, "fallback_strategy": "configured_model"},
+            metadata={"base_url": chave},
         )
     return modelos
 
 
 def _resolver_modelo_openai(base_url, model, timeout, negative_ttl=60):
-    """Prefere o modelo configurado; corrige automaticamente o caso comum
-    de llama-server com um unico modelo carregado e config desatualizada."""
+    """Use an explicit model verbatim; resolve only the explicit ``auto`` mode."""
     configurado = str(model or "").strip()
+    if not configurado:
+        raise ErroLLM(
+            "Nenhum modelo foi configurado para o backend OpenAI-compatible.",
+            transient=False, error_code="MODEL_REQUIRED",
+        )
+    if configurado.lower() != "auto":
+        return configurado
     modelos = _detectar_modelos_openai(base_url, timeout, negative_ttl=negative_ttl)
     if not modelos:
-        return configurado
-    if configurado in modelos:
-        return configurado
-    if configurado.lower() == "auto" or len(modelos) == 1:
-        return modelos[0]
-    return configurado
-
+        raise ErroLLM(
+            "model='auto' exige que /v1/models retorne ao menos um modelo.",
+            transient=False, error_code="MODEL_DISCOVERY_REQUIRED",
+        )
+    return modelos[0]
 
 def _ler_corpo_http_error(erro):
     try:
@@ -368,25 +366,6 @@ def _mensagem_http_error(base_url, erro, corpo_erro=""):
     )
 
 
-def _erro_pode_ser_incompatibilidade(erro, corpo_erro):
-    """400/404/422 sao os codigos usuais para campo/role nao suportado."""
-    return getattr(erro, "code", None) in (400, 404, 422)
-
-
-def _limpar_resposta_estruturada(texto):
-    """Remove raciocinio visivel comum antes do JSON do agente.
-
-    Modelos thinking podem devolver <think>...</think> mesmo quando o servidor
-    nao separa reasoning_content. O conteudo de chat normal nao e alterado.
-    """
-    limpo = _RE_BLOCO_RACIOCINIO.sub("", texto or "").strip()
-    if limpo.startswith("```json") and limpo.endswith("```"):
-        limpo = limpo[7:-3].strip()
-    elif limpo.startswith("```") and limpo.endswith("```"):
-        limpo = limpo[3:-3].strip()
-    return limpo
-
-
 def _metadata_resposta_normalizada(normalizada):
     return {
         "finish_reason": normalizada.finish_reason,
@@ -396,14 +375,13 @@ def _metadata_resposta_normalizada(normalizada):
         "reasoning_tokens": normalizada.reasoning_tokens,
         "provider_model": normalizada.model,
         "response_id": normalizada.response_id,
-        "partial_json": bool(normalizada.partial_json),
         "streaming": bool(normalizada.streaming),
     }
 
 
 def _registrar_metadata_backend(normalizada):
     if not isinstance(normalizada, NormalizedModelResponse):
-        normalizada = normalize_model_response(normalizada)
+        raise TypeError("normalized backend response required")
     _LLM_RESPONSE_LOCAL.metadata = _metadata_resposta_normalizada(normalizada)
     return normalizada
 
@@ -412,11 +390,16 @@ def _ultima_metadata_backend():
     return dict(getattr(_LLM_RESPONSE_LOCAL, "metadata", {}) or {})
 
 
-def _texto_normalizado_backend(valor, *, permitir_raciocinio=False, streaming=False):
-    normalizada = _registrar_metadata_backend(
-        normalize_model_response(valor, streaming=streaming)
-    )
-    return normalizada.usable_text(allow_reasoning=permitir_raciocinio)
+def _texto_openai_backend(valor, *, streaming=False):
+    return _registrar_metadata_backend(
+        normalize_openai_chat_response(valor, streaming=streaming)
+    ).usable_text()
+
+
+def _texto_ollama_backend(valor, *, streaming=False):
+    return _registrar_metadata_backend(
+        normalize_ollama_chat_response(valor, streaming=streaming)
+    ).usable_text()
 
 
 def _finish_reason_truncado(metadata):
@@ -429,15 +412,36 @@ def _registrar_metadata_runtime(config, metadata):
     if not isinstance(runtime, dict):
         return
     clean = {key: value for key, value in dict(metadata or {}).items() if value is not None}
+    requested = clean.get("max_tokens_requested")
+    actual = clean.get("completion_tokens")
+    if isinstance(requested, (int, float)) and isinstance(actual, (int, float)):
+        # A per-call max is a ceiling, never a quota. Expose the unused
+        # headroom explicitly; it remains available to later calls because the
+        # task-wide pool is debited only by actual completion usage.
+        clean["completion_tokens_ceiling_unused"] = max(0, int(requested) - max(0, int(actual)))
     runtime["last_llm_response"] = clean
     history = runtime.setdefault("llm_responses", [])
     history.append(clean)
     del history[:-50]
 
 
+def _structured_response_format(profile, mode):
+    if mode == "json_schema":
+        return json_schema_response_format(profile)
+    if mode == "json_object":
+        return {"type": "json_object"}
+    if mode == "prompt":
+        return None
+    raise ErroLLM(
+        f"Modo estruturado desconhecido: {mode}",
+        transient=False, error_code="STRUCTURED_MODE_UNKNOWN",
+    )
+
+
 def _chamar_ollama(
     base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
-    forcar_json=False, max_tokens=None, read_timeout=None, on_chunk=None,
+    max_tokens=None, read_timeout=None, on_chunk=None,
+    schema_estruturado=None, perfil=None, structured_mode=None,
 ):
     url = base_url.rstrip("/") + "/api/chat"
     options = {"temperature": temperature}
@@ -452,8 +456,16 @@ def _chamar_ollama(
         "stream": bool(on_chunk),
         "options": options,
     }
-    if forcar_json:
-        payload["format"] = "json"
+    if perfil is not None:
+        if structured_mode == "json_schema":
+            payload["format"] = schema_estruturado or _schema_para_perfil(perfil)
+        elif structured_mode == "json_object":
+            payload["format"] = "json"
+        elif structured_mode != "prompt":
+            raise ErroLLM(
+                f"Modo estruturado desconhecido: {structured_mode}",
+                transient=False, error_code="STRUCTURED_MODE_UNKNOWN",
+            )
     dados = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=dados, headers={"Content-Type": "application/json"})
     with _abrir_url(req, timeout, read_timeout or timeout) as resp:
@@ -463,9 +475,24 @@ def _chamar_ollama(
                 corpo = json.loads(bruto)
             except json.JSONDecodeError:
                 corpo = bruto
-            return _texto_normalizado_backend(
-                corpo, permitir_raciocinio=bool(forcar_json),
-            )
+            try:
+                text = _texto_ollama_backend(corpo)
+            except ResponseEnvelopeError as exc:
+                raise ErroLLM(
+                    f"Ollama returned an invalid /api/chat envelope: {exc}",
+                    transient=False, error_code="BACKEND_RESPONSE_INVALID",
+                ) from exc
+            meta = _ultima_metadata_backend()
+            meta.update({
+                "structured_profile": perfil,
+                "structured_mode": structured_mode if perfil is not None else None,
+                "structured_transport": (
+                    f"ollama_{structured_mode}" if perfil is not None else "text"
+                ),
+                "structured_source": "content",
+            })
+            _LLM_RESPONSE_LOCAL.metadata = meta
+            return text
 
         partes = []
         ultimo = {}
@@ -478,7 +505,7 @@ def _chamar_ollama(
             except json.JSONDecodeError:
                 corpo = linha
             ultimo = corpo if isinstance(corpo, dict) else ultimo
-            delta = _texto_normalizado_backend(corpo, streaming=True)
+            delta = _texto_ollama_backend(corpo, streaming=True)
             if delta:
                 partes.append(delta)
             on_chunk(delta, ultimo, bool(ultimo.get("done")))
@@ -488,186 +515,363 @@ def _chamar_ollama(
 
 def _chamar_openai_compatible(
     base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
-    forcar_json=False, max_tokens=None, usar_system_role=True,
-    desativar_raciocinio=False, recuperar_reasoning_content=False,
-    read_timeout=None, on_chunk=None,
+    max_tokens=None, read_timeout=None, on_chunk=None,
+    schema_estruturado=None, perfil=None, on_request=None, structured_mode=None,
 ):
-    url = _endpoint_openai(base_url, "chat/completions")
-    if usar_system_role:
-        messages = [
-            {"role": "system", "content": prompt_sistema},
-            {"role": "user", "content": prompt_usuario},
-        ]
-    else:
-        messages = [{
-            "role": "user",
-            "content": (
-                "SYSTEM INSTRUCTIONS:\n" + prompt_sistema +
-                "\n\nUSER MESSAGE:\n" + prompt_usuario
-            ),
-        }]
+    """Call one OpenAI-compatible Chat Completions endpoint.
 
+    Structured transport is explicit: json_schema, json_object or prompt.  The
+    caller has already behaviorally verified the selected capability.
+    """
+    if on_request is not None:
+        on_request()
+    url = _endpoint_openai(base_url, "chat/completions")
     payload = {
         "model": model,
-        "messages": messages,
+        "messages": [
+            {"role": "system", "content": prompt_sistema},
+            {"role": "user", "content": prompt_usuario},
+        ],
         "temperature": temperature,
         "stream": bool(on_chunk),
     }
     if max_tokens:
         payload["max_tokens"] = max_tokens
-    if forcar_json:
-        payload["response_format"] = {
-            "type": "json_object",
-            "schema": _SCHEMA_DECISAO_AGENTE,
-        }
-        if desativar_raciocinio:
-            payload["reasoning_effort"] = "none"
-            payload["chat_template_kwargs"] = {"enable_thinking": False}
+    if perfil is not None:
+        fmt = _structured_response_format(perfil, structured_mode)
+        if fmt is not None:
+            payload["response_format"] = fmt
     dados = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=dados, headers={"Content-Type": "application/json"})
-    with _abrir_url(req, timeout, read_timeout or timeout) as resp:
-        if on_chunk is not None:
-            partes = []
-            ultimo = {}
-            terminou = False
-            for linha_bruta in resp:
-                linha = linha_bruta.decode("utf-8", errors="replace").strip()
-                if not linha:
-                    continue
-                if linha.startswith("data:"):
-                    linha = linha[5:].strip()
-                if linha == "[DONE]":
-                    terminou = True
-                    break
-                try:
-                    corpo = json.loads(linha)
-                except json.JSONDecodeError:
-                    corpo = linha
-                ultimo = corpo if isinstance(corpo, dict) else ultimo
-                # O adapter reconhece content e reasoning_content. Como este
-                # caminho so e usado para resposta textual visivel, raciocinio
-                # permanece privado e nunca entra no callback publico.
-                delta = _texto_normalizado_backend(corpo, streaming=True)
-                if delta:
-                    partes.append(delta)
-                on_chunk(delta, ultimo, False)
-            on_chunk("", ultimo, True)
-            return "".join(partes)
+    try:
+        with _abrir_url(req, timeout, read_timeout or timeout) as resp:
+            if on_chunk is not None:
+                partes = []
+                ultimo = {}
+                for linha_bruta in resp:
+                    linha = linha_bruta.decode("utf-8", errors="replace").strip()
+                    if not linha:
+                        continue
+                    if linha.startswith("data:"):
+                        linha = linha[5:].strip()
+                    if linha == "[DONE]":
+                        break
+                    try:
+                        corpo = json.loads(linha)
+                    except json.JSONDecodeError:
+                        corpo = linha
+                    ultimo = corpo if isinstance(corpo, dict) else ultimo
+                    try:
+                        delta = _texto_openai_backend(corpo, streaming=True)
+                    except ResponseEnvelopeError as exc:
+                        raise ErroLLM(
+                            f"OpenAI-compatible backend returned an invalid streaming envelope: {exc}",
+                            transient=False, error_code="BACKEND_RESPONSE_INVALID",
+                        ) from exc
+                    if delta:
+                        partes.append(delta)
+                    on_chunk(delta, ultimo, False)
+                on_chunk("", ultimo, True)
+                return "".join(partes)
 
-        bruto = resp.read().decode("utf-8", errors="replace")
-        try:
-            corpo = json.loads(bruto)
-        except json.JSONDecodeError:
-            corpo = bruto
-    return _texto_normalizado_backend(
-        corpo,
-        permitir_raciocinio=bool(forcar_json or recuperar_reasoning_content),
-    )
+            bruto = resp.read().decode("utf-8", errors="replace")
+            try:
+                corpo = json.loads(bruto)
+            except json.JSONDecodeError:
+                corpo = bruto
+    except urllib.error.HTTPError as exc:
+        body = _ler_corpo_http_error(exc)
+        code = (
+            "STRUCTURED_OUTPUT_REJECTED"
+            if perfil is not None and structured_mode != "prompt" and getattr(exc, "code", None) in (400, 404, 422)
+            else "HTTP_ERROR"
+        )
+        raise ErroLLM(
+            _mensagem_http_error(base_url, exc, body),
+            transient=False,
+            status_code=getattr(exc, "code", None),
+            error_code=code,
+        ) from exc
+
+    try:
+        normalized = normalize_openai_chat_response(corpo)
+        text = _registrar_metadata_backend(normalized).usable_text()
+    except ResponseEnvelopeError as exc:
+        raise ErroLLM(
+            f"OpenAI-compatible backend returned an invalid Chat Completions envelope: {exc}",
+            transient=False, error_code="BACKEND_RESPONSE_INVALID",
+        ) from exc
+    source = "content" if normalized.content.strip() else "empty"
+    meta = _ultima_metadata_backend()
+    meta.update({
+        "structured_profile": perfil,
+        "structured_mode": structured_mode if perfil is not None else None,
+        "structured_transport": (
+            f"openai_{structured_mode}" if perfil is not None else "text"
+        ),
+        "structured_source": source,
+    })
+    _LLM_RESPONSE_LOCAL.metadata = meta
+    return text
 
 
-def _chamar_openai_com_fallback(
-    base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
-    forcar_json=False, max_tokens=None, read_timeout=None, on_chunk=None,
-    on_request=None,
+def _record_administrative_probe(config, *, mode, ok, metadata=None, source="probe"):
+    runtime = (config or {}).get("_runtime_agent_budget")
+    if not isinstance(runtime, dict):
+        return
+    meta = dict(metadata or {})
+    runtime["administrative_llm_calls"] = int(runtime.get("administrative_llm_calls", 0) or 0) + 1
+    for runtime_key, meta_key in (
+        ("administrative_prompt_tokens", "prompt_tokens"),
+        ("administrative_completion_tokens", "completion_tokens"),
+        ("administrative_reasoning_tokens", "reasoning_tokens"),
+    ):
+        value = meta.get(meta_key)
+        if isinstance(value, (int, float)):
+            runtime[runtime_key] = int(runtime.get(runtime_key, 0) or 0) + int(value)
+    history = runtime.setdefault("administrative_llm_history", [])
+    history.append({
+        "kind": "structured_capability_probe",
+        "mode": mode,
+        "ok": bool(ok),
+        "source": source,
+        "provider_model": meta.get("provider_model"),
+        "finish_reason": meta.get("finish_reason"),
+        "prompt_tokens": meta.get("prompt_tokens"),
+        "completion_tokens": meta.get("completion_tokens"),
+    })
+    del history[:-30]
+
+
+def _probe_nonce(base_url, model, mode):
+    material = f"{base_url}|{model}|{mode}|{time.time_ns()}".encode("utf-8")
+    return hashlib.sha256(material).hexdigest()[:16]
+
+
+def _probe_schema(nonce):
+    # Exercise the JSON-Schema features used by Eyle's real profiles instead of
+    # trusting a provider that only supports a trivial object subset.
+    return {
+        "type": "object",
+        "properties": {
+            "schema_probe": {"type": "string", "enum": [nonce]},
+            "items": {"type": "array", "maxItems": 0},
+            "optional": {"anyOf": [{"type": "null"}, {"type": "string"}]},
+        },
+        "required": ["schema_probe", "items", "optional"],
+        "additionalProperties": False,
+    }
+
+
+def _probe_result(mode, text, nonce):
+    try:
+        value = json.loads(str(text or ""))
+    except json.JSONDecodeError:
+        return False
+    if mode == "json_schema":
+        return isinstance(value, dict) and value == {"schema_probe": nonce, "items": [], "optional": None}
+    if mode == "json_object":
+        return isinstance(value, dict)
+    if mode == "prompt":
+        return isinstance(value, dict) and value == {"prompt_probe": nonce}
+    return False
+
+
+def _probe_structured_mode(
+    *, base_url, model, openai_compatible, mode, connect_timeout, read_timeout, config,
 ):
-    """Detect common OpenAI-compatible incompatibilities with accounting."""
-    chave = (str(base_url).rstrip("/"), str(model))
-    capacidades = _CAPACIDADES_OPENAI.setdefault(
-        chave, {"json_mode": None, "system_role": None, "reasoning_controls": None},
-    )
-    capacidades.setdefault("reasoning_controls", None)
-    usar_json_nativo = bool(forcar_json and capacidades["json_mode"] is not False)
-    usar_system = capacidades["system_role"] is not False
-    usar_controles_raciocinio = bool(
-        forcar_json and capacidades["reasoning_controls"] is not False
-    )
+    """Behaviorally verify one structured-output mechanism.
 
-    def request(**kwargs):
-        if on_request is not None:
-            on_request()
-        return _chamar_openai_compatible(
-            base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
-            max_tokens=max_tokens, read_timeout=read_timeout, on_chunk=on_chunk,
-            **kwargs,
+    Probe calls are administrative: they are observable and token-accounted in
+    their own counters, but do not consume AgentSession turns/tools or the job's
+    normal LLM-call/completion ceilings.
+    """
+    nonce = _probe_nonce(base_url, model, mode)
+    system = (
+        "You are a transport capability probe. Follow the user instruction exactly unless "
+        "the API response-format mechanism itself enforces another representation."
+    )
+    if mode == "json_schema":
+        user = (
+            'Return exactly this JSON object and no other keys: '
+            + json.dumps({"prompt_probe": nonce}, separators=(",", ":"))
+        )
+    elif mode == "json_object":
+        user = f"Return plain text PROBE-{nonce}, not a JSON object, with no braces or quotes."
+    elif mode == "prompt":
+        user = (
+            "Return exactly one JSON object with no prose: "
+            + json.dumps({"prompt_probe": nonce}, separators=(",", ":"))
+        )
+    else:
+        return False
+
+    max_tokens = 96
+    timeout = max(0.2, min(float(connect_timeout), 10.0))
+    read = max(timeout, min(float(read_timeout), 30.0))
+    metadata = {}
+    try:
+        if openai_compatible:
+            url = _endpoint_openai(base_url, "chat/completions")
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "temperature": 0,
+                "stream": False,
+                "max_tokens": max_tokens,
+            }
+            if mode == "json_schema":
+                payload["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "eyle_capability_probe",
+                        "strict": True,
+                        "schema": _probe_schema(nonce),
+                    },
+                }
+            elif mode == "json_object":
+                payload["response_format"] = {"type": "json_object"}
+            req = urllib.request.Request(
+                url, data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            try:
+                with _abrir_url(req, timeout, read) as resp:
+                    raw = resp.read().decode("utf-8", errors="replace")
+            except urllib.error.HTTPError as exc:
+                if getattr(exc, "code", None) in (400, 422):
+                    _record_administrative_probe(config, mode=mode, ok=False, source="http_rejected")
+                    return False
+                raise
+            try:
+                body = json.loads(raw)
+                normalized = normalize_openai_chat_response(body)
+            except (json.JSONDecodeError, ResponseEnvelopeError) as exc:
+                _record_administrative_probe(config, mode=mode, ok=False, source="invalid_envelope")
+                return False
+            text = normalized.usable_text()
+            metadata = _metadata_resposta_normalizada(normalized)
+        else:
+            url = base_url.rstrip("/") + "/api/chat"
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "stream": False,
+                "options": {"temperature": 0, "num_predict": max_tokens},
+            }
+            if mode == "json_schema":
+                payload["format"] = _probe_schema(nonce)
+            elif mode == "json_object":
+                payload["format"] = "json"
+            req = urllib.request.Request(
+                url, data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            try:
+                with _abrir_url(req, timeout, read) as resp:
+                    raw = resp.read().decode("utf-8", errors="replace")
+            except urllib.error.HTTPError as exc:
+                if getattr(exc, "code", None) in (400, 422):
+                    _record_administrative_probe(config, mode=mode, ok=False, source="http_rejected")
+                    return False
+                raise
+            try:
+                body = json.loads(raw)
+                normalized = normalize_ollama_chat_response(body)
+            except (json.JSONDecodeError, ResponseEnvelopeError):
+                _record_administrative_probe(config, mode=mode, ok=False, source="invalid_envelope")
+                return False
+            text = normalized.usable_text()
+            metadata = _metadata_resposta_normalizada(normalized)
+    except urllib.error.URLError as exc:
+        raise ErroLLM(
+            f"Falha de transporte durante o handshake administrativo: {exc}",
+            transient=True, error_code="STRUCTURED_HANDSHAKE_TRANSPORT_ERROR",
+        ) from exc
+    except (socket.timeout, TimeoutError) as exc:
+        raise ErroLLM(
+            f"Timeout durante o handshake administrativo: {exc}",
+            transient=True, error_code="STRUCTURED_HANDSHAKE_TIMEOUT",
+        ) from exc
+
+    ok = _probe_result(mode, text, nonce)
+    _record_administrative_probe(config, mode=mode, ok=ok, metadata=metadata)
+    return ok
+
+
+def _ensure_structured_capability(
+    *, base_url, model, openai_compatible, connect_timeout, read_timeout, config,
+):
+    transport = "openai_compatible" if openai_compatible else "ollama"
+
+    def probe(mode):
+        return _probe_structured_mode(
+            base_url=base_url, model=model, openai_compatible=openai_compatible,
+            mode=mode, connect_timeout=connect_timeout, read_timeout=read_timeout,
+            config=config,
         )
 
     try:
-        resposta = request(
-            forcar_json=usar_json_nativo,
-            usar_system_role=usar_system,
-            desativar_raciocinio=usar_controles_raciocinio,
-            recuperar_reasoning_content=forcar_json,
+        result = structured_capabilities.ensure_capability(
+            transport=transport, base_url=base_url, model=model, probe=probe,
         )
-        if usar_json_nativo:
-            capacidades["json_mode"] = True
-        if usar_system:
-            capacidades["system_role"] = True
-        if usar_controles_raciocinio:
-            capacidades["reasoning_controls"] = True
-        return resposta
-    except urllib.error.HTTPError as primeiro_erro:
-        erro_inicial = primeiro_erro
-        primeiro_corpo = _ler_corpo_http_error(primeiro_erro)
-        if not _erro_pode_ser_incompatibilidade(primeiro_erro, primeiro_corpo):
-            raise _erro_http(base_url, primeiro_erro, primeiro_corpo) from primeiro_erro
+    except RuntimeError as exc:
+        raise ErroLLM(
+            "A conexão LLM não demonstrou nenhum modo estruturado utilizável.",
+            transient=False, error_code="LLM_STRUCTURED_OUTPUT_UNAVAILABLE",
+        ) from exc
+    result = dict(result)
+    result.update({
+        "transport": transport,
+        "model": str(model),
+    })
+    runtime = (config or {}).get("_runtime_agent_budget")
+    if isinstance(runtime, dict):
+        previous = runtime.get("structured_capability")
+        keep_previous = (
+            result.get("source") == "process"
+            and isinstance(previous, dict)
+            and previous.get("fingerprint") == result.get("fingerprint")
+            and previous.get("mode") == result.get("mode")
+            and previous.get("source") in {"renegotiated", "revalidated", "cache_verified", "cache_verified_retry", "probe"}
+        )
+        if not keep_previous:
+            runtime["structured_capability"] = dict(result)
+    return result
 
-    if usar_json_nativo and usar_controles_raciocinio:
-        try:
-            resposta = request(
-                forcar_json=True, usar_system_role=usar_system,
-                desativar_raciocinio=False,
-                recuperar_reasoning_content=forcar_json,
-            )
-            capacidades["reasoning_controls"] = False
-            capacidades["json_mode"] = True
-            if usar_system:
-                capacidades["system_role"] = True
-            return resposta
-        except urllib.error.HTTPError as erro_sem_controles:
-            corpo_sem_controles = _ler_corpo_http_error(erro_sem_controles)
-            if not _erro_pode_ser_incompatibilidade(
-                erro_sem_controles, corpo_sem_controles,
-            ):
-                raise _erro_http(
-                    base_url, erro_sem_controles, corpo_sem_controles,
-                ) from erro_sem_controles
-            capacidades["reasoning_controls"] = False
 
-    if usar_json_nativo:
-        try:
-            resposta = request(
-                forcar_json=False, usar_system_role=usar_system,
-                recuperar_reasoning_content=forcar_json,
-            )
-            capacidades["json_mode"] = False
-            if usar_system:
-                capacidades["system_role"] = True
-            return resposta
-        except urllib.error.HTTPError as segundo_erro:
-            erro_apos_json = segundo_erro
-            segundo_corpo = _ler_corpo_http_error(segundo_erro)
-            if not _erro_pode_ser_incompatibilidade(segundo_erro, segundo_corpo):
-                raise _erro_http(base_url, segundo_erro, segundo_corpo) from segundo_erro
-    else:
-        erro_apos_json = erro_inicial
-        segundo_corpo = primeiro_corpo
+def _revalidate_structured_capability(
+    *, base_url, model, openai_compatible, current_mode, connect_timeout, read_timeout, config,
+):
+    transport = "openai_compatible" if openai_compatible else "ollama"
 
-    if usar_system:
-        try:
-            resposta = request(
-                forcar_json=False, usar_system_role=False,
-                recuperar_reasoning_content=forcar_json,
-            )
-            capacidades["system_role"] = False
-            if usar_json_nativo:
-                capacidades["json_mode"] = False
-            return resposta
-        except urllib.error.HTTPError as terceiro_erro:
-            terceiro_corpo = _ler_corpo_http_error(terceiro_erro)
-            raise _erro_http(base_url, terceiro_erro, terceiro_corpo) from terceiro_erro
+    def probe(mode):
+        return _probe_structured_mode(
+            base_url=base_url, model=model, openai_compatible=openai_compatible,
+            mode=mode, connect_timeout=connect_timeout, read_timeout=read_timeout,
+            config=config,
+        )
 
-    raise _erro_http(base_url, erro_apos_json, segundo_corpo) from erro_apos_json
-
+    try:
+        result = structured_capabilities.revalidate_capability(
+            transport=transport, base_url=base_url, model=model,
+            current_mode=current_mode, probe=probe,
+        )
+    except RuntimeError as exc:
+        raise ErroLLM(
+            "A conexão LLM deixou de demonstrar um modo estruturado utilizável.",
+            transient=False, error_code="LLM_STRUCTURED_OUTPUT_UNAVAILABLE",
+        ) from exc
+    runtime = (config or {}).get("_runtime_agent_budget")
+    if isinstance(runtime, dict):
+        runtime["structured_capability"] = dict(result)
+    return result
 
 def _timeout_restante(config):
     runtime = (config or {}).get("_runtime_agent_budget") or {}
@@ -692,6 +896,51 @@ def _reservar_orcamento_llm(config):
     runtime["llm_calls"] = atual + 1
 
 
+def _completion_budget_remaining(config):
+    runtime = (config or {}).get("_runtime_agent_budget")
+    if not isinstance(runtime, dict):
+        return None
+    maximum = int(runtime.get("max_completion_tokens", runtime.get("max_generated_tokens", 0)) or 0)
+    if maximum <= 0:
+        return None
+    used = int(runtime.get("generated_tokens", runtime.get("completion_tokens_actual", 0)) or 0)
+    return max(0, maximum - used)
+
+
+def _preflight_completion_budget(config, max_tokens, *, pending_completion_tokens=0):
+    """Reject an impossible LLM request before any backend call is sent.
+
+    ``downstream_completion_reserve_tokens`` protects only the next mandatory
+    semantic stage already known by the caller. It is authority/budget state,
+    not a semantic decision: the runtime never chooses what the model should
+    say or which evidence matters.
+    """
+    runtime = (config or {}).get("_runtime_agent_budget")
+    if not isinstance(runtime, dict):
+        return {"remaining": None, "requested": int(max_tokens or 0), "downstream_reserve": 0}
+    remaining = _completion_budget_remaining(config)
+    requested = max(0, int(max_tokens or 0))
+    pending = max(0, int(pending_completion_tokens or 0))
+    cfg_llm = (config or {}).get("llm") or {}
+    try:
+        downstream = max(0, int(cfg_llm.get("downstream_completion_reserve_tokens", 0) or 0))
+    except (TypeError, ValueError):
+        downstream = 0
+    runtime["completion_tokens_remaining_pre_call"] = remaining
+    runtime["downstream_completion_reserve_tokens"] = downstream
+    runtime["completion_tokens_requested_pre_call"] = requested
+    runtime["completion_tokens_pending_pre_call"] = pending
+    if remaining is not None and pending + requested + downstream > remaining:
+        raise ErroLLM(
+            "A próxima chamada LLM não cabe no orçamento de saída restante sem consumir a reserva da próxima etapa obrigatória.",
+            transient=False, error_code="MAX_COMPLETION_BUDGET_INSUFFICIENT",
+        )
+    return {
+        "remaining": remaining, "requested": requested, "pending": pending,
+        "downstream_reserve": downstream,
+    }
+
+
 def _prompt_cache_weight(config):
     context = (config or {}).get("context_engine") or {}
     try:
@@ -712,6 +961,7 @@ def _reservar_requisicao_llm(config, prompt_sistema, prompt_usuario, max_tokens)
     runtime = (config or {}).get("_runtime_agent_budget")
     if not isinstance(runtime, dict):
         return {"estimated_prompt_tokens": 0, "estimated_effective_tokens": 0}
+    _preflight_completion_budget(config, max_tokens)
     cfg_llm = (config or {}).get("llm", {})
     cfg_context = (config or {}).get("context_engine", {})
     chars_per_token = max(1, int(cfg_context.get("chars_per_token_fallback", 3) or 3))
@@ -825,6 +1075,7 @@ def _registrar_tokens_gerados(config, resposta, metadata_respostas=None):
     max_tokens = int(runtime.get("max_completion_tokens", runtime.get("max_generated_tokens", 0)) or 0)
     runtime["generated_tokens"] = total
     runtime["completion_tokens_actual"] = total
+    runtime["completion_tokens_remaining"] = max(0, max_tokens - total) if max_tokens > 0 else None
     if max_tokens > 0 and total > max_tokens:
         raise ErroLLM(
             "O limite global de tokens de saída da tarefa foi excedido.",
@@ -866,12 +1117,11 @@ def _max_tokens_da_chamada(cfg_llm, perfil):
 
 
 def _timeouts_da_chamada(cfg_llm, perfil, config):
-    legado = float(cfg_llm.get("timeout_seconds", 180))
-    connect_timeout = float(cfg_llm.get("connect_timeout_seconds", min(legado, 10)))
+    connect_timeout = float(cfg_llm.get("connect_timeout_seconds", 5))
     perfil_chave = f"{perfil}_timeout_seconds" if perfil else None
     read_timeout = float(
-        cfg_llm.get(perfil_chave, cfg_llm.get("read_timeout_seconds", legado))
-        if perfil_chave else cfg_llm.get("read_timeout_seconds", legado)
+        cfg_llm.get(perfil_chave, cfg_llm.get("read_timeout_seconds", 120))
+        if perfil_chave else cfg_llm.get("read_timeout_seconds", 120)
     )
     restante = _timeout_restante(config)
     if restante is not None:
@@ -957,10 +1207,11 @@ def _criar_callback_stream(config, perfil, visivel, chars_por_token):
 
 
 def _chamar_llm_impl(
-    prompt_sistema, prompt_usuario, config, forcar_json=False, perfil=None,
-    stream_visible=False,
+    prompt_sistema, prompt_usuario, config, perfil=None, stream_visible=False,
+    _capability_recovery=False,
 ):
     """Chama o backend com limites, isolamento e retry transitório."""
+    canonical_system_prompt = prompt_sistema
     cfg_llm = config.get("llm", {})
     base_url = cfg_llm.get("base_url", "http://localhost:11434")
     configured_model = cfg_llm.get("model", "qwen2.5:7b-instruct-q4_0")
@@ -982,10 +1233,21 @@ def _chamar_llm_impl(
             negative_ttl=cfg_llm.get("model_discovery_negative_ttl_seconds", 60),
         )
 
+    structured_capability = None
+    structured_mode = None
+    if perfil is not None:
+        structured_capability = _ensure_structured_capability(
+            base_url=base_url, model=model, openai_compatible=openai_compatible,
+            connect_timeout=connect_timeout, read_timeout=read_timeout, config=config,
+        )
+        structured_mode = structured_capability["mode"]
+        prompt_sistema = prompt_sistema.rstrip() + "\n\n" + contract_instruction(perfil)
+
     job_progress.publicar(
         config, "llm_wait", "Aguardando a LLM local",
         profile=perfil or "default",
     )
+    _preflight_completion_budget(config, max_tokens)
     _reservar_orcamento_llm(config)
 
     chave_tentativas = (
@@ -1033,14 +1295,12 @@ def _chamar_llm_impl(
             transient=True, error_code="LLM_PROCESS_RATE_LIMIT_WAIT_TIMEOUT",
         )
 
-    # Decisoes estruturadas podem vir apenas em reasoning_content. O parser de
-    # streaming omite esse campo de proposito para nao publicar raciocinio
-    # interno; por isso chamadas JSON precisam usar a resposta nao-streaming,
-    # que ja possui a recuperacao segura desse campo.
+    # Structured profiles are always non-streaming so only the final content
+    # field can cross the executable-response boundary.
     streaming_ativado = bool(
         job_progress.job_id_de(config) is not None
         and cfg_llm.get("stream_responses", True)
-        and not forcar_json
+        and perfil is None
     )
     chars_por_token = max(
         1, int((config or {}).get("context_engine", {}).get("chars_per_token_fallback", 3)),
@@ -1079,18 +1339,22 @@ def _chamar_llm_impl(
                         ))
 
                     if openai_compatible:
-                        resposta_backend = _chamar_openai_com_fallback(
+                        resposta_backend = _chamar_openai_compatible(
                             base_url, model, prompt_sistema, prompt_usuario, temperature,
-                            connect_atual, forcar_json=forcar_json, max_tokens=token_limit,
+                            connect_atual, max_tokens=token_limit,
                             read_timeout=read_atual, on_chunk=callback,
                             on_request=before_request,
+                            schema_estruturado=(_schema_para_perfil(perfil) if perfil is not None else None), perfil=perfil,
+                            structured_mode=structured_mode,
                         )
                     else:
                         before_request()
                         resposta_backend = _chamar_ollama(
                             base_url, model, prompt_sistema, prompt_usuario, temperature,
-                            connect_atual, forcar_json=forcar_json, max_tokens=token_limit,
+                            connect_atual, max_tokens=token_limit,
                             read_timeout=read_atual, on_chunk=callback,
+                            schema_estruturado=(_schema_para_perfil(perfil) if perfil is not None else None), perfil=perfil,
+                            structured_mode=structured_mode,
                         )
                     metadata_backend = _ultima_metadata_backend()
                     if reservations:
@@ -1107,13 +1371,28 @@ def _chamar_llm_impl(
                 metadata_resposta.update({
                     "configured_model": str(configured_model),
                     "resolved_model": str(metadata_resposta.get("provider_model") or model),
-                    "provider": str(cfg_llm.get("provider") or ("openai_compatible" if openai_compatible else "ollama")),
+                    "provider": ("openai_compatible" if openai_compatible else "ollama"),
                     "profile": perfil or "default",
                     "max_tokens_requested": max_tokens,
+                    "structured_mode": structured_mode if perfil is not None else None,
+                    "structured_capability_source": (
+                        structured_capability.get("source") if isinstance(structured_capability, dict) else None
+                    ),
+                    "structured_connection_fingerprint": (
+                        structured_capability.get("fingerprint") if isinstance(structured_capability, dict) else None
+                    ),
                 })
                 if _finish_reason_truncado(metadata_resposta):
-                    retry_limit = int(cfg_llm.get("truncation_retry_max_tokens", 2048) or 2048)
-                    multiplier = max(1.1, float(cfg_llm.get("truncation_retry_multiplier", 2.0) or 2.0))
+                    retry_limit_key = f"{perfil}_truncation_retry_max_tokens" if perfil else None
+                    retry_multiplier_key = f"{perfil}_truncation_retry_multiplier" if perfil else None
+                    retry_limit = int(
+                        cfg_llm.get(retry_limit_key, cfg_llm.get("truncation_retry_max_tokens", 2048))
+                        if retry_limit_key else cfg_llm.get("truncation_retry_max_tokens", 2048)
+                    )
+                    multiplier = max(1.1, float(
+                        cfg_llm.get(retry_multiplier_key, cfg_llm.get("truncation_retry_multiplier", 2.0))
+                        if retry_multiplier_key else cfg_llm.get("truncation_retry_multiplier", 2.0)
+                    ))
                     current = int(max_tokens or cfg_llm.get("max_tokens") or 700)
                     expanded = max(current + 256, int(current * multiplier))
                     expanded = min(expanded, retry_limit)
@@ -1124,6 +1403,7 @@ def _chamar_llm_impl(
                     _registrar_metadata_runtime(config, metadata_resposta)
                     metadata_chamadas.append(dict(metadata_resposta))
                     if expanded <= current or streaming_ativado:
+                        _registrar_tokens_gerados(config, resposta, metadata_chamadas)
                         raise ErroLLM(
                             "A resposta do modelo foi interrompida pelo limite de tokens.",
                             transient=False, error_code="MODEL_OUTPUT_TRUNCATED",
@@ -1133,20 +1413,43 @@ def _chamar_llm_impl(
                         configured_model=str(configured_model), resolved_model=str(model),
                         previous_max_tokens=current, retry_max_tokens=expanded,
                     )
-                    _reservar_orcamento_llm(config)
+                    pending_completion = sum(
+                        int(item.get("completion_tokens") or 0)
+                        for item in metadata_chamadas
+                        if isinstance(item, dict) and isinstance(item.get("completion_tokens"), (int, float))
+                    )
+                    try:
+                        _preflight_completion_budget(
+                            config, expanded, pending_completion_tokens=pending_completion,
+                        )
+                        _reservar_orcamento_llm(config)
+                    except ErroLLM:
+                        # The truncated attempt was a real provider call and
+                        # must remain charged even when the retry is rejected
+                        # before transmission.
+                        _registrar_tokens_gerados(config, resposta, metadata_chamadas)
+                        raise
                     resposta, metadata_resposta = chamar_backend(expanded, None)
                     metadata_resposta.update({
                         "configured_model": str(configured_model),
                         "resolved_model": str(metadata_resposta.get("provider_model") or model),
-                        "provider": str(cfg_llm.get("provider") or ("openai_compatible" if openai_compatible else "ollama")),
+                        "provider": ("openai_compatible" if openai_compatible else "ollama"),
                         "profile": perfil or "default",
                         "max_tokens_requested": expanded,
                         "truncation_retry": True,
                         "truncated": _finish_reason_truncado(metadata_resposta),
+                        "structured_mode": structured_mode if perfil is not None else None,
+                        "structured_capability_source": (
+                            structured_capability.get("source") if isinstance(structured_capability, dict) else None
+                        ),
+                        "structured_connection_fingerprint": (
+                            structured_capability.get("fingerprint") if isinstance(structured_capability, dict) else None
+                        ),
                     })
                     _registrar_metadata_runtime(config, metadata_resposta)
                     metadata_chamadas.append(dict(metadata_resposta))
                     if _finish_reason_truncado(metadata_resposta):
+                        _registrar_tokens_gerados(config, resposta, metadata_chamadas)
                         raise ErroLLM(
                             "A resposta do modelo continuou truncada após a repetição com orçamento maior.",
                             transient=False, error_code="MODEL_OUTPUT_TRUNCATED",
@@ -1154,8 +1457,6 @@ def _chamar_llm_impl(
                 else:
                     _registrar_metadata_runtime(config, metadata_resposta)
                     metadata_chamadas.append(dict(metadata_resposta))
-                if forcar_json:
-                    resposta = _limpar_resposta_estruturada(resposta)
                 if not isinstance(resposta, str) or not resposta.strip():
                     raise ErroLLM(
                         "O backend respondeu sem conteúdo utilizável.",
@@ -1243,6 +1544,60 @@ def _chamar_llm_impl(
         semaforo.release()
 
     _registrar_tokens_gerados(config, resposta, metadata_chamadas)
+    parsed_response = resposta
+    if perfil is not None:
+        try:
+            parsed_response = parse_profile_response(resposta, perfil or "agent")
+            runtime_meta = (config or {}).get("_runtime_agent_budget") or {}
+            last = runtime_meta.get("last_llm_response")
+            if isinstance(last, dict):
+                last["structured_parse_status"] = "valid"
+                last["structured_profile"] = perfil or "agent"
+                last["structured_top_level_keys"] = sorted(parsed_response.keys())
+                history = runtime_meta.get("llm_responses") or []
+                if history and isinstance(history[-1], dict):
+                    history[-1].update(last)
+        except StructuredResponseError as error:
+            runtime_meta = (config or {}).get("_runtime_agent_budget") or {}
+            observed = observed_top_level(resposta)
+            observed_keys = sorted(observed.keys()) if isinstance(observed, dict) else []
+            required_keys = list(mandatory_top_level_keys(perfil or "agent"))
+            missing_keys = [key for key in required_keys if key not in observed_keys]
+            last = runtime_meta.get("last_llm_response")
+            if isinstance(last, dict):
+                last["structured_parse_status"] = "invalid"
+                last["structured_parse_error"] = error.code
+                last["structured_parse_detail"] = error.detail
+                last["structured_profile"] = perfil or "agent"
+                last["structured_top_level_keys"] = observed_keys
+                last["structured_missing_keys"] = missing_keys
+                history = runtime_meta.get("llm_responses") or []
+                if history and isinstance(history[-1], dict):
+                    history[-1].update(last)
+
+            if perfil is not None and not _capability_recovery and structured_mode:
+                revalidated = _revalidate_structured_capability(
+                    base_url=base_url, model=model, openai_compatible=openai_compatible,
+                    current_mode=structured_mode, connect_timeout=connect_timeout,
+                    read_timeout=read_timeout, config=config,
+                )
+                if revalidated.get("mode") != structured_mode:
+                    if isinstance(last, dict):
+                        last["structured_capability_changed"] = True
+                        last["structured_recovered_mode"] = revalidated.get("mode")
+                    return _chamar_llm_impl(
+                        canonical_system_prompt, prompt_usuario, config,
+                        perfil=perfil, stream_visible=stream_visible,
+                        _capability_recovery=True,
+                    )
+
+            raise ErroLLM(
+                f"Structured response for {perfil or 'agent'} is invalid: {error.detail}",
+                transient=False,
+                error_code=f"STRUCTURED_RESPONSE_INVALID:{perfil or 'agent'}:{error.code}",
+                structured_error=error,
+                structured_observed=observed,
+            ) from error
     campos_finais = {"profile": perfil or "default"}
     if stream_visible and not streaming_ativado:
         campos_finais["partial_text"] = str(resposta or "")[-16000:]
@@ -1251,22 +1606,21 @@ def _chamar_llm_impl(
         **campos_finais,
     )
 
-    return resposta
+    return parsed_response
 
 
 def _chamar_llm(
-    prompt_sistema, prompt_usuario, config, forcar_json=False, perfil=None,
-    stream_visible=False,
+    prompt_sistema, prompt_usuario, config, perfil=None, stream_visible=False,
 ):
     """Fronteira observavel de toda chamada LLM, do AgentSession."""
     inicio = time.monotonic()
     runtime = (config or {}).get("_runtime_agent_budget") or {}
     status = "ok"
-    metadata = {"profile": perfil or "default", "structured": bool(forcar_json)}
+    metadata = {"profile": perfil or "default", "structured": perfil is not None}
     try:
         resposta = _chamar_llm_impl(
             prompt_sistema, prompt_usuario, config,
-            forcar_json=forcar_json, perfil=perfil,
+            perfil=perfil,
             stream_visible=stream_visible,
         )
         metadata["estimated_output_chars"] = len(str(resposta or ""))
@@ -1284,6 +1638,29 @@ def _chamar_llm(
             metadata.update({key: value for key, value in last_response.items() if value is not None})
         return resposta
     except ErroLLM as erro:
+        if perfil is not None and erro.error_code == "STRUCTURED_OUTPUT_REJECTED":
+            capability = runtime.get("structured_capability") if isinstance(runtime, dict) else None
+            if isinstance(capability, dict) and capability.get("mode"):
+                revalidated = _revalidate_structured_capability(
+                    base_url=((config or {}).get("llm") or {}).get("base_url"),
+                    model=capability.get("model") or ((config or {}).get("llm") or {}).get("model"),
+                    openai_compatible=(capability.get("transport") == "openai_compatible"),
+                    current_mode=str(capability.get("mode")),
+                    connect_timeout=float(((config or {}).get("llm") or {}).get("connect_timeout_seconds", 5)),
+                    read_timeout=float(((config or {}).get("llm") or {}).get("read_timeout_seconds", 120)),
+                    config=config,
+                )
+                if revalidated.get("mode") != capability.get("mode"):
+                    resposta = _chamar_llm_impl(
+                        prompt_sistema, prompt_usuario, config, perfil=perfil,
+                        stream_visible=stream_visible, _capability_recovery=True,
+                    )
+                    status = "ok"
+                    metadata.update({
+                        "structured_transport_recovered": True,
+                        "structured_mode": revalidated.get("mode"),
+                    })
+                    return resposta
         status = "error"
         metadata.update({
             "error_code": erro.error_code,
@@ -1305,25 +1682,61 @@ def _chamar_llm(
 
 
 
-PROMPT_AGENTE = """You are Eyle, a coding agent. Return one JSON object only.
+PROMPT_AGENTE = """You are Eyle, a coding agent. Return exactly one canonical JSON object.
 
-Valid decisions:
-- {"final":"answer"}
-- {"final":{"answer":"answer","claims":[{"kind":"bug|risk|recommendation|fact","sentence":1,"evidence_ids":["ev-..."]}],"limitations":[]}}
-- {"tool":"name","arguments":{},"plan":[]}
-- {"tool_calls":[{"tool":"name","arguments":{}}],"plan":[]}
-- {"patches":[{"operation":"replace|create|delete|update","path":"file","content":"complete file"}],"plan":[]}
-- {"needs_user":"blocking question"}
+Always return all top-level fields: action, tool_calls, patches, needs_user, final, plan. Set unused payload fields to null and plan to an array.
+Valid forms:
+- {"action":"final","tool_calls":null,"patches":null,"needs_user":null,"final":"answer","plan":[]}
+- {"action":"final","tool_calls":null,"patches":null,"needs_user":null,"final":{"answer":"answer","evidence_ids":["ev-..."],"limitations":[]},"plan":[]}
+- {"action":"tool_calls","tool_calls":[{"tool":"name","arguments":{}}],"patches":null,"needs_user":null,"final":null,"plan":[]}
+- {"action":"patches","tool_calls":null,"patches":[{"operation":"replace|create|delete|update","path":"file"}],"needs_user":null,"final":null,"plan":[]}
+- {"action":"needs_user","tool_calls":null,"patches":null,"needs_user":"blocking question","final":null,"plan":[]}
 
-Follow runtime_phase/action_policy. Use only available_tools; tool_taxonomy defines shared category/effect tags. Project-specific facts, confirmed bugs and contextual risks require real evidence; hypotheses, opinions, tradeoffs and recommendations may be reasoned when clearly framed. If evidence is missing, investigate or state uncertainty. In structured finals, reference claims by the 1-based sentence number; headings do not count. Batch independent observations; do not repeat covered evidence or infer beyond a tool's purpose/caveats. Dry-run patches never write; actual writes require runtime confirmation. When patch_required, prefer one transaction; when reads_allowed is false, do not read. Never claim a change was applied before confirmation. If a patch is rejected, correct it once from the error. Answer in the user's language and tone.
+request is the only active task. conversation_background is context, not an inherited task; keep explicit ongoing user instructions until revoked. investigation_map contains current-task observations; continue from it instead of repeating probes.
+
+Follow runtime_phase/action_policy. Use only available_tools; Project-specific facts, confirmed bugs and contextual risks require real evidence; list the evidence_ids that support a project-grounded final. hypotheses, opinions, tradeoffs and recommendations may be reasoned when clearly framed. If evidence is missing, investigate or state uncertainty. Claims are reviewed separately; do not generate claim bookkeeping. Batch at most 4 independent tool calls per turn; do not repeat covered evidence or infer beyond a tool's purpose/caveats. Dry-run patches never write; actual writes require runtime confirmation. All writes use one transaction, including one-file edits. Canonical patch fields: replace/create use operation,path,content; delete uses operation,path; update uses operation,path,line_start,line_end,new_code. When patch_required, produce one transaction; when reads_allowed is false, do not read. Never claim a change was applied before confirmation. If a patch is rejected, correct it once from the error. Answer in the user's language and tone.
+"""
+
+PROMPT_CLAIM_VERIFIER = """You are Eyle Claim Verifier. Return JSON only. Verify every material factual Claim.
+
+Claim coverage: include every materially necessary atomic Claim; there is no fixed Claim-count limit. around 6 is common, 12 is valid when materially necessary, and 20+ is valid only for genuinely broad material answers. These numbers are guidance, never quotas or limits. Never duplicate Claims, omit material assertions to reduce count, or split propositions artificially.
+
+For EVERY Claim, always return all of these fields:
+id: unique non-empty identifier.
+answer_ref: MUST be exactly one id supplied in answer_anchors. Never copy, rewrite, paraphrase, or invent answer text.
+statement: statement must be exactly one atomic factual proposition expressed by answer_ref. Never omit statement. Even when verdict is supported, statement remains mandatory.
+kind: MUST be exactly one of fact, bug, risk, recommendation. Use fact for architectural, structural, quantitative, implementation, location, usage, or flow facts. Do not create more specific kind values.
+evidence_ids: only supplied IDs.
+verdict: MUST be exactly one of supported, contradicted, insufficient. Do not create alternative or more specific verdict values.
+reason: reason must always be present as a string <=160 chars; empty allowed for obvious support.
+
+Use only supplied Evidence. A supported or contradicted fact/bug/risk requires at least one evidence_id; otherwise use insufficient. Return findings and semantic_gaps arrays, empty when none. findings group bounded fact/bug/risk/recommendation Claims; claim_ids MUST contain Claim.id values, never answer_ref values. semantic_gaps NEVER contain claim_ids and contain exactly id, type, evidence_ids, reason. material_omission means supplied material Evidence was omitted or represented one-sidedly and MUST cite at least one supplied evidence_id. conflicting_evidence means supplied Evidence materially conflicts and MUST cite the relevant supplied evidence_ids. scope_gap means requested material scope is unanswered, unsupported, or established only by proxy/partial investigation; it MAY use evidence_ids=[] when the gap comes from missing investigation rather than an existing Evidence item. A narrow search or marker absence cannot establish absence of a broader property. Never use material_omission or conflicting_evidence with evidence_ids=[].
+
+For Claim reverification return only requested Claim IDs, preserve answer_ref, and return findings=[] and semantic_gaps=[]. For task=reverify_findings return claims=[], semantic_gaps=[], and the complete corrected findings array for the supplied preserved_claims; do not alter Claim semantics. For task=reverify_semantic_gap return claims=[], findings=[], and zero or one semantic_gap. Preserve the target gap id if retaining it. Re-evaluate its type, evidence_ids and reason semantically; do not change type merely to satisfy the protocol. Return semantic_gaps=[] if the target is not a valid material gap. Never request tools, edits, plans or investigation."""
+
+PROMPT_CLAIM_REPAIR = """You are Eyle Claim Repair. Return one JSON object only as {"repairs":[{"claim_id":"claim-...","target":"literal answer substring","replacement":"corrected local text","evidence_ids":["ev-..."]}]}. Correct only claims explicitly marked contradicted. Never rewrite the full answer, never choose tools, and use only the supplied allowed_evidence_ids.
 """
 
 
 def executar_agente(prompt_usuario, config):
-    """Run the only active Eyle reasoning profile."""
-    cfg_agente = config.get("agent", {})
-    forcar_json = cfg_agente.get("usar_json_mode_se_suportado", True)
+    """Run the canonical structured Eyle agent reasoning profile."""
     return _chamar_llm(
         PROMPT_AGENTE, prompt_usuario, config,
-        forcar_json=forcar_json, perfil="agent",
+        perfil="agent",
+    )
+
+
+def executar_verificador_claims(prompt_usuario, config):
+    """Run a bounded semantic review pass with no tool authority."""
+    return _chamar_llm(
+        PROMPT_CLAIM_VERIFIER, prompt_usuario, config,
+        perfil="claim_verifier",
+    )
+
+
+def executar_reparo_claims(prompt_usuario, config):
+    """Repair only contradicted answer fragments using supplied evidence."""
+    return _chamar_llm(
+        PROMPT_CLAIM_REPAIR, prompt_usuario, config,
+        perfil="claim_repair",
     )

@@ -1,25 +1,5 @@
-#!/usr/bin/env python3
-"""
-tests/test_llm_executar.py
----------------------------
-Atualizacao 15 -- primeiro teste automatizado de llm/executar.py. Cobre
-o teto de tokens de saida (max_tokens/num_predict): confere que o
-payload mandado pro backend local carrega o teto configurado, nos dois
-formatos de backend (Ollama nativo e OpenAI-compatible), e que
-max_tokens=0/None desliga o teto sem quebrar a chamada (comportamento
-anterior a esta atualizacao, preservado pra quem preferir sem limite).
-
-O socket de rede (urllib.request.urlopen) e' SEMPRE mockado -- nenhum
-teste aqui precisa de um servidor local rodando.
-
-Rodar com:
-    pip install pytest --break-system-packages   # ou: pip install -r requirements-dev.txt
-    pytest tests/test_llm_executar.py -v
-"""
 import io
 import json
-import os
-import sys
 import threading
 import time
 import urllib.error
@@ -27,27 +7,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-import llm.executar as llm_mod  # noqa: E402
+import llm.executar as llm_mod
 
 
 @pytest.fixture(autouse=True)
-def _limpar_deteccao_llm():
-    llm_mod._CAPACIDADES_OPENAI.clear()
+def _clear_model_discovery():
     llm_mod._MODELOS_OPENAI.clear()
     yield
-    llm_mod._CAPACIDADES_OPENAI.clear()
     llm_mod._MODELOS_OPENAI.clear()
 
 
-class _RespostaFalsa:
-    """Simula o objeto devolvido por urllib.request.urlopen(...) dentro
-    de um 'with' -- so o suficiente pra .read() devolver um corpo JSON
-    fixo, igual um backend real responderia."""
-
-    def __init__(self, corpo_dict):
-        self._bytes = json.dumps(corpo_dict).encode("utf-8")
+class _FakeResponse:
+    def __init__(self, payload):
+        self._bytes = json.dumps(payload).encode("utf-8")
 
     def __enter__(self):
         return self
@@ -59,472 +31,226 @@ class _RespostaFalsa:
         return self._bytes
 
 
-def _config(**overrides_llm):
-    cfg = {
+def _config(**overrides):
+    llm = {
         "base_url": "http://localhost:8080",
         "model": "modelo-teste",
+        "openai_compatible": True,
         "temperature": 0.2,
-        "timeout_seconds": 180,
+        "connect_timeout_seconds": 5,
+        "read_timeout_seconds": 120,
+        "retry_max_attempts": 1,
+        "agent_retry_max_attempts": 1,
+        "max_concurrent_requests": 1,
     }
-    cfg.update(overrides_llm)
-    return {"llm": cfg}
+    llm.update(overrides)
+    return {"llm": llm}
 
 
-def _capturar_payload(monkeypatch, corpo_resposta):
-    """Monkeypatcha urllib.request.urlopen pra devolver corpo_resposta e
-    devolve uma lista onde o payload (dict) de cada chamada e' guardado,
-    na ordem em que aconteceram."""
-    payloads = []
+def _capture(monkeypatch, response, *, include_admin=False):
+    calls = []
 
     def fake_urlopen(req, timeout=None):
-        payloads.append(json.loads(req.data.decode("utf-8")))
-        return _RespostaFalsa(corpo_resposta)
+        payload = json.loads(req.data.decode("utf-8")) if req.data else None
+        if isinstance(payload, dict):
+            fmt = payload.get("response_format")
+            messages = payload.get("messages") or []
+            user_text = str((messages[-1] if messages else {}).get("content") or "")
+            if isinstance(fmt, dict) and fmt.get("type") == "json_schema":
+                js = fmt.get("json_schema") or {}
+                if js.get("name") == "eyle_capability_probe":
+                    schema = js.get("schema") or {}
+                    nonce = (((schema.get("properties") or {}).get("schema_probe") or {}).get("enum") or [""])[0]
+                    if include_admin:
+                        calls.append((req.full_url, payload))
+                    return _FakeResponse({"choices": [{"message": {"content": json.dumps({"schema_probe": nonce, "items": [], "optional": None})}}]})
+            if isinstance(fmt, dict) and fmt.get("type") == "json_object" and "PROBE-" in user_text:
+                if include_admin:
+                    calls.append((req.full_url, payload))
+                return _FakeResponse({"choices": [{"message": {"content": "{}"}}]})
+            if fmt is None and "prompt_probe" in user_text and "Return exactly one JSON object" in user_text:
+                marker = user_text.split('{"prompt_probe":"', 1)[-1].split('"}', 1)[0]
+                if include_admin:
+                    calls.append((req.full_url, payload))
+                return _FakeResponse({"choices": [{"message": {"content": json.dumps({"prompt_probe": marker})}}]})
+        calls.append((req.full_url, payload))
+        return _FakeResponse(response)
 
     monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
-    return payloads
+    return calls
 
 
-# ---------------------------------------------------------------------------
-# 1) Ollama nativo -- max_tokens vira "num_predict" dentro de "options"
-# ---------------------------------------------------------------------------
-
-def test_chamar_ollama_manda_num_predict_quando_max_tokens_configurado(monkeypatch):
-    payloads = _capturar_payload(monkeypatch, {"message": {"content": "ok"}})
-
-    resposta = llm_mod._chamar_llm(
-        "prompt sistema", "prompt usuario",
-        _config(openai_compatible=False, max_tokens=700),
-    )
-
-    assert resposta == "ok"
-    assert payloads[0]["options"]["num_predict"] == 700
+def _agent_json(answer="ok"):
+    return json.dumps({
+        "action": "final", "tool_calls": None, "patches": None,
+        "needs_user": None, "final": {"answer": answer, "evidence_ids": []}, "plan": [],
+    })
 
 
-def test_chamar_ollama_sem_max_tokens_nao_manda_num_predict(monkeypatch):
-    """max_tokens=0/None desliga o teto -- comportamento anterior a esta
-    atualizacao precisa continuar disponivel pra quem preferir."""
-    payloads = _capturar_payload(monkeypatch, {"message": {"content": "ok"}})
-
-    llm_mod._chamar_llm("prompt sistema", "prompt usuario", _config(openai_compatible=False, max_tokens=0))
-
-    assert "num_predict" not in payloads[0]["options"]
+def test_ollama_uses_num_predict(monkeypatch):
+    calls = _capture(monkeypatch, {"message": {"content": "ok"}})
+    assert llm_mod._chamar_llm("s", "u", _config(openai_compatible=False, max_tokens=700)) == "ok"
+    assert calls[0][1]["options"]["num_predict"] == 700
 
 
-# ---------------------------------------------------------------------------
-# 2) Backend OpenAI-compatible -- max_tokens vira "max_tokens" na raiz
-# ---------------------------------------------------------------------------
-
-def test_chamar_openai_compatible_manda_max_tokens_quando_configurado(monkeypatch):
-    payloads = _capturar_payload(monkeypatch, {"choices": [{"message": {"content": "ok"}}]})
-
-    resposta = llm_mod._chamar_llm(
-        "prompt sistema", "prompt usuario",
-        _config(openai_compatible=True, max_tokens=512),
-    )
-
-    assert resposta == "ok"
-    assert payloads[0]["max_tokens"] == 512
+def test_openai_uses_max_tokens(monkeypatch):
+    calls = _capture(monkeypatch, {"choices": [{"message": {"content": "ok"}}]})
+    assert llm_mod._chamar_llm("s", "u", _config(max_tokens=512)) == "ok"
+    assert calls[0][1]["max_tokens"] == 512
 
 
-def test_chamar_openai_compatible_sem_max_tokens_nao_manda_o_campo(monkeypatch):
-    payloads = _capturar_payload(monkeypatch, {"choices": [{"message": {"content": "ok"}}]})
-
-    llm_mod._chamar_llm("prompt sistema", "prompt usuario", _config(openai_compatible=True, max_tokens=None))
-
-    assert "max_tokens" not in payloads[0]
-
-
-# ---------------------------------------------------------------------------
-# 3) Default de config.json (700) e' usado quando a chave nem existe
-# ---------------------------------------------------------------------------
-
-def test_max_tokens_usa_default_700_quando_chave_ausente(monkeypatch):
-    cfg = _config(openai_compatible=True)  # _config() nao inclui max_tokens por padrao
-    assert "max_tokens" not in cfg["llm"]
-    payloads = _capturar_payload(monkeypatch, {"choices": [{"message": {"content": "ok"}}]})
-
-    llm_mod._chamar_llm("prompt sistema", "prompt usuario", cfg)
-
-    assert payloads[0]["max_tokens"] == 700
+def test_structured_openai_uses_strict_profile_schema(monkeypatch):
+    body = _agent_json()
+    calls = _capture(monkeypatch, {"choices": [{"message": {"content": body}}]})
+    parsed = llm_mod._chamar_llm("s", "u", _config(), perfil="agent")
+    assert parsed["final"]["answer"] == "ok"
+    fmt = calls[0][1]["response_format"]
+    assert fmt["type"] == "json_schema"
+    assert fmt["json_schema"]["strict"] is True
+    assert set(fmt["json_schema"]["schema"]["required"]) == {
+        "action", "tool_calls", "patches", "needs_user", "final", "plan",
+    }
 
 
-# ---------------------------------------------------------------------------
-# 4) Atualizacao 20 -- erro de backend/transporte nao e' resposta valida
-# ---------------------------------------------------------------------------
+def test_structured_handshake_fails_closed_when_no_mode_is_usable(monkeypatch):
+    calls = []
 
-def test_http_error_levanta_erro_llm_com_detalhe_do_backend(monkeypatch):
+    def fake_urlopen(req, timeout=None):
+        payload = json.loads(req.data.decode("utf-8"))
+        calls.append(payload)
+        fmt = payload.get("response_format")
+        if isinstance(fmt, dict):
+            raise urllib.error.HTTPError(
+                req.full_url, 400, "Bad Request", {}, io.BytesIO(b'{"error":"structured output unsupported"}')
+            )
+        # Prompt mode is accepted by transport but deliberately returns non-JSON.
+        return _FakeResponse({"choices": [{"message": {"content": "plain text"}}]})
+
+    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(llm_mod.ErroLLM) as exc:
+        llm_mod._chamar_llm("s", "u", _config(retry_max_attempts=1), perfil="agent")
+    assert exc.value.error_code == "LLM_STRUCTURED_OUTPUT_UNAVAILABLE"
+    assert [call.get("response_format", {}).get("type") for call in calls[:2]] == ["json_schema", "json_object"]
+    assert "response_format" not in calls[-1]
+
+
+def test_reasoning_content_is_never_executable(monkeypatch):
+    _capture(monkeypatch, {
+        "choices": [{"message": {"content": "", "reasoning_content": _agent_json()}}]
+    })
+    with pytest.raises(llm_mod.ErroLLM) as exc:
+        llm_mod._chamar_llm("s", "u", _config(), perfil="agent")
+    assert exc.value.error_code == "EMPTY_MODEL_RESPONSE"
+
+
+def test_explicit_openai_model_is_not_silently_replaced(monkeypatch):
+    calls = _capture(monkeypatch, {"choices": [{"message": {"content": "ok"}}]})
+    assert llm_mod._chamar_llm("s", "u", _config(model="explicit-model")) == "ok"
+    assert len(calls) == 1
+    assert calls[0][0].endswith("/v1/chat/completions")
+    assert calls[0][1]["model"] == "explicit-model"
+
+
+def test_auto_model_uses_model_discovery(monkeypatch):
+    calls = []
+
+    def fake_urlopen(req, timeout=None):
+        if req.full_url.endswith("/v1/models"):
+            calls.append((req.full_url, None))
+            return _FakeResponse({"data": [{"id": "loaded-model"}]})
+        payload = json.loads(req.data.decode("utf-8"))
+        calls.append((req.full_url, payload))
+        return _FakeResponse({"choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
+    assert llm_mod._chamar_llm("s", "u", _config(model="auto")) == "ok"
+    assert calls[0][0].endswith("/v1/models")
+    assert calls[1][1]["model"] == "loaded-model"
+
+
+def test_auto_model_fails_if_discovery_is_unavailable(monkeypatch):
+    def fake_urlopen(req, timeout=None):
+        raise urllib.error.URLError("offline")
+
+    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(llm_mod.ErroLLM) as exc:
+        llm_mod._chamar_llm("s", "u", _config(model="auto"))
+    assert exc.value.error_code == "MODEL_DISCOVERY_REQUIRED"
+
+
+def test_invalid_openai_envelope_fails_at_transport_boundary(monkeypatch):
+    _capture(monkeypatch, {"text": "not chat completions"})
+    with pytest.raises(llm_mod.ErroLLM) as exc:
+        llm_mod._chamar_llm("s", "u", _config())
+    assert exc.value.error_code == "BACKEND_RESPONSE_INVALID"
+
+
+def test_structured_parser_rejects_markdown_or_multiple_json_objects(monkeypatch):
+    content = '```json\n' + _agent_json() + '\n```\n' + _agent_json("second")
+    _capture(monkeypatch, {"choices": [{"message": {"content": content}}]})
+    with pytest.raises(llm_mod.ErroLLM) as exc:
+        llm_mod._chamar_llm("s", "u", _config(), perfil="agent")
+    assert str(exc.value.error_code).startswith("STRUCTURED_RESPONSE_INVALID:agent:")
+
+
+def test_http_error_keeps_backend_detail(monkeypatch):
     def fake_urlopen(req, timeout=None):
         raise urllib.error.HTTPError(
-            req.full_url, 400, "Bad Request", {},
-            io.BytesIO(b'{"error":"modelo inexistente"}'),
+            req.full_url, 400, "Bad Request", {}, io.BytesIO(b'{"error":"modelo inexistente"}')
         )
 
     monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
-
-    with pytest.raises(llm_mod.ErroLLM) as capturado:
-        llm_mod._chamar_llm(
-            "prompt sistema", "prompt usuario",
-            _config(openai_compatible=False),
-        )
-
-    assert "HTTP 400" in str(capturado.value)
-    assert "modelo inexistente" in str(capturado.value)
-
-
-def test_url_error_levanta_erro_llm_em_vez_de_retornar_string(monkeypatch):
-    def fake_urlopen(req, timeout=None):
-        raise urllib.error.URLError("conexao recusada")
-
-    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
-
-    with pytest.raises(llm_mod.ErroLLM) as capturado:
-        llm_mod._chamar_llm(
-            "prompt sistema", "prompt usuario",
-            _config(openai_compatible=False),
-        )
-
-    assert "Nao foi possivel conectar" in str(capturado.value)
-    assert not str(capturado.value).startswith("[erro]")
-
-
-# ---------------------------------------------------------------------------
-# 5) Compatibilidade basica com llama-server / modelos variados
-# ---------------------------------------------------------------------------
-
-def test_openai_detecta_modelo_unico_carregado_no_llama_server(monkeypatch):
-    chamadas = []
-
-    def fake_urlopen(req, timeout=None):
-        chamadas.append((req.full_url, req.data))
-        if req.full_url.endswith("/v1/models"):
-            return _RespostaFalsa({"data": [{"id": "qwen-carregado.gguf"}]})
-        payload = json.loads(req.data.decode("utf-8"))
-        assert payload["model"] == "qwen-carregado.gguf"
-        return _RespostaFalsa({"choices": [{"message": {"content": "ok"}}]})
-
-    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
-
-    resposta = llm_mod._chamar_llm(
-        "s", "u",
-        _config(openai_compatible=True, model="modelo-antigo.gguf"),
-    )
-
-    assert resposta == "ok"
-    assert chamadas[0][0].endswith("/v1/models")
-    assert chamadas[1][0].endswith("/v1/chat/completions")
-
-
-def test_openai_json_mode_cai_para_prompt_quando_response_format_e_rejeitado(monkeypatch):
-    payloads_chat = []
-
-    def fake_urlopen(req, timeout=None):
-        if req.full_url.endswith("/v1/models"):
-            return _RespostaFalsa({"data": [{"id": "modelo-teste"}]})
-        payload = json.loads(req.data.decode("utf-8"))
-        payloads_chat.append(payload)
-        if len(payloads_chat) <= 2:
-            assert "response_format" in payload
-            raise urllib.error.HTTPError(
-                req.full_url, 400, "Bad Request", {},
-                io.BytesIO(b'{"error":"response_format unsupported"}'),
-            )
-        assert "response_format" not in payload
-        return _RespostaFalsa({
-            "choices": [{"message": {"content": '{"final":"ok"}'}}],
-        })
-
-    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
-
-    resposta = llm_mod._chamar_llm(
-        "s", "u", _config(openai_compatible=True), forcar_json=True,
-    )
-
-    assert resposta == '{"final":"ok"}'
-    assert len(payloads_chat) == 3
-
-
-def test_openai_lembra_que_json_mode_nativo_nao_e_suportado(monkeypatch):
-    payloads_chat = []
-
-    def fake_urlopen(req, timeout=None):
-        if req.full_url.endswith("/v1/models"):
-            return _RespostaFalsa({"data": [{"id": "modelo-teste"}]})
-        payload = json.loads(req.data.decode("utf-8"))
-        payloads_chat.append(payload)
-        if len(payloads_chat) <= 2:
-            raise urllib.error.HTTPError(
-                req.full_url, 400, "Bad Request", {},
-                io.BytesIO(b'{"error":"response_format unsupported"}'),
-            )
-        return _RespostaFalsa({
-            "choices": [{"message": {"content": '{"final":"ok"}'}}],
-        })
-
-    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
-    cfg = _config(openai_compatible=True)
-
-    llm_mod._chamar_llm("s1", "u1", cfg, forcar_json=True)
-    llm_mod._chamar_llm("s2", "u2", cfg, forcar_json=True)
-
-    assert "response_format" in payloads_chat[0]
-    assert "response_format" in payloads_chat[1]
-    assert "response_format" not in payloads_chat[2]
-    assert "response_format" not in payloads_chat[3]
-
-
-def test_openai_cai_para_system_incorporado_ao_user(monkeypatch):
-    payloads_chat = []
-
-    def fake_urlopen(req, timeout=None):
-        if req.full_url.endswith("/v1/models"):
-            return _RespostaFalsa({"data": [{"id": "modelo-teste"}]})
-        payload = json.loads(req.data.decode("utf-8"))
-        payloads_chat.append(payload)
-        if len(payloads_chat) == 1:
-            assert [m["role"] for m in payload["messages"]] == ["system", "user"]
-            raise urllib.error.HTTPError(
-                req.full_url, 400, "Bad Request", {},
-                io.BytesIO(b'{"error":"system role unsupported by template"}'),
-            )
-        assert [m["role"] for m in payload["messages"]] == ["user"]
-        assert "SYSTEM INSTRUCTIONS" in payload["messages"][0]["content"]
-        return _RespostaFalsa({"choices": [{"message": {"content": "ok"}}]})
-
-    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
-
-    assert llm_mod._chamar_llm(
-        "sistema", "usuario", _config(openai_compatible=True),
-    ) == "ok"
-    assert len(payloads_chat) == 2
-
-
-def test_resposta_json_remove_bloco_think_e_cerca_markdown(monkeypatch):
-    def fake_urlopen(req, timeout=None):
-        if req.full_url.endswith("/v1/models"):
-            return _RespostaFalsa({"data": [{"id": "modelo-teste"}]})
-        return _RespostaFalsa({
-            "choices": [{"message": {
-                "content": '<think>vou decidir</think>\n```json\n{"final":"ok"}\n```',
-            }}],
-        })
-
-    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
-
-    resposta = llm_mod._chamar_llm(
-        "s", "u", _config(openai_compatible=True), forcar_json=True,
-    )
-    assert resposta == '{"final":"ok"}'
-
-
-def test_json_mode_envia_schema_e_desativa_thinking(monkeypatch):
-    payloads = _capturar_payload(
-        monkeypatch,
-        {"choices": [{"message": {"content": '{"final":"ok"}'}}]},
-    )
-
-    resposta = llm_mod._chamar_llm(
-        "s", "u", _config(openai_compatible=True), forcar_json=True,
-    )
-
-    assert resposta == '{"final":"ok"}'
-    formato = payloads[0]["response_format"]
-    assert formato["type"] == "json_object"
-    assert formato["schema"]["type"] == "object"
-    assert payloads[0]["reasoning_effort"] == "none"
-    assert payloads[0]["chat_template_kwargs"] == {"enable_thinking": False}
-
-
-def test_openai_usa_reasoning_content_se_content_vier_vazio(monkeypatch):
-    def fake_urlopen(req, timeout=None):
-        if req.full_url.endswith("/v1/models"):
-            return _RespostaFalsa({"data": [{"id": "modelo-teste"}]})
-        return _RespostaFalsa({
-            "choices": [{"message": {
-                "content": "",
-                "reasoning_content": '{"tool":"list_tree","arguments":{}}',
-            }}],
-        })
-
-    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
-
-    resposta = llm_mod._chamar_llm(
-        "s", "u", _config(openai_compatible=True), forcar_json=True,
-    )
-    assert resposta == '{"tool":"list_tree","arguments":{}}'
-
-
-
-def test_openai_json_fallback_recupera_reasoning_content_sem_response_format(monkeypatch):
-    payloads_chat = []
-
-    def fake_urlopen(req, timeout=None):
-        if req.full_url.endswith("/v1/models"):
-            return _RespostaFalsa({"data": [{"id": "modelo-teste"}]})
-        payload = json.loads(req.data.decode("utf-8"))
-        payloads_chat.append(payload)
-        if len(payloads_chat) <= 2:
-            assert "response_format" in payload
-            raise urllib.error.HTTPError(
-                req.full_url, 400, "Bad Request", {},
-                io.BytesIO(b'{"error":"response_format unsupported"}'),
-            )
-        assert "response_format" not in payload
-        return _RespostaFalsa({
-            "choices": [{"message": {
-                "content": "",
-                "reasoning_content": '{"tool":"list_tree","arguments":{}}',
-            }}],
-        })
-
-    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
-
-    resposta = llm_mod._chamar_llm(
-        "s", "u", _config(openai_compatible=True), forcar_json=True,
-    )
-
-    assert resposta == '{"tool":"list_tree","arguments":{}}'
-    assert len(payloads_chat) == 3
-
-
-def test_openai_json_mode_incompativel_lembrado_preserva_reasoning_content(monkeypatch):
-    payloads_chat = []
-
-    def fake_urlopen(req, timeout=None):
-        if req.full_url.endswith("/v1/models"):
-            return _RespostaFalsa({"data": [{"id": "modelo-teste"}]})
-        payload = json.loads(req.data.decode("utf-8"))
-        payloads_chat.append(payload)
-        if len(payloads_chat) <= 2:
-            raise urllib.error.HTTPError(
-                req.full_url, 400, "Bad Request", {},
-                io.BytesIO(b'{"error":"response_format unsupported"}'),
-            )
-        numero = len(payloads_chat) - 2
-        return _RespostaFalsa({
-            "choices": [{"message": {
-                "content": "",
-                "reasoning_content": f'{{"final":"ok-{numero}"}}',
-            }}],
-        })
-
-    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
-    cfg = _config(openai_compatible=True)
-
-    primeira = llm_mod._chamar_llm("s1", "u1", cfg, forcar_json=True)
-    segunda = llm_mod._chamar_llm("s2", "u2", cfg, forcar_json=True)
-
-    assert primeira == '{"final":"ok-1"}'
-    assert segunda == '{"final":"ok-2"}'
-    assert "response_format" not in payloads_chat[2]
-    assert "response_format" not in payloads_chat[3]
-
-
-def test_openai_textual_nao_expoe_reasoning_content(monkeypatch):
-    def fake_urlopen(req, timeout=None):
-        if req.full_url.endswith("/v1/models"):
-            return _RespostaFalsa({"data": [{"id": "modelo-teste"}]})
-        return _RespostaFalsa({
-            "choices": [{"message": {
-                "content": "",
-                "reasoning_content": "raciocinio privado",
-            }}],
-        })
-
-    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
-
-    with pytest.raises(llm_mod.ErroLLM) as erro:
-        llm_mod._chamar_llm("s", "u", _config(openai_compatible=True))
-
-    assert erro.value.error_code == "EMPTY_MODEL_RESPONSE"
-
-
-def test_diagnosticar_backend_openai_sem_gerar_tokens(monkeypatch):
-    import contextlib
-    import io
-
-    @contextlib.contextmanager
-    def fake_abrir(req, connect_timeout, read_timeout=None):
-        assert req.full_url == "http://localhost:8080/v1/models"
-        yield io.BytesIO(b'{"data":[{"id":"modelo-local"}]}')
-
-    monkeypatch.setattr(llm_mod, "_abrir_url", fake_abrir)
-    resultado = llm_mod.diagnosticar_backend({
-        "llm": {
-            "base_url": "http://localhost:8080",
-            "openai_compatible": True,
-        }
-    })
-
-    assert resultado["ok"] is True
-    assert resultado["reachable"] is True
-    assert resultado["models"] == ["modelo-local"]
-    assert resultado["model_count"] == 1
-
-
-def test_diagnosticar_backend_reporta_servidor_inacessivel(monkeypatch):
-    import contextlib
-    import urllib.error
-
-    @contextlib.contextmanager
-    def fake_abrir(req, connect_timeout, read_timeout=None):
-        raise urllib.error.URLError("conexao recusada")
-        yield  # pragma: no cover
-
-    monkeypatch.setattr(llm_mod, "_abrir_url", fake_abrir)
-    resultado = llm_mod.diagnosticar_backend({
-        "llm": {
-            "base_url": "http://localhost:8080",
-            "openai_compatible": True,
-        }
-    })
-
-    assert resultado["ok"] is False
-    assert resultado["reachable"] is False
-    assert resultado["error_code"] == "BACKEND_UNREACHABLE"
-    assert "conexao recusada" in resultado["detail"]
+    with pytest.raises(llm_mod.ErroLLM) as exc:
+        llm_mod._chamar_llm("s", "u", _config())
+    assert "modelo inexistente" in str(exc.value)
 
 
 class _DelayedOpenAIHandler(BaseHTTPRequestHandler):
     response_delay = 0.25
 
     def do_POST(self):
-        tamanho = int(self.headers.get("Content-Length", "0") or 0)
-        self.rfile.read(tamanho)
+        size = int(self.headers.get("Content-Length", "0") or 0)
+        self.rfile.read(size)
         time.sleep(self.response_delay)
-        corpo = json.dumps({
-            "choices": [{"message": {"content": "resposta depois do connect timeout"}}],
-        }).encode("utf-8")
+        body = json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(corpo)))
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(corpo)
+        self.wfile.write(body)
 
     def log_message(self, format, *args):  # noqa: A003
         return
 
 
-def test_connect_timeout_nao_cancela_geracao_antes_do_read_timeout():
-    """Regressao 55.3: llama-server envia cabecalhos depois da geracao.
-
-    Antes, _abrir_url passava connect_timeout=5s ao urlopen. Como urlopen
-    tambem usa esse valor para esperar a linha de status HTTP, toda resposta
-    nao-streaming acima de cinco segundos era cancelada pelo cliente.
-    """
-    servidor = ThreadingHTTPServer(("127.0.0.1", 0), _DelayedOpenAIHandler)
-    thread = threading.Thread(target=servidor.serve_forever, daemon=True)
+def test_connect_timeout_does_not_replace_read_timeout():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _DelayedOpenAIHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    base_url = f"http://127.0.0.1:{servidor.server_port}"
-    inicio = time.monotonic()
+    start = time.monotonic()
     try:
-        resposta = llm_mod._chamar_openai_compatible(
-            base_url, "modelo-teste", "sistema", "usuario", 0.2,
+        response = llm_mod._chamar_openai_compatible(
+            f"http://127.0.0.1:{server.server_port}", "modelo", "s", "u", 0.2,
             timeout=0.05, read_timeout=1.0,
         )
     finally:
-        servidor.shutdown()
-        servidor.server_close()
-        thread.join(timeout=1.0)
+        server.shutdown(); server.server_close(); thread.join(timeout=1.0)
+    assert response == "ok"
+    assert time.monotonic() - start >= _DelayedOpenAIHandler.response_delay
 
-    assert resposta == "resposta depois do connect timeout"
-    assert time.monotonic() - inicio >= _DelayedOpenAIHandler.response_delay
+
+def test_claim_verifier_missing_claims_is_rejected_at_structured_boundary(monkeypatch):
+    content = json.dumps({"findings": [], "semantic_gaps": []})
+    _capture(monkeypatch, {"choices": [{"message": {"content": content}}]})
+    with pytest.raises(llm_mod.ErroLLM) as exc:
+        llm_mod._chamar_llm("s", "u", _config(), perfil="claim_verifier")
+    assert exc.value.error_code == "STRUCTURED_RESPONSE_INVALID:claim_verifier:CLAIM_REVIEW_MISSING_KEYS"
+
+
+def test_claim_verifier_never_selects_an_earlier_partial_json_object(monkeypatch):
+    complete = json.dumps({"claims": [], "findings": [], "semantic_gaps": []})
+    content = json.dumps({"semantic_gaps": []}) + "\n" + complete
+    _capture(monkeypatch, {"choices": [{"message": {"content": content}}]})
+    with pytest.raises(llm_mod.ErroLLM) as exc:
+        llm_mod._chamar_llm("s", "u", _config(), perfil="claim_verifier")
+    assert str(exc.value.error_code).startswith("STRUCTURED_RESPONSE_INVALID:claim_verifier:")

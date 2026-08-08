@@ -53,11 +53,6 @@ def _idade_segundos(valor, agora=None):
     return max(0.0, (agora - dt).total_seconds())
 
 
-def _pid_ativo(pid):
-    """Compatibilidade interna para o probe central e seguro de PID."""
-    return pid_ativo(pid)
-
-
 def _agora_utc():
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -569,13 +564,11 @@ def concluir(job_id, resultado=None, duracao_segundos=None):
         return cursor.rowcount == 1
 
 
-def falhar(job_id, erro, resultado=None, duracao_segundos=None):
+def falhar(job_id, erro, *, resultado, duracao_segundos=None):
     """Marca um job reservado como falho e conserva erro + resultado seguro.
 
-    ``resultado`` e opcional para manter compatibilidade com excecoes do Worker.
-    Quando a AgentSession devolve um estado estruturado ``status=failed`` sem levantar,
-    ele e persistido aqui para que a API consiga explicar a falha sem transformar
-    diagnostico de transporte em fala do assistente no historico.
+    ``resultado`` e sempre explicito: ``None`` para falhas por excecao e o estado
+    estruturado da AgentSession para falhas retornadas pelo fluxo normal.
     """
     motivo_cancelamento = cancelamento_solicitado(job_id)
     if motivo_cancelamento:
@@ -627,7 +620,7 @@ def recuperar_interrompidos(stale_after_seconds=30, force=False):
                 cancelados.append((int(linha["id"]), str(linha["cancel_reason"] or "cancelado pelo usuario")))
                 continue
             stale = _idade_segundos(linha["heartbeat_em"])
-            morto = linha["pid"] is not None and not _pid_ativo(linha["pid"])
+            morto = linha["pid"] is not None and not pid_ativo(linha["pid"])
             sem_heartbeat_valido = not linha["worker_id"] or stale is None
             if force or sem_heartbeat_valido or morto or (
                 stale >= max(0, float(stale_after_seconds))
@@ -718,7 +711,7 @@ def estatisticas(stale_after_seconds=30, blocked_after_seconds=60):
     for heartbeat in heartbeats:
         age = _idade_segundos(heartbeat.get("atualizado_em"), agora)
         stale = age is None or age >= max(1, float(stale_after_seconds))
-        pid_alive = _pid_ativo(heartbeat.get("pid")) if heartbeat.get("pid") else None
+        pid_alive = pid_ativo(heartbeat.get("pid")) if heartbeat.get("pid") else None
         live = not stale and pid_alive is not False
         live_workers += int(live)
         live_idle_workers += int(live and heartbeat.get("status") == "idle")

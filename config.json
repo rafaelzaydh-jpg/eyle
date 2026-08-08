@@ -1,11 +1,9 @@
 {
   "llm": {
-    "provider": "openai_compatible",
     "base_url": "http://127.0.0.1:8080",
     "model": "auto",
     "openai_compatible": true,
     "temperature": 0.2,
-    "timeout_seconds": 120,
     "max_tokens": 1500,
     "context_window_tokens": 32768,
     "connect_timeout_seconds": 5,
@@ -19,7 +17,6 @@
     "retry_jitter_seconds": 0.2,
     "max_concurrent_requests": 1,
     "cooldown_seconds": 2.0,
-    "agent_max_tokens": 1000,
     "retry_read_timeouts": false,
     "stream_responses": true,
     "truncation_retry_multiplier": 2.0,
@@ -31,7 +28,8 @@
   "context_engine": {
     "safety_margin_tokens": 500,
     "chars_per_token_fallback": 3,
-    "cached_prompt_weight": 0.2
+    "cached_prompt_weight": 0.2,
+    "working_set_target_tokens": 12000
   },
   "web": {
     "api_token": null,
@@ -43,7 +41,6 @@
   },
   "codar": {
     "ativado": true,
-    "fazer_backup": true,
     "testes": {
       "ativado": true,
       "comando_python": "python -m pytest -q",
@@ -88,36 +85,28 @@
   "confirmacoes": {
     "expiracao_segundos": 3600
   },
-  "retention": {
-    "backups_max_files": 50,
-    "backups_max_age_days": 30,
-    "backups_max_total_mb": 256
-  },
   "agent": {
-    "usar_json_mode_se_suportado": true,
     "max_tree_entries": 200,
     "max_tree_depth": 6,
     "max_read_range_lines": 400,
     "task_deadline_seconds": 900,
-    "max_llm_calls": 8,
+    "max_llm_calls": 12,
     "max_secret_scan_bytes": 65536,
     "max_prompt_tokens": 96000,
-    "max_completion_tokens": 6000,
-    "max_total_tokens": 102000,
+    "max_completion_tokens": 9000,
+    "max_total_tokens": 105000,
     "chat_history_token_budget": 700,
     "final_validation_retries": 1,
-    "max_llm_turns": 6,
+    "max_llm_turns": 8,
     "max_tool_calls": 12,
     "max_identical_tool_repeats": 2,
-    "protocol_parse_retries": 1,
     "max_patch_dry_run_failures": 2,
-    "response_quality": {
-      "enabled": true,
+    "context_view": {
       "max_relevant_sources": 4,
-      "max_relevant_source_chars": 8000,
-      "reject_mid_list_corrections": true
+      "max_relevant_source_chars": 3500,
+      "max_symbol_preview_chars": 2600,
+      "max_search_source_chars": 600
     },
-    "task_context_token_budget": 500,
     "max_write_investigation_turns": 2,
     "max_no_progress_turns": 2,
     "max_phase_violations": 1,
@@ -125,7 +114,26 @@
     "max_project_scan_depth": 32,
     "max_project_file_bytes": 4194304,
     "max_inspect_relation_edges": 60,
-    "max_git_diff_chars": 6000
+    "max_git_diff_chars": 6000,
+    "max_search_matches": 40,
+    "max_search_ranges": 12,
+    "claims": {
+      "mode": "self_check",
+      "require_supported": true,
+      "verifier": {
+        "max_tokens": 900,
+        "temperature": 0.0
+      },
+      "evidence": {
+        "max_chars_per_item": 2200
+      },
+      "repair": {
+        "enabled": true,
+        "max_attempts": 1
+      }
+    },
+    "max_search_range_lines": 16,
+    "structured_protocol_retries": 1
   },
   "worker": {
     "heartbeat_interval_seconds": 5,
@@ -143,6 +151,6 @@
     "window_seconds": 3600
   },
   "app_version": "2.7.4",
-  "config_schema_version": "4.12.4.1",
-  "revision": "4.12.4.1-context-budget-hardening"
+  "config_schema_version": "5.1",
+  "revision": "rev5.1-context-boundaries-investigation-continuity"
 }

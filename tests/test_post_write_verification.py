@@ -15,7 +15,6 @@ def _config(tests_enabled=False):
         "agent": {"max_read_range_lines": 400},
         "codar": {
             "ativado": True,
-            "fazer_backup": False,
             "testes": {"ativado": tests_enabled, "timeout_segundos": 30},
         },
     }
@@ -24,10 +23,9 @@ def _config(tests_enabled=False):
 def _pending_replace_and_create(root, replacement="VALUE = 2\n"):
     original = (root / "app.py").read_text(encoding="utf-8")
     return {
-        "tool_pendente": {
-            "tool": "apply_patch_set",
-            "arguments": {
-                "patches": [
+        "continuation_kind": "write_confirmation",
+        "write_transaction": {
+            "patches": [
                     {
                         "operation": "replace",
                         "path": "app.py",
@@ -40,7 +38,6 @@ def _pending_replace_and_create(root, replacement="VALUE = 2\n"):
                         "content": "def test_created():\n    assert True\n",
                     },
                 ]
-            },
         }
     }
 
@@ -126,15 +123,13 @@ def test_no_tests_means_partial_validation_not_verified(tmp_path):
     app.write_text("VALUE = 1\n", encoding="utf-8")
     original = app.read_text(encoding="utf-8")
     pending = {
-        "tool_pendente": {
-            "tool": "apply_patch_set",
-            "arguments": {"patches": [{
+        "continuation_kind": "write_confirmation",
+        "write_transaction": {"patches": [{
                 "operation": "replace",
                 "path": "app.py",
                 "content": "VALUE = 2\n",
                 "file_hash_expected": hashlib.sha256(original.encode()).hexdigest(),
-            }]},
-        }
+            }]}
     }
 
     status, text, _, details = core_agent._resume_set(

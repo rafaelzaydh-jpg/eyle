@@ -1,4 +1,4 @@
-"""Behavior benchmark for the Rev4.12 AgentSession core.
+"""Behavior benchmark for the canonical AgentSession core.
 
 This is a development tool, not part of the reasoning path. It exercises the
 public agent contract against small disposable projects and records real model
@@ -87,11 +87,11 @@ def _run_case(config: Dict[str, Any], case_id: str) -> Dict[str, Any]:
         before = _snapshot(root)
         cfg = copy.deepcopy(config)
         cfg["_runtime_agent_budget"] = {
-            "max_llm_calls": int((cfg.get("agent") or {}).get("max_llm_calls", 8)),
+            "max_llm_calls": int((cfg.get("agent") or {}).get("max_llm_calls", 12)),
             "max_prompt_tokens": int((cfg.get("agent") or {}).get("max_prompt_tokens", 96000)),
-            "max_completion_tokens": int((cfg.get("agent") or {}).get("max_completion_tokens", 6000)),
-            "max_generated_tokens": int((cfg.get("agent") or {}).get("max_completion_tokens", 6000)),
-            "max_total_tokens": int((cfg.get("agent") or {}).get("max_total_tokens", 102000)),
+            "max_completion_tokens": int((cfg.get("agent") or {}).get("max_completion_tokens", 9000)),
+            "max_generated_tokens": int((cfg.get("agent") or {}).get("max_completion_tokens", 9000)),
+            "max_total_tokens": int((cfg.get("agent") or {}).get("max_total_tokens", 105000)),
             "llm_calls": 0, "llm_requests": 0, "prompt_tokens_reserved": 0,
             "prompt_tokens_estimated_raw": 0, "prompt_tokens_actual": 0,
             "prompt_tokens_cached": 0, "prompt_tokens_uncached": 0,
