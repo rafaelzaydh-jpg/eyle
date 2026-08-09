@@ -1,4 +1,4 @@
-"""Rev5.2.3 configuration boundary for the canonical AgentSession core."""
+"""Rev5.2.9 configuration boundary for the canonical AgentSession core."""
 from __future__ import annotations
 
 import json
@@ -30,6 +30,7 @@ _AGENT_FIELDS = {
     "max_prompt_tokens", "max_completion_tokens", "max_total_tokens",
     "chat_history_token_budget", "final_validation_retries", "max_llm_turns",
     "max_tool_calls", "max_identical_tool_repeats", "max_patch_dry_run_failures",
+    "committed_progress_extension_calls",
     "context_view", "max_write_investigation_turns",
     "max_no_progress_turns", "max_phase_violations", "max_project_scan_entries",
     "max_project_scan_depth", "max_project_file_bytes", "max_inspect_relation_edges",
@@ -48,6 +49,7 @@ _CODAR_FIELDS = {"ativado", "testes"}
 _AGENT_POSITIVE_DEFAULTS = {
     "max_llm_turns": 8,
     "max_tool_calls": 12,
+    "committed_progress_extension_calls": 4,
     "max_identical_tool_repeats": 2,
     "max_patch_dry_run_failures": 2,
     "max_write_investigation_turns": 2,

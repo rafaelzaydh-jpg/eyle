@@ -15,6 +15,21 @@ class AgentSession:
     task_id: Optional[str] = None
     turn: int = 0
     tool_calls: int = 0
+    earned_tool_extension: int = 0
+    tool_extension_cycles: int = 0
+    committed_progress_epoch: int = 0
+    last_extension_progress_epoch: int = 0
+    committed_progress_history: List[Dict[str, Any]] = field(default_factory=list)
+    progress_credited_evidence_ids: List[str] = field(default_factory=list)
+    tool_extension_history: List[Dict[str, Any]] = field(default_factory=list)
+    workspace_epoch: int = 0
+    observation_ledger: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    observation_replays: int = 0
+    decision_ledger: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    repeated_rejected_decisions: int = 0
+    progress_history: List[Dict[str, Any]] = field(default_factory=list)
+    runtime_cycle_start_fingerprint: Optional[str] = None
+    runtime_cycle_start_turn: int = 0
     workspace_scope: Dict[str, str] = field(default_factory=dict)
     investigation: List[Dict[str, Any]] = field(default_factory=list)
     latest_tool_results: List[Dict[str, Any]] = field(default_factory=list)
@@ -36,7 +51,6 @@ class AgentSession:
     followup_pinned_evidence_ids: List[str] = field(default_factory=list)
     claim_review: Dict[str, Any] = field(default_factory=dict)
     claim_review_history: List[Dict[str, Any]] = field(default_factory=list)
-    claim_repair_attempts: int = 0
     claim_followup_pending: bool = False
     claim_followup_feedback: str = ""
     phase: str = "start"
@@ -136,6 +150,21 @@ class AgentSession:
             "task_id": self.task_id,
             "turn": self.turn,
             "tool_calls": self.tool_calls,
+            "earned_tool_extension": self.earned_tool_extension,
+            "tool_extension_cycles": self.tool_extension_cycles,
+            "committed_progress_epoch": self.committed_progress_epoch,
+            "last_extension_progress_epoch": self.last_extension_progress_epoch,
+            "committed_progress_history": self.committed_progress_history[-50:],
+            "progress_credited_evidence_ids": self.progress_credited_evidence_ids,
+            "tool_extension_history": self.tool_extension_history[-50:],
+            "workspace_epoch": self.workspace_epoch,
+            "observation_ledger": __import__("eyle.core.observation", fromlist=["persisted_view"]).persisted_view(self.observation_ledger),
+            "observation_replays": self.observation_replays,
+            "decision_ledger": self.decision_ledger,
+            "repeated_rejected_decisions": self.repeated_rejected_decisions,
+            "progress_history": self.progress_history[-50:],
+            "runtime_cycle_start_fingerprint": self.runtime_cycle_start_fingerprint,
+            "runtime_cycle_start_turn": self.runtime_cycle_start_turn,
             "workspace_scope": self.workspace_scope,
             "investigation": self.investigation,
             "latest_tool_results": latest_results,
@@ -152,7 +181,6 @@ class AgentSession:
             "followup_pinned_evidence_ids": self.followup_pinned_evidence_ids,
             "claim_review": self.claim_review,
             "claim_review_history": self.claim_review_history[-10:],
-            "claim_repair_attempts": self.claim_repair_attempts,
             "claim_followup_pending": self.claim_followup_pending,
             "claim_followup_feedback": self.claim_followup_feedback,
             "phase": self.phase,
@@ -171,6 +199,37 @@ class AgentSession:
         )
         session.turn = int(data.get("turn") or 0)
         session.tool_calls = int(data.get("tool_calls") or 0)
+        session.earned_tool_extension = max(0, int(data.get("earned_tool_extension") or 0))
+        session.tool_extension_cycles = max(0, int(data.get("tool_extension_cycles") or 0))
+        session.committed_progress_epoch = max(0, int(data.get("committed_progress_epoch") or 0))
+        session.last_extension_progress_epoch = max(0, int(data.get("last_extension_progress_epoch") or 0))
+        session.committed_progress_history = [
+            dict(item) for item in data.get("committed_progress_history") or [] if isinstance(item, dict)
+        ][-50:]
+        credited_ids = [
+            str(item) for item in data.get("progress_credited_evidence_ids") or [] if str(item)
+        ]
+        # Migration-safe monotonicity: older persisted sessions did not carry
+        # the dedicated credit-once set, but their committed progress history
+        # already records which Evidence funded authority. Backfill from it so
+        # resume cannot recycle old Evidence after upgrading to Rev5.2.9.
+        for snapshot in session.committed_progress_history:
+            for evidence_id in snapshot.get("added_evidence_ids") or []:
+                evidence_id = str(evidence_id or "").strip()
+                if evidence_id:
+                    credited_ids.append(evidence_id)
+        session.progress_credited_evidence_ids = list(dict.fromkeys(credited_ids))
+        session.tool_extension_history = [
+            dict(item) for item in data.get("tool_extension_history") or [] if isinstance(item, dict)
+        ][-50:]
+        session.workspace_epoch = max(0, int(data.get("workspace_epoch") or 0))
+        session.observation_ledger = {str(k): dict(v) for k, v in (data.get("observation_ledger") or {}).items() if isinstance(v, dict)}
+        session.observation_replays = max(0, int(data.get("observation_replays") or 0))
+        session.decision_ledger = {str(k): dict(v) for k, v in (data.get("decision_ledger") or {}).items() if isinstance(v, dict)}
+        session.repeated_rejected_decisions = max(0, int(data.get("repeated_rejected_decisions") or 0))
+        session.progress_history = [dict(item) for item in data.get("progress_history") or [] if isinstance(item, dict)][-50:]
+        session.runtime_cycle_start_fingerprint = data.get("runtime_cycle_start_fingerprint")
+        session.runtime_cycle_start_turn = max(0, int(data.get("runtime_cycle_start_turn") or 0))
         raw_scope = data.get("workspace_scope")
         session.workspace_scope = dict(raw_scope) if isinstance(raw_scope, dict) else {}
         session.investigation = [dict(item) for item in data.get("investigation") or [] if isinstance(item, dict)]
@@ -188,7 +247,6 @@ class AgentSession:
         session.followup_pinned_evidence_ids = [str(item) for item in data.get("followup_pinned_evidence_ids") or [] if str(item)]
         session.claim_review = dict(data.get("claim_review") or {})
         session.claim_review_history = list(data.get("claim_review_history") or [])
-        session.claim_repair_attempts = int(data.get("claim_repair_attempts") or 0)
         session.claim_followup_pending = bool(data.get("claim_followup_pending", False))
         session.claim_followup_feedback = str(data.get("claim_followup_feedback") or "")
         session.phase = str(data.get("phase") or "start")

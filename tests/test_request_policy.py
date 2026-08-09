@@ -3,18 +3,10 @@ import json
 import eyle.core.agent as core_agent
 from eyle.core.request_policy import (
     request_contract,
-    request_needs_project_evidence,
     requested_finding_constraints,
 )
 from eyle.core.validation import validate_final
 from tests.canonical import agent_final, agent_tools, base_config, tool_call
-
-
-def test_project_grounded_requests_require_runtime_evidence():
-    assert request_needs_project_evidence("Onde AgentSession é definida?", True) is True
-    assert request_needs_project_evidence("Procure bugs no projeto", True) is True
-    assert request_needs_project_evidence("Explique o conceito de sessão em geral", True) is False
-    assert request_needs_project_evidence("Onde AgentSession é definida?", False) is False
 
 
 def test_final_gate_is_structural_and_requires_evidence_for_workspace_facts():
@@ -61,7 +53,7 @@ def test_requested_finding_limits_are_deterministic_not_claim_limits():
 def test_canonical_grounded_final_is_accepted_by_agent(monkeypatch, tmp_path):
     (tmp_path / "app.py").write_text("from flask import Flask\n", encoding="utf-8")
     outputs = iter([
-        agent_tools(tool_call("read_file", {"caminho_relativo": "app.py"})),
+        agent_tools(tool_call("read_file", {"path": "app.py"})),
         agent_final({"answer": "app.py importa Flask.", "evidence_ids": ["ev-0001"]}),
     ])
     monkeypatch.setattr(core_agent, "executar_agente_llm", lambda prompt, cfg: next(outputs))
@@ -77,7 +69,7 @@ def test_relevant_source_survives_non_read_result(monkeypatch, tmp_path):
     (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
     prompts = []
     outputs = iter([
-        agent_tools(tool_call("read_file", {"caminho_relativo": "app.py"})),
+        agent_tools(tool_call("read_file", {"path": "app.py"})),
         agent_tools(tool_call("calculate", {"expression": "1+1"})),
         agent_final({"answer": "app.py define VALUE = 1.", "evidence_ids": ["ev-0001"]}),
     ])

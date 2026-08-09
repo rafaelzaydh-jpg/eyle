@@ -97,6 +97,158 @@ def validate_investigation(
     return True, "ok", normalized
 
 
+
+def apply_investigation_updates(
+    raw: Any,
+    *,
+    previous: Sequence[Dict[str, Any]] | None = None,
+    evidence: Dict[str, Any] | None = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Apply Investigation updates transactionally, one target at a time.
+
+    The Main LLM owns target semantics and sends only targets it wants to add or
+    change. The runtime preserves the canonical contract, commits every
+    structurally valid update independently, and rejects only invalid updates.
+    Non-mentioned targets are never reconstructed or dropped. Existing target
+    Evidence is monotonic: ``evidence_ids`` in an update is additive delta input,
+    not a replacement snapshot.
+
+    Returns ``(canonical, accepted, rejected, committed_progress)``.
+    ``committed_progress`` contains only objective contract progress that can
+    authorize more physical tool capacity later: newly attached runtime Evidence.
+    A pure status transition to ``established`` is semantic bookkeeping owned by
+    the Main LLM and never mints physical authority by itself. Claim Review
+    remains the later semantic verifier.
+    """
+    canonical = [dict(item) for item in (previous or []) if isinstance(item, dict)]
+    if not isinstance(raw, list):
+        return canonical, [], [{
+            "id": None,
+            "reason": "INVESTIGATION_UPDATES_LIST_REQUIRED",
+        }], []
+
+    known_evidence = set((evidence or {}).keys())
+    index_by_id = {
+        str(item.get("id") or ""): index
+        for index, item in enumerate(canonical)
+        if str(item.get("id") or "")
+    }
+    counts: Dict[str, int] = {}
+    for item in raw:
+        if isinstance(item, dict):
+            target_id = str(item.get("id") or "").strip()
+            if target_id:
+                counts[target_id] = counts.get(target_id, 0) + 1
+
+    accepted: List[Dict[str, Any]] = []
+    rejected: List[Dict[str, Any]] = []
+    progress: List[Dict[str, Any]] = []
+
+    for position, item in enumerate(raw, start=1):
+        target_id = str(item.get("id") or "").strip() if isinstance(item, dict) else ""
+        def reject(reason: str) -> None:
+            rejected.append({"id": target_id or None, "reason": reason, "position": position})
+
+        if not isinstance(item, dict) or set(item) != _TARGET_FIELDS:
+            reject(f"INVESTIGATION_TARGET_SHAPE_INVALID:{position}")
+            continue
+        if not target_id or len(target_id) > 80:
+            reject(f"INVESTIGATION_TARGET_ID_INVALID:{position}")
+            continue
+        if counts.get(target_id, 0) > 1:
+            reject(f"INVESTIGATION_TARGET_ID_DUPLICATE:{target_id}")
+            continue
+
+        goal = str(item.get("goal") or "").strip()
+        status = str(item.get("status") or "").strip()
+        reason = str(item.get("reason") or "").strip()
+        raw_evidence = item.get("evidence_ids")
+        if not goal or len(goal) > 500:
+            reject(f"INVESTIGATION_TARGET_GOAL_INVALID:{target_id}")
+            continue
+        if status not in TARGET_STATUSES:
+            reject(f"INVESTIGATION_TARGET_STATUS_INVALID:{target_id}")
+            continue
+        if not isinstance(raw_evidence, list) or any(
+            not isinstance(value, str) or not value.strip() for value in raw_evidence
+        ):
+            reject(f"INVESTIGATION_TARGET_EVIDENCE_INVALID:{target_id}")
+            continue
+        incoming_evidence = _ids(raw_evidence)
+        missing = [evidence_id for evidence_id in incoming_evidence if evidence_id not in known_evidence]
+        if missing:
+            reject(f"INVESTIGATION_UNKNOWN_EVIDENCE:{target_id}:" + ",".join(missing))
+            continue
+
+        current = canonical[index_by_id[target_id]] if target_id in index_by_id else None
+        if current is not None:
+            if str(current.get("goal") or "").strip() != goal:
+                reject(f"INVESTIGATION_TARGET_GOAL_MUTATED:{target_id}")
+                continue
+            previous_evidence = _ids(current.get("evidence_ids") or [])
+        else:
+            previous_evidence = []
+
+        # investigation_updates is a true delta. Evidence already committed to
+        # a target is runtime-owned monotonic state and is retained
+        # automatically; the Main Agent only needs to send newly material IDs
+        # (or an empty list when only status/reason changes). This removes an
+        # administrative resend requirement without changing semantic authority.
+        evidence_ids = list(previous_evidence)
+        for evidence_id in incoming_evidence:
+            if evidence_id not in evidence_ids:
+                evidence_ids.append(evidence_id)
+
+        if status == "established" and not evidence_ids:
+            reject(f"INVESTIGATION_ESTABLISHED_REQUIRES_EVIDENCE:{target_id}")
+            continue
+        if status in {"established", "dismissed"} and not reason:
+            reject(f"INVESTIGATION_STATUS_REQUIRES_REASON:{target_id}:{status}")
+            continue
+        if len(reason) > 500:
+            reject(f"INVESTIGATION_TARGET_REASON_TOO_LONG:{target_id}")
+            continue
+
+        normalized = {
+            "id": target_id,
+            "goal": goal,
+            "status": status,
+            "evidence_ids": evidence_ids,
+            "reason": reason,
+        }
+        changed = current != normalized
+        if current is None:
+            index_by_id[target_id] = len(canonical)
+            canonical.append(normalized)
+        elif changed:
+            canonical[index_by_id[target_id]] = normalized
+
+        accepted.append({
+            "id": target_id,
+            "changed": bool(changed),
+            "status": status,
+            "evidence_ids": evidence_ids,
+        })
+
+        added_evidence = [evidence_id for evidence_id in incoming_evidence if evidence_id not in previous_evidence]
+        established_transition = bool(
+            status == "established"
+            and (current is None or str(current.get("status") or "") != "established")
+        )
+        # Creating a target only defines debt; it never mints authority. A pure
+        # semantic status flip also does not mint authority. Credit requires
+        # objectively new runtime Evidence linked to an already-committed target.
+        # This prevents Claim-reopen -> same-Evidence re-establish cycles from
+        # farming tool extensions without learning anything new.
+        if current is not None and changed and added_evidence:
+            progress.append({
+                "target_id": target_id,
+                "added_evidence_ids": added_evidence,
+                "established_transition": established_transition,
+            })
+
+    return canonical, accepted, rejected, progress
+
 def target_evidence_ids(investigation: Sequence[Dict[str, Any]] | None) -> List[str]:
     result: List[str] = []
     seen = set()
@@ -192,11 +344,11 @@ def reopen_targets_from_review(
     investigation: Sequence[Dict[str, Any]] | None,
     review: Dict[str, Any] | None,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
-    """Apply only reviewer-declared target mappings from an insufficient review.
+    """Apply only reviewer-declared target mappings from semantic review debt.
 
     The verifier owns the semantic mapping. The runtime merely reopens an
-    existing target explicitly named by either a Semantic Gap or an
-    ``insufficient`` Claim. ``target_id=null`` never invents a new target.
+    existing target explicitly named by a Semantic Gap or by an ``insufficient``
+    / ``contradicted`` Claim. ``target_id=null`` never invents a new target.
     """
     result = [dict(item) for item in (investigation or []) if isinstance(item, dict)]
     by_id = {str(item.get("id") or ""): item for item in result if str(item.get("id") or "")}
@@ -207,7 +359,7 @@ def reopen_targets_from_review(
         issues.extend(item for item in (review.get("semantic_gaps") or []) if isinstance(item, dict))
         issues.extend(
             item for item in (review.get("claims") or [])
-            if isinstance(item, dict) and item.get("verdict") == "insufficient"
+            if isinstance(item, dict) and item.get("verdict") in {"insufficient", "contradicted"}
         )
 
     for issue in issues:

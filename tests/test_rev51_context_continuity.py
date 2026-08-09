@@ -23,8 +23,8 @@ def test_conversation_background_survives_tool_turns(monkeypatch, tmp_path):
         assert payload["request"] == "Analise app.py"
         assert any(item.get("content") == "Ao terminar, diga abacaxi." for item in payload["conversation_background"])
         if len(prompts) == 1:
-            return {"tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "app.py"}}], "workspace_scope": workspace_scope("read"), "investigation": [investigation_target(goal="Establish what app.py defines")]}
-        return {"final": {"answer": "app.py define x como 1. abacaxi", "evidence_ids": ["ev-0001"], "limitations": []}, "workspace_scope": workspace_scope("read"), "investigation": [investigation_target(goal="Establish what app.py defines", status="established", evidence_ids=["ev-0001"], reason="app.py was read")]}
+            return {"tool_calls": [{"tool": "read_file", "arguments": {"path": "app.py"}}], "workspace_scope": workspace_scope("read"), "investigation_updates": [investigation_target(goal="Establish what app.py defines")]}
+        return {"final": {"answer": "app.py define x como 1. abacaxi", "evidence_ids": ["ev-0001"], "limitations": []}, "workspace_scope": workspace_scope("read"), "investigation_updates": [investigation_target(goal="Establish what app.py defines", status="established", evidence_ids=["ev-0001"], reason="app.py was read")]}
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
     status, text, _, _ = core_agent.executar_agente(
@@ -66,16 +66,16 @@ def test_investigation_map_survives_raw_followup_cleanup(monkeypatch, tmp_path):
         payload = json.loads(prompt)
         prompts.append(payload)
         if len(prompts) == 1:
-            return {"tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "app.py"}}], "workspace_scope": workspace_scope("read"), "investigation": [investigation_target(goal="Establish the material scope of app.py")]}
+            return {"tool_calls": [{"tool": "read_file", "arguments": {"path": "app.py"}}], "workspace_scope": workspace_scope("read"), "investigation_updates": [investigation_target(goal="Establish the material scope of app.py")]}
         if len(prompts) == 2:
-            return {"final": {"answer": "app.py define x como 1.", "evidence_ids": ["ev-0001"], "limitations": []}, "workspace_scope": workspace_scope("read"), "investigation": [investigation_target(goal="Establish the material scope of app.py", status="established", evidence_ids=["ev-0001"], reason="app.py was read")]}
+            return {"final": {"answer": "app.py define x como 1.", "evidence_ids": ["ev-0001"], "limitations": []}, "workspace_scope": workspace_scope("read"), "investigation_updates": [investigation_target(goal="Establish the material scope of app.py", status="established", evidence_ids=["ev-0001"], reason="app.py was read")]}
         assert payload["latest_tool_results"] == []
         assert payload["investigation_map"]
         assert payload["investigation_map"][-1]["tool"] == "read_file"
         assert "semantic_gaps" in (payload.get("runtime_feedback") or "")
         assert payload["investigation"][0]["status"] == "open"
         assert "restante do escopo" in payload["investigation"][0]["reason"]
-        return {"final": {"answer": "app.py define x como 1; o restante não foi estabelecido.", "evidence_ids": ["ev-0001"], "limitations": []}, "workspace_scope": workspace_scope("read"), "investigation": [investigation_target(goal="Establish the material scope of app.py", status="established", evidence_ids=["ev-0001"], reason="The answer is explicitly limited to the observed file")]}
+        return {"final": {"answer": "app.py define x como 1; o restante não foi estabelecido.", "evidence_ids": ["ev-0001"], "limitations": []}, "workspace_scope": workspace_scope("read"), "investigation_updates": [investigation_target(goal="Establish the material scope of app.py", status="established", evidence_ids=["ev-0001"], reason="The answer is explicitly limited to the observed file")]}
 
     def fake_verifier(_prompt, _cfg):
         verifier_calls["n"] += 1
@@ -109,8 +109,8 @@ def test_blocked_repeated_reads_do_not_trigger_identical_tool_loop(monkeypatch, 
     def fake(prompt, _cfg):
         calls["n"] += 1
         if calls["n"] <= 4:
-            return {"tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "app.py"}}], "workspace_scope": workspace_scope("read"), "investigation": [investigation_target(goal="Establish what app.py defines")]}
-        return {"final": {"answer": "x é 1.", "evidence_ids": ["ev-0001"], "limitations": []}, "workspace_scope": workspace_scope("read"), "investigation": [investigation_target(goal="Establish what app.py defines", status="established", evidence_ids=["ev-0001"], reason="app.py was read")]}
+            return {"tool_calls": [{"tool": "read_file", "arguments": {"path": "app.py"}}], "workspace_scope": workspace_scope("read"), "investigation_updates": [investigation_target(goal="Establish what app.py defines")]}
+        return {"final": {"answer": "x é 1.", "evidence_ids": ["ev-0001"], "limitations": []}, "workspace_scope": workspace_scope("read"), "investigation_updates": [investigation_target(goal="Establish what app.py defines", status="established", evidence_ids=["ev-0001"], reason="app.py was read")]}
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
     status, _, _, details = core_agent.executar_agente(
@@ -124,8 +124,8 @@ def test_blocked_repeated_reads_do_not_trigger_identical_tool_loop(monkeypatch, 
 def test_agent_batch_contract_rejects_more_than_four_calls():
     envelope = {
         "action": "tool_calls",
-        "tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": f"f{i}.py"}} for i in range(5)],
-        "patches": None, "needs_user": None, "final": None, "workspace_scope": workspace_scope("read"), "investigation": [],
+        "tool_calls": [{"tool": "read_file", "arguments": {"path": f"f{i}.py"}} for i in range(5)],
+        "patches": None, "needs_user": None, "final": None, "workspace_scope": workspace_scope("read"), "investigation_updates": [],
     }
     with pytest.raises(StructuredResponseError) as exc:
         parse_agent_response(envelope)

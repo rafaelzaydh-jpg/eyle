@@ -1,14 +1,14 @@
 {
   "release": "2.7.4",
   "app_version": "2.7.4",
-  "config_schema_version": "5.2",
-  "revision": "rev5.2.3-investigation-memory-progress",
+  "config_schema_version": "5.4",
+  "revision": "rev5.2.9-progress-earned-authority",
   "released_at": "2026-08-09",
-  "title": "Rev5.2.3 Investigation Memory & Progress Semantics",
+  "title": "Rev5.2.9 Progress-Earned Authority",
   "architecture": {
-    "path": "interface -> runtime/service -> AgentSession(request + workspace_scope + investigation + Evidence + runtime state) -> administrative structured handshake -> main LLM <-> 16 deterministic tools/live workspace -> deterministic Final/Write Gates -> semantic scope/Claim Review -> reviewer-directed recovery -> response",
-    "authority": "Main LLM declares workspace semantics and investigation; runtime preserves/validates contracts, safety and physical authority; Claim Review challenges semantic scope/support without runtime keyword inference",
-    "investigation_contract": "persistent material targets with id, immutable goal, open|established|dismissed status, Evidence IDs and reason",
+    "path": "interface -> runtime/service -> AgentSession(Investigation + Evidence + ObservationLedger + objective Decision/Progress state) -> Main Agent -> Runtime canonical preflight/tools -> provisional Final -> Claim Verifier -> accept OR runtime reopen/pin/feedback -> Main Agent",
+    "authority": "Main Agent owns task semantics; Claim Verifier is the only independent semantic reviewer; Runtime owns contracts, objective state identity, Evidence/observation memory, canonical tool validation and physical authority; administrative structured-output probes remain transport-only",
+    "investigation_contract": "runtime-owned canonical material targets updated transactionally by Main LLM additive deltas; id/goal are durable, committed Evidence is retained automatically, and semantic truth remains outside runtime authority",
     "investigation_map": "compact observable navigation history; separate from semantic investigation purpose",
     "working_set_tokens": 12000,
     "completion_budget_tokens": 9000,
@@ -16,7 +16,12 @@
     "total_budget_tokens": 105000,
     "main_agent_turn_cap": 8,
     "llm_call_cap": 12,
-    "tool_call_cap": 12
+    "tool_call_base_cap": 12,
+    "tool_call_effective_cap": "progress-earned; no fixed cumulative extension ceiling",
+    "committed_progress_extension_calls": 4,
+    "observation_ledger": "same normalized observation + same workspace_epoch is executed once; later requests are replayed/rehydrated without physical tool cost; negative complete searches and symbol-not-found outcomes are citable observations",
+    "workspace_epoch": "increments only when a verified workspace write commits; session/memory bookkeeping does not invalidate workspace observations",
+    "claim_rework_lane": "only after Claim debt; exposes unused task-wide llm_call capacity while reserving one later verifier call and reports current/pending physical authority; does not raise the normal investigation cap"
   },
   "adaptive_structured_handshake": {
     "administrative": true,
@@ -41,7 +46,7 @@
         "needs_user",
         "final",
         "workspace_scope",
-        "investigation"
+        "investigation_updates"
       ]
     },
     "claim_verifier": {
@@ -49,11 +54,6 @@
         "claims",
         "findings",
         "semantic_gaps"
-      ]
-    },
-    "claim_repair": {
-      "required_top_level": [
-        "repairs"
       ]
     }
   },
@@ -80,7 +80,7 @@
     ],
     "semantic_invariants": "necessity, Evidence sufficiency, dismissal validity and missing material scope belong to the Main LLM/Claim Review, not runtime",
     "final_gate": "project-grounded final requires a non-empty contract with no open target",
-    "review_link": "Semantic Gaps and insufficient Claims can explicitly carry target_id for an existing challenged target; null never authorizes runtime-created semantics",
+    "review_link": "Semantic Gaps plus insufficient or contradicted Claims may explicitly carry target_id for an existing challenged target; null never authorizes runtime-created semantics",
     "evidence_pinning": "target-linked Evidence keeps a compact ID/file/lines/hash pointer visible even after the recent Evidence window moves on"
   },
   "canonical_claim_review": {
@@ -106,11 +106,15 @@
       "conflicting_evidence",
       "scope_gap"
     ],
-    "local_recovery": "Claim, Semantic Gap and Finding protocol/consistency recovery preserves unaffected review content; runtime never invents semantic repairs"
+    "local_recovery": "Claim, Semantic Gap and Finding protocol recovery reuses the same claim_verifier only to correct its own invalid structured output; runtime never invents semantic judgments",
+    "followup": "contradicted, insufficient and semantic gaps use one deterministic route: reopen reviewer-declared targets, pin cited Evidence, return reviewer feedback to Main Agent",
+    "loop_control": "Decision Ledger fingerprints reviewer debt against canonical state; identical debt without material state change stops as CLAIM_REVIEW_STALLED",
+    "producer_rule": "Claim Verifier never rewrites final prose; semantic correction belongs only to Main Agent"
   },
   "tools": {
     "public_count": 16,
-    "write_protocol": "action=patches -> dry-run -> confirmation -> apply -> compile/tests/reread -> rollback on failure"
+    "write_protocol": "action=patches -> dry-run -> confirmation -> apply -> compile/tests/reread -> rollback on failure",
+    "public_abi": "canonical English model-facing fields; read_file(path), read_range(path,line_start,line_end), find_symbol(symbol,path?), list_tree(limit?,depth?,filter?), count_tokens(path?,tokenizer?); legacy aliases are rejected"
   },
   "rev5_2": {
     "removed": "free-form plan protocol",
@@ -197,5 +201,152 @@
     },
     "public_tools": 16,
     "regressions": 8
+  },
+  "rev5_2_4": {
+    "basis": "Rev5.2.3 Investigation Memory & Progress Semantics",
+    "changes": [
+      "every job starts with the unchanged 12-tool base fuse",
+      "Claim Review can earn +4 tool calls when structurally new supported material is verified while insufficient Claims or Semantic Gaps still require follow-up",
+      "earned bonus is capped at +8 in this release and duplicate supported Claim shapes cannot mint credit again",
+      "oversized tool batches are rejected atomically before any tool executes; Main LLM chooses the smaller subset",
+      "safe execution history exposes base/earned/effective tool budget and bonus cycles",
+      "history UI adds expand-all/collapse-all controls"
+    ],
+    "authority_rule": "Claim Review owns semantic support; runtime only deduplicates verified Claim identities, grants bounded physical credit and enforces budget atomically",
+    "limits": {
+      "main_agent_turn_cap": 8,
+      "llm_call_cap": 12,
+      "tool_call_base_cap": 12,
+      "tool_bonus_per_verified_progress_cycle": 4,
+      "tool_bonus_cap": 8,
+      "tool_call_effective_cap": 20,
+      "working_set_tokens": 12000,
+      "completion_budget_tokens": 9000
+    },
+    "public_tools": 16,
+    "regressions": 7
+  },
+  "rev5_2_5": {
+    "basis": "Rev5.2.4 Verified Progress Budget",
+    "changes": [
+      "Claim Review no longer grants or influences tool credit; it remains only the second-brain semantic verifier of provisional final claims and target coverage",
+      "Main LLM sends investigation_updates deltas while runtime owns and preserves the canonical Investigation Contract",
+      "runtime applies valid target updates independently and persists accepted siblings even when another update is rejected",
+      "committed_progress is deposited only for structurally valid evidenced progress; multiple target updates in one LLM decision mint one progress epoch",
+      "earned tool extension is dormant runtime authority and is granted only when the physical tool gate would otherwise block an atomic batch, open debt remains, and new committed progress exists since the previous extension",
+      "committed Evidence cannot be silently dropped by later Main LLM updates",
+      "oversized batches remain atomic and the history UI retains expand-all/collapse-all while exposing committed progress and earned extensions"
+    ],
+    "authority_rule": "Main LLM owns meaning; runtime owns canonical contract state, partial commit and physical authority; Claim Review owns semantic verification only",
+    "limits": {
+      "main_agent_turn_cap": 8,
+      "llm_call_cap": 12,
+      "tool_call_base_cap": 12,
+      "committed_progress_extension_calls": 4,
+      "max_earned_tool_extension": 8,
+      "tool_call_effective_cap": 20,
+      "working_set_tokens": 12000,
+      "completion_budget_tokens": 9000
+    },
+    "public_tools": 16,
+    "regressions": 13
+  },
+  "rev5_2_6": {
+    "basis": "Rev5.2.5 Transactional Contract Authority",
+    "changes": [
+      "ObservationLedger becomes the runtime source of truth for deterministic physical observation identity by normalized call plus workspace_epoch",
+      "Main LLM may request the same observation again; runtime replays/rehydrates retained reality instead of physically rerunning it in the same workspace epoch",
+      "complete zero-match search_code and SYMBOL_NOT_FOUND become citable observation Evidence without runtime semantic interpretation",
+      "unified preflight validates phase/schema, suppresses batch duplicates, replays known observations and computes physical cost before earned tool authority",
+      "earned_extension can fund only genuinely novel physical calls after preflight",
+      "runtime-cycle progress accounting covers early continue/rejection paths and DecisionLedger stops repeated identical rejected batches as ADMINISTRATIVE_LOOP",
+      "legacy IDENTICAL_READ_BLOCKED, IDENTICAL_OBSERVATION_BLOCKED, SEMANTIC_READ_BLOCKED execution paths and the full-investigation snapshot fallback are removed",
+      "history exposes observation ledger size, replay/rehydration count, workspace epoch, repeated rejected decisions and runtime progress cycles",
+      "Claim Review remains byte-identical to Rev5.2.5"
+    ],
+    "authority_rule": "Main LLM owns meaning and may reconsider freely; runtime owns contracts, retained observable reality and physical authority; Claim Review owns semantic verification only",
+    "limits": {
+      "main_agent_turn_cap": 8,
+      "llm_call_cap": 12,
+      "tool_call_base_cap": 12,
+      "committed_progress_extension_calls": 4,
+      "max_earned_tool_extension": 8,
+      "tool_call_effective_cap": 20,
+      "working_set_tokens": 12000,
+      "completion_budget_tokens": 9000
+    },
+    "public_tools": 16,
+    "regressions": 7
+  },
+  "rev5_2_7": {
+    "basis": "Rev5.2.6 Observation Ledger & Unified Runtime Preflight",
+    "changes": [
+      "removed claim_repair profile, schema, prompt, LLM entrypoint, config and persisted attempt state",
+      "contradicted joins insufficient and semantic gaps in the same reviewer-debt follow-up route",
+      "runtime reopens only verifier-declared target_id mappings, pins cited Evidence and returns compact reviewer feedback to Main Agent",
+      "Decision Ledger stops identical reviewer debt against unchanged canonical state as CLAIM_REVIEW_STALLED",
+      "directed Claim rework can consume only unused global max_llm_calls capacity and reserves one later verifier call; normal max_llm_turns remains 8",
+      "committed_progress credit now requires newly linked runtime Evidence; pure established status transitions cannot mint tool authority",
+      "local Claim protocol recovery now preserves target_id through merge",
+      "production structured semantic profiles are exactly agent and claim_verifier"
+    ],
+    "authority_rule": "Agent produces; Claim judges; Runtime administers. No third task-semantic LLM role exists.",
+    "limits": {
+      "normal_main_agent_turn_cap": 8,
+      "llm_call_cap": 12,
+      "tool_call_base_cap": 12,
+      "max_earned_tool_extension": 8,
+      "tool_call_effective_cap": 20,
+      "working_set_tokens": 12000,
+      "completion_budget_tokens": 9000
+    },
+    "public_tools": 16,
+    "regressions": 7
+  },
+  "rev5_2_8": {
+    "basis": "Rev5.2.7 Two-Brain Claim Follow-up & Loop Control",
+    "changes": [
+      "Decision Ledger rejection identity includes objective observed state and relevant physical tool-authority state, preventing false ADMINISTRATIVE_LOOP after new observations or changed remaining authority",
+      "runtime progress ignores free-form Investigation status/reason churn and advances only from observed reality, Evidence bindings, committed progress or workspace mutation",
+      "invalid tool batches are rejected atomically before authority; phase policy remains the outer structural contract",
+      "public tool ABI uses one canonical English vocabulary and accepts no legacy aliases",
+      "Main Agent prompt persists material Evidence on open targets incrementally and favors independently provable target granularity",
+      "legacy lexical workspace/write helpers and semantic-read signature compatibility wrapper are removed"
+    ],
+    "authority_rule": "Agent thinks; Claim judges; Runtime administers objective contracts and physical reality. No new subsystem is introduced.",
+    "limits_unchanged": {
+      "normal_main_agent_turn_cap": 8,
+      "llm_call_cap": 12,
+      "tool_call_base_cap": 12,
+      "committed_progress_extension_calls": 4,
+      "max_earned_tool_extension": 8,
+      "tool_call_effective_cap": 20,
+      "working_set_tokens": 12000,
+      "completion_budget_tokens": 9000
+    },
+    "public_tools": 16,
+    "regressions": 6
+  },
+  "rev5_2_9": {
+    "basis": "Rev5.2.8 Canonical Runtime Cleanup",
+    "changes": [
+      "removed the fixed +8 earned-tool ceiling; every unspent runtime-validated committed-progress epoch unlocks +4 physical calls exactly once at the authority gate",
+      "added durable global credit-once Evidence identity so old Evidence cannot mint progress again through reopen, remap or target cloning",
+      "investigation_updates.evidence_ids is additive delta and runtime automatically retains previously committed target Evidence",
+      "Claim follow-up reports remaining Agent-call capacity, current physical capacity and pending progress-funded capacity",
+      "normal 8-turn, 12-LLM-call and 12-tool base limits remain unchanged"
+    ],
+    "authority_rule": "Agent owns meaning; Claim judges; Runtime validates objective progress and converts each immutable progress epoch into +4 physical authority once.",
+    "limits": {
+      "normal_main_agent_turn_cap": 8,
+      "llm_call_cap": 12,
+      "tool_call_base_cap": 12,
+      "committed_progress_extension_calls": 4,
+      "tool_call_effective_cap": "progress-earned; no fixed cumulative ceiling",
+      "working_set_tokens": 12000,
+      "completion_budget_tokens": 9000
+    },
+    "public_tools": 16,
+    "regressions": 7
   }
 }

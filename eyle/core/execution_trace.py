@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, List, Optional
 
 
-_TRACE_LIST_KEYS = ("phases", "context", "llm_calls", "decisions", "tools")
+_TRACE_LIST_KEYS = ("phases", "context", "llm_calls", "decisions", "tools", "committed_progress_history", "tool_extension_history")
 _TRACE_SECTIONS = {"all", "summary", "context", "llm", "tools", "decisions", "phases", "validation"}
 
 
@@ -157,6 +157,7 @@ def build_execution_trace(
             "duration_seconds": duration_seconds,
             "turns": details.get("turns"),
             "tool_calls": details.get("tool_calls"),
+            "tool_budget": details.get("tool_budget") if isinstance(details.get("tool_budget"), dict) else {},
             "current_phase": details.get("runtime_phase"),
             "failure_code": details.get("failure_code"),
             "parse_failures": details.get("parse_failures"),
@@ -169,6 +170,8 @@ def build_execution_trace(
         "llm_calls": _safe_llm_calls(details, limit),
         "decisions": decisions,
         "tools": tools,
+        "committed_progress_history": _bounded_list(details.get("committed_progress_history"), limit),
+        "tool_extension_history": _bounded_list(details.get("tool_extension_history"), limit),
         "administrative": {
             "structured_capability": details.get("structured_capability") if isinstance(details.get("structured_capability"), dict) else {},
             "llm_history": _bounded_list(details.get("administrative_llm_history"), limit),
@@ -215,7 +218,7 @@ def filter_execution_trace(
         "decisions": ["decisions"],
         "phases": ["phases"],
         "validation": ["administrative", "validation"],
-        "all": ["tokens", "phases", "context", "llm_calls", "decisions", "tools", "administrative", "validation"],
+        "all": ["tokens", "phases", "context", "llm_calls", "decisions", "tools", "committed_progress_history", "tool_extension_history", "administrative", "validation"],
     }
     for key in mapping[section]:
         value = trace.get(key)

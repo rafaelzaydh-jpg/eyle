@@ -324,8 +324,8 @@ def _tool_find_symbol(arguments, ctx):
     """Locate a symbol in a known file or across the live project."""
     root=_caminho_projeto(ctx)
     if not root: return _falha("WORKSPACE_NOT_AVAILABLE","nenhum workspace ativo")
-    symbol=arguments["simbolo"]
-    rel=arguments.get("caminho_relativo")
+    symbol=arguments["symbol"]
+    rel=arguments.get("path")
     if rel and _caminho_parece_segredo(str(rel)):
         return _falha("SECRET_PATH_BLOCKED", "arquivo protegido pela política unificada de segredos do workspace", executed=True)
     result=localizar_simbolo(root,rel,symbol) if rel else localizar_simbolo_no_projeto(root,symbol)
@@ -359,7 +359,7 @@ def _tool_read_file(arguments, ctx):
     caminho_projeto = _caminho_projeto(ctx)
     if not caminho_projeto:
         return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
-    caminho_relativo = arguments["caminho_relativo"]
+    caminho_relativo = arguments["path"]
 
     config = (ctx or {}).get("config") or {}
     max_linhas = config.get("agent", {}).get("max_read_range_lines", 400)
@@ -387,8 +387,8 @@ def _tool_list_tree(arguments, ctx):
     max_entradas = cfg_agente.get("max_tree_entries", 200)
     max_profundidade = cfg_agente.get("max_tree_depth", 6)
     max_secret_scan_bytes = cfg_agente.get("max_secret_scan_bytes", 64 * 1024)
-    limite = arguments.get("limite", max_entradas)
-    profundidade = arguments.get("profundidade", max_profundidade)
+    limite = arguments.get("limit", max_entradas)
+    profundidade = arguments.get("depth", max_profundidade)
     if limite > max_entradas:
         return _falha(
             "INVALID_ARGUMENT",
@@ -404,7 +404,7 @@ def _tool_list_tree(arguments, ctx):
             caminho_projeto,
             limite=limite,
             profundidade=profundidade,
-            filtro=arguments.get("filtro"),
+            filtro=arguments.get("filter"),
             max_secret_scan_bytes=max_secret_scan_bytes,
         )
     except ErroLeituraProjeto as erro:
@@ -443,7 +443,7 @@ def _tool_count_tokens(arguments, ctx):
     try:
         detail = count_project_tokens(
             root, (ctx or {}).get("config") or {},
-            path=arguments.get("caminho_relativo"),
+            path=arguments.get("path"),
             tokenizer=arguments.get("tokenizer"),
         )
         return _sucesso(detail)
@@ -502,9 +502,9 @@ def _tool_read_range(arguments, ctx):
     try:
         resultado = ler_faixa_projeto(
             caminho_projeto,
-            arguments["caminho_relativo"],
-            arguments["linha_inicio"],
-            arguments["linha_fim"],
+            arguments["path"],
+            arguments["line_start"],
+            arguments["line_end"],
             max_linhas=max_linhas,
         )
     except ErroLeituraProjeto as erro:
@@ -747,7 +747,7 @@ TOOLS = {
         "description": "Measure token count or a truthful token estimate for safe project text.",
         "permission": "READ",
         "input_schema": _schema_objeto({
-            "caminho_relativo": {"type": "string", "minLength": 1, "description": "Optional project-relative file or directory to measure instead of the whole project."},
+            "path": {"type": "string", "minLength": 1, "description": "Optional project-relative file or directory to measure instead of the whole project."},
             "tokenizer": {"type": "string", "minLength": 1, "description": "Optional tokenizer/model identifier; if unavailable, the configured truthful fallback is reported."},
         }),
         "output_schema": "Standard envelope; detail includes exact=false when using the configured character/token fallback.",
@@ -766,9 +766,9 @@ TOOLS = {
         "description": "List the fresh project tree with limit, depth, filter, and ignored-item counts.",
         "permission": "READ",
         "input_schema": _schema_objeto({
-            "limite": {"type": "integer", "minimum": 1, "description": "Maximum number of tree entries to return before marking the result truncated."},
-            "profundidade": {"type": "integer", "minimum": 1, "description": "Maximum directory depth to traverse from the project root."},
-            "filtro": {"type": "string", "minLength": 1, "description": "Optional filename/path glob-style filter applied to returned tree entries."},
+            "limit": {"type": "integer", "minimum": 1, "description": "Maximum number of tree entries to return before marking the result truncated."},
+            "depth": {"type": "integer", "minimum": 1, "description": "Maximum directory depth to traverse from the project root."},
+            "filter": {"type": "string", "minLength": 1, "description": "Optional filename/path glob-style filter applied to returned tree entries."},
         }),
         "output_schema": "Standard envelope; detail contains tree entries, truncation, and ignored_by_reason counts.",
         "fn": _tool_list_tree,
@@ -788,9 +788,9 @@ TOOLS = {
         "description": "Locate a symbol in a known file or across the live project.",
         "permission": "READ",
         "input_schema": _schema_objeto({
-            "caminho_relativo": _CAMINHO,
-            "simbolo": {"type": "string", "minLength": 1, "description": "Exact code symbol name whose definition/location should be found."},
-        }, ["simbolo"]),
+            "path": _CAMINHO,
+            "symbol": {"type": "string", "minLength": 1, "description": "Exact code symbol name whose definition/location should be found."},
+        }, ["symbol"]),
         "output_schema": "Standard envelope; detail contains the range, original code, and total line count.",
         "fn": _tool_find_symbol,
     },
@@ -799,10 +799,10 @@ TOOLS = {
         "description": "Read one fresh numbered line range directly from a project file.",
         "permission": "READ",
         "input_schema": _schema_objeto({
-            "caminho_relativo": _CAMINHO,
-            "linha_inicio": _LINHA,
-            "linha_fim": _LINHA,
-        }, ["caminho_relativo", "linha_inicio", "linha_fim"]),
+            "path": _CAMINHO,
+            "line_start": _LINHA,
+            "line_end": _LINHA,
+        }, ["path", "line_start", "line_end"]),
         "output_schema": "Standard envelope; detail contains the actual range, numbered snippet, total lines, content_hash, and file_hash.",
         "fn": _tool_read_range,
     },
@@ -811,7 +811,7 @@ TOOLS = {
         "description": "Read a bounded beginning portion of one project file with verifiable hashes and line metadata.",
         "permission": "READ",
         "input_schema": _schema_objeto(
-            {"caminho_relativo": _CAMINHO}, ["caminho_relativo"],
+            {"path": _CAMINHO}, ["path"],
         ),
         "output_schema": "Standard envelope; detail preserves content/truncation and, when readable, includes a numbered range, content_hash, and file_hash.",
         "fn": _tool_read_file,
@@ -1260,11 +1260,11 @@ def validar_chamada_tool(nome, arguments, registro=None):
                     "INVALID_ARGUMENT",
                     f"argumento '{nome_campo}' precisa ser <= {regra['maximum']}",
                 )
-    if "linha_inicio" in normalizados and "linha_fim" in normalizados:
-        if normalizados["linha_fim"] < normalizados["linha_inicio"]:
+    if "line_start" in normalizados and "line_end" in normalizados:
+        if normalizados["line_end"] < normalizados["line_start"]:
             return None, _falha(
                 "INVALID_ARGUMENT",
-                "argumento 'linha_fim' precisa ser >= linha_inicio",
+                "argument 'line_end' must be >= line_start",
             )
     return normalizados, None
 

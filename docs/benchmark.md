@@ -1,4 +1,4 @@
-# Benchmark — Eyle Rev5.2.3
+# Benchmark — Eyle Rev5.2.9
 
 Benchmarks measure observable convergence, grounding and operating cost. They are not a hidden reasoning subsystem.
 
@@ -12,8 +12,8 @@ Record Main Agent turns, tools, Investigation targets/status transitions, Claim 
 
 Expected invariants:
 
-1. the Main LLM creates material Investigation targets in the same decision that begins project investigation;
-2. targets persist by ID and goal across turns and cannot silently disappear;
+1. the Main LLM creates material Investigation targets in `investigation_updates` in the same decision that begins project investigation;
+2. runtime persists the canonical targets by ID/goal across turns; omitted targets do not need to be reconstructed;
 3. search/navigation remains freely chosen by the Main LLM—no target hardcodes a file/tool path;
 4. a grounded final cannot pass with a declared `open` target;
 5. Claim Review receives target-linked Evidence and may challenge a target through `target_id`;
@@ -54,3 +54,27 @@ Required cases include: the historical ~4526-token recovery state must admit the
 
 Required cases: source coverage from an older prompt must not block a reread once that source body is absent from the current prompt; Evidence named by an insufficient Claim/Semantic Gap or a reopened target must remain pinned through the next semantic-follow-up prompt; alternating unchanged `project_stats`/`inspect_project` calls must stop consuming physical tools; `ok=true` without new Evidence or state mutation must not count as progress; and a repeated same-scope `run_tests` execution must be reusable until an observable state-changing action invalidates it.
 
+## Rev5.2.4 historical regression
+
+Atomic oversized batches must still execute zero tools. The reviewer-coupled bonus mechanism from Rev5.2.4 is intentionally absent from the current architecture.
+
+## Rev5.2.5 transactional-authority regressions
+
+Required cases: valid Investigation siblings are committed even when another sibling is structurally rejected; omitted targets remain canonical; committed Evidence cannot silently disappear; multiple valid target changes in one Main-LLM decision deposit only one progress epoch; Claim Review does not participate in extension decisions; a batch that would exceed the base fuse can continue only after runtime finds new committed progress plus open debt; the same progress epoch cannot mint two extensions; the configured +8 ceiling is enforced; no-progress target creation alone earns no extension; atomic batches remain all-or-nothing; and public history exposes committed progress/earned extensions while retaining one-click expand/collapse.
+
+## Rev5.2.6 observation-ledger/preflight regressions
+
+Required cases: `search A -> search B -> search A` performs only two physical executions and rehydrates A on the third request; a complete zero-match search produces citable `search_observation` Evidence; `SYMBOL_NOT_FOUND` is citable and reusable; ObservationLedger identity survives session persistence and is invalidated by `workspace_epoch`, not by session-only changes; a repeated observation does not consume or trigger `earned_extension`; authority is computed only after replay/invalid/batch-duplicate removal; source already visible in the current prompt does not cause a physical reread; repeated identical authority-rejected batches fail as `ADMINISTRATIVE_LOOP` before the general turn fuse; and Claim Review remains byte-identical to Rev5.2.5.
+
+## Rev5.2.7 two-brain Claim-follow-up regressions
+
+Required cases: production structured semantic profiles are exactly `agent` and `claim_verifier`; removed `agent.claims.repair` config is rejected rather than silently accepted; a contradicted Claim with `target_id` reopens exactly that target and pins cited Evidence; the same reviewer debt against the same canonical state fails as `CLAIM_REVIEW_STALLED`; Claim-directed rework can use only unused global LLM-call capacity while reserving a later verifier pass; local Claim protocol recovery preserves `target_id`; and re-establishing a reviewer-reopened target with the same Evidence creates no `committed_progress` or tool credit.
+
+
+## Rev5.2.8 canonical-runtime cleanup regressions
+
+Required cases: changing only Investigation `reason/status` with unchanged Evidence/observations must not count as objective runtime progress; the same authority-rejected payload after a new observation must not be treated as the same Decision-Ledger state; changed remaining/effective tool authority must also create a different rejection identity; a batch containing any malformed tool call must be rejected before tool authority and execute no novel call; the model-facing tool schemas must expose only the canonical English ABI and reject old aliases; open targets must be allowed to accumulate Agent-selected Evidence before `established`; and removed lexical workspace/write helpers plus the semantic-read signature compatibility wrapper must remain absent.
+
+## Rev5.2.9 progress-earned authority regressions
+
+The Rev5.2.9 regression set proves: target Evidence deltas are additive and monotonic; status/reason updates never require resending old Evidence; the same Evidence ID cannot mint committed progress twice even through another target; old persisted sessions backfill the credit-once Evidence set from progress history; stale/missing Evidence cannot mint progress; every unspent progress epoch grants the configured +tool step once with no cumulative ceiling; the removed `max_earned_tool_extension` key is rejected rather than kept as compatibility; Claim rework receives deterministic remaining/pending capacity; and the compact Agent prompt stays below its fixed-token regression ceiling.

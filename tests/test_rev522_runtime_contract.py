@@ -52,19 +52,19 @@ def test_followup_reserve_is_fixed_to_one_verifier_call_even_after_large_review(
 
 def test_main_llm_workspace_scope_not_legacy_regex_controls_grounding(monkeypatch, tmp_path):
     (tmp_path / "session.py").write_text("class AgentSession:\n    pass\n", encoding="utf-8")
-    # If production still consults either legacy classifier this test explodes.
-    monkeypatch.setattr(request_policy, "request_needs_project_evidence", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("legacy grounding classifier called")))
-    monkeypatch.setattr(request_policy, "request_requires_write", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("legacy write classifier called")))
+    # Rev5.2.8 removes the legacy lexical authority helpers entirely.
+    assert not hasattr(request_policy, "request_needs_project_evidence")
+    assert not hasattr(request_policy, "request_requires_write")
     outputs = iter([
         {
-            "tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "session.py"}}],
+            "tool_calls": [{"tool": "read_file", "arguments": {"path": "session.py"}}],
             "workspace_scope": workspace_scope("read", "Answer depends on current AgentSession code."),
-            "investigation": [investigation_target(goal="Establish what AgentSession does")],
+            "investigation_updates": [investigation_target(goal="Establish what AgentSession does")],
         },
         {
             "final": {"answer": "AgentSession is defined in session.py.", "evidence_ids": ["ev-0001"], "limitations": []},
             "workspace_scope": workspace_scope("read", "Answer depends on current AgentSession code."),
-            "investigation": [investigation_target(status="established", evidence_ids=["ev-0001"], reason="session.py was read", goal="Establish what AgentSession does")],
+            "investigation_updates": [investigation_target(status="established", evidence_ids=["ev-0001"], reason="session.py was read", goal="Establish what AgentSession does")],
         },
     ])
     monkeypatch.setattr(core_agent, "executar_agente_llm", lambda _p, _c: next(outputs))
@@ -80,7 +80,7 @@ def test_main_llm_workspace_scope_not_legacy_regex_controls_grounding(monkeypatc
 
 def test_main_llm_can_declare_write_for_wording_legacy_regex_misses(monkeypatch, tmp_path):
     (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
-    assert request_policy.request_requires_write("Faça funcionar o código", True) is False
+    assert not hasattr(request_policy, "request_requires_write")
     prompts = []
 
     def fake(prompt, _cfg):
@@ -88,14 +88,14 @@ def test_main_llm_can_declare_write_for_wording_legacy_regex_misses(monkeypatch,
         prompts.append(payload)
         if len(prompts) == 1:
             return {
-                "tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "app.py"}}],
+                "tool_calls": [{"tool": "read_file", "arguments": {"path": "app.py"}}],
                 "workspace_scope": workspace_scope("write", "The user asks to make the code work."),
-                "investigation": [investigation_target(goal="Establish current app.py before changing it")],
+                "investigation_updates": [investigation_target(goal="Establish current app.py before changing it")],
             }
         return {
             "patches": [{"operation": "replace", "path": "app.py", "content": "VALUE = 2\n"}],
             "workspace_scope": workspace_scope("write", "The user asks to make the code work."),
-            "investigation": [investigation_target(
+            "investigation_updates": [investigation_target(
                 goal="Establish current app.py before changing it", status="established",
                 evidence_ids=["ev-0001"], reason="app.py was read",
             )],
@@ -151,10 +151,10 @@ def test_unified_secret_policy_blocks_read_search_and_git_diff(tmp_path):
     (tmp_path / "normal.py").write_text("TOKEN=supersecret\n", encoding="utf-8")
     ctx = {"projeto": {"caminho_origem": str(tmp_path)}, "config": base_config(claims_mode="off")}
 
-    read = executar_tool("read_file", {"caminho_relativo": ".env"}, ctx)
+    read = executar_tool("read_file", {"path": ".env"}, ctx)
     assert read["ok"] is False and read["error_code"] == "SECRET_PATH_BLOCKED"
 
-    normal_secret = executar_tool("read_file", {"caminho_relativo": "normal.py"}, ctx)
+    normal_secret = executar_tool("read_file", {"path": "normal.py"}, ctx)
     assert normal_secret["ok"] is False and normal_secret["error_code"] == "SECRET_CONTENT_BLOCKED"
 
     search = executar_tool("search_code", {"query": "supersecret"}, ctx)
@@ -218,20 +218,20 @@ def test_ungrounded_workspace_final_is_semantically_fail_closed(monkeypatch, tmp
             return {
                 "final": {"answer": "AgentSession controls task state.", "evidence_ids": [], "limitations": []},
                 "workspace_scope": workspace_scope("none", "I can answer without the live workspace."),
-                "investigation": [],
+                "investigation_updates": [],
             }
         if agent_calls["n"] == 2:
             assert payload["runtime_phase"] == "analysis_investigate"
             assert "WORKSPACE_SCOPE_INSUFFICIENT" in (payload.get("runtime_feedback") or "")
             return {
-                "tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "session.py"}}],
+                "tool_calls": [{"tool": "read_file", "arguments": {"path": "session.py"}}],
                 "workspace_scope": workspace_scope("read", "The reviewer established that current workspace facts are material."),
-                "investigation": [investigation_target(goal="Establish AgentSession's current role")],
+                "investigation_updates": [investigation_target(goal="Establish AgentSession's current role")],
             }
         return {
             "final": {"answer": "AgentSession is defined in session.py.", "evidence_ids": ["ev-0001"], "limitations": []},
             "workspace_scope": workspace_scope("read", "The answer depends on current workspace facts."),
-            "investigation": [investigation_target(
+            "investigation_updates": [investigation_target(
                 goal="Establish AgentSession's current role", status="established",
                 evidence_ids=["ev-0001"], reason="session.py was read",
             )],

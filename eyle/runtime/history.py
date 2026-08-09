@@ -118,6 +118,7 @@ def build_public_job_history(registro):
     write_validation = details.get("write_validation")
     if not isinstance(write_validation, dict):
         write_validation = {}
+    tool_budget = details.get("tool_budget") if isinstance(details.get("tool_budget"), dict) else {}
 
     return {
         "job_id": registro.get("id"),
@@ -129,6 +130,18 @@ def build_public_job_history(registro):
         "agent": {
             "turns": details.get("turns"),
             "tool_calls": details.get("tool_calls"),
+            "tool_budget_base": tool_budget.get("base"),
+            "earned_tool_extension": tool_budget.get("earned_extension"),
+            "tool_budget_effective": tool_budget.get("effective_limit"),
+            "tool_extension_cycles": tool_budget.get("extension_cycles"),
+            "committed_progress_epoch": tool_budget.get("committed_progress_epoch"),
+            "pending_progress_cycles": tool_budget.get("pending_progress_cycles"),
+            "pending_extension_calls": tool_budget.get("pending_extension_calls"),
+            "progress_credited_evidence_count": len(details.get("progress_credited_evidence_ids") or []),
+            "workspace_epoch": details.get("workspace_epoch"),
+            "observation_replays": details.get("observation_replays"),
+            "observation_ledger_size": details.get("observation_ledger_size"),
+            "repeated_rejected_decisions": details.get("repeated_rejected_decisions"),
             "final_phase": details.get("runtime_phase"),
             "failure_code": details.get("failure_code") or (resultado.get("error_code") if isinstance(resultado, dict) else None),
             "parse_failures": details.get("parse_failures"),
@@ -144,6 +157,9 @@ def build_public_job_history(registro):
         "llm_calls": llm_calls,
         "decisions": decisions,
         "tools": tools,
+        "committed_progress_history": list(details.get("committed_progress_history") or [])[-50:],
+        "tool_extension_history": list(details.get("tool_extension_history") or [])[-20:],
+        "progress_history": list(details.get("progress_history") or [])[-50:],
         "administrative": {
             "structured_capability": details.get("structured_capability") if isinstance(details.get("structured_capability"), dict) else {},
             "llm_history": list(details.get("administrative_llm_history") or [])[-30:],

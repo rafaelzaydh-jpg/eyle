@@ -5,9 +5,8 @@ proven deterministically stays in the runtime:
 - omitted Claims config resolves to self_check; off is explicit;
 - verifier citations are confined to the EvidenceRecords actually shown;
 - file Evidence is checked for freshness before and after verification;
-- contradicted content is repaired as local replacements, never as a rewritten
-  full answer;
-- repaired claims can be reverified without reviewing the untouched answer.
+- reviewer debt is returned to the Main LLM through runtime-owned follow-up state;
+- the runtime never rewrites a semantic conclusion on behalf of the Main LLM.
 """
 from __future__ import annotations
 
@@ -21,11 +20,10 @@ from .security import _resolver_caminho_seguro
 from .text_hash import hash_texto, normalizar_quebras
 
 CLAIM_MODES = {"off", "self_check", "verified"}
-_CLAIMS_FIELDS = {"mode", "verifier", "evidence", "repair", "require_supported"}
+_CLAIMS_FIELDS = {"mode", "verifier", "evidence", "require_supported"}
 _VERIFIER_COMMON_FIELDS = {"max_tokens", "temperature"}
 _VERIFIER_VERIFIED_FIELDS = _VERIFIER_COMMON_FIELDS | {"base_url", "model", "openai_compatible"}
 _EVIDENCE_FIELDS = {"max_chars_per_item"}
-_REPAIR_FIELDS = {"enabled", "max_attempts"}
 
 CLAIM_VERDICTS = {"supported", "contradicted", "insufficient"}
 CLAIM_KINDS = {"fact", "bug", "risk", "recommendation"}
@@ -105,10 +103,10 @@ def answer_anchor_map(answer_anchors: Optional[Sequence[Dict[str, Any]]]) -> Dic
 def verifier_answer_anchors(
     answer: str, target_claims: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> Tuple[bool, str, List[Dict[str, Any]]]:
-    """Build anchors for initial review or exact repaired-Claim reverify.
+    """Build anchors for initial review or exact local Claim reverify.
 
     Reverify reuses the original Claim anchor reference and maps it to the
-    repaired literal quote. This keeps semantic scope local without resending
+    target literal quote. This keeps semantic scope local without resending
     unrelated answer text.
     """
     if not target_claims:
@@ -133,7 +131,7 @@ def verifier_answer_anchors(
 
 
 class ClaimConfigError(ValueError):
-    """Invalid Claims configuration; never silently repaired semantically."""
+    """Invalid Claims configuration; never silently reinterpreted semantically."""
 
 
 def _object_field(parent: Dict[str, Any], key: str) -> Dict[str, Any]:
@@ -201,15 +199,9 @@ def claim_config(config: Dict[str, Any]) -> Dict[str, Any]:
 
     verifier = _object_field(raw, "verifier")
     evidence = _object_field(raw, "evidence")
-    repair = _object_field(raw, "repair")
-
     unknown_evidence = sorted(set(evidence) - _EVIDENCE_FIELDS)
     if unknown_evidence:
         raise ClaimConfigError("UNKNOWN_CONFIG_FIELD:agent.claims.evidence:" + ",".join(unknown_evidence))
-    unknown_repair = sorted(set(repair) - _REPAIR_FIELDS)
-    if unknown_repair:
-        raise ClaimConfigError("UNKNOWN_CONFIG_FIELD:agent.claims.repair:" + ",".join(unknown_repair))
-
     transport_keys = {"base_url", "model", "openai_compatible"}
     present_transport = sorted(set(verifier) & transport_keys)
     allowed_verifier = _VERIFIER_VERIFIED_FIELDS if mode == "verified" else _VERIFIER_COMMON_FIELDS
@@ -253,10 +245,6 @@ def claim_config(config: Dict[str, Any]) -> Dict[str, Any]:
             "max_chars_per_item": _int_field(
                 evidence, "max_chars_per_item", 2200, 200, "agent.claims.evidence"
             ),
-        },
-        "repair": {
-            "enabled": _bool_field(repair, "enabled", True, "agent.claims.repair"),
-            "max_attempts": _int_field(repair, "max_attempts", 1, 0, "agent.claims.repair"),
         },
         "require_supported": _bool_field(raw, "require_supported", True, "agent.claims"),
     }
@@ -787,7 +775,7 @@ def review_prompt(
     elif target_semantic_gaps:
         task = "reverify_semantic_gap"
     elif target_claims:
-        task = "reverify_repaired_claims"
+        task = "reverify_claims"
     else:
         task = "verify_claims"
     payload: Dict[str, Any] = {
@@ -836,212 +824,50 @@ def review_prompt(
         payload["request"] = str(request or "")
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
 
-def repair_prompt(
-    answer: str,
-    review: Dict[str, Any],
-    evidence_view: List[Dict[str, Any]],
-    evidence_ids: List[str],
-) -> str:
-    contradicted = problematic_claims(review, "contradicted")
+def review_followup_feedback(review: Dict[str, Any]) -> str:
+    """Serialize reviewer debt without adding runtime semantics.
+
+    The Claim Verifier already decided which material statements are
+    contradicted/insufficient and which semantic gaps exist. The runtime only
+    preserves those coordinates (Claim id, answer_ref, target_id, Evidence ids
+    and reason) so the Main LLM can choose the correction. Evidence bodies stay
+    runtime-owned and are rehydrated separately when pinned.
+    """
+    claims = []
+    for claim in problematic_claims(review):
+        verdict = str(claim.get("verdict") or "")
+        if verdict not in {"contradicted", "insufficient"}:
+            continue
+        claims.append({
+            "id": claim.get("id"),
+            "answer_ref": claim.get("answer_ref"),
+            "target_id": claim.get("target_id"),
+            "statement": claim.get("statement"),
+            "verdict": verdict,
+            "evidence_ids": list(claim.get("evidence_ids") or []),
+            "reason": claim.get("reason", ""),
+        })
+    gaps = []
+    for gap in semantic_gap_findings(review):
+        gaps.append({
+            "id": gap.get("id"),
+            "type": gap.get("type"),
+            "target_id": gap.get("target_id"),
+            "evidence_ids": list(gap.get("evidence_ids") or []),
+            "reason": gap.get("reason", ""),
+            "signature": gap.get("signature"),
+        })
     payload = {
-        "task": "repair_claims",
-        "answer": str(answer or ""),
-        "contradicted_claims": contradicted,
-        "evidence": evidence_view,
-        "allowed_evidence_ids": list(evidence_ids or []),
-        "instructions": (
-            "Return repairs only. For each contradicted claim that can be corrected, return "
-            "claim_id, target (a literal substring inside that contradicted claim's answer_quote, "
-            "occurring exactly once in the answer), replacement, and evidence_ids. Do not rewrite "
-            "the full answer. Do not touch supported content."
+        "code": "CLAIM_REVIEW_FOLLOWUP",
+        "claims": claims,
+        "semantic_gaps": gaps,
+        "instruction": (
+            "The semantic reviewer found material debt. You remain the only producer of task semantics. "
+            "You decide the next action: reinterpret existing Evidence, investigate with available tools, "
+            "narrow/remove an unsupported or contradicted statement, correct workspace work when required, "
+            "cover the reported omission/conflict/scope gap, or explicitly state a limitation. "
+            "The reviewer does not choose tools or rewrite your answer."
         ),
     }
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
 
-
-def normalize_claim_repairs(
-    raw: Any,
-    answer: str,
-    review: Dict[str, Any],
-    *,
-    allowed_evidence_ids: Iterable[str],
-    evidence: Dict[str, Any],
-) -> Tuple[bool, str, List[Dict[str, Any]]]:
-    if not isinstance(raw, dict) or not isinstance(raw.get("repairs"), list):
-        return False, "CLAIM_REPAIR_REPAIRS_REQUIRED", []
-    contradicted = {
-        str(claim.get("id")): claim
-        for claim in problematic_claims(review, "contradicted")
-        if claim.get("id")
-    }
-    allowed = set(_ids(list(allowed_evidence_ids or [])))
-    repairs: List[Dict[str, Any]] = []
-    seen_claims = set()
-    seen_targets = set()
-    for index, item in enumerate(raw.get("repairs") or [], start=1):
-        if not isinstance(item, dict):
-            return False, f"CLAIM_REPAIR_INVALID:{index}", []
-        claim_id = str(item.get("claim_id") or "").strip()
-        target = str(item.get("target") or "")
-        replacement = str(item.get("replacement") or "")
-        evidence_ids = _ids(item.get("evidence_ids"))
-        if claim_id not in contradicted:
-            return False, f"CLAIM_REPAIR_CLAIM_NOT_CONTRADICTED:{claim_id or index}", []
-        if claim_id in seen_claims:
-            return False, f"CLAIM_REPAIR_DUPLICATE_CLAIM:{claim_id}", []
-        if not target:
-            return False, f"CLAIM_REPAIR_TARGET_REQUIRED:{claim_id}", []
-        if answer.count(target) != 1:
-            return False, f"CLAIM_REPAIR_TARGET_NOT_UNIQUE:{claim_id}", []
-        claim_quote = str((contradicted.get(claim_id) or {}).get("answer_quote") or "")
-        if not claim_quote or claim_quote.count(target) != 1:
-            return False, f"CLAIM_REPAIR_TARGET_OUTSIDE_CLAIM:{claim_id}", []
-        if target in seen_targets:
-            return False, f"CLAIM_REPAIR_DUPLICATE_TARGET:{claim_id}", []
-        if replacement == target:
-            return False, f"CLAIM_REPAIR_NO_CHANGE:{claim_id}", []
-        unknown = [item_id for item_id in evidence_ids if item_id not in evidence]
-        if unknown:
-            return False, "CLAIM_REPAIR_UNKNOWN_EVIDENCE:" + ",".join(unknown), []
-        out_of_scope = [item_id for item_id in evidence_ids if item_id not in allowed]
-        if out_of_scope:
-            return False, "CLAIM_REPAIR_EVIDENCE_OUT_OF_SCOPE:" + ",".join(out_of_scope), []
-        if not evidence_ids:
-            return False, f"CLAIM_REPAIR_EVIDENCE_REQUIRED:{claim_id}", []
-        repairs.append({
-            "claim_id": claim_id,
-            "target": target,
-            "replacement": replacement,
-            "evidence_ids": evidence_ids,
-        })
-        seen_claims.add(claim_id)
-        seen_targets.add(target)
-
-    missing = [claim_id for claim_id in contradicted if claim_id not in seen_claims]
-    if missing:
-        return False, "CLAIM_REPAIR_MISSING_CLAIMS:" + ",".join(sorted(missing)), []
-    return True, "ok", repairs
-
-
-def apply_claim_repairs(answer: str, repairs: Sequence[Dict[str, Any]]) -> Tuple[bool, str, str]:
-    repaired = str(answer or "")
-    for item in repairs:
-        target = str(item.get("target") or "")
-        replacement = str(item.get("replacement") or "")
-        if repaired.count(target) != 1:
-            return False, f"CLAIM_REPAIR_TARGET_NOT_UNIQUE:{item.get('claim_id')}", answer
-        repaired = repaired.replace(target, replacement, 1)
-    return True, "ok", repaired
-
-
-def build_repaired_claim_targets(
-    original_review: Dict[str, Any], repairs: Sequence[Dict[str, Any]], repaired_answer: str,
-) -> Tuple[bool, str, List[Dict[str, Any]]]:
-    """Build the exact repaired Claim quotes and preserve untouched Claim scope.
-
-    Repair authority is local: a repair may change only the contradicted Claim's
-    literal ``answer_quote``. Reverification receives that repaired quote, not
-    the replacement token/substring by itself.
-    """
-    original_claims = {
-        str(item.get("id")): item
-        for item in (original_review or {}).get("claims") or []
-        if isinstance(item, dict) and item.get("id")
-    }
-    repaired_ids = {str(item.get("claim_id") or "") for item in repairs if item.get("claim_id")}
-    targets: List[Dict[str, Any]] = []
-
-    for repair in repairs:
-        claim_id = str(repair.get("claim_id") or "")
-        original = original_claims.get(claim_id)
-        if not isinstance(original, dict):
-            return False, f"CLAIM_REPAIR_CLAIM_NOT_FOUND:{claim_id}", []
-        original_quote = str(original.get("answer_quote") or "")
-        target = str(repair.get("target") or "")
-        replacement = str(repair.get("replacement") or "")
-        if not original_quote or original_quote.count(target) != 1:
-            return False, f"CLAIM_REPAIR_TARGET_OUTSIDE_CLAIM:{claim_id}", []
-        repaired_quote = original_quote.replace(target, replacement, 1)
-        if not repaired_quote or repaired_quote not in str(repaired_answer or ""):
-            return False, f"CLAIM_REPAIR_RESULT_NOT_IN_ANSWER:{claim_id}", []
-        targets.append({
-            "claim_id": claim_id,
-            "answer_ref": original.get("answer_ref"),
-            "answer_quote": repaired_quote,
-            "target_id": original.get("target_id"),
-            "kind": original.get("kind", "fact"),
-            "evidence_ids": list(repair.get("evidence_ids") or []),
-        })
-
-    # A local repair must not erase the literal scope of any untouched Claim.
-    for claim_id, claim in original_claims.items():
-        if claim_id in repaired_ids:
-            continue
-        quote = str(claim.get("answer_quote") or "")
-        if quote and quote not in str(repaired_answer or ""):
-            return False, f"CLAIM_REPAIR_TOUCHED_PRESERVED_CLAIM:{claim_id}", []
-
-    return True, "ok", targets
-
-
-def merge_reverified_claims(
-    original_review: Dict[str, Any], reverified_review: Dict[str, Any], repaired_claim_ids: Iterable[str],
-) -> Dict[str, Any]:
-    """Preserve untouched claims/findings and replace only repaired claims."""
-    repaired_ids = set(_ids(list(repaired_claim_ids or [])))
-    replacements = {
-        str(claim.get("id")): dict(claim)
-        for claim in (reverified_review or {}).get("claims") or []
-        if isinstance(claim, dict) and str(claim.get("id")) in repaired_ids
-    }
-    claims = []
-    for claim in (original_review or {}).get("claims") or []:
-        if not isinstance(claim, dict):
-            continue
-        claim_id = str(claim.get("id") or "")
-        claims.append(replacements.get(claim_id, dict(claim)))
-    semantic_gaps = [dict(item) for item in (original_review or {}).get("semantic_gaps") or [] if isinstance(item, dict)]
-    return {
-        "claims": claims,
-        "findings": [dict(item) for item in (original_review or {}).get("findings") or [] if isinstance(item, dict)],
-        "semantic_gaps": semantic_gaps,
-        "summary": _review_summary(claims, semantic_gaps),
-        "mode": original_review.get("mode"),
-        "evidence_ids": list(original_review.get("evidence_ids") or []),
-    }
-
-
-def insufficient_feedback(review: Dict[str, Any]) -> str:
-    """Return only the semantic issue; Evidence bodies stay runtime-owned.
-
-    The agent already receives the session evidence index in its normal prompt,
-    so repeating verifier excerpts here would defeat working-set compaction.
-    Evidence IDs preserve the link while the LLM decides whether to read more,
-    search elsewhere, narrow the statement, or report the limitation.
-    """
-    claims = []
-    for claim in problematic_claims(review, "insufficient"):
-        claims.append({
-            "id": claim.get("id"),
-            "target_id": claim.get("target_id"),
-            "statement": claim.get("statement"),
-            "evidence_ids": list(claim.get("evidence_ids") or []),
-            "reason": claim.get("reason", ""),
-        })
-    findings = []
-    for finding in semantic_gap_findings(review):
-        findings.append({
-            "id": finding.get("id"),
-            "type": finding.get("type"),
-            "target_id": finding.get("target_id"),
-            "evidence_ids": list(finding.get("evidence_ids") or []),
-            "reason": finding.get("reason", ""),
-            "signature": finding.get("signature"),
-        })
-    payload = {
-        "code": "CLAIM_REVIEW_INSUFFICIENT",
-        "claims": claims,
-        "semantic_gaps": findings,
-        "instruction": "Address the exact unsupported statements and semantic gaps reported here. You decide the next action: investigate with available tools, narrow/remove a statement, cover a material omission/conflict/scope gap, or explicitly state the limitation. The verifier does not choose tools.",
-    }
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)

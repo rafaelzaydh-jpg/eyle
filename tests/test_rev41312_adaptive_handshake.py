@@ -53,7 +53,7 @@ def _agent_json(answer="ok"):
         "action": "final", "tool_calls": None, "patches": None,
         "needs_user": None, "final": {"answer": answer, "evidence_ids": [], "limitations": []},
         "workspace_scope": {"mode": "none", "reason": "transport fixture is workspace-independent"},
-        "investigation": [],
+        "investigation_updates": [],
     })
 
 

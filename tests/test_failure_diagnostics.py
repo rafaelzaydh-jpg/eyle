@@ -133,7 +133,7 @@ def test_follow_up_can_cite_runtime_failure_instead_of_restored_code(monkeypatch
                 "evidence_ids": ["ev-runtime-0001"],
             },
             "workspace_scope": {"mode": "read", "reason": "The answer depends on persisted runtime validation Evidence."},
-            "investigation": [{
+            "investigation_updates": [{
                 "id": "T1", "goal": "Establish why the prior project tests failed",
                 "status": "established", "evidence_ids": ["ev-runtime-0001"],
                 "reason": "Runtime validation Evidence records the test failure."

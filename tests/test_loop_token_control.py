@@ -72,18 +72,18 @@ def test_common_multifile_write_reaches_transaction_in_three_calls(monkeypatch, 
         names = {item["name"] for item in payload["available_tools"]}
         assert not {"apply_patch", "test_patch_dry_run", "apply_patch_set", "test_patch_set_dry_run"} & names
         if len(prompts) == 1:
-            return {"tool_calls": [{"tool": "list_tree", "arguments": {}}], "workspace_scope": workspace_scope("write"), "investigation": [investigation_target(goal="Establish the files needed for the requested refactor")]}
+            return {"tool_calls": [{"tool": "list_tree", "arguments": {}}], "workspace_scope": workspace_scope("write"), "investigation_updates": [investigation_target(goal="Establish the files needed for the requested refactor")]}
         if len(prompts) == 2:
             return {"tool_calls": [
-                {"tool": "read_file", "arguments": {"caminho_relativo": "app.py"}},
-                {"tool": "read_file", "arguments": {"caminho_relativo": "routes.py"}},
-                {"tool": "read_file", "arguments": {"caminho_relativo": "test_routes.py"}},
-            ], "workspace_scope": workspace_scope("write"), "investigation": [investigation_target(goal="Establish the files needed for the requested refactor")]}
+                {"tool": "read_file", "arguments": {"path": "app.py"}},
+                {"tool": "read_file", "arguments": {"path": "routes.py"}},
+                {"tool": "read_file", "arguments": {"path": "test_routes.py"}},
+            ], "workspace_scope": workspace_scope("write"), "investigation_updates": [investigation_target(goal="Establish the files needed for the requested refactor")]}
         return {"patches": [
             {"operation": "replace", "path": "app.py", "content": merged},
             {"operation": "delete", "path": "routes.py"},
             {"operation": "delete", "path": "test_routes.py"},
-        ], "workspace_scope": workspace_scope("write"), "investigation": [investigation_target(goal="Establish the files needed for the requested refactor", status="established", evidence_ids=["ev-0001", "ev-0002", "ev-0003"], reason="All source files required for the transaction were read.")]}
+        ], "workspace_scope": workspace_scope("write"), "investigation_updates": [investigation_target(goal="Establish the files needed for the requested refactor", status="established", evidence_ids=["ev-0001", "ev-0002", "ev-0003"], reason="All source files required for the transaction were read.")]}
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
     status, _, pending, details = core_agent.executar_agente(
@@ -105,14 +105,14 @@ def test_semantic_read_coverage_blocks_overlapping_range(monkeypatch, tmp_path):
         payload = json.loads(prompt)
         prompts.append(payload)
         if len(prompts) == 1:
-            return {"tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "app.py"}}], "workspace_scope": workspace_scope("read"), "investigation": [investigation_target(goal="Establish what app.py defines")]}
+            return {"tool_calls": [{"tool": "read_file", "arguments": {"path": "app.py"}}], "workspace_scope": workspace_scope("read"), "investigation_updates": [investigation_target(goal="Establish what app.py defines")]}
         if len(prompts) == 2:
-            return {"tool_calls": [{"tool": "read_range", "arguments": {"caminho_relativo": "app.py", "linha_inicio": 1, "linha_fim": 1}}], "workspace_scope": workspace_scope("read"), "investigation": [investigation_target(goal="Establish what app.py defines")]}
+            return {"tool_calls": [{"tool": "read_range", "arguments": {"path": "app.py", "line_start": 1, "line_end": 1}}], "workspace_scope": workspace_scope("read"), "investigation_updates": [investigation_target(goal="Establish what app.py defines")]}
         assert any(
-            item.get("error_code") == "SEMANTIC_READ_BLOCKED"
+            item.get("error_code") == "SOURCE_ALREADY_VISIBLE"
             for item in payload["latest_tool_results"]
         )
-        return {"final": {"answer": "app.py define x como 1.", "evidence_ids": ["ev-0001"]}, "workspace_scope": workspace_scope("read"), "investigation": [investigation_target(goal="Establish what app.py defines", status="established", evidence_ids=["ev-0001"], reason="app.py was read")]}
+        return {"final": {"answer": "app.py define x como 1.", "evidence_ids": ["ev-0001"]}, "workspace_scope": workspace_scope("read"), "investigation_updates": [investigation_target(goal="Establish what app.py defines", status="established", evidence_ids=["ev-0001"], reason="app.py was read")]}
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
     status, _, _, details = core_agent.executar_agente(
@@ -167,7 +167,7 @@ def test_premature_patch_is_redirected_to_reads_without_poisoning_retry(monkeypa
         if len(prompts) == 1:
             return {"patches": [
                 {"operation": "replace", "path": "app.py", "content": "x = 2\n"},
-            ], "workspace_scope": workspace_scope("write"), "investigation": []}
+            ], "workspace_scope": workspace_scope("write"), "investigation_updates": []}
         if len(prompts) == 2:
             assert payload["runtime_phase"] == "write_prepare"
             assert "INVESTIGATION_REQUIRED" in (payload.get("runtime_feedback") or "")
@@ -175,11 +175,11 @@ def test_premature_patch_is_redirected_to_reads_without_poisoning_retry(monkeypa
                 item.get("content") == "Não use arquivos de rotas separados."
                 for item in payload["conversation_background"]
             )
-            return {"tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "app.py"}}], "workspace_scope": workspace_scope("write"), "investigation": [{"id": "T1", "goal": "Establish current app.py before editing", "status": "open", "evidence_ids": [], "reason": ""}]}
+            return {"tool_calls": [{"tool": "read_file", "arguments": {"path": "app.py"}}], "workspace_scope": workspace_scope("write"), "investigation_updates": [{"id": "T1", "goal": "Establish current app.py before editing", "status": "open", "evidence_ids": [], "reason": ""}]}
         assert payload["runtime_phase"] == "write_patch_only"
         return {"patches": [
             {"operation": "replace", "path": "app.py", "content": "x = 2\n"},
-        ], "workspace_scope": workspace_scope("write"), "investigation": [{"id": "T1", "goal": "Establish current app.py before editing", "status": "established", "evidence_ids": ["ev-0001"], "reason": "app.py was read"}]}
+        ], "workspace_scope": workspace_scope("write"), "investigation_updates": [{"id": "T1", "goal": "Establish current app.py before editing", "status": "established", "evidence_ids": ["ev-0001"], "reason": "app.py was read"}]}
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
     status, _, pending, details = core_agent.executar_agente(

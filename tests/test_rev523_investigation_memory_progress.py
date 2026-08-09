@@ -1,6 +1,7 @@
 import json
 
 from eyle.core import agent as core_agent
+from eyle.core.observation import semantic_signature
 from eyle.core.session import AgentSession
 
 
@@ -24,10 +25,10 @@ def test_visible_source_ranges_are_current_prompt_only_and_history_is_separate()
 
     assert "app.py" in session.visible_source_ranges
     assert "app.py" in session.historically_seen_source_ranges
-    assert core_agent._read_already_covered(
+    assert core_agent._source_already_visible(
         session,
         "read_range",
-        {"caminho_relativo": "app.py", "linha_inicio": 1, "linha_fim": 2},
+        {"path": "app.py", "line_start": 1, "line_end": 2},
     ) is True
 
     # Next compiled prompt no longer carries the body. Historical telemetry must
@@ -35,10 +36,10 @@ def test_visible_source_ranges_are_current_prompt_only_and_history_is_separate()
     core_agent._record_prompt_visible_ranges(session, {"relevant_sources": []})
     assert session.visible_source_ranges == {}
     assert "app.py" in session.historically_seen_source_ranges
-    assert core_agent._read_already_covered(
+    assert core_agent._source_already_visible(
         session,
         "read_range",
-        {"caminho_relativo": "app.py", "linha_inicio": 1, "linha_fim": 2},
+        {"path": "app.py", "line_start": 1, "line_end": 2},
     ) is False
 
 
@@ -69,26 +70,27 @@ def test_semantic_followup_pins_reopened_target_and_verifier_evidence():
     assert all(item.get("pinned") is True for item in retained if item.get("evidence_id") in {"ev-0002", "ev-0003"})
 
 
-def test_success_without_new_evidence_or_state_change_is_not_progress():
+def test_runtime_progress_fingerprint_ignores_activity_without_state_change():
     session = AgentSession("audit")
-    session.evidence["ev-0001"] = {"arquivo": "<tool:project_stats>"}
-    results = [
-        {"tool": "project_stats", "status": "success", "ok": True, "executed": True, "changed": False},
-        {"tool": "inspect_project", "status": "success", "ok": True, "executed": True, "changed": False},
-    ]
-    assert core_agent._turn_made_progress(1, results, session) is False
+    session.evidence["ev-0001"] = {"arquivo": "<tool:project_stats>", "content_hash": "h"}
+    before = core_agent._runtime_progress_fingerprint(session)
+    core_agent._record_tool_history(session, "project_stats", {}, {"status": "success", "ok": True, "executed": True, "changed": False, "detail": {}})
+    core_agent._record_tool_history(session, "inspect_project", {}, {"status": "success", "ok": True, "executed": True, "changed": False, "detail": {}})
+    assert core_agent._runtime_progress_fingerprint(session) == before
 
 
-def test_observation_signature_is_reusable_until_workspace_changes():
+def test_observation_ledger_survives_session_changes_until_workspace_epoch_changes():
+    from eyle.core.observation import lookup, record
     session = AgentSession("audit")
-    signature = core_agent._semantic_read_signature("project_stats", {})
+    signature = semantic_signature("project_stats", {})
     successful = {"status": "success", "ok": True, "executed": True, "changed": False, "detail": {}}
-    core_agent._record_tool_history(session, "project_stats", {}, successful, semantic_signature=signature)
-    assert core_agent._previous_observation(session, signature) is not None
-
-    changed = {"status": "success", "ok": True, "executed": True, "changed": True, "detail": {}}
-    core_agent._record_tool_history(session, "memory_store", {}, changed)
-    assert core_agent._previous_observation(session, signature) is None
+    model = {"tool": "project_stats", "status": "success", "ok": True, "executed": True, "changed": False, "detail": {}, "evidence_ids": []}
+    record(session, signature, "project_stats", {}, successful, model)
+    assert lookup(session, signature) is not None
+    core_agent._record_tool_history(session, "memory_store", {}, {"status": "success", "ok": True, "executed": True, "changed": True, "detail": {}})
+    assert lookup(session, signature) is not None
+    session.workspace_epoch += 1
+    assert lookup(session, signature) is None
 
 
 def test_session_roundtrip_keeps_history_and_followup_pins_but_current_visibility_is_explicit():
@@ -117,15 +119,15 @@ def test_claim_insufficient_keeps_reviewer_source_body_visible_in_next_prompt(mo
         turn = len(prompts)
         if turn == 1:
             return {
-                "tool_calls": [{"tool": "read_range", "arguments": {"caminho_relativo": "app.py", "linha_inicio": 1, "linha_fim": 1}}],
+                "tool_calls": [{"tool": "read_range", "arguments": {"path": "app.py", "line_start": 1, "line_end": 1}}],
                 "workspace_scope": workspace_scope("read"),
-                "investigation": [investigation_target("T1", goal=goal)],
+                "investigation_updates": [investigation_target("T1", goal=goal)],
             }
         if turn == 2:
             return {
                 "final": {"answer": "app.py has VALUE = 1.", "evidence_ids": ["ev-0001"], "limitations": []},
                 "workspace_scope": workspace_scope("read"),
-                "investigation": [investigation_target("T1", goal=goal, status="established", evidence_ids=["ev-0001"], reason="value read")],
+                "investigation_updates": [investigation_target("T1", goal=goal, status="established", evidence_ids=["ev-0001"], reason="value read")],
             }
         # After CLAIM_INSUFFICIENT ordinary relevant_sources/latest results were
         # cleared. The reviewer Evidence body must nevertheless be back in the
@@ -136,7 +138,7 @@ def test_claim_insufficient_keeps_reviewer_source_body_visible_in_next_prompt(mo
         return {
             "final": {"answer": "app.py has VALUE = 1; no broader claim is made.", "evidence_ids": ["ev-0001"], "limitations": []},
             "workspace_scope": workspace_scope("read"),
-            "investigation": [investigation_target("T1", goal=goal, status="established", evidence_ids=["ev-0001"], reason="narrowed to directly observed value")],
+            "investigation_updates": [investigation_target("T1", goal=goal, status="established", evidence_ids=["ev-0001"], reason="narrowed to directly observed value")],
         }
 
     def fake_verifier(_prompt, _cfg):
@@ -186,7 +188,7 @@ def test_repeated_project_stats_and_inspect_project_do_not_execute_forever(monke
         return {
             "tool_calls": [{"tool": tool, "arguments": {}}],
             "workspace_scope": workspace_scope("read"),
-            "investigation": [investigation_target("T1", goal=goal)],
+            "investigation_updates": [investigation_target("T1", goal=goal)],
         }
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake_agent)
@@ -200,7 +202,7 @@ def test_repeated_project_stats_and_inspect_project_do_not_execute_forever(monke
     assert details["tool_calls"] == 2
     skipped = [
         item for item in details["decision_history"]
-        if item.get("decision") == "tool_execution" and item.get("reason") == "IDENTICAL_OBSERVATION_BLOCKED"
+        if item.get("decision") == "tool_preflight" and item.get("reason") == "OBSERVATION_REHYDRATED"
     ]
     assert len(skipped) >= 1
     phase_rejected = [
@@ -210,19 +212,13 @@ def test_repeated_project_stats_and_inspect_project_do_not_execute_forever(monke
     assert phase_rejected
 
 
-def test_run_tests_signature_is_cached_until_a_state_change():
+def test_run_tests_failure_is_reusable_until_workspace_epoch_changes():
+    from eyle.core.observation import lookup, record
     session = AgentSession("fix tests")
-    signature = core_agent._semantic_read_signature("run_tests", {"scope": "tests/test_x.py"})
-    failed = {
-        "status": "failed", "ok": False, "executed": True, "changed": False,
-        "error_code": "TESTS_FAILED", "detail": {},
-    }
-    core_agent._record_tool_history(
-        session, "run_tests", {"scope": "tests/test_x.py"}, failed,
-        semantic_signature=signature,
-    )
-    assert core_agent._previous_observation(session, signature) is not None
-
-    changed = {"status": "success", "ok": True, "executed": True, "changed": True, "detail": {}}
-    core_agent._record_tool_history(session, "memory_store", {}, changed)
-    assert core_agent._previous_observation(session, signature) is None
+    signature = semantic_signature("run_tests", {"scope": "tests/test_x.py"})
+    failed = {"status": "failed", "ok": False, "executed": True, "changed": False, "error_code": "TESTS_FAILED", "detail": {}}
+    model = {"tool": "run_tests", "status": "failed", "ok": False, "executed": True, "changed": False, "error_code": "TESTS_FAILED", "detail": {}, "evidence_ids": []}
+    record(session, signature, "run_tests", {"scope": "tests/test_x.py"}, failed, model)
+    assert lookup(session, signature) is not None
+    session.workspace_epoch += 1
+    assert lookup(session, signature) is None

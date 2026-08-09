@@ -447,6 +447,28 @@ html, body {
   color: var(--text);
 }
 
+.history-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.history-expand-all {
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 3px 7px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 9px;
+  cursor: pointer;
+}
+.history-expand-all:hover,
+.history-expand-all:focus-visible {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+}
+
 .history-status {
   color: var(--muted);
   font-size: 9px;

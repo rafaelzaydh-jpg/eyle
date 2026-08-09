@@ -96,9 +96,9 @@ _AGENT_SCHEMA = {
             ]
         },
         "workspace_scope": _WORKSPACE_SCOPE_SCHEMA,
-        "investigation": {"type": "array", "items": _INVESTIGATION_TARGET_SCHEMA},
+        "investigation_updates": {"type": "array", "items": _INVESTIGATION_TARGET_SCHEMA},
     },
-    "required": ["action", "tool_calls", "patches", "needs_user", "final", "workspace_scope", "investigation"],
+    "required": ["action", "tool_calls", "patches", "needs_user", "final", "workspace_scope", "investigation_updates"],
     "additionalProperties": False,
 }
 
@@ -156,44 +156,19 @@ _CLAIM_REVIEW_SCHEMA = {
     "additionalProperties": False,
 }
 
-_CLAIM_REPAIR_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "repairs": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "claim_id": {"type": "string", "minLength": 1},
-                    "target": {"type": "string", "minLength": 1},
-                    "replacement": {"type": "string"},
-                    "evidence_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
-                },
-                "required": ["claim_id", "target", "replacement", "evidence_ids"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    "required": ["repairs"],
-    "additionalProperties": False,
-}
-
 _PROFILE_SCHEMAS = {
     "agent": _AGENT_SCHEMA,
     "claim_verifier": _CLAIM_REVIEW_SCHEMA,
-    "claim_repair": _CLAIM_REPAIR_SCHEMA,
 }
 
 _PROFILE_NAMES = {
     "agent": "eyle_agent_decision",
     "claim_verifier": "eyle_claim_review",
-    "claim_repair": "eyle_claim_repair",
 }
 
 _PROFILE_TOP_LEVEL = {
-    "agent": ("action", "tool_calls", "patches", "needs_user", "final", "workspace_scope", "investigation"),
+    "agent": ("action", "tool_calls", "patches", "needs_user", "final", "workspace_scope", "investigation_updates"),
     "claim_verifier": ("claims", "findings", "semantic_gaps"),
-    "claim_repair": ("repairs",),
 }
 
 
@@ -233,11 +208,6 @@ def contract_instruction(profile: str) -> str:
             "Top-level JSON contract: return exactly one object containing exactly the mandatory arrays "
             "claims, findings, semantic_gaps. All three keys are always required. Use [] when an array has no items. "
             "Never omit a key and never wrap these fields inside another object."
-        )
-    if profile == "claim_repair":
-        return (
-            "Top-level JSON contract: return exactly one object containing exactly the mandatory array repairs. "
-            "Use [] when no local repair is possible. Never wrap repairs inside another object."
         )
     return (
         "Top-level JSON contract: return exactly one object containing exactly these mandatory fields: "
@@ -341,18 +311,18 @@ def parse_agent_response(raw: Any) -> Dict[str, Any]:
         detail="workspace_scope.reason must be a non-empty string",
     )
     normalized_scope = {"mode": workspace_scope["mode"], "reason": workspace_scope["reason"].strip()}
-    investigation = value.get("investigation")
+    investigation = value.get("investigation_updates")
     if not isinstance(investigation, list):
-        raise StructuredResponseError("AGENT_INVESTIGATION_INVALID", "investigation must be an array")
+        raise StructuredResponseError("AGENT_INVESTIGATION_INVALID", "investigation_updates must be an array")
     target_keys = {"id", "goal", "status", "evidence_ids", "reason"}
     for index, item in enumerate(investigation, start=1):
-        item = _exact_item(item, target_keys, code="AGENT_INVESTIGATION_TARGET_SHAPE_INVALID", detail=f"investigation[{index}] must contain exactly id, goal, status, evidence_ids and reason")
-        _string(item["id"], code="AGENT_INVESTIGATION_TARGET_ID_INVALID", detail=f"investigation[{index}].id must be non-empty")
-        _string(item["goal"], code="AGENT_INVESTIGATION_TARGET_GOAL_INVALID", detail=f"investigation[{index}].goal must be non-empty")
+        item = _exact_item(item, target_keys, code="AGENT_INVESTIGATION_TARGET_SHAPE_INVALID", detail=f"investigation_updates[{index}] must contain exactly id, goal, status, evidence_ids and reason")
+        _string(item["id"], code="AGENT_INVESTIGATION_TARGET_ID_INVALID", detail=f"investigation_updates[{index}].id must be non-empty")
+        _string(item["goal"], code="AGENT_INVESTIGATION_TARGET_GOAL_INVALID", detail=f"investigation_updates[{index}].goal must be non-empty")
         if item["status"] not in {"open", "established", "dismissed"}:
-            raise StructuredResponseError("AGENT_INVESTIGATION_TARGET_STATUS_INVALID", f"investigation[{index}].status is invalid")
-        _string_list(item["evidence_ids"], code="AGENT_INVESTIGATION_TARGET_EVIDENCE_INVALID", detail=f"investigation[{index}].evidence_ids must be an array of non-empty IDs")
-        _string(item["reason"], code="AGENT_INVESTIGATION_TARGET_REASON_INVALID", detail=f"investigation[{index}].reason must be a string", nonempty=False)
+            raise StructuredResponseError("AGENT_INVESTIGATION_TARGET_STATUS_INVALID", f"investigation_updates[{index}].status is invalid")
+        _string_list(item["evidence_ids"], code="AGENT_INVESTIGATION_TARGET_EVIDENCE_INVALID", detail=f"investigation_updates[{index}].evidence_ids must be an array of non-empty IDs")
+        _string(item["reason"], code="AGENT_INVESTIGATION_TARGET_REASON_INVALID", detail=f"investigation_updates[{index}].reason must be a string", nonempty=False)
 
     calls = value.get("tool_calls")
     patches = value.get("patches")
@@ -372,7 +342,7 @@ def parse_agent_response(raw: Any) -> Dict[str, Any]:
             if not isinstance(tool, str) or not tool.strip() or not isinstance(arguments, dict):
                 raise StructuredResponseError("AGENT_TOOL_CALL_INVALID", f"tool_calls[{index}] is invalid")
             normalized.append({"tool": tool.strip(), "arguments": arguments})
-        return {"tool_calls": normalized, "workspace_scope": normalized_scope, "investigation": value["investigation"]}
+        return {"tool_calls": normalized, "workspace_scope": normalized_scope, "investigation_updates": value["investigation_updates"]}
     if action == "patches":
         if not isinstance(patches, list) or not patches or calls is not None or question is not None or final is not None:
             raise StructuredResponseError("AGENT_PATCHES_INVALID", "patches action requires only a non-empty patches payload")
@@ -403,11 +373,11 @@ def parse_agent_response(raw: Any) -> Dict[str, Any]:
                 if not isinstance(item.get("new_code"), str):
                     raise StructuredResponseError("AGENT_PATCH_CONTENT_INVALID", f"patches[{index}].new_code must be a string")
             normalized_patches.append(dict(item))
-        return {"patches": normalized_patches, "workspace_scope": normalized_scope, "investigation": value["investigation"]}
+        return {"patches": normalized_patches, "workspace_scope": normalized_scope, "investigation_updates": value["investigation_updates"]}
     if action == "needs_user":
         if not isinstance(question, str) or not question.strip() or calls is not None or patches is not None or final is not None:
             raise StructuredResponseError("AGENT_NEEDS_USER_INVALID", "needs_user action requires only a non-empty needs_user payload")
-        return {"needs_user": question.strip(), "workspace_scope": normalized_scope, "investigation": value["investigation"]}
+        return {"needs_user": question.strip(), "workspace_scope": normalized_scope, "investigation_updates": value["investigation_updates"]}
     if final is None or calls is not None or patches is not None or question is not None:
         raise StructuredResponseError("AGENT_FINAL_INVALID", "final action requires only the final payload")
     final_keys = {"answer", "evidence_ids", "limitations"}
@@ -419,7 +389,7 @@ def parse_agent_response(raw: Any) -> Dict[str, Any]:
     _string_list(final["evidence_ids"], code="AGENT_FINAL_EVIDENCE_IDS_INVALID", detail="final.evidence_ids must be an array of non-empty IDs")
     if not isinstance(final["limitations"], list) or any(not isinstance(item, str) for item in final["limitations"]):
         raise StructuredResponseError("AGENT_FINAL_LIMITATIONS_INVALID", "final.limitations must be an array of strings")
-    return {"final": dict(final), "workspace_scope": normalized_scope, "investigation": value["investigation"]}
+    return {"final": dict(final), "workspace_scope": normalized_scope, "investigation_updates": value["investigation_updates"]}
 
 
 def parse_claim_review_response(raw: Any) -> Dict[str, Any]:
@@ -466,26 +436,9 @@ def parse_claim_review_response(raw: Any) -> Dict[str, Any]:
     return value
 
 
-def parse_claim_repair_response(raw: Any) -> Dict[str, Any]:
-    value = _object(raw)
-    _exact_keys(value, required=("repairs",), allowed=("repairs",), profile="claim_repair")
-    if not isinstance(value["repairs"], list):
-        raise StructuredResponseError("CLAIM_REPAIR_REPAIRS_LIST_REQUIRED", "repairs must be an array")
-    keys = {"claim_id", "target", "replacement", "evidence_ids"}
-    for index, item in enumerate(value["repairs"], start=1):
-        item = _exact_item(item, keys, code="CLAIM_REPAIR_ITEM_SHAPE_INVALID", detail=f"repairs[{index}] must contain exactly claim_id, target, replacement and evidence_ids")
-        _string(item["claim_id"], code="CLAIM_REPAIR_CLAIM_ID_INVALID", detail=f"repairs[{index}].claim_id must be a non-empty string")
-        _string(item["target"], code="CLAIM_REPAIR_TARGET_INVALID", detail=f"repairs[{index}].target must be a non-empty string")
-        _string(item["replacement"], code="CLAIM_REPAIR_REPLACEMENT_INVALID", detail=f"repairs[{index}].replacement must be a string", nonempty=False)
-        _string_list(item["evidence_ids"], code="CLAIM_REPAIR_EVIDENCE_IDS_INVALID", detail=f"repairs[{index}].evidence_ids must be an array of non-empty Evidence IDs")
-    return value
-
-
 def parse_profile_response(raw: Any, profile: str) -> Dict[str, Any]:
     if profile == "agent":
         return parse_agent_response(raw)
     if profile == "claim_verifier":
         return parse_claim_review_response(raw)
-    if profile == "claim_repair":
-        return parse_claim_repair_response(raw)
     raise StructuredResponseError("STRUCTURED_PROFILE_UNKNOWN", f"unknown structured profile: {profile}")

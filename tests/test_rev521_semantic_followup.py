@@ -18,7 +18,7 @@ def _agent_envelope(final):
         "needs_user": None,
         "final": final,
         "workspace_scope": {"mode": "none", "reason": "fixture is workspace-independent"},
-        "investigation": [],
+        "investigation_updates": [],
     }
 
 
@@ -136,15 +136,15 @@ def test_end_to_end_insufficient_claim_reopens_target_and_main_llm_changes_obser
         turn = len(agent_prompts)
         if turn == 1:
             return {
-                "tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "app.py"}}],
+                "tool_calls": [{"tool": "read_file", "arguments": {"path": "app.py"}}],
                 "workspace_scope": workspace_scope("read"),
-                "investigation": [investigation_target("T3", goal=goal)],
+                "investigation_updates": [investigation_target("T3", goal=goal)],
             }
         if turn == 2:
             return {
                 "final": {"answer": "app.py defines run().", "evidence_ids": ["ev-0001"], "limitations": []},
                 "workspace_scope": workspace_scope("read"),
-                "investigation": [investigation_target(
+                "investigation_updates": [investigation_target(
                     "T3", goal=goal, status="established", evidence_ids=["ev-0001"], reason="run is defined",
                 )],
             }
@@ -154,9 +154,9 @@ def test_end_to_end_insufficient_claim_reopens_target_and_main_llm_changes_obser
             feedback = json.loads(payload["runtime_feedback"])
             assert feedback["claims"][0]["target_id"] == "T3"
             return {
-                "tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "main.py"}}],
+                "tool_calls": [{"tool": "read_file", "arguments": {"path": "main.py"}}],
                 "workspace_scope": workspace_scope("read"),
-                "investigation": [target],
+                "investigation_updates": [target],
             }
         return {
             "final": {
@@ -164,7 +164,7 @@ def test_end_to_end_insufficient_claim_reopens_target_and_main_llm_changes_obser
                 "evidence_ids": ["ev-0001", "ev-0002"], "limitations": [],
             },
             "workspace_scope": workspace_scope("read"),
-            "investigation": [investigation_target(
+            "investigation_updates": [investigation_target(
                 "T3", goal=goal, status="established", evidence_ids=["ev-0001", "ev-0002"],
                 reason="definition and call site are both visible",
             )],

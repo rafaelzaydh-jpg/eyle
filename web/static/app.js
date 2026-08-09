@@ -201,7 +201,20 @@
     const status = document.createElement("span");
     status.className = `history-status ${history.status || ""}`;
     status.textContent = history.status || "desconhecido";
-    head.append(title, status);
+    const headActions = document.createElement("div");
+    headActions.className = "history-head-actions";
+    const expandAll = document.createElement("button");
+    expandAll.type = "button";
+    expandAll.className = "history-expand-all";
+    expandAll.textContent = "expandir tudo";
+    expandAll.addEventListener("click", () => {
+      const items = Array.from(panel.querySelectorAll("details.history-item"));
+      const shouldOpen = items.some((item) => !item.open);
+      items.forEach((item) => { item.open = shouldOpen; });
+      expandAll.textContent = shouldOpen ? "recolher tudo" : "expandir tudo";
+    });
+    headActions.append(expandAll, status);
+    head.append(title, headActions);
     panel.appendChild(head);
 
     const agent = history.agent || {};
@@ -209,6 +222,18 @@
     [
       historyLine("turnos", agent.turns),
       historyLine("tools executadas", agent.tool_calls),
+      historyLine("budget base", agent.tool_budget_base),
+      historyLine("extensão conquistada", agent.earned_tool_extension),
+      historyLine("limite efetivo", agent.tool_budget_effective),
+      historyLine("ciclos de extensão", agent.tool_extension_cycles),
+      historyLine("committed progress", agent.committed_progress_epoch),
+      historyLine("progresso pendente", agent.pending_progress_cycles),
+      historyLine("bônus pendente", agent.pending_extension_calls),
+      historyLine("evidências já creditadas", agent.progress_credited_evidence_count),
+      historyLine("observation ledger", agent.observation_ledger_size),
+      historyLine("replays/rehydrations", agent.observation_replays),
+      historyLine("rejeições repetidas", agent.repeated_rejected_decisions),
+      historyLine("workspace epoch", agent.workspace_epoch),
       historyLine("fase final", agent.final_phase),
       historyLine("duração", history.duration_seconds != null ? `${history.duration_seconds}s` : null),
       historyLine("falha", agent.failure_code),
@@ -303,6 +328,50 @@
         toolSection.appendChild(details);
       });
       panel.appendChild(toolSection);
+    }
+
+    const commits = Array.isArray(history.committed_progress_history) ? history.committed_progress_history : [];
+    if (commits.length) {
+      const commitSection = historySection(`Committed progress · ${commits.length} depósito(s)`);
+      commits.forEach((item) => {
+        const details = document.createElement("details");
+        details.className = "history-item";
+        const summaryEl = document.createElement("summary");
+        const targets = Array.isArray(item.target_ids) && item.target_ids.length ? ` · ${item.target_ids.join(", ")}` : "";
+        summaryEl.textContent = `turno ${item.turn || "?"} · epoch ${item.epoch || "?"}${targets}`;
+        details.append(summaryEl, historyJsonBlock(item));
+        commitSection.appendChild(details);
+      });
+      panel.appendChild(commitSection);
+    }
+
+    const extensions = Array.isArray(history.tool_extension_history) ? history.tool_extension_history : [];
+    if (extensions.length) {
+      const extensionSection = historySection(`Extensões de tools · ${extensions.length} ciclo(s)`);
+      extensions.forEach((item) => {
+        const details = document.createElement("details");
+        details.className = "history-item";
+        const summaryEl = document.createElement("summary");
+        const granted = item.granted != null ? `+${item.granted}` : "extensão";
+        summaryEl.textContent = `turno ${item.turn || "?"} · ${granted} tools`;
+        details.append(summaryEl, historyJsonBlock(item));
+        extensionSection.appendChild(details);
+      });
+      panel.appendChild(extensionSection);
+    }
+
+    const progress = Array.isArray(history.progress_history) ? history.progress_history : [];
+    if (progress.length) {
+      const progressSection = historySection(`Runtime progress · ${progress.length} ciclo(s)`);
+      progress.forEach((item) => {
+        const details = document.createElement("details");
+        details.className = "history-item";
+        const summaryEl = document.createElement("summary");
+        summaryEl.textContent = `turno ${item.turn || "?"} · ${item.progressed ? "avançou" : "sem mudança"}`;
+        details.append(summaryEl, historyJsonBlock(item));
+        progressSection.appendChild(details);
+      });
+      panel.appendChild(progressSection);
     }
 
     const validation = history.write_validation || {};

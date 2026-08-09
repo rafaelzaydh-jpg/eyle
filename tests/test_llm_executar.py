@@ -85,7 +85,7 @@ def _agent_json(answer="ok"):
         "action": "final", "tool_calls": None, "patches": None,
         "needs_user": None, "final": {"answer": answer, "evidence_ids": [], "limitations": []},
         "workspace_scope": {"mode": "none", "reason": "transport fixture is workspace-independent"},
-        "investigation": [],
+        "investigation_updates": [],
     })
 
 
@@ -110,7 +110,7 @@ def test_structured_openai_uses_strict_profile_schema(monkeypatch):
     assert fmt["type"] == "json_schema"
     assert fmt["json_schema"]["strict"] is True
     assert set(fmt["json_schema"]["schema"]["required"]) == {
-        "action", "tool_calls", "patches", "needs_user", "final", "workspace_scope", "investigation",
+        "action", "tool_calls", "patches", "needs_user", "final", "workspace_scope", "investigation_updates",
     }
 
 

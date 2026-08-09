@@ -14,16 +14,19 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from llm.executar import (
-    ErroLLM, PROMPT_AGENTE, PROMPT_CLAIM_VERIFIER, PROMPT_CLAIM_REPAIR,
+    ErroLLM, PROMPT_AGENTE, PROMPT_CLAIM_VERIFIER,
     executar_agente as executar_agente_llm, executar_verificador_claims,
-    executar_reparo_claims,
 )
 from llm.structured import StructuredResponseError, retry_instruction
 
 from .session import AgentSession
+from .observation import (
+    semantic_signature as _observation_signature, lookup as _lookup_observation,
+    record as _record_observation,
+)
 from .investigation import (
-    open_target_ids, reopen_targets_from_review, target_evidence_ids,
-    validate_investigation, validate_workspace_scope,
+    apply_investigation_updates, open_target_ids, reopen_targets_from_review, target_evidence_ids,
+    validate_workspace_scope,
 )
 from .execution_trace import build_execution_trace
 from .security import _resolver_caminho_seguro
@@ -45,11 +48,10 @@ from .transactions import dry_run_patch_set, apply_patch_set, rollback_patch_set
 from .validation import validate_final
 from .request_policy import request_contract
 from .claim_review import (
-    apply_claim_repairs, build_repaired_claim_targets, claim_config, claim_evidence_ledger, compact_evidence,
+    claim_config, claim_evidence_ledger, compact_evidence,
     claim_review_output_budget, claim_protocol_recovery_target, semantic_gap_protocol_recovery_target,
     finding_protocol_recovery_target, finding_recovery_prompt,
-    insufficient_feedback, merge_reverified_claims, normalize_claim_repairs,
-    normalize_claim_review, problematic_claims, repair_prompt, review_prompt,
+    review_followup_feedback, normalize_claim_review, problematic_claims, review_prompt,
     validate_file_evidence_freshness, verifier_answer_anchors,
 )
 
@@ -292,30 +294,30 @@ def _observable_tool_arguments(tool: str, arguments: Dict[str, Any]) -> Dict[str
     """
     arguments = arguments if isinstance(arguments, dict) else {}
     if tool in {"read_file", "read_range"}:
-        result = {"path": arguments.get("caminho_relativo")}
+        result = {"path": arguments.get("path")}
         if tool == "read_range":
             result.update({
-                "line_start": arguments.get("linha_inicio"),
-                "line_end": arguments.get("linha_fim"),
+                "line_start": arguments.get("line_start"),
+                "line_end": arguments.get("line_end"),
             })
         return {k: v for k, v in result.items() if v is not None}
     if tool == "list_tree":
         return {
-            k: arguments.get(k) for k in ("limite", "profundidade", "filtro")
+            k: arguments.get(k) for k in ("limit", "depth", "filter")
             if arguments.get(k) is not None
         }
     if tool == "search_code":
         return {"query": str(arguments.get("query") or "")[:240]}
     if tool == "find_symbol":
         return {
-            k: arguments.get(k) for k in ("simbolo", "caminho_relativo")
+            k: arguments.get(k) for k in ("symbol", "path")
             if arguments.get(k) is not None
         }
     if tool == "calculate":
         return {"expression": str(arguments.get("expression") or "")[:240]}
     if tool == "count_tokens":
         return {
-            k: arguments.get(k) for k in ("caminho_relativo", "tokenizer")
+            k: arguments.get(k) for k in ("path", "tokenizer")
             if arguments.get(k) is not None
         }
     if tool in {"project_stats", "inspect_project", "agent_info"}:
@@ -498,31 +500,35 @@ def _investigation_map(session: AgentSession, limit: int = 12) -> List[Dict[str,
     return entries[-max(1, int(limit or 12)):]
 
 
-def _previous_observation(session: AgentSession, semantic_signature: Optional[str]) -> Optional[Dict[str, Any]]:
-    if not semantic_signature:
-        return None
-    for item in reversed(session.tool_history):
-        if not isinstance(item, dict):
-            continue
-        result = item.get("result") if isinstance(item.get("result"), dict) else {}
-        # A real workspace mutation invalidates cached observation signatures.
-        if result.get("changed") is True:
-            return None
-        if item.get("semantic_signature") != semantic_signature:
-            continue
-        if result.get("ok") is True or (item.get("tool") == "run_tests" and result.get("executed") is True):
-            return {
-                "turn": item.get("turn"),
-                "tool": item.get("tool"),
-                "arguments": dict(item.get("arguments") or {}),
-                "result": dict(result),
-            }
-    return None
-
-
 def _register_evidence(session: AgentSession, tool: str, detail: Any) -> List[str]:
     if tool == "search_code" and isinstance(detail, dict):
         candidates = [item for item in detail.get("resultados") or [] if isinstance(item, dict)]
+        if not candidates and detail.get("coverage_complete") is True:
+            # Negative observations are citable facts about the search itself,
+            # not semantic claims about dead code/legacy.
+            content = json.dumps({
+                "query": detail.get("query"),
+                "matches_observed": detail.get("matches_observed"),
+                "matches_returned": detail.get("matches_returned"),
+                "ranges_observed": detail.get("ranges_observed"),
+                "ranges_returned": detail.get("ranges_returned"),
+                "coverage_complete": True,
+                "truncated": bool(detail.get("truncated")),
+                "backend": detail.get("backend"),
+            }, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+            source_hash = hash_texto(content)
+            candidates = [{
+                "arquivo": "<search-observation>",
+                "linha_inicio": None,
+                "linha_fim": None,
+                "file_hash": source_hash,
+                "content_hash": source_hash,
+                "conteudo": content,
+                "source_type": "search_observation",
+                "query": detail.get("query"),
+                "coverage_complete": True,
+                "matches": 0,
+            }]
     elif tool in {"read_file", "read_range", "find_symbol"} and isinstance(detail, dict):
         candidates = [detail]
     elif tool == "list_tree" and isinstance(detail, dict) and detail.get("inventory_hash"):
@@ -772,13 +778,32 @@ def _record_prompt_visible_ranges(session: AgentSession, payload: Any) -> None:
     session.visible_source_ranges = current
 
 
-def _model_tool_result(session: AgentSession, tool: str, result: Dict[str, Any], config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _model_tool_result(session: AgentSession, tool: str, result: Dict[str, Any], config: Optional[Dict[str, Any]] = None, arguments: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     evidence_worthy = bool(result.get("ok")) or (
         tool == "run_tests"
         and isinstance(result.get("detail"), dict)
         and (result.get("executed") is True or result.get("error_code") == "TEST_RUNNER_UNAVAILABLE")
     )
     evidence_ids = _register_evidence(session, tool, result.get("detail")) if evidence_worthy else []
+    if tool == "find_symbol" and result.get("error_code") == "SYMBOL_NOT_FOUND" and result.get("executed") is True:
+        payload = {
+            "symbol": str((arguments or {}).get("symbol") or ""),
+            "path": (arguments or {}).get("path"),
+            "error_code": "SYMBOL_NOT_FOUND",
+            "executed": True,
+        }
+        content = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        source_hash = hash_texto(content)
+        evidence_ids = _register_evidence(session, "agent_info", {
+            "observation": payload, "source_type": "symbol_observation", "content_hash": source_hash
+        })
+        # Re-label synthetic runtime Evidence as a symbol observation.
+        for evidence_id in evidence_ids:
+            if evidence_id in session.evidence:
+                session.evidence[evidence_id].update({
+                    "arquivo": "<symbol-observation>", "source_type": "symbol_observation",
+                    "conteudo": content, "file_hash": source_hash, "content_hash": source_hash,
+                })
     if tool in EVIDENCE_TOOLS and isinstance(result.get("detail"), dict):
         detail = result.get("detail")
         if tool == "search_code":
@@ -1156,8 +1181,8 @@ def _agent_config(config: Dict[str, Any], session: AgentSession, project: Dict[s
     completion usage is charged to the task-wide pool. The main agent never
     reserves Claim Review capacity speculatively because its next decision may
     still be a tool call, user question, or final. Downstream reserve is kept
-    only at boundaries where a later LLM stage is already mandatory (for
-    example Claim Repair -> local reverify).
+    only when Claim Review has explicitly returned semantic debt and a later
+    verifier pass is already mandatory before acceptance.
     """
     clone = dict(config)
     llm = dict(config.get("llm") or {})
@@ -1221,6 +1246,15 @@ def _current_trace_snapshot(session: AgentSession, config: Dict[str, Any]) -> Di
         "status": "processing",
         "turns": session.turn,
         "tool_calls": session.tool_calls,
+        "tool_budget": _tool_budget_state(session, config),
+        "committed_progress_history": list(session.committed_progress_history[-50:]),
+        "progress_credited_evidence_ids": list(session.progress_credited_evidence_ids),
+        "tool_extension_history": list(session.tool_extension_history[-50:]),
+        "workspace_epoch": int(session.workspace_epoch or 0),
+        "observation_replays": int(session.observation_replays or 0),
+        "observation_ledger_size": len(session.observation_ledger or {}),
+        "repeated_rejected_decisions": int(session.repeated_rejected_decisions or 0),
+        "progress_history": list(session.progress_history[-50:]),
         "tool_history": list(session.tool_history[-50:]),
         "decision_history": list(session.decision_history[-50:]),
         "llm_usage": {key: value for key, value in runtime.items() if key in {
@@ -1304,6 +1338,7 @@ def _compile_prompt(
     phase = _phase_for_call(session, call_config, project)
     session.record_phase(phase, turn=session.turn, reason="phase_for_call")
     allowed, tools = _tool_catalog(call_config, project, phase, session.request)
+    tool_budget = _tool_budget_state(session, call_config)
     payload = {
         "request": session.request,
         "turn": session.turn,
@@ -1316,6 +1351,17 @@ def _compile_prompt(
         "latest_tool_results": session.latest_tool_results,
         "relevant_sources": _retained_sources_for_prompt(session, call_config),
         "evidence_index": session.evidence_index(),
+        "tool_authority": {
+            "earned_extension": tool_budget["earned_extension"],
+            "committed_progress_epoch": tool_budget["committed_progress_epoch"],
+            "pending_progress_cycles": tool_budget["pending_progress_cycles"],
+            "pending_extension_calls": tool_budget["pending_extension_calls"],
+            "policy": (
+                "Tool authority is runtime-managed. Every runtime-validated fresh committed-progress epoch can fund "
+                "the configured +tool step exactly once when the physical fuse is reached; there is no cumulative "
+                "earned-extension ceiling. Claim Review never grants authority. Do not recycle old Evidence."
+            ),
+        },
         "request_contract": request_contract(
             session.request, _project_descriptor(project)["available"],
             write_available=bool(((call_config or {}).get("codar") or {}).get("ativado", True)),
@@ -1398,7 +1444,6 @@ def _claim_llm_config(config: Dict[str, Any], mode: str) -> Dict[str, Any]:
     llm = dict((config or {}).get("llm") or {})
     verifier = cfg["verifier"]
     llm["claim_verifier_max_tokens"] = verifier["max_tokens"]
-    llm["claim_repair_max_tokens"] = verifier["max_tokens"]
     llm["claim_verifier_truncation_retry_multiplier"] = 1.5
     llm["temperature"] = verifier["temperature"]
     if mode == "verified":
@@ -1668,6 +1713,7 @@ def _run_claim_verification(
         parsed_claims[claim_index - 1] = {
             "id": recovered.get("id"),
             "answer_ref": recovered.get("answer_ref"),
+            "target_id": recovered.get("target_id"),
             "statement": recovered.get("statement"),
             "kind": recovered.get("kind"),
             "evidence_ids": list(recovered.get("evidence_ids") or []),
@@ -1827,66 +1873,6 @@ def _run_finding_recovery(
     return True, "ok", [dict(item) for item in findings if isinstance(item, dict)]
 
 
-def _run_claim_repair(
-    session: AgentSession, config: Dict[str, Any], answer: str, review: Dict[str, Any],
-    evidence_ids: List[str], evidence_view: List[Dict[str, Any]], *, project_root: Any = None,
-) -> Tuple[bool, str, str, List[Dict[str, Any]]]:
-    cfg = claim_config(config)
-    allowed_ids = [str(item.get("id")) for item in evidence_view if item.get("id")]
-    fresh, freshness_reason = validate_file_evidence_freshness(
-        session.evidence, allowed_ids, project_root,
-    )
-    if not fresh:
-        return False, freshness_reason, "", []
-    verifier_config = _claim_llm_config(config, cfg["mode"])
-    contradicted = problematic_claims(review, "contradicted")
-    if contradicted:
-        reverify_reserve = claim_review_output_budget(
-            "",
-            base_tokens=cfg["verifier"]["max_tokens"],
-            available_tokens=_remaining_completion_budget(config),
-            target_claims=[{"claim_id": item.get("id")} for item in contradicted],
-        )
-        verifier_config["llm"]["downstream_completion_reserve_tokens"] = int(reverify_reserve)
-    prompt = repair_prompt(answer, review, evidence_view, allowed_ids)
-    _record_aux_prompt(
-        session, verifier_config, mode="claim_repair", prompt=prompt,
-        system_prompt=PROMPT_CLAIM_REPAIR, output_tokens=cfg["verifier"]["max_tokens"],
-    )
-    parsed = None
-    repair_call_prompt = prompt
-    for protocol_attempt in range(_structured_retry_limit(config) + 1):
-        try:
-            parsed = executar_reparo_claims(repair_call_prompt, verifier_config)
-            break
-        except ErroLLM as error:
-            if not _is_structured_response_error(error, "claim_repair") or protocol_attempt >= _structured_retry_limit(config):
-                raise
-            _record_decision(session, "claim_repair_protocol", "retry", reason=error.error_code)
-            repair_call_prompt = _structured_retry_prompt(prompt, error, "claim_repair")
-            _record_aux_prompt(
-                session, verifier_config, mode="claim_repair_protocol_retry", prompt=repair_call_prompt,
-                system_prompt=PROMPT_CLAIM_REPAIR, output_tokens=cfg["verifier"]["max_tokens"],
-                metadata={"protocol_retry": protocol_attempt + 1},
-            )
-    fresh, freshness_reason = validate_file_evidence_freshness(
-        session.evidence, allowed_ids, project_root,
-    )
-    if not fresh:
-        return False, freshness_reason, "", []
-    if not isinstance(parsed, dict):
-        return False, "CLAIM_REPAIR_PROTOCOL_ERROR:STRUCTURED_OBJECT_REQUIRED", "", []
-    ok, reason, repairs = normalize_claim_repairs(
-        parsed, answer, review, allowed_evidence_ids=allowed_ids, evidence=session.evidence,
-    )
-    if not ok:
-        return False, reason, "", []
-    ok, reason, repaired_answer = apply_claim_repairs(answer, repairs)
-    if not ok:
-        return False, reason, "", []
-    return True, "ok", repaired_answer, repairs
-
-
 def _append_claim_review(session: AgentSession, review: Dict[str, Any], *, stage: str) -> None:
     snapshot = {
         "stage": stage,
@@ -1904,6 +1890,201 @@ def _append_claim_review(session: AgentSession, review: Dict[str, Any], *, stage
     session.claim_review = snapshot
     session.claim_review_history.append(snapshot)
     del session.claim_review_history[:-10]
+
+
+def _tool_budget_state(session: AgentSession, config: Dict[str, Any]) -> Dict[str, int]:
+    cfg = (config or {}).get("agent") or {}
+    base = max(1, int(cfg.get("max_tool_calls", 12) or 12))
+    earned = max(0, int(session.earned_tool_extension or 0))
+    committed_epoch = max(0, int(session.committed_progress_epoch or 0))
+    last_extension_epoch = max(0, int(session.last_extension_progress_epoch or 0))
+    per_cycle = max(1, int(cfg.get("committed_progress_extension_calls", 4) or 4))
+    pending_cycles = max(0, committed_epoch - last_extension_epoch)
+    return {
+        "base": base,
+        "earned_extension": earned,
+        "effective_limit": base + earned,
+        "extension_cycles": max(0, int(session.tool_extension_cycles or 0)),
+        "committed_progress_epoch": committed_epoch,
+        "last_extension_progress_epoch": last_extension_epoch,
+        "pending_progress_cycles": pending_cycles,
+        "pending_extension_calls": pending_cycles * per_cycle,
+    }
+
+
+def _record_committed_progress(
+    session: AgentSession, progress: List[Dict[str, Any]], *, accepted_updates: List[Dict[str, Any]] | None = None,
+) -> bool:
+    """Deposit one objective contract-progress cycle into the runtime ledger.
+
+    The runtime never judges whether Evidence semantically proves a goal. A
+    deposit means only that the canonical Investigation Contract accepted a
+    structurally valid change backed by globally fresh runtime Evidence. Each
+    Evidence ID may finance physical authority at most once for the whole
+    session. Multiple targets changed in the same Main LLM decision still mint
+    only one progress epoch, preventing target fragmentation from manufacturing
+    authority.
+    """
+    material = [dict(item) for item in progress or [] if isinstance(item, dict)]
+    if not material:
+        return False
+
+    # Tool authority is funded only by globally fresh Evidence. A previously
+    # credited Evidence ID may still be attached to another Investigation target
+    # for legitimate semantics, but it can never mint physical authority again.
+    # This durable monotonic set prevents target cloning/reopen/edit cycles from
+    # recycling old observations into repeated +tool credit.
+    already_credited = set(str(item) for item in session.progress_credited_evidence_ids if str(item))
+    target_ids = []
+    evidence_ids = []
+    for item in material:
+        fresh_for_item = []
+        for evidence_id in item.get("added_evidence_ids") or []:
+            evidence_id = str(evidence_id or "").strip()
+            evidence_item = session.evidence.get(evidence_id) if evidence_id else None
+            if (
+                evidence_id
+                and isinstance(evidence_item, dict)
+                and not evidence_item.get("stale")
+                and evidence_id not in already_credited
+                and evidence_id not in evidence_ids
+            ):
+                evidence_ids.append(evidence_id)
+                fresh_for_item.append(evidence_id)
+        if fresh_for_item:
+            target_id = str(item.get("target_id") or "").strip()
+            if target_id and target_id not in target_ids:
+                target_ids.append(target_id)
+    if not evidence_ids:
+        return False
+
+    session.progress_credited_evidence_ids.extend(
+        evidence_id for evidence_id in evidence_ids if evidence_id not in already_credited
+    )
+    session.committed_progress_epoch += 1
+    snapshot = {
+        "turn": session.turn,
+        "epoch": session.committed_progress_epoch,
+        "target_ids": target_ids,
+        "added_evidence_ids": evidence_ids,
+        "accepted_updates": [
+            str(item.get("id") or "") for item in accepted_updates or []
+            if isinstance(item, dict) and item.get("changed") is True and str(item.get("id") or "")
+        ],
+    }
+    session.committed_progress_history.append(snapshot)
+    del session.committed_progress_history[:-50]
+    _record_decision(
+        session, "committed_progress", "deposited",
+        reason=f"epoch={session.committed_progress_epoch};targets=" + ",".join(target_ids),
+    )
+    return True
+
+
+def _grant_committed_progress_extension(session: AgentSession, config: Dict[str, Any]) -> int:
+    """Convert every unspent objective progress epoch into physical tool authority.
+
+    This is a physical runtime rule, not a semantic reward. Claim Review is not
+    consulted. Every runtime-validated committed-progress epoch can fund exactly
+    ``committed_progress_extension_calls`` additional physical calls once. There
+    is no artificial cumulative +tool ceiling; replay protection comes from the
+    immutable progress epoch and globally credit-once Evidence ledger.
+    """
+    if not open_target_ids(session.investigation):
+        return 0
+
+    cfg = (config or {}).get("agent") or {}
+    per_cycle = max(1, int(cfg.get("committed_progress_extension_calls", 4) or 4))
+    first_epoch = max(0, int(session.last_extension_progress_epoch or 0)) + 1
+    last_epoch = max(0, int(session.committed_progress_epoch or 0))
+    if first_epoch > last_epoch:
+        return 0
+
+    base = max(1, int(cfg.get("max_tool_calls", 12) or 12))
+    total_granted = 0
+    for progress_epoch in range(first_epoch, last_epoch + 1):
+        session.earned_tool_extension = max(0, int(session.earned_tool_extension or 0)) + per_cycle
+        session.tool_extension_cycles += 1
+        session.last_extension_progress_epoch = progress_epoch
+        total_granted += per_cycle
+        snapshot = {
+            "turn": session.turn,
+            "granted": per_cycle,
+            "progress_epoch": progress_epoch,
+            "earned_total": session.earned_tool_extension,
+            "effective_limit": base + session.earned_tool_extension,
+        }
+        session.tool_extension_history.append(snapshot)
+        del session.tool_extension_history[:-50]
+        _record_decision(
+            session, "tool_authority", "extension_granted",
+            reason=(
+                f"+{per_cycle};progress_epoch={progress_epoch};"
+                f"earned={session.earned_tool_extension};effective={snapshot['effective_limit']}"
+            ),
+        )
+    return total_granted
+
+
+def _review_followup_payload(review: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a canonical, body-free fingerprint payload for Decision Ledger.
+
+    This does not reinterpret reviewer semantics. It preserves only reviewer
+    coordinates so an identical semantic debt against the same canonical state
+    can be detected without another Agent<->Claim token loop.
+    """
+    claims = []
+    for item in (review or {}).get("claims") or []:
+        if not isinstance(item, dict) or item.get("verdict") not in {"contradicted", "insufficient"}:
+            continue
+        claims.append({
+            "answer_ref": item.get("answer_ref"),
+            "target_id": item.get("target_id"),
+            "statement": str(item.get("statement") or ""),
+            "verdict": item.get("verdict"),
+            "evidence_ids": sorted(str(x) for x in item.get("evidence_ids") or [] if str(x)),
+            "reason": str(item.get("reason") or ""),
+        })
+    gaps = []
+    for item in (review or {}).get("semantic_gaps") or []:
+        if not isinstance(item, dict):
+            continue
+        gaps.append({
+            "type": item.get("type"),
+            "target_id": item.get("target_id"),
+            "evidence_ids": sorted(str(x) for x in item.get("evidence_ids") or [] if str(x)),
+            "reason": str(item.get("reason") or ""),
+        })
+    claims.sort(key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str))
+    gaps.sort(key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str))
+    return {"claims": claims, "semantic_gaps": gaps}
+
+
+def _extend_claim_rework_lane(session: AgentSession, config: Dict[str, Any], current_limit: int) -> int:
+    """Expose unused physical LLM-call capacity only after Claim found debt.
+
+    ``max_llm_turns`` remains the normal investigation limit. Claim follow-up is
+    not speculative extra exploration: it is directed rework after the second
+    brain rejected a provisional final. We therefore allow only the remaining
+    task-wide LLM-call capacity, while reserving one future call for Claim Review.
+    No new independent budget or semantic policy is introduced.
+    """
+    runtime = (config or {}).get("_runtime_agent_budget") or {}
+    maximum = int(runtime.get("max_llm_calls", 0) or 0)
+    if maximum <= 0:
+        maximum = int((((config or {}).get("agent") or {}).get("max_llm_calls", 0)) or 0)
+    used = int(runtime.get("llm_calls", 0) or 0)
+    remaining = max(0, maximum - used) if maximum > 0 else 0
+    # One verifier pass is mandatory before a reworked final can be accepted.
+    available_agent_calls = max(0, remaining - 1)
+    desired = int(session.turn or 0) + available_agent_calls
+    if desired > int(current_limit or 0):
+        _record_decision(
+            session, "claim_rework_lane", "opened",
+            reason=f"normal_limit={current_limit};remaining_llm_calls={remaining};rework_limit={desired}",
+        )
+        return desired
+    return int(current_limit or 0)
 
 
 def _details(
@@ -1930,6 +2111,15 @@ def _details(
         "investigation": session.investigation,
         "turns": session.turn,
         "tool_calls": session.tool_calls,
+        "tool_budget": _tool_budget_state(session, config),
+        "committed_progress_history": list(session.committed_progress_history[-50:]),
+        "progress_credited_evidence_ids": list(session.progress_credited_evidence_ids),
+        "tool_extension_history": list(session.tool_extension_history[-50:]),
+        "workspace_epoch": int(session.workspace_epoch or 0),
+        "observation_replays": int(session.observation_replays or 0),
+        "observation_ledger_size": len(session.observation_ledger or {}),
+        "repeated_rejected_decisions": int(session.repeated_rejected_decisions or 0),
+        "progress_history": list(session.progress_history[-50:]),
         "tools_used": [
             item.get("tool") for item in session.tool_history
             if (item.get("result") or {}).get("executed") is True
@@ -2126,7 +2316,7 @@ def _reread_with_tools(context: Dict[str, Any], outputs: List[Dict[str, Any]]) -
         if item.get("operation") == "delete":
             continue
         path = str(item.get("path") or "")
-        result = executar_tool("read_file", {"caminho_relativo": path}, context)
+        result = executar_tool("read_file", {"path": path}, context)
         if not result.get("ok"):
             failures.append(path)
     return {
@@ -2280,6 +2470,8 @@ def _resume_set(session: AgentSession, pending: Dict[str, Any], config: Dict[str
         if fully_verified else
         "Estado: transação aplicada com validação parcial; não foi chamada de verificada."
     )
+    session.workspace_epoch += 1
+
     text = (
         f"Transação aplicada em {len(paths)} arquivo(s): {', '.join(paths)}.\n\nValidação pós-escrita:\n"
         f"- {compile_line};\n- {test_line};\n"
@@ -2423,7 +2615,7 @@ def _enrich_patch_set(session: AgentSession, project: Dict[str, Any], arguments:
 
 def _preserve_source_for_retry(previous: List[Dict[str, Any]], current: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     needs_source = any(
-        item.get("error_code") in {"IDENTICAL_READ_BLOCKED", "SEMANTIC_READ_BLOCKED", "READ_PHASE_CLOSED"}
+        item.get("error_code") in {"READ_PHASE_CLOSED"}
         for item in current if isinstance(item, dict)
     )
     if not needs_source:
@@ -2438,61 +2630,25 @@ def _normalized_path(value: Any) -> str:
     return str(value or "").replace("\\", "/").strip().lstrip("./").lower()
 
 
-def _semantic_read_signature(tool: str, arguments: Dict[str, Any]) -> Optional[str]:
-    if tool == "list_tree":
-        return "tree:" + json.dumps({
-            "filtro": str(arguments.get("filtro") or "").strip().lower(),
-            "profundidade": arguments.get("profundidade"),
-            "limite": arguments.get("limite"),
-        }, sort_keys=True, separators=(",", ":"), default=str)
-    if tool == "search_code":
-        query = " ".join(str(arguments.get("query") or "").lower().split())
-        return f"search:{query}"
-    if tool == "find_symbol":
-        path = _normalized_path(arguments.get("caminho_relativo"))
-        symbol = str(arguments.get("simbolo") or "").strip().lower()
-        return f"symbol:{path}:{symbol}"
-    if tool == "read_file":
-        return f"file:{_normalized_path(arguments.get('caminho_relativo'))}:all"
-    if tool == "read_range":
-        path = _normalized_path(arguments.get("caminho_relativo"))
-        return f"file:{path}:{arguments.get('linha_inicio')}:{arguments.get('linha_fim')}"
-    if tool == "project_stats":
-        return "project_stats:root"
-    if tool == "inspect_project":
-        return "inspect_project:root"
-    if tool == "count_tokens":
-        return "count_tokens:" + json.dumps({
-            "path": _normalized_path(arguments.get("caminho_relativo") or "."),
-            "tokenizer": str(arguments.get("tokenizer") or "").strip().lower(),
-        }, sort_keys=True, separators=(",", ":"))
-    if tool == "agent_info":
-        return "agent_info:runtime"
-    if tool == "run_tests":
-        return "run_tests:" + json.dumps({
-            "scope": _normalized_path(arguments.get("scope") or "."),
-        }, sort_keys=True, separators=(",", ":"))
-    return None
-
-
-def _read_already_covered(
+def _source_already_visible(
     session: AgentSession, tool: str, arguments: Dict[str, Any],
 ) -> bool:
-    signature = _semantic_read_signature(tool, arguments)
+    """Return whether the exact requested source body/range is in the current prompt.
+
+    ObservationLedger owns physical execution identity. This helper owns only
+    current Main-LLM context visibility and therefore never suppresses searches
+    or structured observations.
+    """
+    signature = _observation_signature(tool, arguments)
     if not signature:
         return False
-    if tool == "list_tree":
-        # Tree results are compact structured observations rather than source
-        # bodies; an unchanged successful tree is safe to suppress.
-        return _previous_observation(session, signature) is not None
-    if tool in {"search_code", "find_symbol"}:
-        # These tools expose source snippets. Historical execution alone cannot
-        # prove the snippet is still visible to the stateless Main LLM.
+    # Physical repeat suppression is owned by ObservationLedger. This helper is
+    # only about whether a concrete source body/range is already visible in the
+    # current prompt. Structured observations/searches are never blocked here.
+    if tool in {"list_tree", "search_code", "find_symbol"} or tool in CACHEABLE_OBSERVATION_TOOLS:
         return False
-    if tool in CACHEABLE_OBSERVATION_TOOLS:
-        return _previous_observation(session, signature) is not None
 
-    path = _normalized_path(arguments.get("caminho_relativo"))
+    path = _normalized_path(arguments.get("path"))
     if not path:
         return False
     ranges = [
@@ -2516,8 +2672,8 @@ def _read_already_covered(
     if not groups:
         return False
 
-    requested_start = 1 if tool == "read_file" else int(arguments.get("linha_inicio") or 0)
-    requested_end_raw = None if tool == "read_file" else int(arguments.get("linha_fim") or 0)
+    requested_start = 1 if tool == "read_file" else int(arguments.get("line_start") or 0)
+    requested_end_raw = None if tool == "read_file" else int(arguments.get("line_end") or 0)
     if tool == "read_range" and (requested_start <= 0 or int(requested_end_raw or 0) < requested_start):
         return False
 
@@ -2568,21 +2724,122 @@ def _record_decision(
     del session.decision_history[:-50]
 
 
-def _turn_made_progress(
-    evidence_before: int, results: List[Dict[str, Any]], session: AgentSession,
-) -> bool:
-    """Count only an observable state/knowledge change, never ``ok=True`` alone."""
-    if len(session.evidence) > evidence_before:
-        return True
-    return any(
-        isinstance(item, dict)
-        and item.get("changed") is True
-        for item in results
-    )
-
-
 def _action_signature(tool: str, arguments: Dict[str, Any]) -> str:
     return json.dumps({"tool": tool, "arguments": arguments}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _objective_runtime_state_payload(session: AgentSession) -> Dict[str, Any]:
+    """Return the deterministic state that represents objective runtime progress.
+
+    Free-form Investigation reason/status churn is intentionally excluded. The
+    Main LLM may reinterpret Evidence freely, but only new observed reality, new
+    Evidence bindings or verified workspace mutation reset runtime stall state.
+    """
+    evidence = [
+        (str(key), str((item or {}).get("content_hash") or ""), str((item or {}).get("file_hash") or ""))
+        for key, item in sorted((session.evidence or {}).items()) if isinstance(item, dict)
+    ]
+    observations = [
+        (str(key), str((item or {}).get("result_fingerprint") or ""))
+        for key, item in sorted((session.observation_ledger or {}).items()) if isinstance(item, dict)
+    ]
+    bindings = [
+        (str(item.get("id") or ""), tuple(sorted(str(eid) for eid in (item.get("evidence_ids") or []) if str(eid))))
+        for item in (session.investigation or []) if isinstance(item, dict)
+    ]
+    return {
+        "workspace_epoch": int(session.workspace_epoch or 0),
+        "committed_progress_epoch": int(session.committed_progress_epoch or 0),
+        "evidence": evidence,
+        "observations": observations,
+        "investigation_evidence_bindings": sorted(bindings),
+    }
+
+
+def _runtime_progress_fingerprint(session: AgentSession) -> str:
+    return hash_texto(json.dumps(
+        _objective_runtime_state_payload(session),
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
+    ))
+
+
+def _record_runtime_cycle_progress(session: AgentSession, progressed: bool) -> None:
+    session.progress_history.append({
+        "turn": int(session.runtime_cycle_start_turn or session.turn),
+        "progressed": bool(progressed),
+        "workspace_epoch": int(session.workspace_epoch or 0),
+        "observation_count": len(session.observation_ledger or {}),
+        "evidence_count": len(session.evidence or {}),
+        "committed_progress_epoch": int(session.committed_progress_epoch or 0),
+    })
+    del session.progress_history[:-50]
+
+
+def _decision_rejection_key(
+    session: AgentSession, code: str, payload: Any, *, objective_context: Optional[Dict[str, Any]] = None,
+) -> str:
+    canonical = {
+        "objective_state": _objective_runtime_state_payload(session),
+        "workspace_scope_mode": str((session.workspace_scope or {}).get("mode") or "none"),
+        "phase": str(session.phase or ""),
+        "code": str(code or ""),
+        "payload": payload,
+        "objective_context": dict(objective_context or {}),
+    }
+    return hash_texto(json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str))
+
+
+def _record_rejected_decision(
+    session: AgentSession, code: str, payload: Any, *, objective_context: Optional[Dict[str, Any]] = None,
+) -> int:
+    key = _decision_rejection_key(session, code, payload, objective_context=objective_context)
+    previous = session.decision_ledger.get(key) if isinstance(session.decision_ledger, dict) else None
+    count = int((previous or {}).get("count") or 0) + 1
+    session.decision_ledger[key] = {"count": count, "turn": session.turn, "code": code}
+    if len(session.decision_ledger) > 128:
+        oldest = sorted(session.decision_ledger.items(), key=lambda kv: int((kv[1] or {}).get("turn") or 0))
+        for old_key, _ in oldest[:len(session.decision_ledger)-128]:
+            session.decision_ledger.pop(old_key, None)
+    if count > 1:
+        session.repeated_rejected_decisions += 1
+    return count
+
+
+def _rehydrate_observation(session: AgentSession, entry: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+    replay = copy.deepcopy(entry.get("replay_result")) if isinstance(entry.get("replay_result"), dict) else None
+    if replay is None and isinstance(entry.get("replay_summary"), dict):
+        replay = copy.deepcopy(entry.get("replay_summary"))
+    evidence_ids = [str(item) for item in entry.get("evidence_ids") or [] if str(item) in session.evidence]
+    tool = str(entry.get("tool") or "")
+    if replay is None:
+        details = []
+        for evidence_id in evidence_ids:
+            evidence = session.evidence.get(evidence_id) or {}
+            clone = dict(evidence)
+            clone["evidence_id"] = evidence_id
+            if evidence.get("source_type") in {"search_observation", "symbol_observation"}:
+                try:
+                    details.append(json.loads(str(evidence.get("conteudo") or "{}")))
+                except Exception:
+                    details.append({"evidence_id": evidence_id})
+            else:
+                details.append(_llm_source_view(clone, config, tool=tool))
+        if tool == "search_code":
+            negative = next((item for item in details if isinstance(item, dict) and item.get("coverage_complete") is True and not item.get("arquivo")), None)
+            detail = negative or {"resultados": details}
+        elif len(details) == 1:
+            detail = details[0]
+        else:
+            detail = {"evidence": details}
+        replay = {"tool": tool, "status": "success", "ok": True, "executed": False, "changed": False, "error_code": None, "detail": detail, "evidence_ids": evidence_ids}
+    replay["tool"] = tool or replay.get("tool")
+    replay["status"] = "replayed"
+    replay["executed"] = False
+    replay["changed"] = False
+    replay["replayed"] = True
+    replay["source_turn"] = entry.get("turn")
+    replay["evidence_ids"] = evidence_ids or list(replay.get("evidence_ids") or [])
+    return replay
 
 
 def _final_validation_feedback(reason: str) -> str:
@@ -2647,7 +2904,6 @@ def _run(
     max_turns = max(1, int(cfg.get("max_llm_turns", 8) or 8))
     claim_config(config)  # validate once at the execution boundary
     run_turn_limit = max_turns
-    max_tool_calls = max(1, int(cfg.get("max_tool_calls", 12) or 12))
     max_identical = max(1, int(cfg.get("max_identical_tool_repeats", 2) or 2))
     parse_retries = max(0, int(cfg.get("structured_protocol_retries", 1) or 1))
     final_retries = max(0, int(cfg.get("final_validation_retries", 1) or 1))
@@ -2661,6 +2917,34 @@ def _run(
         if _deadline_exceeded(config):
             text = "A tarefa excedeu o prazo de execução."
             return _return("failed", text, None, _details(session, "failed", config, failure_code="TASK_DEADLINE_EXCEEDED"), full)
+
+        # Unified runtime-cycle epilogue: every prior Main-LLM cycle is observed
+        # here, including paths that exited via ``continue`` before the tool
+        # epilogue (budget rejects, protocol repair, invalid final, etc.).
+        current_runtime_fp = _runtime_progress_fingerprint(session)
+        if session.runtime_cycle_start_fingerprint is not None:
+            progressed = current_runtime_fp != session.runtime_cycle_start_fingerprint
+            _record_runtime_cycle_progress(session, progressed)
+            if progressed:
+                session.no_progress_turns = 0
+            else:
+                session.no_progress_turns += 1
+                if session.no_progress_turns >= max_no_progress:
+                    if session.evidence and str((session.workspace_scope or {}).get("mode") or "") == "write":
+                        feedback = "NO_PROGRESS_WRITE: investigation is closed. Use retained evidence and produce one transactional patch now."
+                    elif session.evidence and session.claim_followup_pending:
+                        feedback = _semantic_followup_stalled_feedback(session)
+                    elif session.evidence:
+                        feedback = json.dumps({
+                            "code": "RUNTIME_CYCLE_STALLED",
+                            "instruction": "The canonical runtime state did not advance. Do not repeat the rejected decision or physical observation; reinterpret retained evidence, commit valid Investigation progress, choose a materially different observation, or return a grounded limitation.",
+                        }, ensure_ascii=False, separators=(",", ":"))
+                    else:
+                        text = "A tarefa não produziu evidência nem progresso após tentativas consecutivas."
+                        return _return("failed", text, None, _details(session, "failed", config, failure_code="AGENT_NO_PROGRESS"), full)
+        session.runtime_cycle_start_fingerprint = current_runtime_fp
+        session.runtime_cycle_start_turn = session.turn + 1
+
         session.turn += 1
         evidence_before = len(session.evidence)
         try:
@@ -2688,9 +2972,11 @@ def _run(
                 _details(session, "failed", config, limitations=[str(error)], failure_code="AGENT_RUNTIME_ERROR"), full,
             )
 
-        raw_investigation = decision.get("investigation", [])
-        investigation_ok, investigation_reason, normalized_investigation = validate_investigation(
-            raw_investigation, previous=session.investigation, evidence=session.evidence,
+        raw_updates = decision.get("investigation_updates")
+        if raw_updates is None:
+            raw_updates = []
+        prospective_investigation, accepted_updates, rejected_updates, committed_progress = apply_investigation_updates(
+            raw_updates, previous=session.investigation, evidence=session.evidence,
         )
         project_available_now = _project_descriptor(project)["available"]
         raw_calls = decision.get("tool_calls") if isinstance(decision.get("tool_calls"), list) else []
@@ -2704,7 +2990,7 @@ def _run(
             decision.get("workspace_scope"),
             previous=session.workspace_scope,
             project_available=project_available_now,
-            investigation=normalized_investigation if investigation_ok else [],
+            investigation=prospective_investigation,
             project_action=project_action,
             patches_requested=isinstance(decision.get("patches"), list),
         )
@@ -2721,24 +3007,38 @@ def _run(
             session, "workspace_scope", "accepted",
             reason=str(normalized_scope.get("mode") or "none"),
         )
+
+        # Commit every structurally valid target update independently. Invalid
+        # siblings cannot roll back accepted work, and omitted targets remain in
+        # the canonical runtime-owned contract unchanged.
+        session.investigation = prospective_investigation
+        _record_committed_progress(session, committed_progress, accepted_updates=accepted_updates)
+        for item in accepted_updates:
+            _record_decision(
+                session, "investigation_update",
+                "committed" if item.get("changed") else "unchanged",
+                reason=f"{item.get('id')}={item.get('status')}",
+            )
+        for item in rejected_updates:
+            _record_decision(
+                session, "investigation_update", "rejected",
+                reason=str(item.get("reason") or "INVESTIGATION_UPDATE_REJECTED"),
+            )
+
         project_grounded_now = normalized_scope.get("mode") in {"read", "write"}
         action_needs_direction = bool(
             isinstance(decision.get("tool_calls"), list)
             or isinstance(decision.get("patches"), list)
             or decision.get("final") is not None
         )
-        if investigation_ok and project_grounded_now and action_needs_direction and not normalized_investigation:
-            investigation_ok = False
-            investigation_reason = "INVESTIGATION_REQUIRED"
-        if not investigation_ok:
-            _record_decision(session, "investigation_contract", "rejected", reason=investigation_reason)
+        if project_grounded_now and action_needs_direction and not session.investigation:
+            _record_decision(session, "investigation_contract", "rejected", reason="INVESTIGATION_REQUIRED")
             feedback = (
-                f"INVESTIGATION_VALIDATION_ERROR: {investigation_reason}. "
-                "Return the complete Investigation Contract. Targets are material facts/properties to establish, not tool steps. "
-                "Preserve every existing target id and goal; use only known Evidence IDs."
+                "INVESTIGATION_VALIDATION_ERROR: INVESTIGATION_REQUIRED. "
+                "Create only the material targets needed for this grounded action in investigation_updates."
             )
             continue
-        session.investigation = normalized_investigation
+
         target_state = ",".join(
             f"{item.get('id')}={item.get('status')}"
             for item in session.investigation if isinstance(item, dict)
@@ -2747,6 +3047,22 @@ def _run(
             session, "investigation_contract", "accepted",
             reason=target_state or "empty",
         )
+
+        if rejected_updates:
+            feedback = json.dumps({
+                "code": "INVESTIGATION_UPDATES_PARTIALLY_REJECTED",
+                "accepted_updates": [
+                    {"id": item.get("id"), "changed": bool(item.get("changed"))}
+                    for item in accepted_updates
+                ],
+                "rejected_updates": rejected_updates,
+                "canonical_investigation": session.investigation,
+                "instruction": (
+                    "Accepted updates are already committed and must not be reconstructed. "
+                    "Correct only the rejected target updates on the next call."
+                ),
+            }, ensure_ascii=False, separators=(",", ":"))
+            continue
 
         if decision.get("needs_user"):
             _record_decision(session, "needs_user", "accepted")
@@ -2953,120 +3269,40 @@ def _run(
 
                 _append_claim_review(session, review, stage="initial")
                 summary = dict(review.get("summary") or {})
-                if int(summary.get("contradicted", 0) or 0) > 0:
-                    _record_decision(session, "claim_review", "contradicted", reason="CLAIM_CONTRADICTED")
-                    if claims_cfg["repair"]["enabled"] and session.claim_repair_attempts < claims_cfg["repair"]["max_attempts"]:
-                        session.claim_repair_attempts += 1
-                        repair_ok, repair_reason, repaired_answer, repairs = _run_claim_repair(
-                            session, config, answer, review, review_evidence_ids, evidence_view,
-                            project_root=project_root,
-                        )
-                        if not repair_ok:
-                            if str(repair_reason).startswith("EVIDENCE_STALE:") and session.turn < run_turn_limit:
-                                session.claim_followup_pending = True
-                                session.claim_followup_feedback = json.dumps({
-                                    "code": "EVIDENCE_STALE",
-                                    "detail": repair_reason,
-                                    "instruction": "Selected file evidence changed during semantic repair. Decide the next investigation step.",
-                                }, ensure_ascii=False, separators=(",", ":"))
-                                feedback = session.claim_followup_feedback
-                                session.latest_tool_results = []
-                                session.relevant_sources = []
-                                continue
-                            text = f"O reparo localizado da conclusão falhou: {repair_reason}."
-                            return _return("failed", text, None, _details(session, "failed", config, failure_code=repair_reason), full)
-
-                        targets_ok, targets_reason, target_claims = build_repaired_claim_targets(
-                            review, repairs, repaired_answer,
-                        )
-                        if not targets_ok:
-                            text = f"O reparo localizado violou o escopo da Claim: {targets_reason}."
-                            return _return(
-                                "failed", text, None,
-                                _details(session, "failed", config, failure_code=targets_reason), full,
-                            )
-                        repair_evidence_ids: List[str] = []
-                        for item in target_claims:
-                            for evidence_id in item.get("evidence_ids") or []:
-                                if evidence_id not in repair_evidence_ids:
-                                    repair_evidence_ids.append(evidence_id)
-                        repaired_fragment = "\n".join(
-                            str(item.get("answer_quote") or "") for item in target_claims
-                        )
-                        try:
-                            reverify_ok, reverify_reason, repaired_review, _repaired_view = _run_claim_verification(
-                                session, config, repaired_fragment, repair_evidence_ids,
-                                project_root=project_root, target_claims=target_claims,
-                            )
-                        except ErroLLM as error:
-                            text = f"A reverificação da Claim reparada falhou: {error.error_code or 'CLAIM_VERIFIER_LLM_FAILED'}."
-                            return _return(
-                                "failed", text, None,
-                                _details(session, "failed", config, limitations=[str(error)], failure_code=error.error_code or "CLAIM_VERIFIER_LLM_FAILED"),
-                                full,
-                            )
-                        if not reverify_ok:
-                            if str(reverify_reason).startswith("EVIDENCE_STALE:") and session.turn < run_turn_limit:
-                                session.claim_followup_pending = True
-                                session.claim_followup_feedback = json.dumps({
-                                    "code": "EVIDENCE_STALE",
-                                    "detail": reverify_reason,
-                                    "instruction": "Selected file evidence changed during repaired-claim verification. Decide the next investigation step.",
-                                }, ensure_ascii=False, separators=(",", ":"))
-                                feedback = session.claim_followup_feedback
-                                session.latest_tool_results = []
-                                session.relevant_sources = []
-                                continue
-                            text = f"A reverificação da Claim reparada ficou inválida: {reverify_reason}."
-                            return _return("failed", text, None, _details(session, "failed", config, failure_code=reverify_reason), full)
-
-                        repaired_claim_ids = [str(item.get("claim_id")) for item in repairs]
-                        had_semantic_gaps = bool(review.get("semantic_gaps"))
-                        answer = repaired_answer
-                        if had_semantic_gaps:
-                            # Semantic gaps describe the conclusion as a whole. A
-                            # local repair can invalidate that diagnosis, so the
-                            # runtime triggers one new global semantic review
-                            # instead of carrying stale gap findings forward.
-                            try:
-                                global_ok, global_reason, global_review, evidence_view = _run_claim_verification(
-                                    session, config, answer, review_evidence_ids, project_root=project_root,
-                                )
-                            except ErroLLM as error:
-                                text = f"A verificação global após o reparo falhou: {error.error_code or 'CLAIM_VERIFIER_LLM_FAILED'}."
-                                return _return(
-                                    "failed", text, None,
-                                    _details(session, "failed", config, limitations=[str(error)], failure_code=error.error_code or "CLAIM_VERIFIER_LLM_FAILED"),
-                                    full,
-                                )
-                            if not global_ok:
-                                if str(global_reason).startswith("EVIDENCE_STALE:") and session.turn < run_turn_limit:
-                                    session.claim_followup_pending = True
-                                    session.claim_followup_feedback = json.dumps({
-                                        "code": "EVIDENCE_STALE",
-                                        "detail": global_reason,
-                                        "instruction": "Selected file evidence changed during global post-repair verification. Decide the next investigation step.",
-                                    }, ensure_ascii=False, separators=(",", ":"))
-                                    feedback = session.claim_followup_feedback
-                                    session.latest_tool_results = []
-                                    session.relevant_sources = []
-                                    continue
-                                text = f"A verificação global após o reparo ficou inválida: {global_reason}."
-                                return _return("failed", text, None, _details(session, "failed", config, failure_code=global_reason), full)
-                            review = global_review
-                            _append_claim_review(session, review, stage="post_repair_global")
-                        else:
-                            review = merge_reverified_claims(review, repaired_review, repaired_claim_ids)
-                            _append_claim_review(session, review, stage="post_repair")
-                        summary = dict(review.get("summary") or {})
-                    if int(summary.get("contradicted", 0) or 0) > 0:
-                        text = "A conclusão permaneceu contradita pelas evidências após o reparo permitido."
-                        return _return("failed", text, None, _details(session, "failed", config, failure_code="CLAIM_REVIEW_CONTRADICTED"), full)
-
+                has_contradicted_claims = int(summary.get("contradicted", 0) or 0) > 0
                 has_insufficient_claims = int(summary.get("insufficient", 0) or 0) > 0
                 has_semantic_gaps = int(summary.get("semantic_gaps", 0) or 0) > 0
-                if has_insufficient_claims or has_semantic_gaps:
-                    review_reason = "CLAIM_INSUFFICIENT" if has_insufficient_claims else "CLAIM_SEMANTIC_GAP"
+                if has_contradicted_claims or has_insufficient_claims or has_semantic_gaps:
+                    if has_contradicted_claims:
+                        review_reason = "CLAIM_CONTRADICTED"
+                        review_outcome = "contradicted"
+                    elif has_insufficient_claims:
+                        review_reason = "CLAIM_INSUFFICIENT"
+                        review_outcome = "insufficient"
+                    else:
+                        review_reason = "CLAIM_SEMANTIC_GAP"
+                        review_outcome = "insufficient"
+
+                    # Decision Ledger is the generic loop fuse. If the reviewer
+                    # returns the exact same debt against the exact same
+                    # canonical workspace/Investigation state, another
+                    # Agent->Claim cycle would spend tokens without changing
+                    # reality. A changed state creates a different key and is
+                    # allowed normally.
+                    repeat_count = _record_rejected_decision(
+                        session, "CLAIM_REVIEW_FOLLOWUP", _review_followup_payload(review),
+                    )
+                    if repeat_count > 1:
+                        _record_decision(
+                            session, "claim_review", "stalled",
+                            reason=f"CLAIM_REVIEW_STALLED:{review_reason}:repeat={repeat_count}",
+                        )
+                        text = "A mesma dívida semântica reapareceu sem mudança material de estado; o runtime interrompeu o ciclo para evitar repetição de tokens."
+                        return _return(
+                            "failed", text, None,
+                            _details(session, "failed", config, failure_code="CLAIM_REVIEW_STALLED"), full,
+                        )
+
                     session.investigation, reopened_targets = reopen_targets_from_review(
                         session.investigation, review,
                     )
@@ -3076,26 +3312,61 @@ def _run(
                             reason=",".join(reopened_targets),
                         )
                     _pin_semantic_followup_evidence(session, review, reopened_targets)
-                    _record_decision(session, "claim_review", "insufficient", reason=review_reason)
+                    _record_decision(session, "claim_review", review_outcome, reason=review_reason)
+                    session.claim_followup_pending = True
+                    session.claim_followup_feedback = review_followup_feedback(review)
+                    feedback = session.claim_followup_feedback
+                    # Claim debt is directed rework, not a free increase in the
+                    # normal reasoning limit. Open only unused task-wide LLM
+                    # capacity and reserve one later verifier call.
+                    run_turn_limit = _extend_claim_rework_lane(session, config, run_turn_limit)
                     if session.turn < run_turn_limit:
-                        session.claim_followup_pending = True
-                        session.claim_followup_feedback = insufficient_feedback(review)
+                        # Make the already-existing rework lane operationally
+                        # explicit so scarce LLM calls are not spent rediscovering
+                        # budget state. Runtime reports capacity only; Agent still
+                        # chooses whether to investigate, reinterpret or conclude.
+                        try:
+                            followup_payload = json.loads(session.claim_followup_feedback)
+                        except Exception:
+                            followup_payload = {"code": "CLAIM_REVIEW_FOLLOWUP", "instruction": session.claim_followup_feedback}
+                        tool_budget = _tool_budget_state(session, config)
+                        remaining_physical = max(0, int(tool_budget["effective_limit"]) - int(session.tool_calls or 0))
+                        agent_calls_left = max(0, int(run_turn_limit) - int(session.turn))
+                        followup_payload["runtime_capacity"] = {
+                            "agent_calls_before_reserved_verifier": agent_calls_left,
+                            "physical_tool_calls_available_now": remaining_physical,
+                            "pending_progress_cycles": int(tool_budget.get("pending_progress_cycles", 0)),
+                            "pending_extension_calls": int(tool_budget.get("pending_extension_calls", 0)),
+                        }
+                        instruction = str(followup_payload.get("instruction") or "")
+                        if agent_calls_left >= 2:
+                            instruction += (
+                                " If new Evidence is required, use materially novel tools in the earliest follow-up call; "
+                                "preserve the last Agent call for a corrected final before the reserved verifier pass."
+                            )
+                        followup_payload["instruction"] = instruction.strip()
+                        session.claim_followup_feedback = json.dumps(
+                            followup_payload, ensure_ascii=False, separators=(",", ":"), default=str,
+                        )
                         feedback = session.claim_followup_feedback
-                        # Ordinary retention is disposable, but Evidence named by
-                        # this semantic follow-up remains pinned and is injected
-                        # again by _retained_sources_for_prompt().
                         session.latest_tool_results = []
                         session.relevant_sources = []
                         continue
+
                     if claims_cfg["require_supported"]:
-                        if has_insufficient_claims:
+                        if has_contradicted_claims:
+                            text = "A conclusão contém afirmações contraditas pelas evidências e não há capacidade física restante para um novo ciclo Agent→Claim."
+                            failure = "CLAIM_REVIEW_CONTRADICTED"
+                        elif has_insufficient_claims:
                             text = "A conclusão contém afirmações que não puderam ser confirmadas com a evidência disponível."
                             failure = "CLAIM_REVIEW_INSUFFICIENT"
                         else:
                             text = "A conclusão ainda contém lacunas materiais identificadas pela verificação semântica."
                             failure = "CLAIM_REVIEW_SEMANTIC_GAP"
                         return _return("failed", text, None, _details(session, "failed", config, failure_code=failure), full)
-                    limitations = list(limitations) + ["A verificação semântica ainda encontrou afirmações insuficientes ou lacunas materiais na conclusão."]
+                    limitations = list(limitations) + [
+                        "A verificação semântica ainda encontrou dívida material na conclusão."
+                    ]
 
                 session.claim_followup_pending = False
                 session.claim_followup_feedback = ""
@@ -3123,6 +3394,7 @@ def _run(
         calls = [call for call in calls if isinstance(call, dict) and call.get("tool")]
         if not calls:
             _record_decision(session, "empty", "rejected", reason="NO_ACTION")
+            _record_rejected_decision(session, "NO_ACTION", {})
             feedback = "Choose one available tool, ask a blocking question, or return final."
             continue
 
@@ -3132,11 +3404,17 @@ def _run(
             "requested",
             tools=[str(call.get("tool") or "") for call in calls],
         )
+
+        # Unified physical preflight. Semantic freedom is untouched: the model
+        # may request any available observation again. Runtime decides only
+        # whether that physical observation must be executed for this workspace
+        # epoch, or whether retained reality can be replayed.
         next_results: List[Dict[str, Any]] = []
+        novel_calls: List[Dict[str, Any]] = []
+        seen_batch_observations: set[str] = set()
+        preflight_invalid = 0
+        preflight_replays = 0
         for call in calls:
-            if session.tool_calls >= max_tool_calls:
-                text = "A tarefa atingiu o limite de ferramentas antes de concluir."
-                return _return("failed", text, None, _details(session, "failed", config, failure_code="MAX_TOOL_CALLS_EXCEEDED"), full)
             tool = str(call.get("tool") or "")
             arguments = call.get("arguments") or {}
             if tool not in allowed:
@@ -3156,67 +3434,164 @@ def _run(
                     "error_code": phase_error or "TOOL_NOT_AVAILABLE",
                     "detail": phase_detail,
                 }
+                preflight_invalid += 1
                 next_results.append(rejected)
                 _record_decision(session, "tool_validation", "rejected", reason=rejected["error_code"], tools=[tool])
                 _record_tool_history(session, tool, arguments, rejected, status_override="rejected")
-                if (
-                    phase_error in {"READ_PHASE_CLOSED", "FINAL_PHASE_REQUIRES_ANSWER"}
-                    and session.phase_violations > max_phase_violations
-                ):
-                    text = "A LLM continuou tentando investigar depois que a fase de leitura foi encerrada."
-                    return _return(
-                        "failed", text, None,
-                        _details(session, "failed", config, failure_code=phase_error), full,
-                    )
                 continue
+
             normalized, error = validar_chamada_tool(tool, arguments)
             if error:
                 rejected = _compact_non_read_result(tool, error)
+                preflight_invalid += 1
                 next_results.append(rejected)
                 _record_decision(session, "tool_validation", "rejected", reason=error.get("error_code") or "INVALID_ARGUMENT", tools=[tool])
                 _record_tool_history(session, tool, arguments, error, status_override="rejected")
                 continue
+
             _record_decision(session, "tool_validation", "validated", tools=[tool])
-            semantic_signature = _semantic_read_signature(tool, normalized)
-            signature = _action_signature(tool, normalized)
-            previous_observation = _previous_observation(session, semantic_signature)
-            if tool in CACHEABLE_OBSERVATION_TOOLS and previous_observation is not None:
-                blocked = {
-                    "tool": tool, "status": "skipped", "ok": False,
+            semantic_signature = _observation_signature(tool, normalized)
+            if semantic_signature and semantic_signature in seen_batch_observations:
+                duplicate = {
+                    "tool": tool, "status": "replayed", "ok": True,
                     "executed": False, "changed": False,
-                    "error_code": "IDENTICAL_OBSERVATION_BLOCKED",
-                    "detail": {
-                        "message": "The exact unchanged observation already exists. Reuse it or choose a materially different observation.",
-                        "previous_observation": previous_observation,
-                        "investigation_map": _investigation_map(session, 6),
-                    },
+                    "error_code": "BATCH_DUPLICATE_SUPPRESSED",
+                    "detail": "Duplicate observation in the same batch was suppressed before physical execution.",
+                    "replayed": True,
                 }
-                next_results.append(blocked)
-                _record_decision(session, "tool_execution", "skipped", reason="IDENTICAL_OBSERVATION_BLOCKED", tools=[tool])
-                _record_tool_history(session, tool, normalized, blocked, semantic_signature=semantic_signature)
+                preflight_replays += 1
+                next_results.append(duplicate)
+                _record_decision(session, "tool_preflight", "batch_duplicate", reason="BATCH_DUPLICATE_SUPPRESSED", tools=[tool])
+                _record_tool_history(session, tool, normalized, duplicate, semantic_signature=semantic_signature, status_override="replayed")
                 continue
-            if tool in READ_TOOLS and _read_already_covered(session, tool, normalized):
-                blocked = {
-                    "tool": tool, "status": "skipped", "ok": False,
+            if semantic_signature:
+                seen_batch_observations.add(semantic_signature)
+                previous = _lookup_observation(session, semantic_signature)
+                if previous is not None:
+                    replay = _rehydrate_observation(session, previous, config)
+                    preflight_replays += 1
+                    session.observation_replays += 1
+                    next_results.append(replay)
+                    _record_decision(session, "tool_preflight", "replayed", reason="OBSERVATION_REHYDRATED", tools=[tool])
+                    _record_tool_history(session, tool, normalized, replay, semantic_signature=semantic_signature, status_override="replayed")
+                    _remember_relevant_sources(session, tool, replay, config)
+                    continue
+
+            if tool in READ_TOOLS and _source_already_visible(session, tool, normalized):
+                visible = {
+                    "tool": tool, "status": "replayed", "ok": True,
                     "executed": False, "changed": False,
-                    "error_code": "SEMANTIC_READ_BLOCKED",
-                    "detail": {
-                        "message": "This source/range is already covered by fresh visible evidence. Use the investigation map or choose another query/range/file.",
-                        "investigation_map": _investigation_map(session, 6),
-                    },
+                    "error_code": "SOURCE_ALREADY_VISIBLE",
+                    "detail": "Requested source coverage is already present in the current Main-LLM prompt; no physical reread was executed.",
+                    "replayed": True,
                 }
-                next_results.append(blocked)
-                _record_decision(session, "tool_execution", "skipped", reason="SEMANTIC_READ_BLOCKED", tools=[tool])
-                _record_tool_history(session, tool, normalized, blocked, semantic_signature=semantic_signature)
+                preflight_replays += 1
+                session.observation_replays += 1
+                next_results.append(visible)
+                _record_decision(session, "tool_preflight", "replayed", reason="SOURCE_ALREADY_VISIBLE", tools=[tool])
+                _record_tool_history(session, tool, normalized, visible, semantic_signature=semantic_signature, status_override="replayed")
                 continue
 
-            projected_identical = (
-                session.consecutive_identical_calls + 1
-                if signature == session.last_tool_signature else 1
+            novel_calls.append({
+                "tool": tool,
+                "arguments": normalized,
+                "semantic_signature": semantic_signature,
+                "action_signature": _action_signature(tool, normalized),
+            })
+
+        # Phase policy is the outer structural contract. Repeated attempts to
+        # investigate after reads are closed fail before lower-level argument
+        # handling, so a validation detail cannot mask FINAL_PHASE_REQUIRES_ANSWER.
+        if session.phase_violations > max_phase_violations:
+            text = "A LLM continuou tentando investigar depois que a fase de leitura foi encerrada."
+            return _return("failed", text, None, _details(session, "failed", config, failure_code="FINAL_PHASE_REQUIRES_ANSWER"), full)
+
+        # Invalid calls make the requested batch non-executable. Runtime does
+        # not let a later budget gate mask a malformed tool contract. Replays
+        # already recovered above remain visible, but no novel call executes.
+        if preflight_invalid:
+            invalid_results = [
+                {
+                    "tool": item.get("tool"),
+                    "error_code": item.get("error_code"),
+                    "detail": item.get("detail"),
+                }
+                for item in next_results
+                if isinstance(item, dict) and item.get("ok") is False
+            ]
+            repeat_count = _record_rejected_decision(
+                session, "TOOL_BATCH_VALIDATION_FAILED", invalid_results,
+                objective_context={"invalid_calls": preflight_invalid},
             )
+            _record_decision(
+                session, "tool_preflight", "batch_rejected",
+                reason=f"invalid={preflight_invalid};replayed={preflight_replays};repeat={repeat_count}",
+            )
+            if repeat_count >= 2:
+                text = "A LLM repetiu o mesmo batch de ferramentas inválido sem alterar o estado objetivo."
+                return _return("failed", text, None, _details(session, "failed", config, failure_code="ADMINISTRATIVE_LOOP"), full)
+            session.latest_tool_results = _preserve_source_for_retry(session.latest_tool_results, next_results)
+            feedback = json.dumps({
+                "code": "TOOL_BATCH_VALIDATION_FAILED",
+                "invalid_calls": invalid_results,
+                "replayed_calls": preflight_replays,
+                "instruction": "No novel tool from an invalid batch was executed. Correct the rejected call using the canonical available_tools schema; do not retry legacy argument names.",
+            }, ensure_ascii=False, separators=(",", ":"))
+            continue
+
+        # Phase/contract validation precedes authority. Additional authority is
+        # based only on genuinely novel physical work, never on replayed calls.
+        physical_cost = len(novel_calls)
+        budget_state = _tool_budget_state(session, config)
+        remaining_tool_calls = max(0, budget_state["effective_limit"] - session.tool_calls)
+        if physical_cost > remaining_tool_calls:
+            granted_extension = _grant_committed_progress_extension(session, config)
+            if granted_extension > 0:
+                budget_state = _tool_budget_state(session, config)
+                remaining_tool_calls = max(0, budget_state["effective_limit"] - session.tool_calls)
+
+        if physical_cost > remaining_tool_calls:
+            rejection_payload = [
+                {"tool": item["tool"], "arguments": item["arguments"]}
+                for item in novel_calls
+            ]
+            repeat_count = _record_rejected_decision(
+                session, "TOOL_BATCH_EXCEEDS_AUTHORIZED_BUDGET", rejection_payload,
+                objective_context={
+                    "tool_calls_used": int(session.tool_calls or 0),
+                    "remaining_tool_calls": int(remaining_tool_calls),
+                    "effective_tool_limit": int(budget_state["effective_limit"]),
+                    "earned_extension": int(budget_state["earned_extension"]),
+                },
+            )
+            _record_decision(
+                session, "tool_authority", "batch_rejected",
+                reason=f"requested={len(calls)};novel={physical_cost};authorized_now={remaining_tool_calls};effective={budget_state['effective_limit']};repeat={repeat_count}",
+            )
+            if repeat_count >= 2:
+                text = "A LLM repetiu a mesma decisão rejeitada sem alterar o estado canônico."
+                return _return("failed", text, None, _details(session, "failed", config, failure_code="ADMINISTRATIVE_LOOP"), full)
+            session.latest_tool_results = _preserve_source_for_retry(session.latest_tool_results, next_results)
+            feedback = json.dumps({
+                "code": "REPEATED_REJECTED_DECISION" if repeat_count > 1 else "TOOL_BATCH_EXCEEDS_AUTHORIZED_BUDGET",
+                "requested": len(calls),
+                "novel_physical_calls": physical_cost,
+                "replayed_calls": preflight_replays,
+                "invalid_calls": preflight_invalid,
+                "max_novel_batch_size_now": remaining_tool_calls,
+                "instruction": "No novel tool from this batch was executed. Replayed observations remain available. Valid Investigation progress remains deposited. Choose a smaller materially novel batch or conclude from retained Evidence.",
+            }, ensure_ascii=False, separators=(",", ":"))
+            continue
+
+        for item in novel_calls:
+            tool = item["tool"]
+            normalized = item["arguments"]
+            semantic_signature = item["semantic_signature"]
+            signature = item["action_signature"]
+            projected_identical = session.consecutive_identical_calls + 1 if signature == session.last_tool_signature else 1
             if projected_identical > max_identical:
                 text = "A LLM repetiu exatamente a mesma ferramenta executável várias vezes sem mudar a ação."
-                return _return("failed", text, None, _details(session, "failed", config, failure_code="IDENTICAL_TOOL_LOOP"), full)
+                return _return("failed", text, None, _details(session, "failed", config, failure_code="CONSECUTIVE_ACTION_REPEAT_FUSE"), full)
 
             context = {
                 "config": config, "projeto": project, "evidence": session.evidence,
@@ -3231,9 +3606,7 @@ def _run(
                 else:
                     session.last_tool_signature = signature
                     session.consecutive_identical_calls = 1
-            _record_tool_history(
-                session, tool, normalized, result, semantic_signature=semantic_signature,
-            )
+            _record_tool_history(session, tool, normalized, result, semantic_signature=semantic_signature)
             if result.get("executed") is True:
                 execution_outcome = "executed" if result.get("ok") is True else "failed"
             elif result.get("status") == "skipped":
@@ -3242,11 +3615,9 @@ def _run(
                 execution_outcome = "completed"
             else:
                 execution_outcome = "failed"
-            _record_decision(
-                session, "tool_execution", execution_outcome,
-                reason=result.get("error_code"), tools=[tool],
-            )
-            model_result = _model_tool_result(session, tool, result, config)
+            _record_decision(session, "tool_execution", execution_outcome, reason=result.get("error_code"), tools=[tool])
+            model_result = _model_tool_result(session, tool, result, config, normalized)
+            _record_observation(session, semantic_signature, tool, normalized, result, model_result)
             _remember_relevant_sources(session, tool, model_result, config)
             next_results.append(model_result)
             if not result.get("ok") and result.get("error_code") in TERMINAL_TOOL_ERRORS:
@@ -3259,29 +3630,9 @@ def _run(
         ):
             session.investigation_turns += 1
 
-        if _turn_made_progress(evidence_before, next_results, session):
-            session.no_progress_turns = 0
-            feedback = ""
-        else:
-            session.no_progress_turns += 1
-            if session.no_progress_turns >= max_no_progress:
-                if session.evidence and str((session.workspace_scope or {}).get("mode") or "") == "write":
-                    feedback = (
-                        "NO_PROGRESS_WRITE: investigation is closed. Use retained evidence and "
-                        "produce one transactional patch now."
-                    )
-                elif session.evidence and session.claim_followup_pending:
-                    feedback = _semantic_followup_stalled_feedback(session)
-                elif session.evidence:
-                    feedback = "NO_PROGRESS_ANALYSIS: stop using tools and answer from current evidence."
-                else:
-                    text = "A tarefa não produziu evidência nem progresso após tentativas consecutivas."
-                    return _return(
-                        "failed", text, None,
-                        _details(session, "failed", config, failure_code="AGENT_NO_PROGRESS"), full,
-                    )
-            else:
-                feedback = "The last action added no new evidence. Do not repeat it; advance to the next phase."
+        # Runtime-cycle progress is finalized at the top of the next loop so
+        # every path, including early ``continue`` branches, is accounted for.
+        feedback = ""
 
     text = "A tarefa atingiu o limite de turnos do agente antes de concluir."
     return _return("failed", text, None, _details(session, "failed", config, failure_code="MAX_LLM_TURNS_EXCEEDED"), full)

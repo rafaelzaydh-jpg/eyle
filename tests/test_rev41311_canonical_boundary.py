@@ -7,7 +7,7 @@ import pytest
 import eyle.core.agent as core_agent
 import llm.executar as llm_exec
 from eyle.core.claim_review import (
-    ClaimConfigError, claim_config, insufficient_feedback, normalize_claim_review,
+    ClaimConfigError, claim_config, review_followup_feedback, normalize_claim_review,
     semantic_gap_protocol_recovery_target,
 )
 from eyle.core.session import AgentSession
@@ -16,7 +16,6 @@ from eyle.runtime.config import ConfigError, validar_config
 from llm.structured import (
     StructuredResponseError,
     parse_agent_response,
-    parse_claim_repair_response,
     parse_claim_review_response,
 )
 
@@ -29,7 +28,7 @@ def _agent_envelope(*, action="final", final=None, calls=None, patches=None, que
         "needs_user": question,
         "final": final,
         "workspace_scope": dict(scope or {"mode": "none", "reason": "fixture is workspace-independent"}),
-        "investigation": list(investigation or []),
+        "investigation_updates": list(investigation or []),
     }
 
 
@@ -60,7 +59,7 @@ def _config(mode="off"):
             "max_secret_scan_bytes": 65536, "max_git_diff_chars": 6000,
             "structured_protocol_retries": 1, "final_validation_retries": 1,
             "context_view": {"max_relevant_sources": 4, "max_relevant_source_chars": 3500, "max_search_source_chars": 600, "max_symbol_preview_chars": 2600},
-            "claims": {"mode": mode, "require_supported": True, "verifier": {"max_tokens": 900, "temperature": 0.0}, "evidence": {"max_chars_per_item": 2200}, "repair": {"enabled": True, "max_attempts": 1}},
+            "claims": {"mode": mode, "require_supported": True, "verifier": {"max_tokens": 900, "temperature": 0.0}, "evidence": {"max_chars_per_item": 2200}},
         },
         "codar": {"ativado": True, "testes": {"ativado": False}},
         "_runtime_agent_budget": {"max_llm_calls": 12, "max_prompt_tokens": 96000, "max_completion_tokens": 9000, "max_total_tokens": 105000, "llm_calls": 0, "llm_requests": 0},
@@ -72,14 +71,12 @@ def test_profile_parsers_accept_only_canonical_shapes():
         parse_agent_response({"tool": "list_tree", "arguments": {}})
     with pytest.raises(StructuredResponseError):
         parse_claim_review_response({"semantic_gaps": []})
-    with pytest.raises(StructuredResponseError):
-        parse_claim_repair_response({"claim_id": "c1"})
 
     parsed = parse_agent_response(_agent_envelope(action="tool_calls", calls=[{"tool": "list_tree", "arguments": {}}]))
     assert parsed == {
         "tool_calls": [{"tool": "list_tree", "arguments": {}}],
         "workspace_scope": {"mode": "none", "reason": "fixture is workspace-independent"},
-        "investigation": [],
+        "investigation_updates": [],
     }
 
 
@@ -189,8 +186,8 @@ def test_direct_patch_action_creates_canonical_write_transaction(monkeypatch, tm
     def fake(_prompt, _config):
         calls["n"] += 1
         if calls["n"] == 1:
-            return {"tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "app.py"}}], "workspace_scope": {"mode":"write","reason":"The active request asks to change app.py."}, "investigation": [{"id":"T1","goal":"Establish the current app.py before editing","status":"open","evidence_ids":[],"reason":""}]}
-        return {"patches": [{"operation": "replace", "path": "app.py", "content": "VALUE = 2\n"}], "workspace_scope": {"mode":"write","reason":"The active request asks to change app.py."}, "investigation": [{"id":"T1","goal":"Establish the current app.py before editing","status":"established","evidence_ids":["ev-0001"],"reason":"app.py was read"}]}
+            return {"tool_calls": [{"tool": "read_file", "arguments": {"path": "app.py"}}], "workspace_scope": {"mode":"write","reason":"The active request asks to change app.py."}, "investigation_updates": [{"id":"T1","goal":"Establish the current app.py before editing","status":"open","evidence_ids":[],"reason":""}]}
+        return {"patches": [{"operation": "replace", "path": "app.py", "content": "VALUE = 2\n"}], "workspace_scope": {"mode":"write","reason":"The active request asks to change app.py."}, "investigation_updates": [{"id":"T1","goal":"Establish the current app.py before editing","status":"established","evidence_ids":["ev-0001"],"reason":"app.py was read"}]}
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
     status, _, pending, _ = core_agent.executar_agente(
@@ -326,7 +323,7 @@ def test_semantic_gap_feedback_returns_exact_recovered_gap_to_agent():
             "reason": "runtime usage still requires targeted investigation", "signature": "sig",
         }],
     }
-    payload = json.loads(insufficient_feedback(review))
+    payload = json.loads(review_followup_feedback(review))
     assert payload["semantic_gaps"] == [{
         "id": "gap-2", "type": "scope_gap", "target_id": None, "evidence_ids": [],
         "reason": "runtime usage still requires targeted investigation", "signature": "sig",

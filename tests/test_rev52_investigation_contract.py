@@ -163,8 +163,8 @@ def test_agent_and_verifier_schemas_expose_investigation_contract_without_new_to
     agent_schema = schema_for_profile("agent")
     gap_schema = schema_for_profile("claim_verifier")["properties"]["semantic_gaps"]["items"]
     assert "plan" not in agent_schema["properties"]
-    assert "investigation" in agent_schema["properties"]
-    assert "maxItems" not in agent_schema["properties"]["investigation"]
+    assert "investigation_updates" in agent_schema["properties"]
+    assert "maxItems" not in agent_schema["properties"]["investigation_updates"]
     assert gap_schema["properties"]["target_id"]["anyOf"][0] == {"type": "null"}
     assert len(TOOLS) == 16
 
@@ -172,14 +172,14 @@ def test_agent_and_verifier_schemas_expose_investigation_contract_without_new_to
 def test_parser_accepts_canonical_investigation_target():
     parsed = parse_agent_response({
         "action": "tool_calls",
-        "tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "x.py"}}],
+        "tool_calls": [{"tool": "read_file", "arguments": {"path": "x.py"}}],
         "patches": None,
         "needs_user": None,
         "final": None,
         "workspace_scope": workspace_scope("read"),
-        "investigation": [investigation_target(goal="Establish x.py behavior")],
+        "investigation_updates": [investigation_target(goal="Establish x.py behavior")],
     })
-    assert parsed["investigation"][0]["id"] == "T1"
+    assert parsed["investigation_updates"][0]["id"] == "T1"
 
 
 def test_project_grounded_action_cannot_ignore_investigation_contract(monkeypatch, tmp_path):
@@ -189,9 +189,9 @@ def test_project_grounded_action_cannot_ignore_investigation_contract(monkeypatc
     def fake(_prompt, _cfg):
         calls["n"] += 1
         return {
-            "tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "x.py"}}],
+            "tool_calls": [{"tool": "read_file", "arguments": {"path": "x.py"}}],
             "workspace_scope": workspace_scope("read"),
-            "investigation": [],
+            "investigation_updates": [],
         }
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
@@ -221,15 +221,15 @@ def test_claim_review_reopens_target_and_directs_next_investigation(monkeypatch,
         prompts.append(payload)
         if len(prompts) == 1:
             return {
-                "tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "app.py"}}],
+                "tool_calls": [{"tool": "read_file", "arguments": {"path": "app.py"}}],
                 "workspace_scope": workspace_scope("read"),
-                "investigation": [investigation_target(goal=goal)],
+                "investigation_updates": [investigation_target(goal=goal)],
             }
         if len(prompts) == 2:
             return {
                 "final": {"answer": "app.py defines run().", "evidence_ids": ["ev-0001"], "limitations": []},
                 "workspace_scope": workspace_scope("read"),
-                "investigation": [investigation_target(goal=goal, status="established", evidence_ids=["ev-0001"], reason="app.py defines run")],
+                "investigation_updates": [investigation_target(goal=goal, status="established", evidence_ids=["ev-0001"], reason="app.py defines run")],
             }
         if len(prompts) == 3:
             target = payload["investigation"][0]
@@ -237,14 +237,14 @@ def test_claim_review_reopens_target_and_directs_next_investigation(monkeypatch,
             assert "execution path" in target["reason"]
             assert payload["investigation_map"]
             return {
-                "tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "main.py"}}],
+                "tool_calls": [{"tool": "read_file", "arguments": {"path": "main.py"}}],
                 "workspace_scope": workspace_scope("read"),
-                "investigation": [target],
+                "investigation_updates": [target],
             }
         return {
             "final": {"answer": "main.py imports and calls app.run().", "evidence_ids": ["ev-0001", "ev-0002"], "limitations": []},
             "workspace_scope": workspace_scope("read"),
-            "investigation": [investigation_target(goal=goal, status="established", evidence_ids=["ev-0001", "ev-0002"], reason="app.py defines run and main.py calls it")],
+            "investigation_updates": [investigation_target(goal=goal, status="established", evidence_ids=["ev-0001", "ev-0002"], reason="app.py defines run and main.py calls it")],
         }
 
     def fake_verifier(_prompt, _cfg):

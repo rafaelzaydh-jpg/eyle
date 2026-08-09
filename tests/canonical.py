@@ -37,7 +37,7 @@ def _default_final_investigation(final):
 def agent_tools(*calls, investigation=None, scope=None):
     if investigation is None:
         investigation = [investigation_target()]
-    return {"tool_calls": [dict(call) for call in calls], "workspace_scope": dict(scope or workspace_scope("read")), "investigation": [dict(item) for item in investigation]}
+    return {"tool_calls": [dict(call) for call in calls], "workspace_scope": dict(scope or workspace_scope("read")), "investigation_updates": [dict(item) for item in investigation]}
 
 
 def tool_call(tool, arguments=None):
@@ -50,7 +50,7 @@ def agent_patches(patches, investigation=None, scope=None):
             status="established", evidence_ids=["ev-0001"],
             reason="The fixture has read the source required for the write.",
         )]
-    return {"patches": [dict(item) for item in patches], "workspace_scope": dict(scope or workspace_scope("write")), "investigation": [dict(item) for item in investigation]}
+    return {"patches": [dict(item) for item in patches], "workspace_scope": dict(scope or workspace_scope("write")), "investigation_updates": [dict(item) for item in investigation]}
 
 
 def agent_final(final, investigation=None, scope=None):
@@ -59,14 +59,14 @@ def agent_final(final, investigation=None, scope=None):
     if scope is None:
         mode = "read" if isinstance(final, dict) and final.get("evidence_ids") else "none"
         scope = workspace_scope(mode)
-    return {"final": final, "workspace_scope": dict(scope), "investigation": [dict(item) for item in investigation]}
+    return {"final": final, "workspace_scope": dict(scope), "investigation_updates": [dict(item) for item in investigation]}
 
 
 def agent_needs_user(message, investigation=None, scope=None):
     items = [dict(item) for item in (investigation or [])]
     if scope is None:
         scope = workspace_scope("read" if items else "none")
-    return {"needs_user": str(message), "workspace_scope": dict(scope), "investigation": items}
+    return {"needs_user": str(message), "workspace_scope": dict(scope), "investigation_updates": items}
 
 
 def claim(
@@ -92,9 +92,6 @@ def review(claims=None, findings=None, semantic_gaps=None):
         "semantic_gaps": list(semantic_gaps or []),
     }
 
-
-def repair(repairs=None):
-    return {"repairs": list(repairs or [])}
 
 
 def base_config(*, claims_mode="off", tests_enabled=False):
@@ -139,7 +136,6 @@ def base_config(*, claims_mode="off", tests_enabled=False):
                 "require_supported": True,
                 "verifier": {"max_tokens": 900, "temperature": 0.0},
                 "evidence": {"max_chars_per_item": 2200},
-                "repair": {"enabled": True, "max_attempts": 1},
             },
         },
         "codar": {"ativado": True, "testes": {"ativado": bool(tests_enabled)}},

@@ -172,7 +172,7 @@ def test_agent_can_choose_execution_trace_and_cite_it(monkeypatch, tmp_path):
             return {
                 "tool_calls": [{"tool": "execution_trace", "arguments": {"section": "context", "limit": 20}}],
                 "workspace_scope": {"mode": "read", "reason": "The request asks about the current execution trace."},
-                "investigation": [{"id": "T1", "goal": "Establish what the current trace records", "status": "open", "evidence_ids": [], "reason": ""}],
+                "investigation_updates": [{"id": "T1", "goal": "Establish what the current trace records", "status": "open", "evidence_ids": [], "reason": ""}],
             }
         result = payload["latest_tool_results"][0]
         assert result["tool"] == "execution_trace"
@@ -182,7 +182,7 @@ def test_agent_can_choose_execution_trace_and_cite_it(monkeypatch, tmp_path):
             "answer": "O trace atual registra a composição do contexto sem expor o prompt bruto.",
             "evidence_ids": [evidence_id],
         }, "workspace_scope": {"mode": "read", "reason": "The answer depends on the current execution trace."},
-        "investigation": [{"id": "T1", "goal": "Establish what the current trace records", "status": "established", "evidence_ids": [evidence_id], "reason": "The trace Evidence was observed."}]}
+        "investigation_updates": [{"id": "T1", "goal": "Establish what the current trace records", "status": "established", "evidence_ids": [evidence_id], "reason": "The trace Evidence was observed."}]}
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
     status, text, _, details = core_agent.executar_agente(

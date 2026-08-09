@@ -4,11 +4,23 @@
 
 # Eyle
 
-**Version:** 2.7.4 · **Schema:** 5.2 · **Revision:** rev5.2.3-investigation-memory-progress
+**Version:** 2.7.4 · **Schema:** 5.4 · **Revision:** rev5.2.9-progress-earned-authority
 
-## Rev5.2.3 — Investigation Memory & Progress Semantics
+## Rev5.2.9 — Progress-Earned Authority
 
-Rev5.2.3 keeps every Rev5.2.2 hardening rule and fixes two P0 convergence defects exposed by hostile audits. Source suppression now follows what is visible in the **current compiled prompt**, not everything the model saw historically; historical ranges are telemetry only. Evidence named by an insufficient Claim/Semantic Gap or attached to a reopened target is pinned through semantic follow-up, so the stateless Main LLM is never told to investigate while the motivating source has vanished. Progress also means an observable knowledge/state change: `ok=true` alone no longer resets the no-progress fuse, unchanged project/runtime observations are suppressed, and repeated `run_tests` for the same scope is reused until a state-changing action invalidates it. The 16 public tools and the 8-turn / 12-tool / 9k-completion limits are unchanged.
+Rev5.2.9 keeps the Rev5.2.8 architecture and removes an artificial authority ceiling rather than adding a new subsystem. The base fuse remains 12 physical tools, but every runtime-validated committed-progress epoch can unlock +4 tools exactly once when the physical gate needs them; there is no cumulative +8 ceiling. A durable global credit-once Evidence set prevents old Evidence from being remapped or reopened to mint authority again. `investigation_updates.evidence_ids` is now truly additive, so the Main Agent sends only newly material Evidence IDs and runtime retains prior committed Evidence automatically. Claim rework also receives deterministic remaining-capacity feedback so scarce LLM calls can be used for investigation first and finalization last. Normal 8-turn and 12-LLM-call limits are unchanged.
+
+## Rev5.2.8 — Canonical Runtime Cleanup
+
+Rev5.2.8 adds no agent, tool, ledger or budget. It tightens the existing Runtime contracts after the legacy-audit benchmark exposed a false `ADMINISTRATIVE_LOOP`: Decision Ledger identity now includes objective observed state and physical authority, while runtime progress ignores free-form Investigation `reason/status` churn. Invalid tool batches fail atomically before tool authority, and the public tool ABI uses one canonical vocabulary (`path`, `line_start`, `line_end`, `symbol`, `limit`, `depth`, `filter`) with no legacy aliases. Open Investigation targets are explicitly allowed to accumulate Evidence incrementally when the Main Agent judges it material. The retired lexical workspace/write classifiers and the old semantic-read signature compatibility wrapper are deleted. Physical limits are unchanged.
+
+## Rev5.2.7 — Two-Brain Claim Follow-up & Loop Control
+
+Rev5.2.7 removed the `claim_repair` semantic profile and routes `contradicted`, `insufficient` and semantic gaps back to the Main Agent through deterministic Runtime reopen/pin/feedback. Only `agent` produces task semantics and only `claim_verifier` independently judges them.
+
+## Rev5.2.5 — Transactional Contract Authority
+
+Rev5.2.5 keeps the 12-tool base fuse but moves progressive authority out of Claim Review and into the runtime contract administrator. The Main LLM now sends only `investigation_updates`; the runtime owns the canonical Investigation Contract, commits structurally valid target updates independently, preserves accepted siblings when another update fails, and deposits objective `committed_progress` when real Evidence is attached or a target is validly established. That deposit becomes dormant authority: only when the physical tool gate would block an atomic batch, open debt still exists, and new committed progress has appeared since the previous extension can runtime grant +4 tool calls, capped at +8 in this release. Claim Review remains only the second-brain semantic verifier of the provisional final. The history panel keeps **expand all / collapse all** and now exposes committed progress and earned extensions.
 
 Eyle is a local-first coding agent built around one `AgentSession`, deterministic tools, runtime-owned Evidence, supervised transactional writes, and one semantic Claim Review before grounded answers are accepted.
 
@@ -31,19 +43,20 @@ interface
    ├─ investigation_map (where the agent has already navigated)
    └─ Evidence + runtime state
 → administrative structured handshake
-→ main LLM ↔ 16 deterministic tools + live workspace
+→ main LLM ↔ transactional Investigation updates
+→ runtime contract admin ↔ 16 deterministic tools + live workspace
 → deterministic Final Gate
 → Claim Review (single semantic 2FA)
    ├─ supported → response
-   ├─ contradicted → local Repair → Reverify
-   └─ insufficient / target gap → reopen directed investigation
+   ├─ contradicted → Runtime reopens mapped debt → Main Agent
+   └─ insufficient / semantic gap → same directed follow-up route
 ```
 
 The administrative handshake is not an agent tool. It behaviorally verifies `json_schema`, then `json_object`, then prompt-driven JSON, and Eyle always validates structured output locally.
 
 ## Investigation Contract
 
-Rev5.2 replaces the old free-form `plan` with a persistent semantic ledger. The Main LLM declares only materially necessary targets:
+Rev5.2 replaces the old free-form `plan` with a persistent semantic ledger. In Rev5.2.5 the runtime owns the canonical ledger and the Main LLM sends only target deltas through `investigation_updates`. Unmentioned targets stay committed exactly as they were; accepted Evidence cannot silently disappear. The Main LLM still decides all target semantics and declares only materially necessary targets:
 
 ```json
 {
@@ -55,7 +68,7 @@ Rev5.2 replaces the old free-form `plan` with a persistent semantic ledger. The 
 }
 ```
 
-Targets may be `open`, `established`, or `dismissed`. Existing target IDs cannot silently disappear and their goals cannot silently change. `established` requires real runtime Evidence and a reason; `dismissed` requires a reason. The runtime validates only those mechanical invariants—it never decides whether the Evidence actually proves the goal.
+Targets may be `open`, `established`, or `dismissed`. Existing target IDs cannot silently disappear and their goals cannot silently change. `established` requires real runtime Evidence and a reason; `dismissed` requires a reason. Updates are committed independently, so one invalid sibling does not erase accepted work. The runtime validates only those mechanical invariants—it never decides whether the Evidence actually proves the goal.
 
 A grounded final cannot be accepted while a declared target is still `open`. Claim Review receives the same contract and can challenge an `established`/`dismissed` target with `target_id`, causing the runtime to reopen exactly that target. A material scope missing from the contract is reported with `target_id=null`; the Main LLM decides how to incorporate it.
 
@@ -75,7 +88,7 @@ Writing remains one model-facing protocol: `action=patches`. Runtime performs th
 
 Full Evidence remains runtime-owned. The model receives bounded views. Evidence associated with Investigation targets is pinned only as compact metadata (`ID`, file, lines, hashes), so an early target does not lose its source pointer after many later observations.
 
-Claim Review is still the only semantic verifier. It checks material Claims and target coverage. Local Claim, Semantic Gap and Finding recovery preserve unaffected review content; the runtime never invents verdicts, gap types, Evidence or semantic corrections.
+Claim Review is the only independent semantic verifier. It checks material Claims and target coverage after a provisional final. It does **not** grant tool authority, define `committed_progress`, rewrite the answer, or choose tools. Local Claim, Semantic Gap and Finding protocol recovery only repairs the verifier's own malformed structured output; semantic debt from `contradicted`, `insufficient` or gaps is returned to the Main Agent through runtime-owned follow-up state.
 
 ## Context boundaries
 
@@ -105,7 +118,7 @@ See [Configuration](docs/configuration.md).
 
 ## Validation
 
-Rev5.2.3 should be published only after the extracted artifact passes:
+Rev5.2.9 should be published only after the extracted artifact passes:
 
 ```bash
 python -m eyle.devtools.release_identity

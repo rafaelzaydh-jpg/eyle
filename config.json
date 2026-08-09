@@ -126,14 +126,11 @@
       },
       "evidence": {
         "max_chars_per_item": 2200
-      },
-      "repair": {
-        "enabled": true,
-        "max_attempts": 1
       }
     },
     "max_search_range_lines": 16,
-    "structured_protocol_retries": 1
+    "structured_protocol_retries": 1,
+    "committed_progress_extension_calls": 4
   },
   "worker": {
     "heartbeat_interval_seconds": 5,
@@ -151,6 +148,6 @@
     "window_seconds": 3600
   },
   "app_version": "2.7.4",
-  "config_schema_version": "5.2",
-  "revision": "rev5.2.3-investigation-memory-progress"
+  "config_schema_version": "5.4",
+  "revision": "rev5.2.9-progress-earned-authority"
 }

@@ -4,11 +4,23 @@
 
 # Eyle
 
-**Versão:** 2.7.4 · **Schema:** 5.2 · **Revisão:** rev5.2.3-investigation-memory-progress
+**Versão:** 2.7.4 · **Schema:** 5.4 · **Revisão:** rev5.2.9-progress-earned-authority
 
-## Rev5.2.3 — Investigation Memory & Progress Semantics
+## Rev5.2.9 — Autoridade Conquistada por Progresso
 
-A Rev5.2.3 preserva todo o hardening da Rev5.2.2 e corrige dois P0 de convergência expostos pelas auditorias hostis. O bloqueio de releitura agora usa somente o que está visível no **prompt compilado atual**, enquanto ranges vistos no passado ficam apenas como telemetria. Evidence citada por Claim/Semantic Gap insuficiente ou ligada a target reaberto fica pinned durante o follow-up semântico, impedindo o caso absurdo de mandar a Main LLM investigar depois de remover a própria fonte. Progresso também passa a significar mudança observável de conhecimento/estado: `ok=true` sozinho não zera mais o fusível de no-progress, observações idênticas de projeto/runtime são suprimidas e `run_tests` repetido no mesmo scope é reutilizado até uma ação com mudança observável invalidar a execução anterior. As 16 tools públicas e os limites de 8 turnos / 12 tools / 9k completion permanecem iguais.
+A Rev5.2.9 mantém a arquitetura da Rev5.2.8 e remove um teto artificial de autoridade em vez de adicionar outro subsistema. O fusível-base continua em 12 tools físicas, mas cada epoch de `committed_progress` validado pelo Runtime pode liberar +4 tools exatamente uma vez quando o gate físico precisar; não existe mais teto cumulativo de +8. Um conjunto persistente global de Evidence já creditada impede que Evidence antiga seja remapeada ou reaberta para comprar autoridade novamente. `investigation_updates.evidence_ids` agora é delta aditivo de verdade: o Agent envia somente Evidence nova que julgou material, e o Runtime preserva automaticamente toda Evidence já commitada. O follow-up do Claim também recebe capacidade restante determinística para gastar as poucas chamadas LLM de forma deliberada. Os limites normais de 8 turnos e 12 chamadas LLM permanecem iguais.
+
+## Rev5.2.8 — Canonical Runtime Cleanup
+
+A Rev5.2.8 não adiciona agente, tool, ledger nem budget. Ela corrige os contratos já existentes depois que o benchmark de código legado expôs um falso `ADMINISTRATIVE_LOOP`: a identidade do Decision Ledger agora inclui estado objetivo observado e autoridade física, enquanto o progresso do Runtime ignora churn livre de `reason/status` da Investigation. Batches com chamada inválida são rejeitados atomicamente antes de tool authority, e o ABI público das tools usa um único vocabulário canônico (`path`, `line_start`, `line_end`, `symbol`, `limit`, `depth`, `filter`) sem aliases legados. Targets `open` podem acumular Evidence incrementalmente quando o Agent julgar material. Os classificadores lexicais aposentados de workspace/write e o wrapper antigo de assinatura semântica de leitura foram apagados. Os limites físicos permanecem iguais.
+
+## Rev5.2.7 — Two-Brain Claim Follow-up & Loop Control
+
+A Rev5.2.7 removeu o perfil semântico `claim_repair` e passou a devolver `contradicted`, `insufficient` e semantic gaps ao Agent principal pelo mesmo follow-up determinístico de reopen/pin/feedback. Somente `agent` produz semântica da tarefa e somente `claim_verifier` a julga de forma independente.
+
+## Rev5.2.5 — Transactional Contract Authority
+
+A Rev5.2.5 mantém o fusível-base de 12 tools, mas move a liberação progressiva de autoridade para o administrador de contratos do Runtime. A Main LLM passa a enviar somente `investigation_updates`; o Runtime mantém o Investigation Contract canônico, commita updates estruturalmente válidos de forma independente, preserva os itens aceitos quando outro falha e deposita `committed_progress` objetivo quando Evidence real é vinculada ou um target é estabelecido validamente. Esse depósito vira autoridade dormente: somente quando o gate físico impedir um lote atômico, ainda existir dívida aberta e houver novo progresso commitado desde a última extensão o Runtime pode liberar +4 tools, limitado a +8 nesta release. O Claim Review volta a ser apenas o segundo cérebro verificador da conclusão provisória. O histórico mantém **expandir tudo / recolher tudo** e agora mostra committed progress e extensões conquistadas.
 
 A Eyle é um agente de código local-first construído em torno de uma única `AgentSession`, tools determinísticas, Evidence mantida pelo runtime, escrita transacional supervisionada e um único Claim Review semântico antes da aceitação de respostas fundamentadas no projeto.
 
@@ -31,17 +43,18 @@ interface
    ├─ investigation_map (onde a agente já navegou)
    └─ Evidence + estado do runtime
 → handshake estruturado administrativo
-→ LLM principal ↔ 16 tools determinísticas + workspace real
+→ LLM principal ↔ updates transacionais de Investigation
+→ administrador de contratos do Runtime ↔ 16 tools determinísticas + workspace real
 → Final Gate determinístico
 → Claim Review (único 2FA semântico)
    ├─ supported → resposta
-   ├─ contradicted → Repair local → Reverify
-   └─ insufficient / target gap → reabrir investigação dirigida
+   ├─ contradicted → Runtime reabre a dívida mapeada → Main Agent
+   └─ insufficient / semantic gap → mesmo follow-up dirigido
 ```
 
 ## Investigation Contract
 
-A Rev5.2 substitui o antigo `plan` livre por um ledger semântico persistente. A própria Main LLM declara apenas alvos materialmente necessários:
+A Rev5.2 substitui o antigo `plan` livre por um ledger semântico persistente. Na Rev5.2.5 o Runtime mantém esse ledger canônico e a Main LLM envia somente deltas em `investigation_updates`. Targets omitidos permanecem exatamente como estavam e Evidence já commitada não pode desaparecer silenciosamente. A Main LLM continua decidindo toda a semântica e declara apenas alvos materialmente necessários:
 
 ```json
 {
@@ -53,7 +66,7 @@ A Rev5.2 substitui o antigo `plan` livre por um ledger semântico persistente. A
 }
 ```
 
-Os estados são `open`, `established` e `dismissed`. Um target existente não pode desaparecer silenciosamente nem mudar de `goal`. `established` exige Evidence real e motivo; `dismissed` exige motivo. O runtime valida somente essas propriedades mecânicas — ele nunca decide se a Evidence realmente prova o target.
+Os estados são `open`, `established` e `dismissed`. Um target existente não pode desaparecer silenciosamente nem mudar de `goal`. `established` exige Evidence real e motivo; `dismissed` exige motivo. Updates válidos são commitados individualmente, então um sibling inválido não apaga trabalho aceito. O runtime valida somente essas propriedades mecânicas — ele nunca decide se a Evidence realmente prova o target.
 
 Uma resposta fundamentada no projeto não passa pelo Final Gate enquanto houver target `open`. O Claim Review recebe o mesmo contrato e pode contestar target `established`/`dismissed` usando `target_id`, fazendo o runtime reabrir exatamente aquela dívida. Um escopo material ausente do contrato usa `target_id=null`; cabe à Main LLM decidir se cria novo target, reformula a investigação, restringe a resposta ou informa limitação.
 
@@ -73,7 +86,7 @@ A escrita continua usando um único protocolo: `action=patches` → dry-run → 
 
 A Evidence completa permanece no runtime. Evidence associada a targets fica pinned somente como índice compacto (`ID`, arquivo, linhas e hashes), evitando que uma fonte importante do começo da tarefa desapareça do índice depois de muitas observações.
 
-Claim Review continua sendo o único verificador semântico. Ele verifica Claims materiais e cobertura dos targets. Claim, Semantic Gap e Finding Recovery preservam o conteúdo válido; o runtime nunca inventa verdict, Evidence, tipo de gap ou reparo semântico.
+Claim Review continua sendo o único verificador semântico independente. Ele verifica Claims materiais e cobertura dos targets depois do final provisório. Ele **não** concede autoridade de tools, não define `committed_progress`, não reescreve a resposta e não escolhe tools. Recovery local de Claim, Semantic Gap e Finding corrige somente saída estruturada inválida do próprio revisor; dívida semântica `contradicted`, `insufficient` ou gap volta para a Main Agent pelo estado de follow-up do Runtime.
 
 ## Fronteiras de contexto
 
@@ -103,7 +116,7 @@ Veja [Configuração](docs/configuration.md).
 
 ## Validação
 
-A Rev5.2.3 deve ser publicada somente depois que o artefato extraído passar:
+A Rev5.2.9 deve ser publicada somente depois que o artefato extraído passar:
 
 ```bash
 python -m eyle.devtools.release_identity
