@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from .request_policy import requested_finding_limit, request_needs_project_evidence
+from .request_policy import requested_finding_limit
 
 
 def validate_final(
@@ -12,6 +12,8 @@ def validate_final(
     *,
     request: Any = "",
     project_available: bool = False,
+    grounding_required: bool = False,
+    investigation: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[bool, str, str, List[str], List[Dict[str, Any]], Optional[int]]:
     """Validate only deterministic final-answer invariants.
 
@@ -50,7 +52,13 @@ def validate_final(
     if missing:
         return False, "FINAL_UNKNOWN_EVIDENCE:" + ",".join(missing), "", limitations, [], finding_limit
 
-    grounding_required = request_needs_project_evidence(request, project_available)
+    if grounding_required:
+        targets = [item for item in (investigation or []) if isinstance(item, dict)]
+        if not targets:
+            return False, "FINAL_INVESTIGATION_REQUIRED", "", limitations, [], finding_limit
+        open_ids = [str(item.get("id") or "") for item in targets if item.get("status") == "open"]
+        if open_ids:
+            return False, "FINAL_INVESTIGATION_TARGET_OPEN:" + ",".join(open_ids), "", limitations, [], finding_limit
     if grounding_required and not evidence:
         return False, "FINAL_PROJECT_FACTS_REQUIRE_READ", "", limitations, [], finding_limit
     if grounding_required and not evidence_ids:

@@ -1,29 +1,29 @@
-# Configuration — Eyle Rev5.1
+# Configuration — Eyle Rev5.2.3
 
-Rev5.1 accepts only the current public configuration schema. Unknown fields fail with `UNKNOWN_CONFIG_FIELD`; removed compatibility keys are not interpreted or translated.
+Rev5.2.3 accepts only the current public configuration schema. Unknown fields fail with `UNKNOWN_CONFIG_FIELD`; removed compatibility keys are not translated.
 
 ## LLM connection
 
-`llm.openai_compatible=true` selects OpenAI-compatible Chat Completions; `false` selects Ollama `/api/chat`. `llm.model` is an explicit model name or `auto` for model discovery. An explicit model is never silently substituted.
+`llm.openai_compatible=true` selects OpenAI-compatible Chat Completions; `false` selects Ollama `/api/chat`. `llm.model` is explicit or `auto`. Structured-output capability is discovered empirically and cached machine-locally in `context/llm_capabilities.json`.
 
-Structured-output capability is discovered empirically. No provider-specific `structured_output` setting is required. Eyle probes `json_schema`, `json_object`, then prompt JSON and stores the verified result in machine-local `context/llm_capabilities.json`.
+## Context and physical budgets
 
-## Context and budgets
+The default active working-set target remains 12,000 tokens. Canonical job fuses remain 8 Main Agent turns, 12 LLM calls, 12 tool calls, 96,000 cumulative prompt tokens, 9,000 cumulative completion tokens, and 105,000 total tokens. Rev5.2 does not raise these limits.
 
-The default active working-set target is 12,000 tokens. Canonical task ceilings are 8 main-agent turns, 12 LLM calls, 12 tool calls, 96,000 cumulative prompt tokens, 9,000 cumulative completion tokens, and 105,000 total tokens. Ceilings are elastic: actual provider usage is charged.
+`agent.context_view` controls physical preview sizes only. `agent.chat_history_token_budget` bounds stable `conversation_background`. Investigation targets are semantic state produced by the LLM; there is no fixed target-count setting.
 
-`agent.context_view` contains only preview/working-set limits; it is not a semantic quality gate. `agent.chat_history_token_budget` bounds the stable per-job `conversation_background`; the removed `task_context_token_budget` is no longer part of the schema.
+## Investigation Contract
+
+The contract is not configured by the user and has no heuristic thresholds. It is part of the canonical agent structured response. Runtime validates target identity/status/Evidence integrity; Claim Review validates semantic adequacy.
 
 ## Claim Review
 
-`agent.claims.mode` may be `off`, `self_check`, or `verified`. `self_check` uses the main connection. `verified` requires an explicit distinct verifier connection/model.
-
-Claims use the canonical fields `id`, `answer_ref`, `statement`, `kind`, `evidence_ids`, `verdict`, and `reason`. There is no fixed Claim or Evidence item count. Semantic Gaps use `material_omission`, `conflicting_evidence`, or `scope_gap`; the first two require relevant visible Evidence, while `scope_gap` may be evidence-empty when the problem is missing/partial investigation.
+`agent.claims.mode` may be `off`, `self_check`, or `verified`. Semantic Gaps now include nullable `target_id` in addition to `id`, `type`, `evidence_ids`, and `reason`. `material_omission` and `conflicting_evidence` require relevant visible Evidence; `scope_gap` may be Evidence-empty for missing/partial investigation.
 
 ## Writes
 
-The LLM never calls public patch tools. It emits `action=patches`; runtime performs transactional dry-run, asks for confirmation, applies, validates, rereads and rolls back on failure.
+The model emits `action=patches`; runtime performs transactional dry-run, confirmation, apply, validation, reread and rollback.
 
 ## Machine-local state
 
-The repository intentionally keeps only `.gitkeep` files in `context/`, `memory/`, and `workspace/`. Generated databases, capability cache, Python caches, logs and runtime artifacts must not be committed.
+Only `.gitkeep` belongs in `context/`, `memory/`, and `workspace/`. Databases, capability cache, Python/test caches, logs and runtime artifacts must not be committed.

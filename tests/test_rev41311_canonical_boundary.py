@@ -21,14 +21,15 @@ from llm.structured import (
 )
 
 
-def _agent_envelope(*, action="final", final=None, calls=None, patches=None, question=None, plan=None):
+def _agent_envelope(*, action="final", final=None, calls=None, patches=None, question=None, investigation=None, scope=None):
     return {
         "action": action,
         "tool_calls": calls,
         "patches": patches,
         "needs_user": question,
         "final": final,
-        "plan": list(plan or []),
+        "workspace_scope": dict(scope or {"mode": "none", "reason": "fixture is workspace-independent"}),
+        "investigation": list(investigation or []),
     }
 
 
@@ -75,12 +76,16 @@ def test_profile_parsers_accept_only_canonical_shapes():
         parse_claim_repair_response({"claim_id": "c1"})
 
     parsed = parse_agent_response(_agent_envelope(action="tool_calls", calls=[{"tool": "list_tree", "arguments": {}}]))
-    assert parsed == {"tool_calls": [{"tool": "list_tree", "arguments": {}}], "plan": []}
+    assert parsed == {
+        "tool_calls": [{"tool": "list_tree", "arguments": {}}],
+        "workspace_scope": {"mode": "none", "reason": "fixture is workspace-independent"},
+        "investigation": [],
+    }
 
 
 def test_claim_normalizer_only_checks_runtime_authority_after_parse():
     raw = parse_claim_review_response(_review(claims=[{
-        "id": "claim-1", "answer_ref": "a1", "statement": "X is defined.", "kind": "fact",
+        "id": "claim-1", "answer_ref": "a1", "target_id": None, "statement": "X is defined.", "kind": "fact",
         "evidence_ids": ["ev-1"], "verdict": "supported", "reason": "",
     }]))
     ok, reason, review = normalize_claim_review(
@@ -104,7 +109,7 @@ def test_claim_structural_retry_is_top_level_and_not_local(monkeypatch):
                 error_code="STRUCTURED_RESPONSE_INVALID:claim_verifier:CLAIM_REVIEW_MISSING_KEYS",
             )
         return _review(claims=[{
-            "id": "claim-1", "answer_ref": "a1", "statement": "X is defined.", "kind": "fact",
+            "id": "claim-1", "answer_ref": "a1", "target_id": None, "statement": "X is defined.", "kind": "fact",
             "evidence_ids": ["ev-1"], "verdict": "supported", "reason": "",
         }])
 
@@ -121,8 +126,8 @@ def test_local_claim_recovery_preserves_good_claims(monkeypatch):
     session = AgentSession("analise")
     session.evidence["ev-1"] = {"arquivo": "x.py", "linha_inicio": 1, "linha_fim": 1, "file_hash": "h", "content_hash": "c", "conteudo": "A. B."}
     global_review = _review(claims=[
-        {"id": "claim-1", "answer_ref": "a1", "statement": "A.", "kind": "fact", "evidence_ids": ["ev-1"], "verdict": "supported", "reason": ""},
-        {"id": "claim-2", "answer_ref": "a2", "statement": "B.", "kind": "fact", "evidence_ids": [], "verdict": "supported", "reason": ""},
+        {"id": "claim-1", "answer_ref": "a1", "target_id": None, "statement": "A.", "kind": "fact", "evidence_ids": ["ev-1"], "verdict": "supported", "reason": ""},
+        {"id": "claim-2", "answer_ref": "a2", "target_id": None, "statement": "B.", "kind": "fact", "evidence_ids": [], "verdict": "supported", "reason": ""},
     ])
     calls = []
 
@@ -131,7 +136,7 @@ def test_local_claim_recovery_preserves_good_claims(monkeypatch):
         if len(calls) == 1:
             return global_review
         return _review(claims=[
-            {"id": "claim-2", "answer_ref": "a2", "statement": "B.", "kind": "fact", "evidence_ids": ["ev-1"], "verdict": "supported", "reason": ""},
+            {"id": "claim-2", "answer_ref": "a2", "target_id": None, "statement": "B.", "kind": "fact", "evidence_ids": ["ev-1"], "verdict": "supported", "reason": ""},
         ])
 
     monkeypatch.setattr(core_agent, "executar_verificador_claims", fake)
@@ -184,8 +189,8 @@ def test_direct_patch_action_creates_canonical_write_transaction(monkeypatch, tm
     def fake(_prompt, _config):
         calls["n"] += 1
         if calls["n"] == 1:
-            return {"tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "app.py"}}], "plan": []}
-        return {"patches": [{"operation": "replace", "path": "app.py", "content": "VALUE = 2\n"}], "plan": []}
+            return {"tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "app.py"}}], "workspace_scope": {"mode":"write","reason":"The active request asks to change app.py."}, "investigation": [{"id":"T1","goal":"Establish the current app.py before editing","status":"open","evidence_ids":[],"reason":""}]}
+        return {"patches": [{"operation": "replace", "path": "app.py", "content": "VALUE = 2\n"}], "workspace_scope": {"mode":"write","reason":"The active request asks to change app.py."}, "investigation": [{"id":"T1","goal":"Establish the current app.py before editing","status":"established","evidence_ids":["ev-0001"],"reason":"app.py was read"}]}
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
     status, _, pending, _ = core_agent.executar_agente(
@@ -206,7 +211,7 @@ def test_semantic_gap_recovery_target_is_local_and_does_not_reclassify():
         raw, "CLAIM_REVIEW_SEMANTIC_GAP_EVIDENCE_REQUIRED:1:material_omission",
     )
     assert ok is True and reason == "ok" and index == 1
-    assert target == raw["semantic_gaps"][0]
+    assert target == {**raw["semantic_gaps"][0], "target_id": None}
     assert target["type"] == "material_omission"
     assert target["evidence_ids"] == []
 
@@ -219,7 +224,7 @@ def test_local_semantic_gap_recovery_preserves_review_and_can_reclassify(monkeyp
     }
     global_review = _review(
         claims=[{
-            "id": "claim-1", "answer_ref": "a1", "statement": "AgentSession is defined.",
+            "id": "claim-1", "answer_ref": "a1", "target_id": None, "statement": "AgentSession is defined.",
             "kind": "fact", "evidence_ids": ["ev-1"], "verdict": "supported", "reason": "",
         }],
         findings=[{"id": "finding-1", "type": "fact", "claim_ids": ["claim-1"]}],
@@ -261,7 +266,7 @@ def test_local_semantic_gap_recovery_can_add_evidence_without_changing_type(monk
     }
     global_review = _review(
         claims=[{
-            "id": "claim-1", "answer_ref": "a1", "statement": "A fact.", "kind": "fact",
+            "id": "claim-1", "answer_ref": "a1", "target_id": None, "statement": "A fact.", "kind": "fact",
             "evidence_ids": ["ev-1"], "verdict": "supported", "reason": "",
         }],
         gaps=[{"id": "gap-1", "type": "material_omission", "evidence_ids": [], "reason": "usage evidence omitted"}],
@@ -292,7 +297,7 @@ def test_local_semantic_gap_recovery_can_remove_invalid_gap(monkeypatch):
     }
     global_review = _review(
         claims=[{
-            "id": "claim-1", "answer_ref": "a1", "statement": "A.", "kind": "fact",
+            "id": "claim-1", "answer_ref": "a1", "target_id": None, "statement": "A.", "kind": "fact",
             "evidence_ids": ["ev-1"], "verdict": "supported", "reason": "",
         }],
         gaps=[{"id": "gap-1", "type": "material_omission", "evidence_ids": [], "reason": "claimed omission"}],
@@ -323,7 +328,7 @@ def test_semantic_gap_feedback_returns_exact_recovered_gap_to_agent():
     }
     payload = json.loads(insufficient_feedback(review))
     assert payload["semantic_gaps"] == [{
-        "id": "gap-2", "type": "scope_gap", "evidence_ids": [],
+        "id": "gap-2", "type": "scope_gap", "target_id": None, "evidence_ids": [],
         "reason": "runtime usage still requires targeted investigation", "signature": "sig",
     }]
     assert "You decide the next action" in payload["instruction"]
@@ -345,7 +350,7 @@ def test_multiple_semantic_gap_recoveries_survive_index_shift_after_removal(monk
     }
     global_review = _review(
         claims=[{
-            "id": "claim-1", "answer_ref": "a1", "statement": "A.", "kind": "fact",
+            "id": "claim-1", "answer_ref": "a1", "target_id": None, "statement": "A.", "kind": "fact",
             "evidence_ids": ["ev-1"], "verdict": "supported", "reason": "",
         }],
         gaps=[

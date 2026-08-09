@@ -1,7 +1,9 @@
-"""Deterministic request policy for the AgentSession core.
+"""Deterministic request helpers for the AgentSession core.
 
-This module classifies workspace grounding, write intent and explicit Finding
-limits. Semantic truth belongs exclusively to ``claim_review.py``.
+Explicit numeric Finding limits remain deterministic. Legacy lexical helpers
+are retained for compatibility/tests, but production workspace authority is
+declared by the Main LLM through ``workspace_scope`` and administered by the
+runtime.
 """
 from __future__ import annotations
 
@@ -242,13 +244,15 @@ def request_needs_project_evidence(request: Any, project_available: bool) -> boo
 def request_contract(
     request: Any, project_available: bool,
     write_available: bool = True, claims_mode: str = "self_check",
+    workspace_scope: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     constraints = requested_finding_constraints(request)
-    project_evidence_required = request_needs_project_evidence(request, project_available)
+    declared = dict(workspace_scope) if isinstance(workspace_scope, dict) else {}
     return {
-        "project_evidence_required": project_evidence_required,
-        "final_evidence_ids_required": project_evidence_required,
-        "write_action_required": bool(write_available and request_requires_write(request, project_available)),
+        "workspace_scope_authority": "main_llm",
+        "workspace_available": bool(project_available),
+        "write_available": bool(write_available),
+        "declared_workspace_scope": declared or None,
         "requested_finding_limit": constraints["overall"],
         "requested_kind_limits": constraints["by_kind"],
         "claims_mode": str(claims_mode or "self_check"),

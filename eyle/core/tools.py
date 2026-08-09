@@ -39,6 +39,7 @@ from eyle.core.project_inspection import (  # noqa: E402
 )
 from eyle.core.git_tools import git_status as inspect_git_status, git_diff as inspect_git_diff  # noqa: E402
 from eyle.core.execution_trace import build_execution_trace, filter_execution_trace  # noqa: E402
+from eyle.core.workspace_policy import _caminho_parece_segredo  # noqa: E402
 
 PROJECT_BASE_DIR = os.path.dirname(BASE_DIR)
 MEMORY_DIR = os.path.join(PROJECT_BASE_DIR, "memory")
@@ -279,6 +280,10 @@ def _tool_search_code(arguments, ctx):
         raw_matches, observed, match_truncated = _search_matches_fallback(root, query, max_matches)
         backend = "python-fallback"
 
+    raw_matches = [
+        item for item in raw_matches
+        if not _caminho_parece_segredo(str(item.get("arquivo") or ""))
+    ]
     grouped, range_truncated, ranges_observed = _group_search_ranges(raw_matches, max_lines, max_ranges)
     results = []
     read_failures = []
@@ -298,7 +303,7 @@ def _tool_search_code(arguments, ctx):
         ]
         results.append(reading)
 
-    files = sorted({item.get("arquivo") for item in raw_matches if item.get("arquivo")})
+    files = sorted({item.get("arquivo") for item in results if item.get("arquivo")})
     truncated = bool(match_truncated or range_truncated)
     return _sucesso({
         "query": query,
@@ -321,19 +326,31 @@ def _tool_find_symbol(arguments, ctx):
     if not root: return _falha("WORKSPACE_NOT_AVAILABLE","nenhum workspace ativo")
     symbol=arguments["simbolo"]
     rel=arguments.get("caminho_relativo")
+    if rel and _caminho_parece_segredo(str(rel)):
+        return _falha("SECRET_PATH_BLOCKED", "arquivo protegido pela política unificada de segredos do workspace", executed=True)
     result=localizar_simbolo(root,rel,symbol) if rel else localizar_simbolo_no_projeto(root,symbol)
     if result is None or (isinstance(result, list) and not result):
         return _falha("SYMBOL_NOT_FOUND",f"símbolo '{symbol}' não encontrado",executed=True)
     if isinstance(result,list): result=result[0] if len(result)==1 else {"matches":result}
     if result.get("matches") is not None:
-        if not result.get("matches"):
+        safe_matches = [
+            item for item in (result.get("matches") or [])
+            if isinstance(item, dict) and not _caminho_parece_segredo(str(item.get("arquivo") or ""))
+        ]
+        if not safe_matches:
             return _falha("SYMBOL_NOT_FOUND",f"símbolo '{symbol}' não encontrado",executed=True)
-        return _sucesso(result)
+        clone = dict(result)
+        clone["matches"] = safe_matches
+        return _sucesso(clone)
     result=dict(result); rel=result.get("arquivo") or rel; result["arquivo"]=rel; result["simbolo"]=symbol
     try:
         reading=ler_faixa_projeto(root,rel,int(result["linha_inicio"]),int(result["linha_fim"]),max_linhas=((ctx or {}).get("config") or {}).get("agent",{}).get("max_read_range_lines",400))
         result.update(reading); result["simbolo"]=symbol
-    except Exception: pass
+    except ErroLeituraProjeto as erro:
+        if erro.error_code in {"SECRET_PATH_BLOCKED", "SECRET_CONTENT_BLOCKED"}:
+            return _falha(erro.error_code, erro.detail, executed=True)
+    except Exception:
+        pass
     return _sucesso(result)
 
 

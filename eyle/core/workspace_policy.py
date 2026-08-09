@@ -25,6 +25,10 @@ PADROES_SEGREDO_CONTEUDO = (
     re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"), re.compile(r"\bgh[opusr]_[A-Za-z0-9]{30,}\b"),
     re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b"), re.compile(r"\bsk-[A-Za-z0-9_-]{24,}\b"),
+    re.compile(
+        r"(?im)^\s*(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|"
+        r"client[_-]?secret|password|passwd)\s*[:=]\s*[\"']?[^\s\"'#]{8,}"
+    ),
 )
 
 
@@ -103,3 +107,16 @@ def _caminho_parece_segredo(caminho_relativo):
 def _conteudo_parece_segredo(conteudo):
     sample=str(conteudo or "")[:512*1024]
     return any(pattern.search(sample) for pattern in PADROES_SEGREDO_CONTEUDO)
+
+
+def validar_leitura_workspace(caminho_relativo, conteudo=None):
+    """Return a stable denial code for secret path/content, otherwise ``None``.
+
+    All source-reading surfaces should call this shared policy instead of
+    maintaining tool-specific secret rules.
+    """
+    if _caminho_parece_segredo(caminho_relativo):
+        return "SECRET_PATH_BLOCKED"
+    if conteudo is not None and _conteudo_parece_segredo(conteudo):
+        return "SECRET_CONTENT_BLOCKED"
+    return None

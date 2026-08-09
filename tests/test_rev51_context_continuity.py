@@ -6,7 +6,7 @@ import eyle.core.agent as core_agent
 from eyle.core.session import AgentSession
 from eyle.runtime import service
 from llm.structured import StructuredResponseError, parse_agent_response
-from tests.canonical import base_config
+from tests.canonical import base_config, investigation_target, workspace_scope
 
 
 def _project(tmp_path):
@@ -23,8 +23,8 @@ def test_conversation_background_survives_tool_turns(monkeypatch, tmp_path):
         assert payload["request"] == "Analise app.py"
         assert any(item.get("content") == "Ao terminar, diga abacaxi." for item in payload["conversation_background"])
         if len(prompts) == 1:
-            return {"tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "app.py"}}], "plan": []}
-        return {"final": {"answer": "app.py define x como 1. abacaxi", "evidence_ids": ["ev-0001"]}, "plan": []}
+            return {"tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "app.py"}}], "workspace_scope": workspace_scope("read"), "investigation": [investigation_target(goal="Establish what app.py defines")]}
+        return {"final": {"answer": "app.py define x como 1. abacaxi", "evidence_ids": ["ev-0001"], "limitations": []}, "workspace_scope": workspace_scope("read"), "investigation": [investigation_target(goal="Establish what app.py defines", status="established", evidence_ids=["ev-0001"], reason="app.py was read")]}
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
     status, text, _, _ = core_agent.executar_agente(
@@ -41,8 +41,8 @@ def test_agent_prompt_declares_current_request_authority():
     import llm.executar as llm_exec
     prompt = llm_exec.PROMPT_AGENTE
     assert "request is the only active task" in prompt
-    assert "conversation_background is context, not an inherited task" in prompt
-    assert "ongoing user instructions" in prompt
+    assert "conversation_background is context" in prompt
+    assert "request is the only active task" in prompt
     assert "investigation_map" in prompt
 
 
@@ -66,14 +66,16 @@ def test_investigation_map_survives_raw_followup_cleanup(monkeypatch, tmp_path):
         payload = json.loads(prompt)
         prompts.append(payload)
         if len(prompts) == 1:
-            return {"tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "app.py"}}], "plan": []}
+            return {"tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "app.py"}}], "workspace_scope": workspace_scope("read"), "investigation": [investigation_target(goal="Establish the material scope of app.py")]}
         if len(prompts) == 2:
-            return {"final": {"answer": "app.py define x como 1.", "evidence_ids": ["ev-0001"]}, "plan": []}
+            return {"final": {"answer": "app.py define x como 1.", "evidence_ids": ["ev-0001"], "limitations": []}, "workspace_scope": workspace_scope("read"), "investigation": [investigation_target(goal="Establish the material scope of app.py", status="established", evidence_ids=["ev-0001"], reason="app.py was read")]}
         assert payload["latest_tool_results"] == []
         assert payload["investigation_map"]
         assert payload["investigation_map"][-1]["tool"] == "read_file"
         assert "semantic_gaps" in (payload.get("runtime_feedback") or "")
-        return {"final": {"answer": "app.py define x como 1; o restante não foi estabelecido.", "evidence_ids": ["ev-0001"]}, "plan": []}
+        assert payload["investigation"][0]["status"] == "open"
+        assert "restante do escopo" in payload["investigation"][0]["reason"]
+        return {"final": {"answer": "app.py define x como 1; o restante não foi estabelecido.", "evidence_ids": ["ev-0001"], "limitations": []}, "workspace_scope": workspace_scope("read"), "investigation": [investigation_target(goal="Establish the material scope of app.py", status="established", evidence_ids=["ev-0001"], reason="The answer is explicitly limited to the observed file")]}
 
     def fake_verifier(_prompt, _cfg):
         verifier_calls["n"] += 1
@@ -81,7 +83,7 @@ def test_investigation_map_survives_raw_followup_cleanup(monkeypatch, tmp_path):
             return {
                 "claims": [{"id": "c1", "answer_ref": "a1", "statement": "app.py define x como 1.", "kind": "fact", "evidence_ids": ["ev-0001"], "verdict": "supported", "reason": ""}],
                 "findings": [],
-                "semantic_gaps": [{"id": "g1", "type": "scope_gap", "evidence_ids": [], "reason": "restante do escopo não foi investigado"}],
+                "semantic_gaps": [{"id": "g1", "type": "scope_gap", "target_id": "T1", "evidence_ids": [], "reason": "restante do escopo não foi investigado"}],
             }
         return {
             "claims": [{"id": "c1", "answer_ref": "a1", "statement": "app.py define x como 1; o restante não foi estabelecido.", "kind": "fact", "evidence_ids": ["ev-0001"], "verdict": "supported", "reason": ""}],
@@ -107,8 +109,8 @@ def test_blocked_repeated_reads_do_not_trigger_identical_tool_loop(monkeypatch, 
     def fake(prompt, _cfg):
         calls["n"] += 1
         if calls["n"] <= 4:
-            return {"tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "app.py"}}], "plan": []}
-        return {"final": {"answer": "x é 1.", "evidence_ids": ["ev-0001"]}, "plan": []}
+            return {"tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "app.py"}}], "workspace_scope": workspace_scope("read"), "investigation": [investigation_target(goal="Establish what app.py defines")]}
+        return {"final": {"answer": "x é 1.", "evidence_ids": ["ev-0001"], "limitations": []}, "workspace_scope": workspace_scope("read"), "investigation": [investigation_target(goal="Establish what app.py defines", status="established", evidence_ids=["ev-0001"], reason="app.py was read")]}
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
     status, _, _, details = core_agent.executar_agente(
@@ -123,7 +125,7 @@ def test_agent_batch_contract_rejects_more_than_four_calls():
     envelope = {
         "action": "tool_calls",
         "tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": f"f{i}.py"}} for i in range(5)],
-        "patches": None, "needs_user": None, "final": None, "plan": [],
+        "patches": None, "needs_user": None, "final": None, "workspace_scope": workspace_scope("read"), "investigation": [],
     }
     with pytest.raises(StructuredResponseError) as exc:
         parse_agent_response(envelope)

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import eyle.core.agent as core_agent
 import eyle.core.tools as tools
-from tests.canonical import agent_final, agent_patches, agent_tools, base_config, tool_call
+from tests.canonical import agent_final, agent_patches, agent_tools, base_config, investigation_target, tool_call, workspace_scope
 
 
 def config(tmp_path, *, claims_mode="off"):
@@ -30,8 +30,11 @@ def test_greeting_is_written_by_same_agent(monkeypatch, tmp_path):
 def test_analysis_uses_one_agent_loop_and_retained_evidence(monkeypatch, tmp_path):
     (tmp_path / "app.py").write_text("def soma(a, b):\n    return a + b\n", encoding="utf-8")
     outputs = iter([
-        agent_tools(tool_call("read_file", {"caminho_relativo": "app.py"}), plan=["ler", "explicar"]),
-        agent_final({"answer": "A função soma retorna a adição dos argumentos.", "evidence_ids": ["ev-0001"]}),
+        agent_tools(tool_call("read_file", {"caminho_relativo": "app.py"}), investigation=[investigation_target(goal="Establish what app.py does")]),
+        agent_final(
+            {"answer": "A função soma retorna a adição dos argumentos.", "evidence_ids": ["ev-0001"]},
+            investigation=[investigation_target(goal="Establish what app.py does", status="established", evidence_ids=["ev-0001"], reason="app.py was read")],
+        ),
     ])
     prompts = []
     monkeypatch.setattr(core_agent, "executar_agente_llm", lambda prompt, cfg: prompts.append(json.loads(prompt)) or next(outputs))
@@ -43,7 +46,7 @@ def test_analysis_uses_one_agent_loop_and_retained_evidence(monkeypatch, tmp_pat
     assert len(prompts) == 2
     assert "def soma" in prompts[1]["latest_tool_results"][0]["detail"]["trecho_numerado"]
     assert "conteudo" not in prompts[1]["latest_tool_results"][0]["detail"]
-    assert details["plan"] == ["ler", "explicar"]
+    assert details["investigation"][0]["goal"] == "Establish what app.py does"
 
 
 def test_transactional_write_requires_confirmation_and_resume_is_deterministic(monkeypatch, tmp_path):
@@ -52,7 +55,7 @@ def test_transactional_write_requires_confirmation_and_resume_is_deterministic(m
     updated = "def soma(a, b):\n    return a + b + 1\n"
     app.write_text(original, encoding="utf-8")
     outputs = iter([
-        agent_tools(tool_call("read_file", {"caminho_relativo": "app.py"})),
+        agent_tools(tool_call("read_file", {"caminho_relativo": "app.py"}), scope=workspace_scope("write")),
         agent_patches([{"operation": "replace", "path": "app.py", "content": updated}]),
     ])
     monkeypatch.setattr(core_agent, "executar_agente_llm", lambda prompt, cfg: next(outputs))
@@ -83,7 +86,7 @@ def test_pending_transaction_does_not_duplicate_full_source(monkeypatch, tmp_pat
     source = "TOKEN_DO_ARQUIVO = 'segredo-local'\n"
     app.write_text(source, encoding="utf-8")
     outputs = iter([
-        agent_tools(tool_call("read_file", {"caminho_relativo": "app.py"})),
+        agent_tools(tool_call("read_file", {"caminho_relativo": "app.py"}), scope=workspace_scope("write")),
         agent_patches([{"operation": "replace", "path": "app.py", "content": "TOKEN_DO_ARQUIVO = 'novo'\n"}]),
     ])
     monkeypatch.setattr(core_agent, "executar_agente_llm", lambda prompt, cfg: next(outputs))

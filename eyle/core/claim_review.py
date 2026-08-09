@@ -354,13 +354,14 @@ def validate_file_evidence_freshness(
     return True, "ok"
 
 
-def _finding_signature(finding_type: str, evidence_ids: Sequence[str], reason: str) -> str:
+def _finding_signature(finding_type: str, evidence_ids: Sequence[str], reason: str, target_id: Any = None) -> str:
     """Build an observational semantic-gap signature without interpreting it."""
     normalized_reason = re.sub(r"\s+", " ", str(reason or "")).strip().lower()
     payload = json.dumps({
         "type": str(finding_type or ""),
         "evidence_ids": sorted(_ids(list(evidence_ids or []))),
         "reason": normalized_reason,
+        "target_id": None if target_id is None else str(target_id),
     }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hash_texto(normalizar_quebras(payload))
 
@@ -404,6 +405,7 @@ def normalize_claim_review(
     answer_anchors: Optional[Sequence[Dict[str, Any]]] = None,
     visible_evidence_ids: Optional[Iterable[str]] = None,
     expected_claim_ids: Optional[Iterable[str]] = None,
+    investigation: Optional[Sequence[Dict[str, Any]]] = None,
     enforce_finding_coverage: bool = True,
 ) -> Tuple[bool, str, Dict[str, Any]]:
     """Apply deterministic authority checks after strict structured parsing.
@@ -415,6 +417,7 @@ def normalize_claim_review(
     """
     visible = set(_ids(list(visible_evidence_ids or []))) if visible_evidence_ids is not None else None
     expected = set(_ids(list(expected_claim_ids or []))) if expected_claim_ids is not None else None
+    investigation_ids = {str(item.get("id") or "") for item in (investigation or []) if isinstance(item, dict) and str(item.get("id") or "")}
     answer_text = None if answer is None else str(answer)
     resolved_anchors = answer_anchors
     if resolved_anchors is None and answer_text is not None:
@@ -426,6 +429,9 @@ def normalize_claim_review(
     for index, item in enumerate(raw["claims"], start=1):
         claim_id = item["id"].strip()
         answer_ref = item["answer_ref"].strip()
+        target_id = item.get("target_id")
+        if target_id is not None:
+            target_id = str(target_id).strip()
         statement = item["statement"].strip()
         kind = item["kind"]
         verdict = item["verdict"]
@@ -439,6 +445,8 @@ def normalize_claim_review(
         if answer_ref not in anchors:
             return False, f"CLAIM_REVIEW_ANSWER_REF_INVALID:{index}:{answer_ref}", {}
         answer_quote = anchors[answer_ref]
+        if target_id is not None and target_id not in investigation_ids:
+            return False, f"CLAIM_REVIEW_UNKNOWN_TARGET:{index}:{target_id}", {}
 
         missing = [evidence_id for evidence_id in evidence_ids if evidence_id not in evidence]
         if missing:
@@ -457,6 +465,7 @@ def normalize_claim_review(
             "id": claim_id,
             "answer_ref": answer_ref,
             "answer_quote": answer_quote,
+            "target_id": target_id,
             "statement": statement,
             "kind": kind,
             "evidence_ids": evidence_ids,
@@ -487,10 +496,15 @@ def normalize_claim_review(
     for index, item in enumerate(raw["semantic_gaps"], start=1):
         gap_id = item["id"].strip()
         gap_type = item["type"]
+        gap_target_id = item.get("target_id")
+        if gap_target_id is not None:
+            gap_target_id = str(gap_target_id).strip()
         gap_evidence_ids = _ids(item["evidence_ids"])
         gap_reason = item["reason"].strip()[:240]
         if gap_id in semantic_ids:
             return False, f"CLAIM_REVIEW_SEMANTIC_GAP_ID_DUPLICATE:{index}", {}
+        if gap_target_id is not None and gap_target_id not in investigation_ids:
+            return False, f"CLAIM_REVIEW_UNKNOWN_TARGET:{index}:{gap_target_id}", {}
         missing = [evidence_id for evidence_id in gap_evidence_ids if evidence_id not in evidence]
         if missing:
             return False, "CLAIM_REVIEW_UNKNOWN_EVIDENCE:" + ",".join(missing), {}
@@ -503,9 +517,10 @@ def normalize_claim_review(
         semantic_gaps.append({
             "id": gap_id,
             "type": gap_type,
+            "target_id": gap_target_id,
             "evidence_ids": gap_evidence_ids,
             "reason": gap_reason,
-            "signature": _finding_signature(gap_type, gap_evidence_ids, gap_reason),
+            "signature": _finding_signature(gap_type, gap_evidence_ids, gap_reason, gap_target_id),
         })
         semantic_ids.add(gap_id)
 
@@ -565,6 +580,7 @@ def claim_evidence_ledger(review: Dict[str, Any], evidence: Dict[str, Any]) -> L
             "id": claim.get("id"),
             "kind": claim.get("kind"),
             "answer_ref": claim.get("answer_ref"),
+            "target_id": claim.get("target_id"),
             "answer_quote": claim.get("answer_quote"),
             "statement": claim.get("statement"),
             "verdict": claim.get("verdict"),
@@ -646,6 +662,7 @@ def claim_protocol_recovery_target(
         "claim_id": claim_id,
         "answer_ref": answer_ref,
         "answer_quote": answer_quote,
+        "target_id": item.get("target_id"),
         "kind": item["kind"],
         "evidence_ids": [],
     }
@@ -678,6 +695,7 @@ def semantic_gap_protocol_recovery_target(
     return True, "ok", {
         "id": gap_id,
         "type": item["type"],
+        "target_id": item.get("target_id"),
         "evidence_ids": list(item["evidence_ids"]),
         "reason": item["reason"],
     }, index
@@ -743,6 +761,9 @@ def review_prompt(
     target_claims: Optional[List[Dict[str, Any]]] = None,
     target_semantic_gaps: Optional[List[Dict[str, Any]]] = None,
     answer_anchors: Optional[List[Dict[str, Any]]] = None,
+    investigation: Optional[List[Dict[str, Any]]] = None,
+    workspace_scope: Optional[Dict[str, Any]] = None,
+    scope_only: bool = False,
 ) -> str:
     """Build the minimum semantic-review packet with deterministic anchors.
 
@@ -761,7 +782,9 @@ def review_prompt(
         for item in anchors
         if isinstance(item, dict) and item.get("id")
     ]
-    if target_semantic_gaps:
+    if scope_only:
+        task = "verify_workspace_scope"
+    elif target_semantic_gaps:
         task = "reverify_semantic_gap"
     elif target_claims:
         task = "reverify_repaired_claims"
@@ -771,12 +794,23 @@ def review_prompt(
         "task": task,
         "answer_anchors": public_anchors,
         "evidence": evidence_view,
+        "investigation": [dict(item) for item in (investigation or []) if isinstance(item, dict)],
+        "workspace_scope": dict(workspace_scope or {}),
     }
-    if target_claims:
+    if scope_only:
+        payload["request"] = str(request or "")
+        payload["instructions"] = (
+            "Audit only whether workspace_scope=none is semantically valid for this request and answer. "
+            "Return claims=[] and findings=[]. If current workspace facts are materially required, emit exactly one "
+            "scope_gap with target_id=null and evidence_ids=[]; otherwise semantic_gaps=[]. Do not fact-check "
+            "workspace-independent content in this task."
+        )
+    elif target_claims:
         payload["target_claims"] = [
             {
                 "claim_id": item.get("claim_id"),
                 "answer_ref": item.get("answer_ref"),
+                "target_id": item.get("target_id"),
                 "kind": item.get("kind"),
                 "evidence_ids": list(item.get("evidence_ids") or []),
             }
@@ -789,6 +823,7 @@ def review_prompt(
             {
                 "id": item.get("id"),
                 "type": item.get("type"),
+                "target_id": item.get("target_id"),
                 "evidence_ids": list(item.get("evidence_ids") or []),
                 "reason": item.get("reason", ""),
             }
@@ -933,6 +968,7 @@ def build_repaired_claim_targets(
             "claim_id": claim_id,
             "answer_ref": original.get("answer_ref"),
             "answer_quote": repaired_quote,
+            "target_id": original.get("target_id"),
             "kind": original.get("kind", "fact"),
             "evidence_ids": list(repair.get("evidence_ids") or []),
         })
@@ -987,6 +1023,7 @@ def insufficient_feedback(review: Dict[str, Any]) -> str:
     for claim in problematic_claims(review, "insufficient"):
         claims.append({
             "id": claim.get("id"),
+            "target_id": claim.get("target_id"),
             "statement": claim.get("statement"),
             "evidence_ids": list(claim.get("evidence_ids") or []),
             "reason": claim.get("reason", ""),
@@ -996,6 +1033,7 @@ def insufficient_feedback(review: Dict[str, Any]) -> str:
         findings.append({
             "id": finding.get("id"),
             "type": finding.get("type"),
+            "target_id": finding.get("target_id"),
             "evidence_ids": list(finding.get("evidence_ids") or []),
             "reason": finding.get("reason", ""),
             "signature": finding.get("signature"),

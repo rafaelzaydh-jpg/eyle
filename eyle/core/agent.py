@@ -1,6 +1,6 @@
 """Single-session LLM-first programming agent.
 
-There is one reasoning loop. The LLM decides whether to answer, plan, use a
+There is one reasoning loop. The LLM decides what must be established, whether to answer, use a
 tool, ask a blocking question or propose a patch. The runtime only validates
 and executes concrete actions.
 """
@@ -21,8 +21,13 @@ from llm.executar import (
 from llm.structured import StructuredResponseError, retry_instruction
 
 from .session import AgentSession
+from .investigation import (
+    open_target_ids, reopen_targets_from_review, target_evidence_ids,
+    validate_investigation, validate_workspace_scope,
+)
 from .execution_trace import build_execution_trace
 from .security import _resolver_caminho_seguro
+from .workspace_io import ErroLeituraProjeto, ler_faixa_projeto
 from .token_budget import available_user_prompt_tokens, estimate_tokens
 from .text_hash import hash_faixa, hash_texto
 from .post_write import (
@@ -38,9 +43,7 @@ from .tools import (
 )
 from .transactions import dry_run_patch_set, apply_patch_set, rollback_patch_set
 from .validation import validate_final
-from .request_policy import (
-    request_contract, request_requires_write, request_needs_project_evidence,
-)
+from .request_policy import request_contract
 from .claim_review import (
     apply_claim_repairs, build_repaired_claim_targets, claim_config, claim_evidence_ledger, compact_evidence,
     claim_review_output_budget, claim_protocol_recovery_target, semantic_gap_protocol_recovery_target,
@@ -55,6 +58,7 @@ OBSERVATION_TOOLS = {"project_stats", "count_tokens", "inspect_project"}
 UTILITY_TOOLS = {"calculate", "agent_info"}
 GIT_TOOLS = {"git_status", "git_diff"}
 EXECUTION_TOOLS = {"run_tests"}
+CACHEABLE_OBSERVATION_TOOLS = OBSERVATION_TOOLS | {"agent_info", "run_tests"}
 TRACE_TOOLS = {"execution_trace"}
 EVIDENCE_TOOLS = READ_TOOLS | OBSERVATION_TOOLS | GIT_TOOLS | EXECUTION_TOOLS | TRACE_TOOLS | {"calculate", "agent_info"}
 MEMORY_TOOLS = {"memory_search", "memory_store"}
@@ -79,14 +83,6 @@ _FAST_CHAT_HINT = re.compile(
     r"como vai\??|valeu|obrigad[oa]|thanks|thank you)(?:\s+eyle)?[!?.\s]*$",
     re.I,
 )
-_TEST_ONLY_REQUEST = re.compile(
-    r"^\s*(?:(?:execute|rode|rodar|faça|faca|run)\s+)?"
-    r"(?:os\s+|the\s+)?(?:testes|tests|pytest|test suite|su[ií]te de testes)"
-    r"(?:\s+(?:do|de|of)\s+(?:projeto|project|workspace))?"
-    r"(?:\s+e\s+(?:explique|explain)\b[^.;]*)?[?!.\s]*$",
-    re.I,
-)
-
 
 def _is_obvious_calculator_request(request: Any) -> bool:
     return bool(_OBVIOUS_CALCULATOR_REQUEST.fullmatch(str(request or "")))
@@ -94,12 +90,6 @@ def _is_obvious_calculator_request(request: Any) -> bool:
 
 def _is_obvious_agent_info_request(request: Any) -> bool:
     return bool(_OBVIOUS_AGENT_INFO_REQUEST.fullmatch(str(request or "")))
-
-
-def _is_test_only_request(request: Any) -> bool:
-    """Conservative optimization hint; never routes a compound investigation."""
-    return bool(_TEST_ONLY_REQUEST.fullmatch(str(request or "")))
-
 
 
 def _return(status: str, text: str, pending: Any, details: Dict[str, Any], full: bool):
@@ -161,31 +151,6 @@ def _context_view_config(config: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _run_tests_closes_read_only_task(session: AgentSession) -> bool:
-    latest_terminal_test = any(
-        isinstance(item, dict)
-        and item.get("tool") == "run_tests"
-        and (
-            item.get("executed") is True
-            or item.get("error_code") in {"TEST_RUNNER_UNAVAILABLE", "TESTS_NOT_FOUND"}
-        )
-        for item in session.latest_tool_results
-    )
-    if not latest_terminal_test:
-        return False
-    if not _is_test_only_request(session.request):
-        return False
-    observed_tools = [
-        str(item.get("tool") or "")
-        for item in session.tool_history
-        if isinstance(item, dict) and str(item.get("tool") or "") in EVIDENCE_TOOLS
-    ]
-    if any(name != "run_tests" for name in observed_tools):
-        return False
-    if len(session.plan) > 1:
-        return False
-    return True
-
 
 def _phase_for_call(
     session: AgentSession, config: Dict[str, Any], project: Dict[str, Any],
@@ -195,7 +160,7 @@ def _phase_for_call(
         return "chat"
 
     agent_cfg = (config or {}).get("agent") or {}
-    write_required = request_requires_write(session.request, True)
+    write_required = str((session.workspace_scope or {}).get("mode") or "") == "write"
     max_investigation = max(1, int(agent_cfg.get("max_write_investigation_turns", 2) or 2))
     max_no_progress = max(1, int(agent_cfg.get("max_no_progress_turns", 2) or 2))
     max_turns = max(1, int(agent_cfg.get("max_llm_turns", 8) or 8))
@@ -232,11 +197,6 @@ def _phase_for_call(
         return "analysis_investigate"
     if not session.evidence:
         return "analysis_investigate"
-    # A test result closes tools only when execution state shows a narrow
-    # test-only flow: run_tests was the sole project observation and the model
-    # did not declare a multi-step plan. Compound investigations remain open.
-    if _run_tests_closes_read_only_task(session):
-        return "analysis_answer_only"
     if session.no_progress_turns >= max_no_progress or session.turn >= max_turns:
         return "analysis_answer_only"
     return "analysis_complete_or_read"
@@ -433,12 +393,32 @@ def _observable_tool_result(tool: str, result: Dict[str, Any]) -> Dict[str, Any]
             if key in detail:
                 public[key] = detail.get(key)
     elif tool == "inspect_project":
-        for key in ("file_count", "languages", "frameworks", "entrypoints", "test_frameworks", "has_tests", "has_ci"):
+        for key in ("file_count", "directory_count", "languages", "scan_complete"):
             if key in detail:
                 public[key] = detail.get(key)
-        for key in ("routes", "local_import_edges", "relation_hubs"):
-            if isinstance(detail.get(key), list):
-                public[f"{key}_count"] = len(detail.get(key) or [])
+        if isinstance(detail.get("entrypoint_signals"), list):
+            public["entrypoint_signals"] = [dict(item) for item in detail.get("entrypoint_signals")[:20] if isinstance(item, dict)]
+        tests = detail.get("test_signals") if isinstance(detail.get("test_signals"), dict) else {}
+        if tests:
+            public["test_signals"] = {
+                "has_tests": bool(tests.get("has_tests")),
+                "count": int(tests.get("count") or 0),
+                "files": list(tests.get("files") or [])[:20],
+            }
+        ci = detail.get("ci_signals") if isinstance(detail.get("ci_signals"), dict) else {}
+        if ci:
+            public["ci_signals"] = {"has_ci": bool(ci.get("has_ci")), "files": list(ci.get("files") or [])[:20]}
+        if isinstance(detail.get("framework_signals"), list):
+            public["framework_signals"] = [dict(item) for item in detail.get("framework_signals")[:20] if isinstance(item, dict)]
+        relations = detail.get("relation_signals") if isinstance(detail.get("relation_signals"), dict) else {}
+        if relations:
+            public["relation_signals"] = {
+                "local_import_edge_count": int(relations.get("local_import_edge_count") or 0),
+                "local_import_edges_truncated": bool(relations.get("local_import_edges_truncated")),
+                "most_imported_files": [dict(item) for item in (relations.get("most_imported_files") or [])[:20] if isinstance(item, dict)],
+                "route_file_count": len(relations.get("route_files") or []),
+                "syntax_error_file_count": len(relations.get("syntax_error_files") or []),
+            }
     elif tool == "agent_info":
         for key in ("name", "app_version", "revision", "write_enabled", "write_confirmation_required"):
             if key in detail:
@@ -522,10 +502,15 @@ def _previous_observation(session: AgentSession, semantic_signature: Optional[st
     if not semantic_signature:
         return None
     for item in reversed(session.tool_history):
-        if not isinstance(item, dict) or item.get("semantic_signature") != semantic_signature:
+        if not isinstance(item, dict):
             continue
         result = item.get("result") if isinstance(item.get("result"), dict) else {}
-        if result.get("ok") is True:
+        # A real workspace mutation invalidates cached observation signatures.
+        if result.get("changed") is True:
+            return None
+        if item.get("semantic_signature") != semantic_signature:
+            continue
+        if result.get("ok") is True or (item.get("tool") == "run_tests" and result.get("executed") is True):
             return {
                 "turn": item.get("turn"),
                 "tool": item.get("tool"),
@@ -712,8 +697,8 @@ def _llm_source_view(item: Dict[str, Any], config: Dict[str, Any], *, tool: str)
 _NUMBERED_SOURCE_LINE = re.compile(r"(?m)^\s*(\d+)\s+\|")
 
 
-def _remember_visible_source_range(
-    session: AgentSession,
+def _merge_source_range(
+    target: Dict[str, List[Dict[str, Any]]],
     *,
     path: Any,
     start: int,
@@ -721,12 +706,7 @@ def _remember_visible_source_range(
     file_hash: Any = None,
     total_lines: Any = None,
 ) -> None:
-    """Record only source lines that were actually present in an agent prompt.
-
-    Runtime Evidence may contain more bytes than the compact view delivered to
-    the model. Semantic read suppression must therefore consult this visible
-    coverage, never the full EvidenceRecord.
-    """
+    """Merge one observed range into a deterministic coverage map."""
     normalized = _normalized_path(path)
     if not normalized or start <= 0 or end < start:
         return
@@ -736,7 +716,7 @@ def _remember_visible_source_range(
         "file_hash": str(file_hash or ""),
         "total_lines": int(total_lines or 0),
     }
-    existing = [dict(item) for item in session.visible_source_ranges.get(normalized, []) if isinstance(item, dict)]
+    existing = [dict(item) for item in target.get(normalized, []) if isinstance(item, dict)]
     existing.append(entry)
     existing.sort(key=lambda item: (str(item.get("file_hash") or ""), int(item.get("start") or 0), int(item.get("end") or 0)))
 
@@ -752,11 +732,18 @@ def _remember_visible_source_range(
             previous["total_lines"] = max(int(previous.get("total_lines") or 0), int(item.get("total_lines") or 0))
         else:
             merged.append(item)
-    session.visible_source_ranges[normalized] = merged[-40:]
+    target[normalized] = merged[-40:]
 
 
 def _record_prompt_visible_ranges(session: AgentSession, payload: Any) -> None:
-    """Capture source coverage from the final, already-cropped agent payload."""
+    """Capture CURRENT prompt coverage and separately retain historical telemetry.
+
+    A source that appeared in an older prompt is not necessarily available to
+    the stateless Main LLM now. Only ``visible_source_ranges`` may suppress a
+    semantic reread. ``historically_seen_source_ranges`` is observability only.
+    """
+    current: Dict[str, List[Dict[str, Any]]] = {}
+
     def visit(value: Any) -> None:
         if isinstance(value, dict):
             numbered = value.get("trecho_numerado")
@@ -764,14 +751,15 @@ def _record_prompt_visible_ranges(session: AgentSession, payload: Any) -> None:
             if isinstance(numbered, str) and numbered and path:
                 line_numbers = [int(match) for match in _NUMBERED_SOURCE_LINE.findall(numbered)]
                 if line_numbers:
-                    _remember_visible_source_range(
-                        session,
-                        path=path,
-                        start=min(line_numbers),
-                        end=max(line_numbers),
-                        file_hash=value.get("file_hash"),
-                        total_lines=value.get("total_linhas_arquivo"),
-                    )
+                    kwargs = {
+                        "path": path,
+                        "start": min(line_numbers),
+                        "end": max(line_numbers),
+                        "file_hash": value.get("file_hash"),
+                        "total_lines": value.get("total_linhas_arquivo"),
+                    }
+                    _merge_source_range(current, **kwargs)
+                    _merge_source_range(session.historically_seen_source_ranges, **kwargs)
             for nested in value.values():
                 if isinstance(nested, (dict, list)):
                     visit(nested)
@@ -781,6 +769,7 @@ def _record_prompt_visible_ranges(session: AgentSession, payload: Any) -> None:
                     visit(nested)
 
     visit(payload)
+    session.visible_source_ranges = current
 
 
 def _model_tool_result(session: AgentSession, tool: str, result: Dict[str, Any], config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -873,8 +862,13 @@ def _remember_relevant_sources(
     del session.relevant_sources[:-context_view["max_relevant_sources"]]
 
 
-def _retained_sources_for_prompt(session: AgentSession) -> List[Dict[str, Any]]:
-    """Avoid sending the same raw source in latest results and retention."""
+def _retained_sources_for_prompt(session: AgentSession, config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return retained source bodies, keeping semantic-followup Evidence pinned.
+
+    ``relevant_sources`` is intentionally small and disposable. Evidence named
+    by an insufficient Claim/gap or by a reopened target must remain available
+    during the follow-up even when the ordinary retention window is cleared.
+    """
     latest_ids: set[str] = set()
     for result in session.latest_tool_results:
         if not isinstance(result, dict):
@@ -888,10 +882,78 @@ def _retained_sources_for_prompt(session: AgentSession) -> List[Dict[str, Any]]:
         for item in detail.get("resultados") or []:
             if isinstance(item, dict) and item.get("evidence_id"):
                 latest_ids.add(str(item["evidence_id"]))
-    return [
-        source for source in session.relevant_sources
-        if str(source.get("evidence_id") or "") not in latest_ids
-    ]
+
+    by_id: Dict[str, Dict[str, Any]] = {}
+    for source in session.relevant_sources:
+        if not isinstance(source, dict):
+            continue
+        evidence_id = str(source.get("evidence_id") or "")
+        if evidence_id and evidence_id not in latest_ids:
+            by_id[evidence_id] = dict(source)
+
+    for evidence_id in session.followup_pinned_evidence_ids:
+        evidence_id = str(evidence_id or "")
+        if not evidence_id or evidence_id in latest_ids:
+            continue
+        item = session.evidence.get(evidence_id)
+        if not isinstance(item, dict) or item.get("stale"):
+            continue
+        clone = dict(item)
+        clone["evidence_id"] = evidence_id
+        source_view = _llm_source_view(clone, config, tool="read_range")
+        if source_view.get("trecho_numerado"):
+            by_id[evidence_id] = {
+                "tool": "semantic_followup_pin",
+                "evidence_id": evidence_id,
+                "arquivo": source_view.get("arquivo"),
+                "linha_inicio": source_view.get("linha_inicio"),
+                "linha_fim": source_view.get("linha_fim"),
+                "file_hash": source_view.get("file_hash"),
+                "content_hash": source_view.get("content_hash"),
+                "trecho_numerado": source_view.get("trecho_numerado"),
+                "source_preview_complete": source_view.get("source_preview_complete"),
+                "pinned": True,
+            }
+    return list(by_id.values())
+
+
+def _pin_semantic_followup_evidence(
+    session: AgentSession, review: Dict[str, Any], reopened_target_ids: List[str],
+) -> None:
+    """Pin only Evidence materially named by the semantic follow-up.
+
+    The verifier decides semantic insufficiency and target reopening. Runtime
+    merely preserves the referenced Evidence bodies so the stateless Main LLM
+    cannot be asked to investigate while simultaneously losing the source that
+    motivated the follow-up.
+    """
+    wanted: List[str] = []
+
+    def add(evidence_id: Any) -> None:
+        value = str(evidence_id or "").strip()
+        if value and value in session.evidence and value not in wanted:
+            wanted.append(value)
+
+    reopened = {str(item or "").strip() for item in reopened_target_ids if str(item or "").strip()}
+    for target in session.investigation:
+        if not isinstance(target, dict) or str(target.get("id") or "") not in reopened:
+            continue
+        for evidence_id in target.get("evidence_ids") or []:
+            add(evidence_id)
+
+    for claim in (review or {}).get("claims") or []:
+        if not isinstance(claim, dict) or str(claim.get("verdict") or "") not in {"insufficient", "contradicted"}:
+            continue
+        for evidence_id in claim.get("evidence_ids") or []:
+            add(evidence_id)
+
+    for gap in (review or {}).get("semantic_gaps") or []:
+        if not isinstance(gap, dict):
+            continue
+        for evidence_id in gap.get("evidence_ids") or []:
+            add(evidence_id)
+
+    session.followup_pinned_evidence_ids = wanted
 
 
 def _shrink_structured_once(value: Any) -> bool:
@@ -1049,9 +1111,18 @@ def _crop_payload(payload: Dict[str, Any], budget: int, chars_per_token: int) ->
         if len(relevant) > 1:
             payload["relevant_sources"] = relevant[1:]
             continue
-        if len(payload.get("evidence_index") or []) > 8:
-            payload["evidence_index"] = payload["evidence_index"][-8:]
-            continue
+        evidence_index = payload.get("evidence_index") or []
+        if len(evidence_index) > 8:
+            pinned = [item for item in evidence_index if isinstance(item, dict) and item.get("pinned") is True]
+            pinned_ids = {str(item.get("id") or "") for item in pinned}
+            recent = [item for item in evidence_index if str((item or {}).get("id") or "") not in pinned_ids]
+            if len(pinned) >= 8:
+                compacted = pinned
+            else:
+                compacted = pinned + recent[-max(0, 8 - len(pinned)):]
+            if compacted != evidence_index:
+                payload["evidence_index"] = compacted
+                continue
 
         # Conversation background is stable across turns and lower authority than
         # the active request/current investigation. Drop oldest messages only
@@ -1108,10 +1179,17 @@ def _agent_config(config: Dict[str, Any], session: AgentSession, project: Dict[s
         ceiling = decision_limit
     llm["agent_max_tokens"] = ceiling
 
-    # Main-agent calls do not know whether Claim Review will actually be the
-    # next LLM inference. Reserving it here would turn "may follow" into a
-    # false mandatory obligation and can block legitimate investigation.
-    llm.pop("downstream_completion_reserve_tokens", None)
+    # Ordinary investigation does not reserve a verifier call speculatively.
+    # Once Claim Review explicitly sends the Main LLM back for semantic
+    # follow-up, however, one later Claim Review is a known mandatory stage
+    # before success. Reserve exactly the verifier's configured call ceiling,
+    # not a projection based on historical Claims/gaps: already-supported
+    # material must not consume the future recovery budget again.
+    if session.claim_followup_pending and claim_config(config)["mode"] != "off":
+        claims_cfg = claim_config(config)
+        llm["downstream_completion_reserve_tokens"] = int(claims_cfg["verifier"]["max_tokens"])
+    else:
+        llm.pop("downstream_completion_reserve_tokens", None)
     clone["llm"] = llm
     return clone
 
@@ -1229,19 +1307,20 @@ def _compile_prompt(
     payload = {
         "request": session.request,
         "turn": session.turn,
-        "plan": session.plan,
+        "investigation": session.investigation,
         "project": _project_descriptor(project),
         "runtime_phase": phase,
         "action_policy": _phase_policy(phase),
         "conversation_background": session.conversation_background,
         "investigation_map": _investigation_map(session),
         "latest_tool_results": session.latest_tool_results,
-        "relevant_sources": _retained_sources_for_prompt(session),
+        "relevant_sources": _retained_sources_for_prompt(session, call_config),
         "evidence_index": session.evidence_index(),
         "request_contract": request_contract(
             session.request, _project_descriptor(project)["available"],
             write_available=bool(((call_config or {}).get("codar") or {}).get("ativado", True)),
             claims_mode=claim_config(call_config)["mode"],
+            workspace_scope=session.workspace_scope,
         ),
         "tool_taxonomy": gerar_taxonomia_tools(tools) if tools else {},
         "available_tools": tools,
@@ -1365,6 +1444,7 @@ def _fit_claim_evidence_view(
     *, output_tokens: int, target_claims: Optional[List[Dict[str, Any]]] = None,
     target_semantic_gaps: Optional[List[Dict[str, Any]]] = None,
     answer_anchors: Optional[List[Dict[str, Any]]] = None,
+    scope_only: bool = False,
 ) -> Tuple[bool, str, List[Dict[str, Any]], Dict[str, int]]:
     """Fit every selected Evidence ID inside the verifier working set.
 
@@ -1391,6 +1471,7 @@ def _fit_claim_evidence_view(
         prompt = review_prompt(
             answer, view, session.request, target_claims=target_claims,
             target_semantic_gaps=target_semantic_gaps, answer_anchors=answer_anchors,
+            investigation=session.investigation, workspace_scope=session.workspace_scope, scope_only=scope_only,
         )
         return view, estimate_tokens(prompt, chars_per_token)
 
@@ -1464,7 +1545,7 @@ def _run_claim_verification(
     session: AgentSession, config: Dict[str, Any], answer: str, evidence_ids: List[str],
     *, project_root: Any = None, target_claims: Optional[List[Dict[str, Any]]] = None,
     target_semantic_gaps: Optional[List[Dict[str, Any]]] = None,
-    allow_protocol_recovery: bool = True,
+    allow_protocol_recovery: bool = True, scope_only: bool = False,
 ) -> Tuple[bool, str, Dict[str, Any], List[Dict[str, Any]]]:
     cfg = claim_config(config)
     selected_ids = list(dict.fromkeys(str(item) for item in (evidence_ids or []) if str(item)))
@@ -1494,7 +1575,7 @@ def _run_claim_verification(
     verifier_config["llm"]["claim_verifier_truncation_retry_max_tokens"] = retry_ceiling
     fit_ok, fit_reason, view, fit_meta = _fit_claim_evidence_view(
         session, config, answer, selected_ids, output_tokens=output_tokens, target_claims=target_claims,
-        target_semantic_gaps=target_semantic_gaps, answer_anchors=answer_anchors,
+        target_semantic_gaps=target_semantic_gaps, answer_anchors=answer_anchors, scope_only=scope_only,
     )
     if not fit_ok:
         return False, fit_reason, {}, []
@@ -1509,9 +1590,10 @@ def _run_claim_verification(
     prompt = review_prompt(
         answer, view, session.request, target_claims=target_claims,
         target_semantic_gaps=target_semantic_gaps, answer_anchors=answer_anchors,
+        investigation=session.investigation, workspace_scope=session.workspace_scope, scope_only=scope_only,
     )
     _record_aux_prompt(
-        session, verifier_config, mode=("semantic_gap_reverification" if target_semantic_gaps else ("claim_reverification" if target_claims else "claim_verification")), prompt=prompt,
+        session, verifier_config, mode=("workspace_scope_verification" if scope_only else ("semantic_gap_reverification" if target_semantic_gaps else ("claim_reverification" if target_claims else "claim_verification"))), prompt=prompt,
         system_prompt=PROMPT_CLAIM_VERIFIER, output_tokens=output_tokens, metadata=fit_meta,
     )
     parsed = None
@@ -1543,12 +1625,21 @@ def _run_claim_verification(
     expected_ids = [str(item.get("claim_id")) for item in (target_claims or []) if item.get("claim_id")] or None
     ok, reason, review = normalize_claim_review(
         parsed, session.evidence, request=session.request, answer=answer, answer_anchors=answer_anchors,
-        visible_evidence_ids=visible_ids, expected_claim_ids=expected_ids,
-        enforce_finding_coverage=not bool(target_claims or target_semantic_gaps),
+        visible_evidence_ids=visible_ids, expected_claim_ids=expected_ids, investigation=session.investigation,
+        enforce_finding_coverage=not bool(target_claims or target_semantic_gaps or scope_only),
     )
+    if ok and scope_only:
+        scope_gaps = [dict(item) for item in review.get("semantic_gaps") or [] if isinstance(item, dict)]
+        if review.get("claims") or review.get("findings"):
+            return False, "WORKSPACE_SCOPE_REVIEW_PROTOCOL_INVALID:CLAIMS_OR_FINDINGS", {}, view
+        if len(scope_gaps) > 1 or any(
+            item.get("type") != "scope_gap" or item.get("target_id") is not None or item.get("evidence_ids")
+            for item in scope_gaps
+        ):
+            return False, "WORKSPACE_SCOPE_REVIEW_PROTOCOL_INVALID:GAP", {}, view
 
     recovered_indices = set()
-    while not ok and allow_protocol_recovery and not target_claims:
+    while not ok and allow_protocol_recovery and not scope_only and not target_claims:
         recoverable, _recover_reason, target, claim_index = claim_protocol_recovery_target(
             parsed, reason, answer_anchors,
         )
@@ -1588,11 +1679,11 @@ def _run_claim_verification(
         )
         ok, reason, review = normalize_claim_review(
             parsed, session.evidence, request=session.request, answer=answer, answer_anchors=answer_anchors,
-            visible_evidence_ids=visible_ids, expected_claim_ids=expected_ids,
+            visible_evidence_ids=visible_ids, expected_claim_ids=expected_ids, investigation=session.investigation,
         )
 
     recovered_gap_ids = set()
-    while not ok and allow_protocol_recovery and not target_claims and not target_semantic_gaps:
+    while not ok and allow_protocol_recovery and not scope_only and not target_claims and not target_semantic_gaps:
         recoverable, _recover_reason, target_gap, gap_index = semantic_gap_protocol_recovery_target(
             parsed, reason,
         )
@@ -1630,6 +1721,7 @@ def _run_claim_verification(
             parsed_gaps[gap_index - 1] = {
                 "id": recovered_gap.get("id"),
                 "type": recovered_gap.get("type"),
+                "target_id": recovered_gap.get("target_id"),
                 "evidence_ids": list(recovered_gap.get("evidence_ids") or []),
                 "reason": recovered_gap.get("reason", ""),
             }
@@ -1638,7 +1730,7 @@ def _run_claim_verification(
             )
         ok, reason, review = normalize_claim_review(
             parsed, session.evidence, request=session.request, answer=answer, answer_anchors=answer_anchors,
-            visible_evidence_ids=visible_ids, expected_claim_ids=expected_ids,
+            visible_evidence_ids=visible_ids, expected_claim_ids=expected_ids, investigation=session.investigation,
         )
 
     if not ok and allow_protocol_recovery and not target_claims and not target_semantic_gaps:
@@ -1654,7 +1746,7 @@ def _run_claim_verification(
             parsed["findings"] = recovered_findings
             ok, reason, review = normalize_claim_review(
                 parsed, session.evidence, request=session.request, answer=answer, answer_anchors=answer_anchors,
-                visible_evidence_ids=visible_ids, expected_claim_ids=expected_ids,
+                visible_evidence_ids=visible_ids, expected_claim_ids=expected_ids, investigation=session.investigation,
             )
             if ok:
                 _record_decision(
@@ -1679,12 +1771,15 @@ def _run_claim_verification(
             target = targets.get(str(claim.get("id"))) or {}
             if claim.get("answer_ref") != target.get("answer_ref"):
                 return False, f"CLAIM_REVERIFY_REF_CHANGED:{claim.get('id')}", {}, view
+            if claim.get("target_id") != target.get("target_id"):
+                return False, f"CLAIM_REVERIFY_TARGET_CHANGED:{claim.get('id')}", {}, view
             if claim.get("answer_quote") != target.get("answer_quote"):
                 return False, f"CLAIM_REVERIFY_QUOTE_CHANGED:{claim.get('id')}", {}, view
             expected_kind = str(target.get("kind") or "")
             if expected_kind and claim.get("kind") != expected_kind:
                 return False, f"CLAIM_REVERIFY_KIND_CHANGED:{claim.get('id')}", {}, view
-    if ok and not target_semantic_gaps and (request_needs_project_evidence(session.request, True) or bool(selected_ids)) and not review.get("claims"):
+    workspace_grounded = str((session.workspace_scope or {}).get("mode") or "") in {"read", "write"}
+    if ok and not target_semantic_gaps and (workspace_grounded or bool(selected_ids)) and not review.get("claims"):
         return False, "CLAIM_REVIEW_EMPTY", {}, view
     if ok:
         review["mode"] = cfg["mode"]
@@ -1831,7 +1926,8 @@ def _details(
     )
     return {
         "status": status,
-        "plan": session.plan,
+        "workspace_scope": dict(session.workspace_scope or {}),
+        "investigation": session.investigation,
         "turns": session.turn,
         "tool_calls": session.tool_calls,
         "tools_used": [
@@ -2201,6 +2297,30 @@ def _resume(session: AgentSession, pending: Dict[str, Any], config: Dict[str, An
             "failed", text, None,
             _details(session, "failed", config, failure_code="WRITE_PENDING_INVALID"), full,
         )
+    # The persisted continuation type objectively proves that this pending
+    # operation is a workspace write. This also keeps a 5.2.1 pending proposal
+    # compatible with the 5.2.2 workspace-scope contract.
+    if not isinstance(session.workspace_scope, dict) or not session.workspace_scope.get("mode"):
+        session.workspace_scope = {
+            "mode": "write",
+            "reason": "Persisted write_confirmation requires workspace mutation.",
+        }
+    if session.workspace_scope.get("mode") != "write":
+        text = "A confirmação pendente não possui autoridade de escrita válida."
+        return _return(
+            "failed", text, None,
+            _details(session, "failed", config, failure_code="WRITE_SCOPE_INVALID"), full,
+        )
+    pending_open = open_target_ids(session.investigation)
+    if pending_open:
+        text = "A escrita confirmada foi bloqueada porque a investigação ainda possui dívida aberta."
+        return _return(
+            "failed", text, None,
+            _details(
+                session, "failed", config,
+                failure_code="WRITE_INVESTIGATION_TARGET_OPEN:" + ",".join(pending_open),
+            ), full,
+        )
     return _resume_set(session, pending, config, project, full)
 
 
@@ -2348,6 +2468,10 @@ def _semantic_read_signature(tool: str, arguments: Dict[str, Any]) -> Optional[s
         }, sort_keys=True, separators=(",", ":"))
     if tool == "agent_info":
         return "agent_info:runtime"
+    if tool == "run_tests":
+        return "run_tests:" + json.dumps({
+            "scope": _normalized_path(arguments.get("scope") or "."),
+        }, sort_keys=True, separators=(",", ":"))
     return None
 
 
@@ -2357,12 +2481,16 @@ def _read_already_covered(
     signature = _semantic_read_signature(tool, arguments)
     if not signature:
         return False
-    if tool in {"list_tree", "search_code", "find_symbol"} | OBSERVATION_TOOLS | {"agent_info"}:
-        return any(
-            item.get("semantic_signature") == signature and item.get("status") == "success"
-            for item in session.tool_history
-            if isinstance(item, dict)
-        )
+    if tool == "list_tree":
+        # Tree results are compact structured observations rather than source
+        # bodies; an unchanged successful tree is safe to suppress.
+        return _previous_observation(session, signature) is not None
+    if tool in {"search_code", "find_symbol"}:
+        # These tools expose source snippets. Historical execution alone cannot
+        # prove the snippet is still visible to the stateless Main LLM.
+        return False
+    if tool in CACHEABLE_OBSERVATION_TOOLS:
+        return _previous_observation(session, signature) is not None
 
     path = _normalized_path(arguments.get("caminho_relativo"))
     if not path:
@@ -2443,12 +2571,12 @@ def _record_decision(
 def _turn_made_progress(
     evidence_before: int, results: List[Dict[str, Any]], session: AgentSession,
 ) -> bool:
+    """Count only an observable state/knowledge change, never ``ok=True`` alone."""
     if len(session.evidence) > evidence_before:
         return True
     return any(
         isinstance(item, dict)
-        and item.get("ok") is True
-        and item.get("tool") not in READ_TOOLS
+        and item.get("changed") is True
         for item in results
     )
 
@@ -2458,6 +2586,16 @@ def _action_signature(tool: str, arguments: Dict[str, Any]) -> str:
 
 
 def _final_validation_feedback(reason: str) -> str:
+    if str(reason).startswith("FINAL_INVESTIGATION_REQUIRED"):
+        return (
+            "FINAL_VALIDATION_ERROR: FINAL_INVESTIGATION_REQUIRED. "
+            "Create the material Investigation targets for this project-grounded request before finalizing."
+        )
+    if str(reason).startswith("FINAL_INVESTIGATION_TARGET_OPEN:"):
+        return (
+            f"FINAL_VALIDATION_ERROR: {reason}. Resolve the open targets with Evidence, explicitly dismiss them with reason, "
+            "or continue investigation. Do not drop or rename targets."
+        )
     if str(reason).startswith("FINAL_PROJECT_EVIDENCE_IDS_REQUIRED"):
         return (
             "FINAL_VALIDATION_ERROR: FINAL_PROJECT_EVIDENCE_IDS_REQUIRED. "
@@ -2467,6 +2605,30 @@ def _final_validation_feedback(reason: str) -> str:
     if str(reason).startswith("FINAL_UNKNOWN_EVIDENCE:"):
         return f"FINAL_VALIDATION_ERROR: {reason}. Use only evidence_ids present in evidence_index."
     return f"FINAL_VALIDATION_ERROR: {reason}. Return a corrected final answer."
+
+
+def _semantic_followup_stalled_feedback(session: AgentSession) -> str:
+    """Describe a physical stall without choosing the semantic next action."""
+    open_targets = [
+        {
+            "id": item.get("id"),
+            "goal": item.get("goal"),
+            "evidence_ids": list(item.get("evidence_ids") or []),
+            "reason": item.get("reason", ""),
+        }
+        for item in session.investigation
+        if isinstance(item, dict) and item.get("status") == "open"
+    ]
+    return json.dumps({
+        "code": "SEMANTIC_FOLLOWUP_STALLED",
+        "open_targets": open_targets,
+        "instruction": (
+            "No new Evidence was added. Do not repeat observations already blocked or covered. "
+            "Keep semantic control: choose a materially different available observation, update the "
+            "Investigation Contract consistently, narrow/remove the unsupported statement, or explicitly "
+            "state a limitation when the current Evidence warrants it. Runtime does not choose the tool."
+        ),
+    }, ensure_ascii=False, separators=(",", ":"))
 
 
 def _deadline_exceeded(config: Dict[str, Any]) -> bool:
@@ -2526,8 +2688,65 @@ def _run(
                 _details(session, "failed", config, limitations=[str(error)], failure_code="AGENT_RUNTIME_ERROR"), full,
             )
 
-        if isinstance(decision.get("plan"), list) and decision["plan"]:
-            session.plan = decision["plan"][:20]
+        raw_investigation = decision.get("investigation", [])
+        investigation_ok, investigation_reason, normalized_investigation = validate_investigation(
+            raw_investigation, previous=session.investigation, evidence=session.evidence,
+        )
+        project_available_now = _project_descriptor(project)["available"]
+        raw_calls = decision.get("tool_calls") if isinstance(decision.get("tool_calls"), list) else []
+        project_action = any(
+            isinstance(call, dict)
+            and str(call.get("tool") or "")
+            and str(call.get("tool") or "") not in UTILITY_TOOLS
+            for call in raw_calls
+        )
+        scope_ok, scope_reason, normalized_scope = validate_workspace_scope(
+            decision.get("workspace_scope"),
+            previous=session.workspace_scope,
+            project_available=project_available_now,
+            investigation=normalized_investigation if investigation_ok else [],
+            project_action=project_action,
+            patches_requested=isinstance(decision.get("patches"), list),
+        )
+        if not scope_ok:
+            _record_decision(session, "workspace_scope", "rejected", reason=scope_reason)
+            feedback = (
+                f"WORKSPACE_SCOPE_VALIDATION_ERROR: {scope_reason}. "
+                "You decide semantic workspace dependency via workspace_scope: none for workspace-independent work, "
+                "read for current-workspace facts, write for requested workspace changes. Preserve read/write once declared."
+            )
+            continue
+        session.workspace_scope = normalized_scope
+        _record_decision(
+            session, "workspace_scope", "accepted",
+            reason=str(normalized_scope.get("mode") or "none"),
+        )
+        project_grounded_now = normalized_scope.get("mode") in {"read", "write"}
+        action_needs_direction = bool(
+            isinstance(decision.get("tool_calls"), list)
+            or isinstance(decision.get("patches"), list)
+            or decision.get("final") is not None
+        )
+        if investigation_ok and project_grounded_now and action_needs_direction and not normalized_investigation:
+            investigation_ok = False
+            investigation_reason = "INVESTIGATION_REQUIRED"
+        if not investigation_ok:
+            _record_decision(session, "investigation_contract", "rejected", reason=investigation_reason)
+            feedback = (
+                f"INVESTIGATION_VALIDATION_ERROR: {investigation_reason}. "
+                "Return the complete Investigation Contract. Targets are material facts/properties to establish, not tool steps. "
+                "Preserve every existing target id and goal; use only known Evidence IDs."
+            )
+            continue
+        session.investigation = normalized_investigation
+        target_state = ",".join(
+            f"{item.get('id')}={item.get('status')}"
+            for item in session.investigation if isinstance(item, dict)
+        )
+        _record_decision(
+            session, "investigation_contract", "accepted",
+            reason=target_state or "empty",
+        )
 
         if decision.get("needs_user"):
             _record_decision(session, "needs_user", "accepted")
@@ -2543,13 +2762,24 @@ def _run(
             _record_decision(session, "patches", "requested")
             project_available = _project_descriptor(project)["available"]
             write_enabled = bool(((config.get("codar") or {}).get("ativado", True)))
-            write_required = request_requires_write(session.request, project_available)
+            write_required = str((session.workspace_scope or {}).get("mode") or "") == "write"
             if not project_available:
                 text = "A escrita exige um workspace ativo."
                 return _return("failed", text, None, _details(session, "failed", config, failure_code="WORKSPACE_NOT_AVAILABLE"), full)
             if not write_enabled or not write_required:
                 _record_decision(session, "patches", "rejected", reason="WRITE_ACTION_NOT_ALLOWED")
                 feedback = "WRITE_ACTION_NOT_ALLOWED: only propose patches for an explicit write request."
+                continue
+            open_ids = open_target_ids(session.investigation)
+            if open_ids:
+                _record_decision(
+                    session, "patches", "rejected",
+                    reason="WRITE_INVESTIGATION_TARGET_OPEN:" + ",".join(open_ids),
+                )
+                feedback = (
+                    "WRITE_INVESTIGATION_TARGET_OPEN: resolve or explicitly dismiss every open Investigation target "
+                    "before proposing a write transaction. Open: " + ",".join(open_ids)
+                )
                 continue
             if session.phase == "write_investigate":
                 _record_decision(session, "patches", "rejected", reason="WRITE_REQUIRES_SOURCE_READ")
@@ -2600,7 +2830,8 @@ def _run(
             claims_cfg = claim_config(config)
             project_available = _project_descriptor(project)["available"]
             project_root = project.get("caminho_origem")
-            write_required = request_requires_write(session.request, project_available)
+            workspace_mode = str((session.workspace_scope or {}).get("mode") or "none")
+            write_required = workspace_mode == "write"
             write_available = bool(((config or {}).get("codar") or {}).get("ativado", True))
             final_obj = decision.get("final")
 
@@ -2613,21 +2844,77 @@ def _run(
                     final_obj, session.evidence,
                     request=session.request,
                     project_available=project_available,
+                    grounding_required=workspace_mode in {"read", "write"},
+                    investigation=session.investigation,
                 )
 
             final_evidence_ids = (
                 list(dict.fromkeys(str(item) for item in final_obj.get("evidence_ids") or [] if str(item)))
                 if isinstance(final_obj, dict) else []
             )
+            review_evidence_ids = list(final_evidence_ids)
+            for evidence_id in target_evidence_ids(session.investigation):
+                if evidence_id not in review_evidence_ids:
+                    review_evidence_ids.append(evidence_id)
             claims_grounded_request = bool(
                 claims_cfg["mode"] != "off"
-                and request_needs_project_evidence(session.request, project_available)
+                and workspace_mode in {"read", "write"}
+            )
+            needs_scope_review = bool(
+                ok
+                and claims_cfg["mode"] != "off"
+                and project_available
+                and workspace_mode == "none"
+                and session.phase != "chat"
             )
             needs_claim_review = bool(
                 ok
                 and claims_cfg["mode"] != "off"
                 and (claims_grounded_request or bool(final_evidence_ids))
             )
+
+            if ok and needs_scope_review:
+                _record_decision(session, "final", "provisional", reason="workspace_scope_review")
+                try:
+                    scope_ok, scope_reason, scope_review, _scope_view = _run_claim_verification(
+                        session, config, answer, [], project_root=project_root,
+                        allow_protocol_recovery=False, scope_only=True,
+                    )
+                except ErroLLM as error:
+                    text = f"A verificação semântica de escopo falhou: {error.error_code or 'WORKSPACE_SCOPE_VERIFIER_FAILED'}."
+                    return _return(
+                        "failed", text, None,
+                        _details(session, "failed", config, limitations=[str(error)], failure_code=error.error_code or "WORKSPACE_SCOPE_VERIFIER_FAILED"),
+                        full,
+                    )
+                if not scope_ok:
+                    _record_decision(session, "workspace_scope_review", "rejected", reason=scope_reason)
+                    text = f"A verificação semântica de escopo ficou inválida: {scope_reason}."
+                    return _return("failed", text, None, _details(session, "failed", config, failure_code=scope_reason), full)
+                scope_gaps = [dict(item) for item in scope_review.get("semantic_gaps") or [] if isinstance(item, dict)]
+                if scope_gaps:
+                    _append_claim_review(session, scope_review, stage="workspace_scope")
+                    session.claim_followup_pending = True
+                    session.claim_followup_feedback = json.dumps({
+                        "code": "WORKSPACE_SCOPE_INSUFFICIENT",
+                        "workspace_scope": dict(session.workspace_scope or {}),
+                        "semantic_gaps": scope_gaps,
+                        "instruction": (
+                            "A semantic reviewer found that current workspace facts are material. "
+                            "You control semantics: declare read/write workspace_scope as appropriate, create the material "
+                            "Investigation targets, gather Evidence, or narrow the answer if the request is actually workspace-independent."
+                        ),
+                    }, ensure_ascii=False, separators=(",", ":"))
+                    feedback = session.claim_followup_feedback
+                    session.latest_tool_results = []
+                    session.relevant_sources = []
+                    _record_decision(session, "workspace_scope_review", "insufficient", reason="WORKSPACE_SCOPE_INSUFFICIENT")
+                    continue
+                _record_decision(session, "workspace_scope_review", "supported")
+                session.claim_followup_pending = False
+                session.claim_followup_feedback = ""
+                _record_decision(session, "final", "accepted")
+                return _return("success", answer, None, _details(session, "success", config, limitations=limitations), full)
 
             if ok and not needs_claim_review:
                 session.claim_followup_pending = False
@@ -2639,7 +2926,7 @@ def _run(
                 _record_decision(session, "final", "provisional")
                 try:
                     review_ok, review_reason, review, evidence_view = _run_claim_verification(
-                        session, config, answer, final_evidence_ids, project_root=project_root,
+                        session, config, answer, review_evidence_ids, project_root=project_root,
                     )
                 except ErroLLM as error:
                     text = f"A verificação de claims falhou: {error.error_code or 'CLAIM_VERIFIER_LLM_FAILED'}."
@@ -2671,7 +2958,7 @@ def _run(
                     if claims_cfg["repair"]["enabled"] and session.claim_repair_attempts < claims_cfg["repair"]["max_attempts"]:
                         session.claim_repair_attempts += 1
                         repair_ok, repair_reason, repaired_answer, repairs = _run_claim_repair(
-                            session, config, answer, review, final_evidence_ids, evidence_view,
+                            session, config, answer, review, review_evidence_ids, evidence_view,
                             project_root=project_root,
                         )
                         if not repair_ok:
@@ -2743,7 +3030,7 @@ def _run(
                             # instead of carrying stale gap findings forward.
                             try:
                                 global_ok, global_reason, global_review, evidence_view = _run_claim_verification(
-                                    session, config, answer, final_evidence_ids, project_root=project_root,
+                                    session, config, answer, review_evidence_ids, project_root=project_root,
                                 )
                             except ErroLLM as error:
                                 text = f"A verificação global após o reparo falhou: {error.error_code or 'CLAIM_VERIFIER_LLM_FAILED'}."
@@ -2780,15 +3067,23 @@ def _run(
                 has_semantic_gaps = int(summary.get("semantic_gaps", 0) or 0) > 0
                 if has_insufficient_claims or has_semantic_gaps:
                     review_reason = "CLAIM_INSUFFICIENT" if has_insufficient_claims else "CLAIM_SEMANTIC_GAP"
+                    session.investigation, reopened_targets = reopen_targets_from_review(
+                        session.investigation, review,
+                    )
+                    if reopened_targets:
+                        _record_decision(
+                            session, "investigation_contract", "reopened",
+                            reason=",".join(reopened_targets),
+                        )
+                    _pin_semantic_followup_evidence(session, review, reopened_targets)
                     _record_decision(session, "claim_review", "insufficient", reason=review_reason)
                     if session.turn < run_turn_limit:
                         session.claim_followup_pending = True
                         session.claim_followup_feedback = insufficient_feedback(review)
                         feedback = session.claim_followup_feedback
-                        # Full EvidenceRecords remain runtime-owned. The semantic
-                        # diagnosis persists across tool calls until a later Claim
-                        # Review replaces or resolves it. Global turns/calls/tools/
-                        # tokens/deadline are the only execution ceilings.
+                        # Ordinary retention is disposable, but Evidence named by
+                        # this semantic follow-up remains pinned and is injected
+                        # again by _retained_sources_for_prompt().
                         session.latest_tool_results = []
                         session.relevant_sources = []
                         continue
@@ -2804,6 +3099,7 @@ def _run(
 
                 session.claim_followup_pending = False
                 session.claim_followup_feedback = ""
+                session.followup_pinned_evidence_ids = []
                 _record_decision(session, "claim_review", "supported")
                 _record_decision(session, "final", "accepted")
                 return _return("success", answer, None, _details(session, "success", config, limitations=limitations), full)
@@ -2884,19 +3180,19 @@ def _run(
             semantic_signature = _semantic_read_signature(tool, normalized)
             signature = _action_signature(tool, normalized)
             previous_observation = _previous_observation(session, semantic_signature)
-            if tool in READ_TOOLS and previous_observation is not None:
+            if tool in CACHEABLE_OBSERVATION_TOOLS and previous_observation is not None:
                 blocked = {
                     "tool": tool, "status": "skipped", "ok": False,
                     "executed": False, "changed": False,
-                    "error_code": "IDENTICAL_READ_BLOCKED",
+                    "error_code": "IDENTICAL_OBSERVATION_BLOCKED",
                     "detail": {
-                        "message": "The exact fresh observation already exists. Do not repeat it; use the map or choose another query/range/file.",
+                        "message": "The exact unchanged observation already exists. Reuse it or choose a materially different observation.",
                         "previous_observation": previous_observation,
                         "investigation_map": _investigation_map(session, 6),
                     },
                 }
                 next_results.append(blocked)
-                _record_decision(session, "tool_execution", "skipped", reason="IDENTICAL_READ_BLOCKED", tools=[tool])
+                _record_decision(session, "tool_execution", "skipped", reason="IDENTICAL_OBSERVATION_BLOCKED", tools=[tool])
                 _record_tool_history(session, tool, normalized, blocked, semantic_signature=semantic_signature)
                 continue
             if tool in READ_TOOLS and _read_already_covered(session, tool, normalized):
@@ -2969,11 +3265,13 @@ def _run(
         else:
             session.no_progress_turns += 1
             if session.no_progress_turns >= max_no_progress:
-                if session.evidence and request_requires_write(session.request, _project_descriptor(project)["available"]):
+                if session.evidence and str((session.workspace_scope or {}).get("mode") or "") == "write":
                     feedback = (
                         "NO_PROGRESS_WRITE: investigation is closed. Use retained evidence and "
                         "produce one transactional patch now."
                     )
+                elif session.evidence and session.claim_followup_pending:
+                    feedback = _semantic_followup_stalled_feedback(session)
                 elif session.evidence:
                     feedback = "NO_PROGRESS_ANALYSIS: stop using tools and answer from current evidence."
                 else:
@@ -2987,6 +3285,78 @@ def _run(
 
     text = "A tarefa atingiu o limite de turnos do agente antes de concluir."
     return _return("failed", text, None, _details(session, "failed", config, failure_code="MAX_LLM_TURNS_EXCEEDED"), full)
+
+
+def _rehydrate_persisted_evidence(
+    session: AgentSession, project: Dict[str, Any], config: Dict[str, Any],
+) -> None:
+    """Restore persisted file Evidence from the live workspace after resume.
+
+    Persistence intentionally omits source bodies. On resume the runtime can
+    deterministically reconstruct them from path/range only when both stored
+    hashes still match. If reconstruction fails or the file is stale, visible
+    coverage for that path is released so the Main LLM may read it again.
+    """
+    root = (project or {}).get("caminho_origem")
+    if not root or not os.path.isdir(root):
+        return
+    max_lines = max(1, int(((config or {}).get("agent") or {}).get("max_read_range_lines", 400) or 400))
+    restored_sources: List[Dict[str, Any]] = []
+    for evidence_id, item in list(session.evidence.items()):
+        if not isinstance(item, dict):
+            continue
+        if item.get("conteudo") or item.get("trecho_numerado"):
+            continue
+        path = str(item.get("arquivo") or "").strip()
+        start = item.get("linha_inicio")
+        end = item.get("linha_fim")
+        if not path or not isinstance(start, int) or not isinstance(end, int) or start < 1 or end < start:
+            continue
+        try:
+            reading = ler_faixa_projeto(root, path, start, end, max_linhas=max(max_lines, end - start + 1))
+        except ErroLeituraProjeto as error:
+            item["rehydration_error"] = error.error_code
+            session.visible_source_ranges.pop(_normalized_path(path), None)
+            session.historically_seen_source_ranges.pop(_normalized_path(path), None)
+            continue
+        stored_file_hash = str(item.get("file_hash") or "")
+        stored_content_hash = str(item.get("content_hash") or "")
+        if (
+            (stored_file_hash and stored_file_hash != str(reading.get("file_hash") or ""))
+            or (stored_content_hash and stored_content_hash != str(reading.get("content_hash") or ""))
+        ):
+            item["rehydration_error"] = "EVIDENCE_STALE"
+            item["stale"] = True
+            session.visible_source_ranges.pop(_normalized_path(path), None)
+            session.historically_seen_source_ranges.pop(_normalized_path(path), None)
+            continue
+        item.update(reading)
+        item.pop("rehydration_error", None)
+        item.pop("stale", None)
+        clone = dict(item)
+        clone["evidence_id"] = evidence_id
+        source_view = _llm_source_view(clone, config, tool="read_range")
+        restored_sources.append({
+            "tool": "resume_rehydrate",
+            "evidence_id": evidence_id,
+            "arquivo": source_view.get("arquivo"),
+            "linha_inicio": source_view.get("linha_inicio"),
+            "linha_fim": source_view.get("linha_fim"),
+            "file_hash": source_view.get("file_hash"),
+            "content_hash": source_view.get("content_hash"),
+            "trecho_numerado": source_view.get("trecho_numerado"),
+            "source_preview_complete": source_view.get("source_preview_complete"),
+        })
+
+    if restored_sources:
+        context_view = _context_view_config(config)
+        by_id = {
+            str(source.get("evidence_id") or ""): source
+            for source in session.relevant_sources if isinstance(source, dict)
+        }
+        for source in restored_sources:
+            by_id[str(source.get("evidence_id") or "")] = source
+        session.relevant_sources = list(by_id.values())[-context_view["max_relevant_sources"]:]
 
 
 def executar_agente(
@@ -3004,6 +3374,7 @@ def executar_agente(
     project = projeto or {}
     if retomar:
         session = AgentSession.from_dict(retomar.get("estado") or {})
+        _rehydrate_persisted_evidence(session, project, config)
         if retomar.get("continuation_kind") == "user_input":
             session.latest_tool_results = [{
                 "tool": "user_response", "status": "success", "ok": True,

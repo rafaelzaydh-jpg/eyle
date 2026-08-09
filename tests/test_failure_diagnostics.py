@@ -132,7 +132,12 @@ def test_follow_up_can_cite_runtime_failure_instead_of_restored_code(monkeypatch
                 "answer": "Os testes falharam porque render_template não estava definido.",
                 "evidence_ids": ["ev-runtime-0001"],
             },
-            "plan": [],
+            "workspace_scope": {"mode": "read", "reason": "The answer depends on persisted runtime validation Evidence."},
+            "investigation": [{
+                "id": "T1", "goal": "Establish why the prior project tests failed",
+                "status": "established", "evidence_ids": ["ev-runtime-0001"],
+                "reason": "Runtime validation Evidence records the test failure."
+            }],
         }
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)

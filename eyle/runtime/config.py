@@ -1,4 +1,4 @@
-"""Rev5.1 configuration boundary for the canonical AgentSession core."""
+"""Rev5.2.3 configuration boundary for the canonical AgentSession core."""
 from __future__ import annotations
 
 import json

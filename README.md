@@ -4,17 +4,21 @@
 
 # Eyle
 
-**Version:** 2.7.4 · **Schema:** 5.1 · **Revision:** rev5.1-context-boundaries-investigation-continuity
+**Version:** 2.7.4 · **Schema:** 5.2 · **Revision:** rev5.2.3-investigation-memory-progress
 
-Eyle is a local-first coding agent built around one `AgentSession`, deterministic tools, runtime-owned Evidence, supervised transactional writes, and a semantic Claim Review before grounded answers are accepted.
+## Rev5.2.3 — Investigation Memory & Progress Semantics
+
+Rev5.2.3 keeps every Rev5.2.2 hardening rule and fixes two P0 convergence defects exposed by hostile audits. Source suppression now follows what is visible in the **current compiled prompt**, not everything the model saw historically; historical ranges are telemetry only. Evidence named by an insufficient Claim/Semantic Gap or attached to a reopened target is pinned through semantic follow-up, so the stateless Main LLM is never told to investigate while the motivating source has vanished. Progress also means an observable knowledge/state change: `ok=true` alone no longer resets the no-progress fuse, unchanged project/runtime observations are suppressed, and repeated `run_tests` for the same scope is reused until a state-changing action invalidates it. The 16 public tools and the 8-turn / 12-tool / 9k-completion limits are unchanged.
+
+Eyle is a local-first coding agent built around one `AgentSession`, deterministic tools, runtime-owned Evidence, supervised transactional writes, and one semantic Claim Review before grounded answers are accepted.
 
 > **The LLM decides semantics. The runtime validates contracts.**
 
 ## Why Eyle exists
 
-Eyle is designed to let the connected LLM investigate and reason about a real workspace without turning the runtime into a second hidden agent. The runtime owns safety, structure, budgets, hashes, freshness, confirmation, persistence and validation. The LLM owns investigation choices, semantic interpretation, answer wording and patch intent.
+Eyle lets a connected LLM investigate a real workspace without turning the runtime into a second hidden agent. The LLM decides what must be established, how to investigate, what Evidence supports its conclusions, and what to say. The runtime owns structure, state, tool execution, hashes, freshness, safety, budgets, confirmation and deterministic validation.
 
-The core is provider-agnostic. Qwen, Llama and other compatible models can use the same Eyle protocol; only the `llm/` boundary adapts to the structured-output capability actually delivered by the connection.
+The core is provider-agnostic. Qwen, Llama and other compatible models use the same Eyle protocol; only `llm/` adapts to the structured-output behavior actually delivered by the connection.
 
 ## Architecture
 
@@ -22,64 +26,65 @@ The core is provider-agnostic. Qwen, Llama and other compatible models can use t
 interface
 → runtime/service
 → AgentSession
+   ├─ current request + conversation background
+   ├─ Investigation Contract (what remains to establish)
+   ├─ investigation_map (where the agent has already navigated)
+   └─ Evidence + runtime state
 → administrative structured handshake
 → main LLM ↔ 16 deterministic tools + live workspace
-→ Evidence Core
 → deterministic Final Gate
 → Claim Review (single semantic 2FA)
    ├─ supported → response
    ├─ contradicted → local Repair → Reverify
-   └─ insufficient / semantic gap → directed main-agent follow-up
+   └─ insufficient / target gap → reopen directed investigation
 ```
 
-The administrative handshake is not an agent tool. It behaviorally verifies `json_schema`, then `json_object`, then prompt-driven JSON and caches the verified mode per connection/model. Provider enforcement is never trusted by itself: every structured response is validated locally by Eyle.
+The administrative handshake is not an agent tool. It behaviorally verifies `json_schema`, then `json_object`, then prompt-driven JSON, and Eyle always validates structured output locally.
+
+## Investigation Contract
+
+Rev5.2 replaces the old free-form `plan` with a persistent semantic ledger. The Main LLM declares only materially necessary targets:
+
+```json
+{
+  "id": "T3",
+  "goal": "Establish AgentSession's role in the real execution path",
+  "status": "open",
+  "evidence_ids": [],
+  "reason": ""
+}
+```
+
+Targets may be `open`, `established`, or `dismissed`. Existing target IDs cannot silently disappear and their goals cannot silently change. `established` requires real runtime Evidence and a reason; `dismissed` requires a reason. The runtime validates only those mechanical invariants—it never decides whether the Evidence actually proves the goal.
+
+A grounded final cannot be accepted while a declared target is still `open`. Claim Review receives the same contract and can challenge an `established`/`dismissed` target with `target_id`, causing the runtime to reopen exactly that target. A material scope missing from the contract is reported with `target_id=null`; the Main LLM decides how to incorporate it.
+
+`investigation` and `investigation_map` are deliberately separate: the first is **purpose**, the second is **navigation history**.
 
 ## Tools
 
-The Main Agent currently sees 16 public tools:
+The Main Agent still sees exactly 16 public tools:
 
 `calculate`, `agent_info`, `project_stats`, `count_tokens`, `inspect_project`, `list_tree`, `search_code`, `find_symbol`, `read_range`, `read_file`, `memory_search`, `memory_store`, `run_tests`, `execution_trace`, `git_status`, and `git_diff`.
 
-Writing is intentionally not exposed as patch tools. The model emits the canonical `action=patches` protocol and the runtime executes one transactional path.
+Rev5.2 does **not** add Planner/ResearchManager agents, callers/callees/reference tools, semantic file ranking, or a new read-range coverage system. The current benchmark showed a direction problem, not a discovery-tool problem.
 
-
-## Context boundaries and investigation continuity
-
-`request` is the only active task. `conversation_background` is a bounded, non-authoritative conversation view that remains stable across every turn of the current job, so explicit ongoing user instructions can survive tool use without an older task silently becoming the new objective. `investigation_map` is derived from observable successful tool history and preserves the current task's navigation state across `CLAIM_INSUFFICIENT` follow-up.
-
-Blocked duplicate/covered reads are not counted as executed identical tools. They return the existing observable map and contribute to generic no-progress control. Agent batches are contractually limited to four tool calls per turn; larger batches are rejected instead of silently truncated.
-
-## Supervised writes
-
-```text
-request
-→ inspect source
-→ action=patches
-→ transaction dry-run
-→ user confirmation
-→ transaction apply
-→ compile/tests/reread
-→ rollback on validation failure
-→ verified response
-```
+Writing remains one model-facing protocol: `action=patches`. Runtime performs the transaction dry-run, confirmation, apply, compile/tests/reread and rollback path.
 
 ## Evidence and Claim Review
 
-Full Evidence remains runtime-owned. The model receives bounded views and can request deeper ranges. Claims and Evidence are proportional to the material content of the answer: numbers such as ~6, 12 or 20+ are guidance, never quotas.
+Full Evidence remains runtime-owned. The model receives bounded views. Evidence associated with Investigation targets is pinned only as compact metadata (`ID`, file, lines, hashes), so an early target does not lose its source pointer after many later observations.
 
-Claim Review is the only semantic final verifier. It checks atomic Claims and conclusion-level Semantic Gaps. Local protocol recovery preserves valid review content and re-evaluates malformed Claims or Semantic Gaps; Finding coverage can also be regenerated from preserved Claims; the runtime never invents verdicts, gap types, Evidence or semantic fixes.
+Claim Review is still the only semantic verifier. It checks material Claims and target coverage. Local Claim, Semantic Gap and Finding recovery preserve unaffected review content; the runtime never invents verdicts, gap types, Evidence or semantic corrections.
+
+## Context boundaries
+
+`request` is the only active task. `conversation_background` is stable, bounded and non-authoritative across every turn of the current job. `investigation_map` preserves observable current-task discoveries across semantic follow-up. Blocked duplicate/covered reads are not counted as executed identical tools.
 
 ## Run
 
-Create your environment and install dependencies:
-
 ```bash
 python -m pip install -r requirements.lock
-```
-
-Useful commands:
-
-```bash
 python main.py status
 python main.py perguntar "Analyze the project"
 python main.py serve
@@ -94,24 +99,13 @@ python -m pytest -q
 
 ## Configuration
 
-Edit `config.json` for the LLM endpoint, model and runtime limits. Structured-output capability does not need a provider-specific setting: Eyle probes the actual behavior and stores the machine-local result in `context/llm_capabilities.json`, which is ignored by Git.
+Edit `config.json` for the LLM endpoint, model and runtime limits. Structured-output capability is behaviorally probed and cached machine-locally in `context/llm_capabilities.json`, which is ignored by Git.
 
-See [Configuration](docs/configuration.md) for details.
-
-## Project layout
-
-```text
-eyle/core/       AgentSession, tools, Evidence, Claim Review and safe editing
-eyle/runtime/    service, queue, worker, persistence, telemetry and history
-llm/             transport, adaptive capabilities and structured contracts
-web/             local web interface
-tests/           canonical regression suite
-docs/            current architecture, configuration, benchmarks and publishing
-```
+See [Configuration](docs/configuration.md).
 
 ## Validation
 
-The Rev5.1 release is intended to be published only after the extracted artifact passes:
+Rev5.2.3 should be published only after the extracted artifact passes:
 
 ```bash
 python -m eyle.devtools.release_identity
@@ -124,9 +118,7 @@ See [Benchmarking](docs/benchmark.md) for the real AgentSession acceptance scena
 
 ## License
 
-Eyle is **source-available, not open-source software**. Personal, private, non-commercial use is permitted under the terms in [LICENSE.md](LICENSE.md). Redistribution, publication of modified copies, commercial use, sublicensing, sale, or offering Eyle as a service require prior written permission.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+Eyle is **source-available, not open-source software**. Personal, private, non-commercial use is permitted under [LICENSE.md](LICENSE.md). Redistribution, publication of modified copies, commercial use, sublicensing, sale, or offering Eyle as a service require prior written permission.
 
 ## Documentation
 

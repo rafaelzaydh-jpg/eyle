@@ -10,6 +10,8 @@ import os
 import subprocess
 from typing import Any, Dict, List, Optional
 
+from .workspace_policy import _caminho_parece_segredo, _conteudo_parece_segredo
+
 
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv"}
 
@@ -85,8 +87,11 @@ def git_status(root: str, max_entries: int = 200) -> Dict[str, Any]:
             category = "modified"
         else:
             category = "other"
+        normalized = path.replace("\\", "/")
+        if _caminho_parece_segredo(normalized):
+            continue
         counts[category] += 1
-        entries.append({"path": path.replace("\\", "/"), "status": code, "category": category})
+        entries.append({"path": normalized, "status": code, "category": category})
 
     return {
         "ok": True,
@@ -130,6 +135,8 @@ def git_diff(
         normalized_path = str(path).strip().replace("\\", "/")
         if os.path.isabs(normalized_path) or normalized_path.startswith("../") or "/../" in f"/{normalized_path}/":
             return {"ok": False, "error_code": "UNSAFE_PATH", "detail": "git_diff aceita somente caminho relativo seguro."}
+        if _caminho_parece_segredo(normalized_path):
+            return {"ok": False, "error_code": "SECRET_PATH_BLOCKED", "detail": "git_diff bloqueou caminho protegido por segredo."}
 
     context_lines = max(0, min(10, int(context_lines)))
     max_chars = max(1000, min(12000, int(max_chars)))
@@ -160,6 +167,10 @@ def git_diff(
 
     files = _parse_numstat(numstat.get("stdout", ""))
     raw = diff.get("stdout", "")
+    if any(_caminho_parece_segredo(str(item.get("path") or "")) for item in files):
+        return {"ok": False, "error_code": "SECRET_PATH_BLOCKED", "detail": "git_diff bloqueou diff que contém caminho protegido por segredo."}
+    if _conteudo_parece_segredo(raw):
+        return {"ok": False, "error_code": "SECRET_CONTENT_BLOCKED", "detail": "git_diff bloqueou conteúdo que corresponde à política de segredos."}
     clipped = raw[:max_chars]
     total_added = sum(item["added"] or 0 for item in files)
     total_removed = sum(item["removed"] or 0 for item in files)

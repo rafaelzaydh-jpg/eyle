@@ -1,33 +1,82 @@
 from __future__ import annotations
 
 
-def agent_tools(*calls, plan=None):
-    return {"tool_calls": [dict(call) for call in calls], "plan": list(plan or [])}
+def investigation_target(
+    target_id="T1", *, goal="Establish the material project fact needed by the request",
+    status="open", evidence_ids=None, reason="",
+):
+    return {
+        "id": str(target_id),
+        "goal": str(goal),
+        "status": str(status),
+        "evidence_ids": list(evidence_ids or []),
+        "reason": str(reason),
+    }
+
+
+def workspace_scope(mode="read", reason=None):
+    if reason is None:
+        reason = {
+            "none": "The fixture is independent of the live workspace.",
+            "read": "The fixture depends on current workspace facts.",
+            "write": "The fixture requests a workspace mutation.",
+        }[mode]
+    return {"mode": str(mode), "reason": str(reason)}
+
+
+def _default_final_investigation(final):
+    if isinstance(final, dict):
+        ids = [str(item) for item in final.get("evidence_ids") or [] if str(item)]
+        if ids:
+            return [investigation_target(
+                status="established", evidence_ids=ids, reason="Grounded by the cited fixture Evidence.",
+            )]
+    return []
+
+
+def agent_tools(*calls, investigation=None, scope=None):
+    if investigation is None:
+        investigation = [investigation_target()]
+    return {"tool_calls": [dict(call) for call in calls], "workspace_scope": dict(scope or workspace_scope("read")), "investigation": [dict(item) for item in investigation]}
 
 
 def tool_call(tool, arguments=None):
     return {"tool": tool, "arguments": dict(arguments or {})}
 
 
-def agent_patches(patches, plan=None):
-    return {"patches": [dict(item) for item in patches], "plan": list(plan or [])}
+def agent_patches(patches, investigation=None, scope=None):
+    if investigation is None:
+        investigation = [investigation_target(
+            status="established", evidence_ids=["ev-0001"],
+            reason="The fixture has read the source required for the write.",
+        )]
+    return {"patches": [dict(item) for item in patches], "workspace_scope": dict(scope or workspace_scope("write")), "investigation": [dict(item) for item in investigation]}
 
 
-def agent_final(final, plan=None):
-    return {"final": final, "plan": list(plan or [])}
+def agent_final(final, investigation=None, scope=None):
+    if investigation is None:
+        investigation = _default_final_investigation(final)
+    if scope is None:
+        mode = "read" if isinstance(final, dict) and final.get("evidence_ids") else "none"
+        scope = workspace_scope(mode)
+    return {"final": final, "workspace_scope": dict(scope), "investigation": [dict(item) for item in investigation]}
 
 
-def agent_needs_user(message, plan=None):
-    return {"needs_user": str(message), "plan": list(plan or [])}
+def agent_needs_user(message, investigation=None, scope=None):
+    items = [dict(item) for item in (investigation or [])]
+    if scope is None:
+        scope = workspace_scope("read" if items else "none")
+    return {"needs_user": str(message), "workspace_scope": dict(scope), "investigation": items}
 
 
 def claim(
-    claim_id="claim-1", *, answer_ref="a1", statement="supported fact",
+    claim_id="claim-1", *, answer_ref="a1", target_id=None, statement="supported fact",
     kind="fact", evidence_ids=None, verdict="supported", reason="",
 ):
     return {
         "id": claim_id,
         "answer_ref": answer_ref,
+        "target_id": target_id,
         "statement": statement,
         "kind": kind,
         "evidence_ids": list(evidence_ids or []),

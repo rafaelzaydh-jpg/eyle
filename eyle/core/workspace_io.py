@@ -15,6 +15,7 @@ from .text_hash import hash_faixa, hash_texto, normalizar_quebras
 from .workspace_policy import (
     EXTENSOES_TEXTO, PASTAS_IGNORADAS, _carregar_gitignore,
     _caminho_parece_segredo, _conteudo_parece_segredo, _ignorado_por_gitignore,
+    validar_leitura_workspace,
 )
 
 
@@ -63,6 +64,12 @@ def ler_faixa_projeto(caminho_projeto, caminho_relativo, linha_inicio,
             "FILE_NOT_FOUND",
             f"arquivo '{caminho_relativo}' nao encontrado no disco",
         )
+    secret_error = validar_leitura_workspace(caminho_relativo)
+    if secret_error:
+        raise ErroLeituraProjeto(
+            secret_error,
+            "arquivo protegido pela política unificada de segredos do workspace",
+        )
 
     try:
         with open(caminho_abs, "r", encoding="utf-8", errors="replace") as arquivo:
@@ -72,6 +79,13 @@ def ler_faixa_projeto(caminho_projeto, caminho_relativo, linha_inicio,
             "FILE_READ_ERROR",
             f"nao foi possivel ler '{caminho_relativo}': {erro}",
         ) from erro
+
+    secret_error = validar_leitura_workspace(caminho_relativo, conteudo)
+    if secret_error:
+        raise ErroLeituraProjeto(
+            secret_error,
+            "conteúdo protegido pela política unificada de segredos do workspace",
+        )
 
     linhas = conteudo.splitlines(keepends=True)
     total_linhas = len(linhas)

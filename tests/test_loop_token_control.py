@@ -5,6 +5,7 @@ import eyle.core.agent as core_agent
 import llm.executar as llm_mod
 from eyle.core.token_budget import estimate_tokens
 from llm.response_adapter import normalize_openai_chat_response
+from tests.canonical import investigation_target, workspace_scope
 
 
 def _config():
@@ -55,7 +56,7 @@ def _config():
 def test_fixed_agent_prompt_is_compact():
     assert estimate_tokens(llm_mod.PROMPT_AGENTE, 3) <= 750
     assert len(llm_mod.PROMPT_AGENTE) < 2300
-    assert "Claims are reviewed separately" in llm_mod.PROMPT_AGENTE
+    assert "Claims and target coverage are reviewed separately" in llm_mod.PROMPT_AGENTE
     assert "1-based sentence" not in llm_mod.PROMPT_AGENTE
 
 
@@ -71,18 +72,18 @@ def test_common_multifile_write_reaches_transaction_in_three_calls(monkeypatch, 
         names = {item["name"] for item in payload["available_tools"]}
         assert not {"apply_patch", "test_patch_dry_run", "apply_patch_set", "test_patch_set_dry_run"} & names
         if len(prompts) == 1:
-            return {"tool_calls": [{"tool": "list_tree", "arguments": {}}], "plan": []}
+            return {"tool_calls": [{"tool": "list_tree", "arguments": {}}], "workspace_scope": workspace_scope("write"), "investigation": [investigation_target(goal="Establish the files needed for the requested refactor")]}
         if len(prompts) == 2:
             return {"tool_calls": [
                 {"tool": "read_file", "arguments": {"caminho_relativo": "app.py"}},
                 {"tool": "read_file", "arguments": {"caminho_relativo": "routes.py"}},
                 {"tool": "read_file", "arguments": {"caminho_relativo": "test_routes.py"}},
-            ], "plan": []}
+            ], "workspace_scope": workspace_scope("write"), "investigation": [investigation_target(goal="Establish the files needed for the requested refactor")]}
         return {"patches": [
             {"operation": "replace", "path": "app.py", "content": merged},
             {"operation": "delete", "path": "routes.py"},
             {"operation": "delete", "path": "test_routes.py"},
-        ], "plan": []}
+        ], "workspace_scope": workspace_scope("write"), "investigation": [investigation_target(goal="Establish the files needed for the requested refactor", status="established", evidence_ids=["ev-0001", "ev-0002", "ev-0003"], reason="All source files required for the transaction were read.")]}
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
     status, _, pending, details = core_agent.executar_agente(
@@ -104,14 +105,14 @@ def test_semantic_read_coverage_blocks_overlapping_range(monkeypatch, tmp_path):
         payload = json.loads(prompt)
         prompts.append(payload)
         if len(prompts) == 1:
-            return {"tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "app.py"}}], "plan": []}
+            return {"tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "app.py"}}], "workspace_scope": workspace_scope("read"), "investigation": [investigation_target(goal="Establish what app.py defines")]}
         if len(prompts) == 2:
-            return {"tool_calls": [{"tool": "read_range", "arguments": {"caminho_relativo": "app.py", "linha_inicio": 1, "linha_fim": 1}}], "plan": []}
+            return {"tool_calls": [{"tool": "read_range", "arguments": {"caminho_relativo": "app.py", "linha_inicio": 1, "linha_fim": 1}}], "workspace_scope": workspace_scope("read"), "investigation": [investigation_target(goal="Establish what app.py defines")]}
         assert any(
             item.get("error_code") == "SEMANTIC_READ_BLOCKED"
             for item in payload["latest_tool_results"]
         )
-        return {"final": {"answer": "app.py define x como 1.", "evidence_ids": ["ev-0001"]}, "plan": []}
+        return {"final": {"answer": "app.py define x como 1.", "evidence_ids": ["ev-0001"]}, "workspace_scope": workspace_scope("read"), "investigation": [investigation_target(goal="Establish what app.py defines", status="established", evidence_ids=["ev-0001"], reason="app.py was read")]}
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
     status, _, _, details = core_agent.executar_agente(
@@ -166,19 +167,19 @@ def test_premature_patch_is_redirected_to_reads_without_poisoning_retry(monkeypa
         if len(prompts) == 1:
             return {"patches": [
                 {"operation": "replace", "path": "app.py", "content": "x = 2\n"},
-            ], "plan": []}
+            ], "workspace_scope": workspace_scope("write"), "investigation": []}
         if len(prompts) == 2:
             assert payload["runtime_phase"] == "write_prepare"
-            assert "WRITE_REQUIRES_SOURCE_READ" in (payload.get("runtime_feedback") or "")
+            assert "INVESTIGATION_REQUIRED" in (payload.get("runtime_feedback") or "")
             assert any(
                 item.get("content") == "Não use arquivos de rotas separados."
                 for item in payload["conversation_background"]
             )
-            return {"tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "app.py"}}], "plan": []}
+            return {"tool_calls": [{"tool": "read_file", "arguments": {"caminho_relativo": "app.py"}}], "workspace_scope": workspace_scope("write"), "investigation": [{"id": "T1", "goal": "Establish current app.py before editing", "status": "open", "evidence_ids": [], "reason": ""}]}
         assert payload["runtime_phase"] == "write_patch_only"
         return {"patches": [
             {"operation": "replace", "path": "app.py", "content": "x = 2\n"},
-        ], "plan": []}
+        ], "workspace_scope": workspace_scope("write"), "investigation": [{"id": "T1", "goal": "Establish current app.py before editing", "status": "established", "evidence_ids": ["ev-0001"], "reason": "app.py was read"}]}
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
     status, _, pending, details = core_agent.executar_agente(

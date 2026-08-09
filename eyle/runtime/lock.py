@@ -1,47 +1,102 @@
 #!/usr/bin/env python3
+"""Portable per-file locking for Eyle persistence.
+
+Eyle may persist the same JSON file from the web process and isolated worker
+processes. A process-local ``threading.Lock`` prevents thread races but cannot
+prevent lost updates across ``multiprocessing.Process`` boundaries. ``lock_para``
+therefore combines one in-process mutex per normalized path with an OS-backed
+advisory lock on a stable sidecar file.
+
+The sidecar may remain on disk after use; the operating-system lock, not file
+existence, is the authority. Crashed processes release the OS lock automatically.
 """
-memoria_lock.py
-----------------
-A interface web, o Worker e o agente podem persistir estado ao mesmo tempo.
-Este modulo serializa atualizacoes no mesmo arquivo para evitar lost update --
-ler o JSON inteiro, modificar em memoria, gravar o JSON inteiro de volta
--- sem nenhuma trava. Isso e' seguro enquanto so uma coisa escreve por
-vez, mas main.py serve sobe o Flask (thread da requisicao) e o Worker
-(eyle/runtime/worker.py, thread permanente) NO MESMO PROCESSO, e os dois podem
-chamar registrar_mensagem/salvar_evidencias/registrar_historico ao mesmo
-tempo -- exatamente o modo normal de operacao do agente persistente, nao
-um caso raro. Sem trava, duas escritas concorrentes podem se perder uma
-a outra (lost update) ou gerar o mesmo id duas vezes.
+from __future__ import annotations
 
-Como tudo roda no mesmo processo (threads, nao processos separados), um
-threading.Lock() por caminho de arquivo resolve -- nao precisamos de
-lock de sistema de arquivos (flock) pra esse caso de uso. Cada caminho
-tem seu proprio lock (conversa.json e agent_pendente.json podem ser escritos
-em paralelo sem se atrapalhar; so o MESMO arquivo precisa ser
-serializado).
-
-Uso:
-    from eyle.runtime.lock import lock_para
-
-    def registrar_algo(...):
-        caminho = os.path.join(MEMORY_DIR, "conversa.json")
-        with lock_para(caminho):
-            dados = carregar(caminho)
-            ...
-            salvar(caminho, dados)
-"""
 import os
 import threading
 from collections import defaultdict
+
+try:  # POSIX
+    import fcntl  # type: ignore
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
+
+try:  # Windows
+    import msvcrt  # type: ignore
+except ImportError:  # pragma: no cover - POSIX
+    msvcrt = None
+
 
 _locks = defaultdict(threading.Lock)
 _locks_guard = threading.Lock()
 
 
+def _normalized_path(caminho):
+    return os.path.normcase(os.path.normpath(os.path.abspath(os.fspath(caminho))))
+
+
+class _InterProcessFileLock:
+    def __init__(self, caminho):
+        self.path = _normalized_path(caminho)
+        with _locks_guard:
+            self._thread_lock = _locks[self.path]
+        self._handle = None
+
+    @property
+    def lock_path(self):
+        return self.path + ".lock"
+
+    def _acquire_os_lock(self):
+        os.makedirs(os.path.dirname(self.lock_path), exist_ok=True)
+        handle = open(self.lock_path, "a+b")
+        try:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            elif msvcrt is not None:  # pragma: no cover - exercised on Windows
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    handle.write(b"\0")
+                    handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            else:  # pragma: no cover - unsupported interpreter/platform
+                raise RuntimeError("interprocess file locking is unavailable on this platform")
+        except BaseException:
+            handle.close()
+            raise
+        self._handle = handle
+
+    def _release_os_lock(self):
+        handle = self._handle
+        self._handle = None
+        if handle is None:
+            return
+        try:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            elif msvcrt is not None:  # pragma: no cover - exercised on Windows
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        finally:
+            handle.close()
+
+    def __enter__(self):
+        self._thread_lock.acquire()
+        try:
+            self._acquire_os_lock()
+        except BaseException:
+            self._thread_lock.release()
+            raise
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            self._release_os_lock()
+        finally:
+            self._thread_lock.release()
+        return False
+
+
 def lock_para(caminho):
-    """Devolve sempre o MESMO threading.Lock() para o mesmo caminho
-    (normalizado, absoluto), mesmo que seja passado com barras/casing
-    ligeiramente diferentes entre chamadas."""
-    chave = os.path.normcase(os.path.normpath(os.path.abspath(caminho)))
-    with _locks_guard:
-        return _locks[chave]
+    """Return a context manager serializing one path across threads/processes."""
+    return _InterProcessFileLock(caminho)

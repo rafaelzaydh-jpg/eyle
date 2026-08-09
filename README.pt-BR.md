@@ -4,17 +4,21 @@
 
 # Eyle
 
-**Versão:** 2.7.4 · **Schema:** 5.1 · **Revisão:** rev5.1-context-boundaries-investigation-continuity
+**Versão:** 2.7.4 · **Schema:** 5.2 · **Revisão:** rev5.2.3-investigation-memory-progress
 
-A Eyle é um agente de código local-first construído em torno de uma única `AgentSession`, tools determinísticas, Evidence mantida pelo runtime, escrita transacional supervisionada e um Claim Review semântico antes da aceitação de respostas fundamentadas no projeto.
+## Rev5.2.3 — Investigation Memory & Progress Semantics
+
+A Rev5.2.3 preserva todo o hardening da Rev5.2.2 e corrige dois P0 de convergência expostos pelas auditorias hostis. O bloqueio de releitura agora usa somente o que está visível no **prompt compilado atual**, enquanto ranges vistos no passado ficam apenas como telemetria. Evidence citada por Claim/Semantic Gap insuficiente ou ligada a target reaberto fica pinned durante o follow-up semântico, impedindo o caso absurdo de mandar a Main LLM investigar depois de remover a própria fonte. Progresso também passa a significar mudança observável de conhecimento/estado: `ok=true` sozinho não zera mais o fusível de no-progress, observações idênticas de projeto/runtime são suprimidas e `run_tests` repetido no mesmo scope é reutilizado até uma ação com mudança observável invalidar a execução anterior. As 16 tools públicas e os limites de 8 turnos / 12 tools / 9k completion permanecem iguais.
+
+A Eyle é um agente de código local-first construído em torno de uma única `AgentSession`, tools determinísticas, Evidence mantida pelo runtime, escrita transacional supervisionada e um único Claim Review semântico antes da aceitação de respostas fundamentadas no projeto.
 
 > **A LLM decide semântica. O runtime valida contratos.**
 
 ## Por que a Eyle existe
 
-A Eyle permite que a LLM conectada investigue e raciocine sobre um workspace real sem transformar o runtime em um segundo agente escondido. O runtime controla segurança, estrutura, budgets, hashes, freshness, confirmação, persistência e validação. A LLM controla escolhas de investigação, interpretação semântica, redação e intenção de patch.
+A Eyle permite que a LLM conectada investigue um workspace real sem transformar o runtime em um segundo agente escondido. A LLM decide o que precisa ser estabelecido, como investigar, quais Evidence sustentam suas conclusões e como responder. O runtime controla estrutura, estado, execução de tools, hashes, freshness, segurança, budgets, confirmação e validações determinísticas.
 
-O core é independente de provider. Qwen, Llama e outros modelos compatíveis usam o mesmo protocolo da Eyle; somente a fronteira `llm/` se adapta à capacidade de structured output que a conexão realmente entrega.
+O core é independente de provider. Qwen, Llama e outros modelos compatíveis usam o mesmo protocolo; somente `llm/` se adapta ao structured output realmente entregue pela conexão.
 
 ## Arquitetura
 
@@ -22,57 +26,63 @@ O core é independente de provider. Qwen, Llama e outros modelos compatíveis us
 interface
 → runtime/service
 → AgentSession
+   ├─ request atual + conversation_background
+   ├─ Investigation Contract (o que ainda falta estabelecer)
+   ├─ investigation_map (onde a agente já navegou)
+   └─ Evidence + estado do runtime
 → handshake estruturado administrativo
 → LLM principal ↔ 16 tools determinísticas + workspace real
-→ Evidence Core
 → Final Gate determinístico
 → Claim Review (único 2FA semântico)
    ├─ supported → resposta
    ├─ contradicted → Repair local → Reverify
-   └─ insufficient / semantic gap → nova investigação dirigida
+   └─ insufficient / target gap → reabrir investigação dirigida
 ```
 
-O handshake administrativo não é uma tool do agente. Ele verifica por comportamento `json_schema`, depois `json_object`, depois JSON guiado por prompt, e salva o modo comprovado por conexão/modelo. A Eyle nunca confia apenas no enforcement do servidor: toda saída estruturada é validada localmente.
+## Investigation Contract
+
+A Rev5.2 substitui o antigo `plan` livre por um ledger semântico persistente. A própria Main LLM declara apenas alvos materialmente necessários:
+
+```json
+{
+  "id": "T3",
+  "goal": "Establish AgentSession's role in the real execution path",
+  "status": "open",
+  "evidence_ids": [],
+  "reason": ""
+}
+```
+
+Os estados são `open`, `established` e `dismissed`. Um target existente não pode desaparecer silenciosamente nem mudar de `goal`. `established` exige Evidence real e motivo; `dismissed` exige motivo. O runtime valida somente essas propriedades mecânicas — ele nunca decide se a Evidence realmente prova o target.
+
+Uma resposta fundamentada no projeto não passa pelo Final Gate enquanto houver target `open`. O Claim Review recebe o mesmo contrato e pode contestar target `established`/`dismissed` usando `target_id`, fazendo o runtime reabrir exatamente aquela dívida. Um escopo material ausente do contrato usa `target_id=null`; cabe à Main LLM decidir se cria novo target, reformula a investigação, restringe a resposta ou informa limitação.
+
+`investigation` e `investigation_map` permanecem separados: um guarda **propósito**, o outro **histórico de navegação**.
 
 ## Tools
 
-A LLM principal recebe atualmente 16 tools públicas:
+A Main LLM continua recebendo exatamente 16 tools públicas:
 
 `calculate`, `agent_info`, `project_stats`, `count_tokens`, `inspect_project`, `list_tree`, `search_code`, `find_symbol`, `read_range`, `read_file`, `memory_search`, `memory_store`, `run_tests`, `execution_trace`, `git_status` e `git_diff`.
 
-A escrita não é exposta como patch tools. O modelo emite o protocolo canônico `action=patches` e o runtime executa um único caminho transacional.
+A Rev5.2 não adiciona Planner, ResearchManager, tools `callers/callees/references`, ranking semântico de arquivos ou outro sistema de coverage de leitura. O benchmark mostrou falta de direção, não falta de capacidade de descoberta.
 
-## Escrita supervisionada
-
-```text
-pedido
-→ investigar código
-→ action=patches
-→ dry-run transacional
-→ confirmação do usuário
-→ aplicar transação
-→ compile/testes/releitura
-→ rollback em falha de validação
-→ resposta verificada
-```
+A escrita continua usando um único protocolo: `action=patches` → dry-run → confirmação → apply → compile/testes/releitura → rollback em falha.
 
 ## Evidence e Claim Review
 
-A Evidence completa permanece no runtime. A LLM recebe visões limitadas e pode pedir ranges mais profundos. Claims e Evidence são proporcionais ao conteúdo material da resposta: números como ~6, 12 ou 20+ são orientação, nunca quotas.
+A Evidence completa permanece no runtime. Evidence associada a targets fica pinned somente como índice compacto (`ID`, arquivo, linhas e hashes), evitando que uma fonte importante do começo da tarefa desapareça do índice depois de muitas observações.
 
-Claim Review é o único verificador semântico final. Ele verifica Claims atômicas e Semantic Gaps da conclusão. A recuperação local preserva o Review válido e reavalia somente a Claim ou Semantic Gap malformado; o runtime nunca inventa verdict, tipo de gap, Evidence ou correção semântica.
+Claim Review continua sendo o único verificador semântico. Ele verifica Claims materiais e cobertura dos targets. Claim, Semantic Gap e Finding Recovery preservam o conteúdo válido; o runtime nunca inventa verdict, Evidence, tipo de gap ou reparo semântico.
+
+## Fronteiras de contexto
+
+`request` é a única tarefa ativa. `conversation_background` permanece estável e não autoritativo ao longo do job. `investigation_map` preserva descobertas observáveis da tarefa atual entre follow-ups semânticos. Reads bloqueados por cobertura/repetição não contam como execução idêntica.
 
 ## Uso
 
-Instale as dependências:
-
 ```bash
 python -m pip install -r requirements.lock
-```
-
-Comandos úteis:
-
-```bash
 python main.py status
 python main.py perguntar "Analise o projeto"
 python main.py serve
@@ -87,24 +97,13 @@ python -m pytest -q
 
 ## Configuração
 
-Edite `config.json` para endpoint da LLM, modelo e limites do runtime. Não é necessário configurar manualmente o tipo de structured output por provider: a Eyle testa o comportamento real e salva o resultado local em `context/llm_capabilities.json`, ignorado pelo Git.
+Edite `config.json` para endpoint, modelo e limites do runtime. A capacidade de structured output é testada por comportamento e salva localmente em `context/llm_capabilities.json`, ignorado pelo Git.
 
 Veja [Configuração](docs/configuration.md).
 
-## Estrutura do projeto
-
-```text
-eyle/core/       AgentSession, tools, Evidence, Claim Review e edição segura
-eyle/runtime/    serviço, fila, worker, persistência, telemetria e histórico
-llm/             transporte, capacidades adaptativas e contratos estruturados
-web/             interface web local
-tests/           suíte de regressão canônica
-docs/            arquitetura, configuração, benchmarks e publicação atuais
-```
-
 ## Validação
 
-A Rev5.1 deve ser publicada somente depois que o artefato extraído passar:
+A Rev5.2.3 deve ser publicada somente depois que o artefato extraído passar:
 
 ```bash
 python -m eyle.devtools.release_identity
@@ -118,8 +117,6 @@ Veja [Benchmark](docs/benchmark.md) para o cenário real de aceitação da Agent
 ## Licença
 
 A Eyle tem **código-fonte disponível, mas não é software open source**. Uso pessoal, privado e não comercial é permitido conforme [LICENSE.md](LICENSE.md). Redistribuição, publicação de versões modificadas, uso comercial, sublicenciamento, venda ou oferta da Eyle como serviço exigem autorização prévia por escrito.
-
-Veja também [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) e [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 ## Documentação
 

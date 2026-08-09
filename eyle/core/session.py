@@ -15,7 +15,8 @@ class AgentSession:
     task_id: Optional[str] = None
     turn: int = 0
     tool_calls: int = 0
-    plan: List[str] = field(default_factory=list)
+    workspace_scope: Dict[str, str] = field(default_factory=dict)
+    investigation: List[Dict[str, Any]] = field(default_factory=list)
     latest_tool_results: List[Dict[str, Any]] = field(default_factory=list)
     evidence: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     tool_history: List[Dict[str, Any]] = field(default_factory=list)
@@ -27,7 +28,12 @@ class AgentSession:
     prompt_snapshots: List[Dict[str, Any]] = field(default_factory=list)
     phase_history: List[Dict[str, Any]] = field(default_factory=list)
     relevant_sources: List[Dict[str, Any]] = field(default_factory=list)
+    # Source ranges visible in the CURRENT compiled prompt only.
     visible_source_ranges: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    # Historical coverage is observability only; it must never suppress a reread by itself.
+    historically_seen_source_ranges: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    # Evidence explicitly kept available during semantic follow-up.
+    followup_pinned_evidence_ids: List[str] = field(default_factory=list)
     claim_review: Dict[str, Any] = field(default_factory=dict)
     claim_review_history: List[Dict[str, Any]] = field(default_factory=list)
     claim_repair_attempts: int = 0
@@ -42,7 +48,20 @@ class AgentSession:
 
     def evidence_index(self) -> List[Dict[str, Any]]:
         index: List[Dict[str, Any]] = []
-        for evidence_id, item in list(self.evidence.items())[-40:]:
+        pinned = []
+        seen = set()
+        for target in self.investigation:
+            if not isinstance(target, dict):
+                continue
+            for evidence_id in target.get("evidence_ids") or []:
+                evidence_id = str(evidence_id or "").strip()
+                if evidence_id and evidence_id in self.evidence and evidence_id not in seen:
+                    pinned.append(evidence_id)
+                    seen.add(evidence_id)
+        recent = [evidence_id for evidence_id in list(self.evidence.keys())[-40:] if evidence_id not in seen]
+        ordered_ids = pinned + recent
+        for evidence_id in ordered_ids:
+            item = self.evidence.get(evidence_id)
             if not isinstance(item, dict):
                 continue
             entry = {
@@ -52,6 +71,8 @@ class AgentSession:
                 "file_hash": item.get("file_hash"),
                 "content_hash": item.get("content_hash"),
             }
+            if evidence_id in seen:
+                entry["pinned"] = True
             if item.get("source_type"):
                 entry.update({
                     "source_type": item.get("source_type"),
@@ -115,7 +136,8 @@ class AgentSession:
             "task_id": self.task_id,
             "turn": self.turn,
             "tool_calls": self.tool_calls,
-            "plan": self.plan,
+            "workspace_scope": self.workspace_scope,
+            "investigation": self.investigation,
             "latest_tool_results": latest_results,
             "evidence": evidence,
             "tool_history": self.tool_history[-30:],
@@ -126,6 +148,8 @@ class AgentSession:
             "phase_history": self.phase_history,
             "relevant_sources": self.relevant_sources,
             "visible_source_ranges": self.visible_source_ranges,
+            "historically_seen_source_ranges": self.historically_seen_source_ranges,
+            "followup_pinned_evidence_ids": self.followup_pinned_evidence_ids,
             "claim_review": self.claim_review,
             "claim_review_history": self.claim_review_history[-10:],
             "claim_repair_attempts": self.claim_repair_attempts,
@@ -147,7 +171,9 @@ class AgentSession:
         )
         session.turn = int(data.get("turn") or 0)
         session.tool_calls = int(data.get("tool_calls") or 0)
-        session.plan = [str(item) for item in data.get("plan") or []]
+        raw_scope = data.get("workspace_scope")
+        session.workspace_scope = dict(raw_scope) if isinstance(raw_scope, dict) else {}
+        session.investigation = [dict(item) for item in data.get("investigation") or [] if isinstance(item, dict)]
         session.latest_tool_results = list(data.get("latest_tool_results") or [])
         session.evidence = dict(data.get("evidence") or {})
         session.tool_history = list(data.get("tool_history") or [])
@@ -158,6 +184,8 @@ class AgentSession:
         session.phase_history = list(data.get("phase_history") or [])
         session.relevant_sources = list(data.get("relevant_sources") or [])
         session.visible_source_ranges = dict(data.get("visible_source_ranges") or {})
+        session.historically_seen_source_ranges = dict(data.get("historically_seen_source_ranges") or {})
+        session.followup_pinned_evidence_ids = [str(item) for item in data.get("followup_pinned_evidence_ids") or [] if str(item)]
         session.claim_review = dict(data.get("claim_review") or {})
         session.claim_review_history = list(data.get("claim_review_history") or [])
         session.claim_repair_attempts = int(data.get("claim_repair_attempts") or 0)

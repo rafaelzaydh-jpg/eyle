@@ -15,7 +15,7 @@ from eyle.runtime import queue as runtime_queue
 def _config():
     return {
         "app_version": "2.7.4",
-        "revision": "rev5.1-context-boundaries-investigation-continuity",
+        "revision": "rev5.2-investigation-contract-directed-evidence",
         "llm": {
             "model": "auto",
             "context_window_tokens": 10000,
@@ -169,7 +169,11 @@ def test_agent_can_choose_execution_trace_and_cite_it(monkeypatch, tmp_path):
         if len(prompts) == 1:
             names = {item["name"] for item in payload["available_tools"]}
             assert "execution_trace" in names
-            return {"tool_calls": [{"tool": "execution_trace", "arguments": {"section": "context", "limit": 20}}], "plan": []}
+            return {
+                "tool_calls": [{"tool": "execution_trace", "arguments": {"section": "context", "limit": 20}}],
+                "workspace_scope": {"mode": "read", "reason": "The request asks about the current execution trace."},
+                "investigation": [{"id": "T1", "goal": "Establish what the current trace records", "status": "open", "evidence_ids": [], "reason": ""}],
+            }
         result = payload["latest_tool_results"][0]
         assert result["tool"] == "execution_trace"
         assert result["detail"]["context"]
@@ -177,7 +181,8 @@ def test_agent_can_choose_execution_trace_and_cite_it(monkeypatch, tmp_path):
         return {"final": {
             "answer": "O trace atual registra a composição do contexto sem expor o prompt bruto.",
             "evidence_ids": [evidence_id],
-        }, "plan": []}
+        }, "workspace_scope": {"mode": "read", "reason": "The answer depends on the current execution trace."},
+        "investigation": [{"id": "T1", "goal": "Establish what the current trace records", "status": "established", "evidence_ids": [evidence_id], "reason": "The trace Evidence was observed."}]}
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
     status, text, _, details = core_agent.executar_agente(

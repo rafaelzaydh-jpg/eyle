@@ -22,12 +22,16 @@ def test_final_gate_is_structural_and_requires_evidence_for_workspace_facts():
     ok, reason, answer, _, _, _ = validate_final(
         {"answer": "X está em x.py.", "evidence_ids": ["ev-1"]},
         evidence, request="Onde AgentSession está definido?", project_available=True,
+        investigation=[{"id":"T1","goal":"Establish location","status":"established","evidence_ids":["ev-1"],"reason":"cited"}],
+        grounding_required=True,
     )
     assert ok is True and reason == "ok" and answer.startswith("X")
 
     ok, reason, *_ = validate_final(
         {"answer": "X está em x.py.", "evidence_ids": []},
         evidence, request="Onde AgentSession está definido?", project_available=True,
+        investigation=[{"id":"T1","goal":"Establish location","status":"established","evidence_ids":["ev-1"],"reason":"cited"}],
+        grounding_required=True,
     )
     assert ok is False and reason == "FINAL_PROJECT_EVIDENCE_IDS_REQUIRED"
 
