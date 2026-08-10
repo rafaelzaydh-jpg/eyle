@@ -40,39 +40,17 @@ def _config(**overrides):
         "connect_timeout_seconds": 5,
         "read_timeout_seconds": 120,
         "retry_max_attempts": 1,
-        "agent_retry_max_attempts": 1,
         "max_concurrent_requests": 1,
     }
     llm.update(overrides)
     return {"llm": llm}
 
 
-def _capture(monkeypatch, response, *, include_admin=False):
+def _capture(monkeypatch, response):
     calls = []
 
     def fake_urlopen(req, timeout=None):
         payload = json.loads(req.data.decode("utf-8")) if req.data else None
-        if isinstance(payload, dict):
-            fmt = payload.get("response_format")
-            messages = payload.get("messages") or []
-            user_text = str((messages[-1] if messages else {}).get("content") or "")
-            if isinstance(fmt, dict) and fmt.get("type") == "json_schema":
-                js = fmt.get("json_schema") or {}
-                if js.get("name") == "eyle_capability_probe":
-                    schema = js.get("schema") or {}
-                    nonce = (((schema.get("properties") or {}).get("schema_probe") or {}).get("enum") or [""])[0]
-                    if include_admin:
-                        calls.append((req.full_url, payload))
-                    return _FakeResponse({"choices": [{"message": {"content": json.dumps({"schema_probe": nonce, "items": [], "optional": None})}}]})
-            if isinstance(fmt, dict) and fmt.get("type") == "json_object" and "PROBE-" in user_text:
-                if include_admin:
-                    calls.append((req.full_url, payload))
-                return _FakeResponse({"choices": [{"message": {"content": "{}"}}]})
-            if fmt is None and "prompt_probe" in user_text and "Return exactly one JSON object" in user_text:
-                marker = user_text.split('{"prompt_probe":"', 1)[-1].split('"}', 1)[0]
-                if include_admin:
-                    calls.append((req.full_url, payload))
-                return _FakeResponse({"choices": [{"message": {"content": json.dumps({"prompt_probe": marker})}}]})
         calls.append((req.full_url, payload))
         return _FakeResponse(response)
 
@@ -82,9 +60,8 @@ def _capture(monkeypatch, response, *, include_admin=False):
 
 def _agent_json(answer="ok"):
     return json.dumps({
-        "action": "final", "tool_calls": None, "patches": None,
-        "needs_user": None, "final": {"answer": answer, "evidence_ids": [], "limitations": []},
-        "workspace_scope": {"mode": "none", "reason": "transport fixture is workspace-independent"},
+        "tool_calls": None, "patches": None,
+        "needs_user": None, "final": {"answer": answer, "limitations": []},
         "investigation_updates": [],
     })
 
@@ -110,30 +87,27 @@ def test_structured_openai_uses_strict_profile_schema(monkeypatch):
     assert fmt["type"] == "json_schema"
     assert fmt["json_schema"]["strict"] is True
     assert set(fmt["json_schema"]["schema"]["required"]) == {
-        "action", "tool_calls", "patches", "needs_user", "final", "workspace_scope", "investigation_updates",
+        "tool_calls", "patches", "needs_user", "final", "investigation_updates",
     }
 
 
-def test_structured_handshake_fails_closed_when_no_mode_is_usable(monkeypatch):
+def test_structured_json_schema_is_required_and_fails_closed(monkeypatch):
     calls = []
 
     def fake_urlopen(req, timeout=None):
         payload = json.loads(req.data.decode("utf-8"))
         calls.append(payload)
-        fmt = payload.get("response_format")
-        if isinstance(fmt, dict):
-            raise urllib.error.HTTPError(
-                req.full_url, 400, "Bad Request", {}, io.BytesIO(b'{"error":"structured output unsupported"}')
-            )
-        # Prompt mode is accepted by transport but deliberately returns non-JSON.
-        return _FakeResponse({"choices": [{"message": {"content": "plain text"}}]})
+        raise urllib.error.HTTPError(
+            req.full_url, 400, "Bad Request", {},
+            io.BytesIO(b'{"error":"json schema unsupported"}')
+        )
 
     monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(llm_mod.ErroLLM) as exc:
         llm_mod._chamar_llm("s", "u", _config(retry_max_attempts=1), perfil="agent")
     assert exc.value.error_code == "LLM_STRUCTURED_OUTPUT_UNAVAILABLE"
-    assert [call.get("response_format", {}).get("type") for call in calls[:2]] == ["json_schema", "json_object"]
-    assert "response_format" not in calls[-1]
+    assert len(calls) == 1
+    assert calls[0]["response_format"]["type"] == "json_schema"
 
 
 def test_reasoning_content_is_never_executable(monkeypatch):
@@ -242,7 +216,7 @@ def test_connect_timeout_does_not_replace_read_timeout():
 
 
 def test_claim_verifier_missing_claims_is_rejected_at_structured_boundary(monkeypatch):
-    content = json.dumps({"findings": [], "semantic_gaps": []})
+    content = json.dumps({"semantic_gaps": []})
     _capture(monkeypatch, {"choices": [{"message": {"content": content}}]})
     with pytest.raises(llm_mod.ErroLLM) as exc:
         llm_mod._chamar_llm("s", "u", _config(), perfil="claim_verifier")
@@ -250,7 +224,11 @@ def test_claim_verifier_missing_claims_is_rejected_at_structured_boundary(monkey
 
 
 def test_claim_verifier_never_selects_an_earlier_partial_json_object(monkeypatch):
-    complete = json.dumps({"claims": [], "findings": [], "semantic_gaps": []})
+    complete = json.dumps({
+        "material_satisfaction": {"status": "satisfied", "reason": "Fixture delivers the requested material result."},
+        "answer_consistency": {"status": "consistent", "reason": "Fixture answer is internally consistent."},
+        "claims": [], "semantic_gaps": [],
+    })
     content = json.dumps({"semantic_gaps": []}) + "\n" + complete
     _capture(monkeypatch, {"choices": [{"message": {"content": content}}]})
     with pytest.raises(llm_mod.ErroLLM) as exc:

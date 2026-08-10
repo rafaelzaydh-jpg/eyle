@@ -222,23 +222,34 @@
     [
       historyLine("turnos", agent.turns),
       historyLine("tools executadas", agent.tool_calls),
-      historyLine("budget base", agent.tool_budget_base),
-      historyLine("extensão conquistada", agent.earned_tool_extension),
-      historyLine("limite efetivo", agent.tool_budget_effective),
-      historyLine("ciclos de extensão", agent.tool_extension_cycles),
-      historyLine("committed progress", agent.committed_progress_epoch),
-      historyLine("progresso pendente", agent.pending_progress_cycles),
-      historyLine("bônus pendente", agent.pending_extension_calls),
-      historyLine("evidências já creditadas", agent.progress_credited_evidence_count),
+      historyLine("limite físico de tools", agent.tool_call_limit),
+      historyLine("tools restantes", agent.tool_calls_remaining),
+      historyLine("evidências", agent.evidence_count_total),
       historyLine("observation ledger", agent.observation_ledger_size),
       historyLine("replays/rehydrations", agent.observation_replays),
       historyLine("rejeições repetidas", agent.repeated_rejected_decisions),
       historyLine("workspace epoch", agent.workspace_epoch),
-      historyLine("fase final", agent.final_phase),
       historyLine("duração", history.duration_seconds != null ? `${history.duration_seconds}s` : null),
       historyLine("falha", agent.failure_code),
     ].filter(Boolean).forEach((line) => summary.appendChild(line));
     panel.appendChild(summary);
+
+    const taskTotals = agent.task_totals || {};
+    if (Object.keys(taskTotals).length && (
+      taskTotals.turns !== agent.turns || taskTotals.tool_calls !== agent.tool_calls ||
+      taskTotals.evidence_count !== agent.evidence_count_total || taskTotals.observation_replays !== agent.observation_replays
+    )) {
+      const taskSection = historySection("Tarefa acumulada");
+      [
+        historyLine("turnos acumulados", taskTotals.turns),
+        historyLine("tools acumuladas", taskTotals.tool_calls),
+        historyLine("evidências acumuladas", taskTotals.evidence_count),
+        historyLine("observações acumuladas", taskTotals.observation_events),
+        historyLine("replays acumulados", taskTotals.observation_replays),
+        historyLine("decisões acumuladas", taskTotals.decision_events),
+      ].filter(Boolean).forEach((line) => taskSection.appendChild(line));
+      panel.appendChild(taskSection);
+    }
 
     const tokens = history.tokens || {};
     if (Object.keys(tokens).length) {
@@ -251,12 +262,50 @@
         completion: "saída",
         reasoning: "reasoning reportado",
         effective_total: "total efetivo",
+        physical_estimated_total: "total físico estimado",
+        physical_remaining: "budget físico restante",
+        physical_limit: "budget físico máximo",
       };
       Object.entries(labels).forEach(([key, label]) => {
         const line = historyLine(label, tokens[key]);
         if (line) tokenSection.appendChild(line);
       });
       panel.appendChild(tokenSection);
+    }
+
+    const accounting = history.prompt_accounting || {};
+    if (Object.keys(accounting).length) {
+      const summaryData = accounting.summary || {};
+      const diagnostics = accounting.diagnostics || {};
+      const costSection = historySection("Contabilidade de prompt");
+      [
+        historyLine("estimativa local total", summaryData.local_total_estimated_tokens),
+        historyLine("provider prompt total", summaryData.provider_prompt_tokens),
+        historyLine("provider/local", summaryData.provider_to_local_estimate_ratio),
+        historyLine("imposto fixo repetido", summaryData.fixed_repeat_tax_estimated_tokens),
+        historyLine("resultados frescos", summaryData.fresh_observation_estimated_tokens),
+        historyLine("contexto retido", summaryData.retained_context_estimated_tokens),
+        historyLine("estado Evidence/Investigation", summaryData.evidence_state_estimated_tokens),
+        historyLine("amplificação Evidence", diagnostics.evidence_amplification_ratio),
+        historyLine("taxa de replay", diagnostics.replay_request_rate),
+        historyLine("Evidence sem referência estrutural", diagnostics.structurally_unreferenced_evidence_count),
+        historyLine("tools sem referência estrutural", diagnostics.structurally_unreferenced_tool_actions),
+      ].filter(Boolean).forEach((line) => costSection.appendChild(line));
+
+      const details = document.createElement("details");
+      details.className = "history-item";
+      const summaryEl = document.createElement("summary");
+      summaryEl.textContent = "componentes acumulados e pacote do Claim";
+      details.appendChild(summaryEl);
+      details.appendChild(historyJsonBlock({
+        categories: accounting.categories || {},
+        component_totals: accounting.component_totals || {},
+        claim_packet: accounting.claim_packet || {},
+        diagnostics,
+        interpretation: accounting.interpretation,
+      }));
+      costSection.appendChild(details);
+      panel.appendChild(costSection);
     }
 
     const llmCalls = Array.isArray(history.llm_calls) ? history.llm_calls : [];
@@ -270,11 +319,10 @@
         const details = document.createElement("details");
         details.className = "history-item";
         const summaryEl = document.createElement("summary");
-        const phase = call.phase ? ` · ${call.phase}` : "";
         const prompt = call.prompt_tokens != null ? ` · ${call.prompt_tokens} prompt` : "";
         const cached = call.cached_prompt_tokens != null ? ` · ${call.cached_prompt_tokens} cache` : "";
         const requestState = call.request_status === "preflight_blocked" ? " · preflight bloqueado" : "";
-        summaryEl.textContent = `LLM #${call.call}${phase}${prompt}${cached}${requestState}`;
+        summaryEl.textContent = `LLM #${call.call}${prompt}${cached}${requestState}`;
         details.appendChild(summaryEl);
         const body = { ...call };
         delete body.call;
@@ -292,8 +340,7 @@
         details.className = "history-item";
         const summaryEl = document.createElement("summary");
         const outcome = item.outcome ? ` · ${item.outcome}` : "";
-        const phase = item.phase ? ` · ${item.phase}` : "";
-        summaryEl.textContent = `turno ${item.turn || item.call} · ${item.decision || "decisão"}${outcome}${phase}`;
+        summaryEl.textContent = `turno ${item.turn || item.call} · ${item.decision || "decisão"}${outcome}`;
         details.appendChild(summaryEl);
         const body = { ...item };
         delete body.call;
@@ -311,8 +358,7 @@
         details.className = "history-item";
         const summaryEl = document.createElement("summary");
         const statusText = call.status ? ` · ${call.status}` : "";
-        const phaseText = call.phase ? ` · ${call.phase}` : "";
-        summaryEl.textContent = `${call.call}. ${call.tool || "tool"}${statusText}${phaseText}`;
+        summaryEl.textContent = `${call.call}. ${call.tool || "tool"}${statusText}`;
         details.appendChild(summaryEl);
         const toolNameLine = historyLine("ferramenta", call.tool || "unknown_tool");
         if (toolNameLine) details.appendChild(toolNameLine);
@@ -328,50 +374,6 @@
         toolSection.appendChild(details);
       });
       panel.appendChild(toolSection);
-    }
-
-    const commits = Array.isArray(history.committed_progress_history) ? history.committed_progress_history : [];
-    if (commits.length) {
-      const commitSection = historySection(`Committed progress · ${commits.length} depósito(s)`);
-      commits.forEach((item) => {
-        const details = document.createElement("details");
-        details.className = "history-item";
-        const summaryEl = document.createElement("summary");
-        const targets = Array.isArray(item.target_ids) && item.target_ids.length ? ` · ${item.target_ids.join(", ")}` : "";
-        summaryEl.textContent = `turno ${item.turn || "?"} · epoch ${item.epoch || "?"}${targets}`;
-        details.append(summaryEl, historyJsonBlock(item));
-        commitSection.appendChild(details);
-      });
-      panel.appendChild(commitSection);
-    }
-
-    const extensions = Array.isArray(history.tool_extension_history) ? history.tool_extension_history : [];
-    if (extensions.length) {
-      const extensionSection = historySection(`Extensões de tools · ${extensions.length} ciclo(s)`);
-      extensions.forEach((item) => {
-        const details = document.createElement("details");
-        details.className = "history-item";
-        const summaryEl = document.createElement("summary");
-        const granted = item.granted != null ? `+${item.granted}` : "extensão";
-        summaryEl.textContent = `turno ${item.turn || "?"} · ${granted} tools`;
-        details.append(summaryEl, historyJsonBlock(item));
-        extensionSection.appendChild(details);
-      });
-      panel.appendChild(extensionSection);
-    }
-
-    const progress = Array.isArray(history.progress_history) ? history.progress_history : [];
-    if (progress.length) {
-      const progressSection = historySection(`Runtime progress · ${progress.length} ciclo(s)`);
-      progress.forEach((item) => {
-        const details = document.createElement("details");
-        details.className = "history-item";
-        const summaryEl = document.createElement("summary");
-        summaryEl.textContent = `turno ${item.turn || "?"} · ${item.progressed ? "avançou" : "sem mudança"}`;
-        details.append(summaryEl, historyJsonBlock(item));
-        progressSection.appendChild(details);
-      });
-      panel.appendChild(progressSection);
     }
 
     const validation = history.write_validation || {};

@@ -28,7 +28,7 @@ def test_falha_antes_do_replace_mantem_json_anterior(monkeypatch, tmp_path):
     caminho.write_text(original, encoding="utf-8")
 
     def falhar_dump(*args, **kwargs):
-        args[1].write('{"truncado":')
+        args[1].write('{"truncated":')
         raise OSError("interrupcao simulada")
 
     monkeypatch.setattr(persistence.json, "dump", falhar_dump)

@@ -54,7 +54,7 @@ _ROTAS_PUBLICAS = {"painel", "static"}
 _CHAVES_PUBLICAS_PROJETO = ("nome", "auto_discovered")
 
 _CHAVES_PUBLICAS_JOB = (
-    "id", "tipo", "status", "tentativas", "criado_em", "atualizado_em",
+    "id", "type", "status", "tentativas", "criado_em", "atualizado_em",
     "iniciado_em", "concluido_em", "erro", "progresso_seq", "cancel_reason",
 )
 _CHAVES_PUBLICAS_PROGRESSO = (
@@ -293,7 +293,7 @@ def _job_publico(registro):
         publico["progresso"] = seguro
 
     payload = registro.get("payload")
-    if isinstance(payload, dict) and registro.get("tipo") == "pergunta":
+    if isinstance(payload, dict) and registro.get("type") == "pergunta":
         mensagem_id = payload.get("mensagem_id")
         texto = payload.get("texto")
         if isinstance(mensagem_id, int) and mensagem_id > 0:
@@ -366,7 +366,7 @@ def enviar():
         "user", texto,
     )
     job_id = queue.adicionar({
-        "tipo": "pergunta",
+        "type": "pergunta",
         "texto": texto,
         "mensagem_id": mensagem_id,
         "historico_snapshot": historico_snapshot,

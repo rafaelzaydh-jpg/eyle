@@ -13,7 +13,6 @@ from typing import Any, Dict, List, Optional
 from .workspace_policy import _caminho_parece_segredo, _conteudo_parece_segredo
 
 
-_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv"}
 
 
 def _run_git(root: str, args: List[str], timeout: int = 20) -> Dict[str, Any]:

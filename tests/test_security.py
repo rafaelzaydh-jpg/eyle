@@ -9,7 +9,7 @@ from eyle.core.security import _resolver_caminho_seguro
 def _ctx(raiz):
     return {
         "projeto": {"caminho_origem": str(raiz)},
-        "config": {"agent": {"max_read_range_lines": 400}},
+        "config": {"agent": {"max_file_read_lines": 400}},
     }
 
 
@@ -26,8 +26,8 @@ def test_caminho_normal_dentro_do_projeto_continua_funcionando(tmp_path):
         "read_file", {"path": "src/normal.py"}, _ctx(raiz),
     )
     assert resultado["status"] == "success"
-    assert resultado["detail"]["conteudo"] == "valor = 42\n"
-    assert resultado["detail"]["truncado"] is False
+    assert resultado["detail"]["content"] == "valor = 42\n"
+    assert resultado["detail"]["truncated"] is False
 
 
 def test_read_file_rejeita_travessia_sem_vazar_conteudo(tmp_path):

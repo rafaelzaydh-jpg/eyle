@@ -3,7 +3,7 @@ from pathlib import Path
 
 import eyle.core.agent as core_agent
 import eyle.core.tools as tools
-from tests.canonical import agent_final, agent_patches, agent_tools, base_config, investigation_target, tool_call, workspace_scope
+from tests.canonical import agent_final, agent_patches, agent_tools, base_config, investigation_target, tool_call
 
 
 def config(tmp_path, *, claims_mode="off"):
@@ -23,7 +23,11 @@ def test_greeting_is_written_by_same_agent(monkeypatch, tmp_path):
     assert text.startswith("Oiii")
     assert pending is None
     assert len(prompts) == 1
-    assert prompts[0]["available_tools"] == []
+    index = prompts[0]["capability_index"]
+    assert any(item.startswith("calculate(") for item in index)
+    assert any(item.startswith("agent_info(") for item in index)
+    assert any(item.startswith("execution_trace(") for item in index)
+    assert prompts[0]["active_tools"] == []
     assert details["tool_calls"] == 0
 
 
@@ -44,8 +48,8 @@ def test_analysis_uses_one_agent_loop_and_retained_evidence(monkeypatch, tmp_pat
     assert status == "success"
     assert "adição" in text
     assert len(prompts) == 2
-    assert "def soma" in prompts[1]["latest_tool_results"][0]["detail"]["trecho_numerado"]
-    assert "conteudo" not in prompts[1]["latest_tool_results"][0]["detail"]
+    assert "def soma" in prompts[1]["latest_tool_results"][0]["detail"]["numbered_content"]
+    assert "content" not in prompts[1]["latest_tool_results"][0]["detail"]
     assert details["investigation"][0]["goal"] == "Establish what app.py does"
 
 
@@ -55,7 +59,7 @@ def test_transactional_write_requires_confirmation_and_resume_is_deterministic(m
     updated = "def soma(a, b):\n    return a + b + 1\n"
     app.write_text(original, encoding="utf-8")
     outputs = iter([
-        agent_tools(tool_call("read_file", {"path": "app.py"}), scope=workspace_scope("write")),
+        agent_tools(tool_call("read_file", {"path": "app.py"})),
         agent_patches([{"operation": "replace", "path": "app.py", "content": updated}]),
     ])
     monkeypatch.setattr(core_agent, "executar_agente_llm", lambda prompt, cfg: next(outputs))
@@ -67,7 +71,8 @@ def test_transactional_write_requires_confirmation_and_resume_is_deterministic(m
     assert status == "needs_user"
     assert app.read_text(encoding="utf-8") == original
     assert pending["continuation_kind"] == "write_confirmation"
-    assert pending["write_transaction"]["patches"][0]["path"] == "app.py"
+    assert pending["transaction_id"] == pending["estado"]["write_transaction"]["transaction_id"]
+    assert pending["estado"]["write_transaction"]["patches"][0]["path"] == "app.py"
 
     status, text, pending2, details = core_agent.executar_agente(
         pending["estado"]["request"], config(tmp_path),
@@ -77,7 +82,8 @@ def test_transactional_write_requires_confirmation_and_resume_is_deterministic(m
     assert status == "success"
     assert pending2 is None
     assert "+ 1" in app.read_text(encoding="utf-8")
-    assert "releitura" in text.lower()
+    assert "relidos integralmente" in text.lower()
+    assert details["write_transaction"]["validation"]["full_reread"]["ok"] is True
     assert details["llm_usage"].get("llm_calls", 0) == 0
 
 
@@ -86,7 +92,7 @@ def test_pending_transaction_does_not_duplicate_full_source(monkeypatch, tmp_pat
     source = "TOKEN_DO_ARQUIVO = 'segredo-local'\n"
     app.write_text(source, encoding="utf-8")
     outputs = iter([
-        agent_tools(tool_call("read_file", {"path": "app.py"}), scope=workspace_scope("write")),
+        agent_tools(tool_call("read_file", {"path": "app.py"})),
         agent_patches([{"operation": "replace", "path": "app.py", "content": "TOKEN_DO_ARQUIVO = 'novo'\n"}]),
     ])
     monkeypatch.setattr(core_agent, "executar_agente_llm", lambda prompt, cfg: next(outputs))
@@ -96,7 +102,7 @@ def test_pending_transaction_does_not_duplicate_full_source(monkeypatch, tmp_pat
     assert status == "needs_user"
     serialized = json.dumps(pending, ensure_ascii=False)
     assert source.strip() not in serialized
-    assert pending["write_transaction"]["patches"][0]["content"] == "TOKEN_DO_ARQUIVO = 'novo'\n"
+    assert pending["estado"]["write_transaction"]["patches"][0]["content"] == "TOKEN_DO_ARQUIVO = 'novo'\n"
 
 
 def test_identical_read_loop_is_bounded(monkeypatch, tmp_path):
@@ -106,12 +112,11 @@ def test_identical_read_loop_is_bounded(monkeypatch, tmp_path):
         lambda p, c: agent_tools(tool_call("read_file", {"path": "app.py"})),
     )
     cfg = config(tmp_path)
-    cfg["agent"]["max_identical_tool_repeats"] = 2
     status, _, _, details = core_agent.executar_agente(
         "analise", cfg, projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True,
     )
     assert status == "failed"
-    assert details["failure_code"] in {"IDENTICAL_TOOL_LOOP", "AGENT_NO_PROGRESS", "FINAL_PHASE_REQUIRES_ANSWER"}
+    assert details["failure_code"] == "OBSERVATION_REPLAY_LOOP"
 
 
 def test_disabled_tests_are_not_advertised(monkeypatch, tmp_path):
@@ -126,7 +131,7 @@ def test_disabled_tests_are_not_advertised(monkeypatch, tmp_path):
         "olhe o projeto", config(tmp_path), projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True,
     )
     assert status == "success"
-    assert "run_tests" not in {item["name"] for item in prompts[0]["available_tools"]}
+    assert not any(item.startswith("run_tests(") for item in prompts[0]["capability_index"])
 
 
 def test_external_memory_only_moves_through_tools(monkeypatch, tmp_path):
@@ -134,7 +139,7 @@ def test_external_memory_only_moves_through_tools(monkeypatch, tmp_path):
     app.write_text("VALUE = 1\n", encoding="utf-8")
     import hashlib
     file_hash = hashlib.sha256(app.read_bytes()).hexdigest()
-    evidence = {"ev-0001": {"arquivo": "app.py", "file_hash": file_hash}}
+    evidence = {"ev-0001": {"file": "app.py", "file_hash": file_hash}}
     context = {"config": config(tmp_path), "projeto": {"caminho_origem": str(tmp_path)}, "evidence": evidence}
     monkeypatch.setattr(tools, "MEMORY_DIR", str(tmp_path / "memory"))
     stored = tools.executar_tool("memory_store", {"text": "app.py define VALUE", "kind": "fact", "evidence_ids": ["ev-0001"]}, context)

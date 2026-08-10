@@ -13,8 +13,8 @@ def _usar_fila_temporaria(monkeypatch, tmp_path):
 def test_fila_persistente_preserva_fifo_resultado_e_status(monkeypatch, tmp_path):
     banco = _usar_fila_temporaria(monkeypatch, tmp_path)
 
-    primeiro = queue.adicionar({"tipo": "pergunta", "texto": "A"})
-    segundo = queue.adicionar({"tipo": "pergunta", "texto": "B"})
+    primeiro = queue.adicionar({"type": "pergunta", "texto": "A"})
+    segundo = queue.adicionar({"type": "pergunta", "texto": "B"})
 
     assert banco.exists()
     assert queue.tamanho() == 2
@@ -31,7 +31,7 @@ def test_fila_persistente_preserva_fifo_resultado_e_status(monkeypatch, tmp_path
 
 def test_worker_recoloca_job_interrompido_na_fila(monkeypatch, tmp_path):
     _usar_fila_temporaria(monkeypatch, tmp_path)
-    job_id = queue.adicionar({"tipo": "pergunta", "texto": "sobrevivo"})
+    job_id = queue.adicionar({"type": "pergunta", "texto": "sobrevivo"})
 
     reservado = queue.proximo(timeout=0)
     assert reservado["_job_id"] == job_id
@@ -45,7 +45,7 @@ def test_worker_recoloca_job_interrompido_na_fila(monkeypatch, tmp_path):
 
 def test_falha_do_worker_fica_registrada(monkeypatch, tmp_path):
     _usar_fila_temporaria(monkeypatch, tmp_path)
-    job_id = queue.adicionar({"tipo": "quebrar"})
+    job_id = queue.adicionar({"type": "quebrar"})
     monkeypatch.setattr(
         worker,
         "processar_evento",
@@ -97,7 +97,7 @@ def test_worker_repassa_snapshot_do_job(monkeypatch):
 
     monkeypatch.setattr(worker.eyle_service, "processar", fake_processar)
     worker.processar_evento({
-        "tipo": "pergunta", "texto": "agora", "historico_snapshot": snapshot,
+        "type": "pergunta", "texto": "agora", "historico_snapshot": snapshot,
     })
 
     assert chamada["registrar_pergunta"] is False
@@ -106,7 +106,7 @@ def test_worker_repassa_snapshot_do_job(monkeypatch):
 
 def test_falha_estruturada_do_engine_nao_vira_completed(monkeypatch, tmp_path):
     _usar_fila_temporaria(monkeypatch, tmp_path)
-    job_id = queue.adicionar({"tipo": "pergunta", "texto": "oi"})
+    job_id = queue.adicionar({"type": "pergunta", "texto": "oi"})
     resultado_falha = {
         "status": "failed",
         "error_code": "TRANSPORT_ERROR",
@@ -124,7 +124,7 @@ def test_falha_estruturada_do_engine_nao_vira_completed(monkeypatch, tmp_path):
 
 def test_queue_falhar_pode_preservar_resultado_estruturado(monkeypatch, tmp_path):
     _usar_fila_temporaria(monkeypatch, tmp_path)
-    job_id = queue.adicionar({"tipo": "pergunta", "texto": "A"})
+    job_id = queue.adicionar({"type": "pergunta", "texto": "A"})
     queue.proximo(timeout=0)
     resultado = {"status": "failed", "error_code": "EMPTY_RESPONSE"}
 

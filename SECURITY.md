@@ -16,6 +16,16 @@ Eyle is designed to fail closed around project writes and command execution:
 - writes require fresh evidence, hashes, a dry run, and explicit confirmation;
 - tests run through a configured sandbox and are refused when isolation cannot
   satisfy the requested policy;
+- `run_command` is unrestricted only inside a strong per-job project snapshot:
+  automatic selection prefers Docker and falls back to Bubblewrap; `trusted_local`
+  and process-only execution are rejected for this capability;
+- Docker sandbox execution uses one disposable persistent container per job; it may
+  use the network, auto-pull the base image, install dependencies/toolchains, compile,
+  create, modify, and delete files without user confirmation; only a sanitized copied
+  snapshot is mounted read-write, never the real workspace;
+- protected secret paths and files matching the secret-content policy are omitted
+  from unrestricted sandbox snapshots so command execution cannot bypass the
+  workspace read boundary;
 - `git_status` and `git_diff` are inspection-only; Rev5 does not expose Git mutation commands to the LLM;
 - test and diff text returned to the model is bounded to reduce context flooding;
 - patches are applied atomically and can be rolled back;
@@ -33,4 +43,4 @@ Reintroducing a removed architecture or compatibility path requires a concrete c
 
 ## Semantic verification boundary
 
-Claim review is advisory semantic verification, not a new authority layer. The verifier receives compact evidence and cannot call tools or write. `self_check` is not independent verification because it uses the same configured model; `verified` may use a separate verifier backend. Deterministic write, path, hash, test and rollback controls remain runtime-enforced.
+Claim review is advisory semantic verification, not a new authority layer. The verifier receives typed grounding coordinates (`request`, answer anchors, source Evidence, Runtime Facts and Investigation targets) and cannot call tools or write. Runtime validates coordinate existence, not semantic sufficiency. A truthful physical blockage may be grounded by a Runtime Fact without inventing source Evidence. `self_check` is not independent verification because it uses the same configured model; `verified` may use a separate verifier backend. Deterministic write, path, hash, test and rollback controls remain runtime-enforced.

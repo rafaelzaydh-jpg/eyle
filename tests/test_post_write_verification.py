@@ -8,11 +8,12 @@ from eyle.core.post_write import (
     verify_expected_outputs,
 )
 from eyle.core.session import AgentSession
+from eyle.core.write_transaction import begin as begin_write_transaction, set_status as set_write_status
 
 
 def _config(tests_enabled=False):
     return {
-        "agent": {"max_read_range_lines": 400},
+        "agent": {"max_file_read_lines": 400},
         "codar": {
             "ativado": True,
             "testes": {"ativado": tests_enabled, "timeout_segundos": 30},
@@ -20,26 +21,17 @@ def _config(tests_enabled=False):
     }
 
 
-def _pending_replace_and_create(root, replacement="VALUE = 2\n"):
+def _session_pending_replace_and_create(root, replacement="VALUE = 2\n"):
     original = (root / "app.py").read_text(encoding="utf-8")
-    return {
-        "continuation_kind": "write_confirmation",
-        "write_transaction": {
-            "patches": [
-                    {
-                        "operation": "replace",
-                        "path": "app.py",
-                        "content": replacement,
-                        "file_hash_expected": hashlib.sha256(original.encode()).hexdigest(),
-                    },
-                    {
-                        "operation": "create",
-                        "path": "tests/test_created.py",
-                        "content": "def test_created():\n    assert True\n",
-                    },
-                ]
-        }
-    }
+    patches = [
+        {"operation":"replace","path":"app.py","content":replacement,"file_hash_expected":hashlib.sha256(original.encode()).hexdigest()},
+        {"operation":"create","path":"tests/test_created.py","content":"def test_created():\n    assert True\n"},
+    ]
+    session = AgentSession("mude")
+    session.write_transaction = begin_write_transaction(patches=patches, turn=1)
+    set_write_status(session.write_transaction, "awaiting_confirmation")
+    pending = {"continuation_kind":"write_confirmation","transaction_id":session.write_transaction["transaction_id"]}
+    return session, pending
 
 
 def test_new_pytest_file_is_detected_without_root_marker(tmp_path):
@@ -80,14 +72,14 @@ def test_compileall_reports_invalid_written_python(tmp_path):
 def test_failed_tests_roll_back_whole_transaction(monkeypatch, tmp_path):
     app = tmp_path / "app.py"
     app.write_text("VALUE = 1\n", encoding="utf-8")
-    pending = _pending_replace_and_create(tmp_path)
+    session, pending = _session_pending_replace_and_create(tmp_path)
     monkeypatch.setattr(core_agent, "_run_tests_after_write", lambda *_: {
         "status": "failed", "ok": False, "executed": True,
         "error_code": "TESTS_FAILED", "detail": "1 failed",
     })
 
     status, text, _, details = core_agent._resume_set(
-        AgentSession("mude"), pending, _config(tests_enabled=True),
+        session, pending, _config(tests_enabled=True),
         {"caminho_origem": str(tmp_path)}, True,
     )
 
@@ -101,14 +93,14 @@ def test_failed_tests_roll_back_whole_transaction(monkeypatch, tmp_path):
 def test_compileall_failure_rolls_back_whole_transaction(monkeypatch, tmp_path):
     app = tmp_path / "app.py"
     app.write_text("VALUE = 1\n", encoding="utf-8")
-    pending = _pending_replace_and_create(tmp_path)
+    session, pending = _session_pending_replace_and_create(tmp_path)
     monkeypatch.setattr(core_agent, "_compile_after_write", lambda *_: {
         "required": True, "executed": True, "ok": False,
         "error_code": "COMPILEALL_FAILED", "detail": "syntax error",
     })
 
     status, _, _, details = core_agent._resume_set(
-        AgentSession("mude"), pending, _config(),
+        session, pending, _config(),
         {"caminho_origem": str(tmp_path)}, True,
     )
 
@@ -122,18 +114,16 @@ def test_no_tests_means_partial_validation_not_verified(tmp_path):
     app = tmp_path / "app.py"
     app.write_text("VALUE = 1\n", encoding="utf-8")
     original = app.read_text(encoding="utf-8")
-    pending = {
-        "continuation_kind": "write_confirmation",
-        "write_transaction": {"patches": [{
-                "operation": "replace",
-                "path": "app.py",
-                "content": "VALUE = 2\n",
-                "file_hash_expected": hashlib.sha256(original.encode()).hexdigest(),
-            }]}
-    }
+    session = AgentSession("mude")
+    session.write_transaction = begin_write_transaction(patches=[{
+        "operation":"replace","path":"app.py","content":"VALUE = 2\n",
+        "file_hash_expected":hashlib.sha256(original.encode()).hexdigest(),
+    }], turn=1)
+    set_write_status(session.write_transaction, "awaiting_confirmation")
+    pending = {"continuation_kind":"write_confirmation","transaction_id":session.write_transaction["transaction_id"]}
 
     status, text, _, details = core_agent._resume_set(
-        AgentSession("mude"), pending, _config(tests_enabled=False),
+        session, pending, _config(tests_enabled=False),
         {"caminho_origem": str(tmp_path)}, True,
     )
 

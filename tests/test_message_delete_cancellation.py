@@ -24,7 +24,7 @@ def test_remover_mensagem_de_origem_cancela_seu_job(monkeypatch, tmp_path):
     _ambiente_temporario(monkeypatch, tmp_path)
     mensagem_id, snapshot = service_mod.registrar_mensagem_com_snapshot("user", "analise")
     job_id = queue.adicionar({
-        "tipo": "pergunta",
+        "type": "pergunta",
         "texto": "analise",
         "mensagem_id": mensagem_id,
         "historico_snapshot": snapshot,
@@ -45,7 +45,7 @@ def test_remover_mensagem_de_contexto_espera_job_sem_cancela_lo(monkeypatch, tmp
     mensagem_a, _ = service_mod.registrar_mensagem_com_snapshot("user", "contexto antigo")
     mensagem_b, snapshot_b = service_mod.registrar_mensagem_com_snapshot("user", "pergunta atual")
     job_b = queue.adicionar({
-        "tipo": "pergunta",
+        "type": "pergunta",
         "texto": "pergunta atual",
         "mensagem_id": mensagem_b,
         "historico_snapshot": snapshot_b,
@@ -88,7 +88,7 @@ def test_pergunta_web_forca_processo_terminavel_mesmo_com_isolamento_desligado(
     monkeypatch, tmp_path,
 ):
     _ambiente_temporario(monkeypatch, tmp_path)
-    job_id = queue.adicionar({"tipo": "pergunta", "texto": "oi", "mensagem_id": 1})
+    job_id = queue.adicionar({"type": "pergunta", "texto": "oi", "mensagem_id": 1})
     chamadas = []
 
     def fake_isolado(evento, deadline, **kwargs):

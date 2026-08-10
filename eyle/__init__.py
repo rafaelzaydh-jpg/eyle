@@ -1,4 +1,5 @@
-"""Eyle 2.7.4 Rev5.2.9 — Progress-Earned Authority."""
+"""Eyle 2.7.4 Rev5.6 — Grounded Outcomes & Docker Backend."""
 
 __version__ = "2.7.4"
-__revision__ = "rev5.2.9-progress-earned-authority"
+__schema_version__ = "5.6"
+__revision__ = "rev5.6-grounded-outcomes-docker-backend"

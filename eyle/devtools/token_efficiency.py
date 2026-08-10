@@ -31,15 +31,10 @@ def _integer(value):
 def _usage_from_result(result):
     result = result or {}
     usage = result.get("token_usage") if isinstance(result.get("token_usage"), dict) else {}
-    responses = result.get("llm_responses") or []
-    prompt_from_responses = sum(_integer(item.get("prompt_tokens")) for item in responses if isinstance(item, dict))
-    completion_from_responses = sum(
-        _integer(item.get("completion_tokens")) for item in responses if isinstance(item, dict)
-    )
-    calls = _integer(usage.get("llm_calls", result.get("llm_calls", len(responses))))
+    calls = _integer(usage.get("llm_calls", result.get("llm_calls", 0)))
     requests = _integer(usage.get("llm_requests", calls))
-    prompt = _integer(usage.get("prompt_tokens_effective", prompt_from_responses))
-    completion = _integer(usage.get("completion_tokens_actual", completion_from_responses))
+    prompt = _integer(usage.get("prompt_tokens_effective", result.get("prompt_tokens_effective", 0)))
+    completion = _integer(usage.get("completion_tokens_actual", result.get("completion_tokens_actual", 0)))
     total = _integer(usage.get("total_tokens_effective", prompt + completion))
     return {
         "llm_calls": calls,
@@ -56,7 +51,7 @@ def _case_index(report):
         if not isinstance(run, dict):
             continue
         role = str(run.get("papel") or run.get("role") or "principal")
-        for result in run.get("casos") or run.get("cases") or run.get("resultados") or []:
+        for result in run.get("casos") or run.get("cases") or run.get("results") or []:
             if not isinstance(result, dict) or not result.get("id"):
                 continue
             indexed[(role, str(result["id"]))] = {

@@ -5,15 +5,14 @@ import eyle.core.agent as core_agent
 import llm.executar as llm_mod
 from eyle.core.token_budget import estimate_tokens
 from llm.response_adapter import normalize_openai_chat_response
-from tests.canonical import investigation_target, workspace_scope
+from tests.canonical import investigation_target
 
 
 def _config():
     return {
         "llm": {
             "context_window_tokens": 10000,
-            "agent_decision_max_tokens": 1100,
-            "agent_patch_max_tokens": 3600,
+            "agent_max_tokens": 3600,
         },
         "context_engine": {
             "safety_margin_tokens": 500,
@@ -23,40 +22,23 @@ def _config():
         "agent": {
             "max_llm_turns": 6,
             "max_tool_calls": 12,
-            "max_identical_tool_repeats": 2,
-            "structured_protocol_retries": 1,
-            "final_validation_retries": 1,
             "max_patch_dry_run_failures": 2,
-            "max_write_investigation_turns": 2,
-            "max_no_progress_turns": 2,
-            "max_phase_violations": 1,
-            "chat_history_token_budget": 700,
             "max_tree_entries": 200,
             "max_tree_depth": 6,
-            "max_read_range_lines": 400,
+            "max_file_read_lines": 400,
             "claims": {"mode": "off"},
-            "context_view": {"max_relevant_sources": 4, "max_relevant_source_chars": 3500, "max_symbol_preview_chars": 2600, "max_search_source_chars": 600},
+            "context_view": {"max_source_preview_chars": 3500, "max_symbol_preview_chars": 2600, "max_search_source_chars": 600},
         },
         "codar": {"ativado": True, "testes": {"ativado": False}},
-        "_runtime_agent_budget": {
-            "max_llm_calls": 8,
-            "max_prompt_tokens": 12000,
-            "max_completion_tokens": 6000,
-            "max_total_tokens": 18000,
-            "llm_calls": 0,
-            "llm_requests": 0,
-            "prompt_tokens_reserved": 0,
-            "prompt_tokens_actual": 0,
-            "prompt_tokens_effective": 0,
-            "generated_tokens": 0,
-        },
+
     }
 
 
 def test_fixed_agent_prompt_is_compact():
-    assert estimate_tokens(llm_mod.PROMPT_AGENTE, 3) <= 750
-    assert len(llm_mod.PROMPT_AGENTE) < 2300
-    assert "Claims and target coverage are reviewed separately" in llm_mod.PROMPT_AGENTE
+    assert estimate_tokens(llm_mod.PROMPT_AGENTE, 3) <= 1100
+    assert len(llm_mod.PROMPT_AGENTE) < 3300
+    assert "Investigation is YOUR semantic working memory" in llm_mod.PROMPT_AGENTE
+    assert "never a Runtime requirement" in llm_mod.PROMPT_AGENTE
     assert "1-based sentence" not in llm_mod.PROMPT_AGENTE
 
 
@@ -69,21 +51,21 @@ def test_common_multifile_write_reaches_transaction_in_three_calls(monkeypatch, 
 
     def fake(prompt, cfg):
         payload = json.loads(prompt); prompts.append(payload)
-        names = {item["name"] for item in payload["available_tools"]}
-        assert not {"apply_patch", "test_patch_dry_run", "apply_patch_set", "test_patch_set_dry_run"} & names
+        index_text = "\n".join(payload["capability_index"])
+        assert not any(name in index_text for name in ("apply_patch", "test_patch_dry_run", "apply_patch_set", "test_patch_set_dry_run"))
         if len(prompts) == 1:
-            return {"tool_calls": [{"tool": "list_tree", "arguments": {}}], "workspace_scope": workspace_scope("write"), "investigation_updates": [investigation_target(goal="Establish the files needed for the requested refactor")]}
+            return {"tool_calls": [{"tool": "list_tree", "arguments": {}}], "investigation_updates": [investigation_target(goal="Establish the files needed for the requested refactor")]}
         if len(prompts) == 2:
             return {"tool_calls": [
                 {"tool": "read_file", "arguments": {"path": "app.py"}},
                 {"tool": "read_file", "arguments": {"path": "routes.py"}},
                 {"tool": "read_file", "arguments": {"path": "test_routes.py"}},
-            ], "workspace_scope": workspace_scope("write"), "investigation_updates": [investigation_target(goal="Establish the files needed for the requested refactor")]}
+            ], "investigation_updates": [investigation_target(goal="Establish the files needed for the requested refactor")]}
         return {"patches": [
             {"operation": "replace", "path": "app.py", "content": merged},
             {"operation": "delete", "path": "routes.py"},
             {"operation": "delete", "path": "test_routes.py"},
-        ], "workspace_scope": workspace_scope("write"), "investigation_updates": [investigation_target(goal="Establish the files needed for the requested refactor", status="established", evidence_ids=["ev-0001", "ev-0002", "ev-0003"], reason="All source files required for the transaction were read.")]}
+        ], "investigation_updates": [investigation_target(goal="Establish the files needed for the requested refactor", status="established", evidence_ids=["ev-0001", "ev-0002", "ev-0003"], reason="All source files required for the transaction were read.")]}
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
     status, _, pending, details = core_agent.executar_agente(
@@ -92,9 +74,9 @@ def test_common_multifile_write_reaches_transaction_in_three_calls(monkeypatch, 
     )
     assert status == "needs_user"
     assert pending["continuation_kind"] == "write_confirmation"
-    assert len(pending["write_transaction"]["patches"]) == 3
+    assert len(pending["estado"]["write_transaction"]["patches"]) == 3
     assert len(prompts) == 3
-    assert sum(item["estimated_tokens"] for item in details["prompt_snapshots"]) < 12000
+    assert sum((item.get("prompt") or {}).get("estimated_tokens", 0) for item in details["llm_calls"]) < 12000
 
 
 def test_semantic_read_coverage_blocks_overlapping_range(monkeypatch, tmp_path):
@@ -105,14 +87,15 @@ def test_semantic_read_coverage_blocks_overlapping_range(monkeypatch, tmp_path):
         payload = json.loads(prompt)
         prompts.append(payload)
         if len(prompts) == 1:
-            return {"tool_calls": [{"tool": "read_file", "arguments": {"path": "app.py"}}], "workspace_scope": workspace_scope("read"), "investigation_updates": [investigation_target(goal="Establish what app.py defines")]}
+            return {"tool_calls": [{"tool": "read_file", "arguments": {"path": "app.py"}}], "investigation_updates": [investigation_target(goal="Establish what app.py defines")]}
         if len(prompts) == 2:
-            return {"tool_calls": [{"tool": "read_range", "arguments": {"path": "app.py", "line_start": 1, "line_end": 1}}], "workspace_scope": workspace_scope("read"), "investigation_updates": [investigation_target(goal="Establish what app.py defines")]}
+            return {"tool_calls": [{"tool": "read_file", "arguments": {"path": "app.py", "line_start": 1, "line_end": 1}}], "investigation_updates": [investigation_target(goal="Establish what app.py defines")]}
         assert any(
-            item.get("error_code") == "SOURCE_ALREADY_VISIBLE"
+            item.get("coverage_replayed") is True
+            and item.get("source_observation_tool") == "read_file"
             for item in payload["latest_tool_results"]
         )
-        return {"final": {"answer": "app.py define x como 1.", "evidence_ids": ["ev-0001"]}, "workspace_scope": workspace_scope("read"), "investigation_updates": [investigation_target(goal="Establish what app.py defines", status="established", evidence_ids=["ev-0001"], reason="app.py was read")]}
+        return {"final": {"answer": "app.py define x como 1.", "limitations": []}, "investigation_updates": [investigation_target(goal="Establish what app.py defines", status="established", evidence_ids=["ev-0001"], reason="app.py was read")]}
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
     status, _, _, details = core_agent.executar_agente(
@@ -125,22 +108,21 @@ def test_semantic_read_coverage_blocks_overlapping_range(monkeypatch, tmp_path):
 
 
 def test_provider_cache_metadata_reduces_effective_task_budget():
+    from eyle.core.execution_context import ExecutionContext
     cfg = _config()
-    runtime = cfg["_runtime_agent_budget"]
-
-    first = llm_mod._reservar_requisicao_llm(cfg, "same system", "first", 100)
-    llm_mod._finalizar_requisicao_llm(
-        cfg, first, {"prompt_tokens": 1000, "cached_prompt_tokens": 0},
-    )
-    second = llm_mod._reservar_requisicao_llm(cfg, "same system", "second", 100)
-    llm_mod._finalizar_requisicao_llm(
-        cfg, second, {"prompt_tokens": 1000, "cached_prompt_tokens": 800},
-    )
-
-    assert runtime["prompt_tokens_actual"] == 2000
-    assert runtime["prompt_tokens_cached"] == 800
-    assert runtime["prompt_tokens_uncached"] == 1200
-    assert runtime["prompt_tokens_effective"] == 1360
+    cfg.setdefault("agent", {}).update({"max_llm_calls": 8, "max_prompt_tokens": 12000, "max_completion_tokens": 6000, "max_total_tokens": 18000})
+    execution = ExecutionContext.from_config(cfg)
+    execution.begin_call(mode="agent", turn=1, prompt={})
+    first = llm_mod._reservar_requisicao_llm(cfg, execution, "same system", "first", 100)
+    llm_mod._finalizar_requisicao_llm(cfg, execution, first, {"prompt_tokens": 1000, "cached_prompt_tokens": 0})
+    execution.begin_call(mode="agent", turn=2, prompt={})
+    second = llm_mod._reservar_requisicao_llm(cfg, execution, "same system", "second", 100)
+    llm_mod._finalizar_requisicao_llm(cfg, execution, second, {"prompt_tokens": 1000, "cached_prompt_tokens": 800})
+    usage = execution.usage_view()
+    assert usage["prompt_tokens_actual"] == 2000
+    assert usage["prompt_tokens_cached"] == 800
+    assert usage["prompt_tokens_uncached"] == 1200
+    assert usage["prompt_tokens_effective"] == 1360
 
 
 def test_response_adapter_reads_openai_cached_prompt_tokens():
@@ -157,40 +139,28 @@ def test_response_adapter_reads_openai_cached_prompt_tokens():
     assert normalized.completion_tokens == 20
 
 
-def test_premature_patch_is_redirected_to_reads_without_poisoning_retry(monkeypatch, tmp_path):
+def test_replace_without_current_read_is_rejected_by_write_contract(monkeypatch, tmp_path):
     (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")
     prompts = []
 
     def fake(prompt, cfg):
-        payload = json.loads(prompt)
-        prompts.append(payload)
-        if len(prompts) == 1:
-            return {"patches": [
-                {"operation": "replace", "path": "app.py", "content": "x = 2\n"},
-            ], "workspace_scope": workspace_scope("write"), "investigation_updates": []}
-        if len(prompts) == 2:
-            assert payload["runtime_phase"] == "write_prepare"
-            assert "INVESTIGATION_REQUIRED" in (payload.get("runtime_feedback") or "")
-            assert any(
-                item.get("content") == "Não use arquivos de rotas separados."
-                for item in payload["conversation_background"]
-            )
-            return {"tool_calls": [{"tool": "read_file", "arguments": {"path": "app.py"}}], "workspace_scope": workspace_scope("write"), "investigation_updates": [{"id": "T1", "goal": "Establish current app.py before editing", "status": "open", "evidence_ids": [], "reason": ""}]}
-        assert payload["runtime_phase"] == "write_patch_only"
-        return {"patches": [
-            {"operation": "replace", "path": "app.py", "content": "x = 2\n"},
-        ], "workspace_scope": workspace_scope("write"), "investigation_updates": [{"id": "T1", "goal": "Establish current app.py before editing", "status": "established", "evidence_ids": ["ev-0001"], "reason": "app.py was read"}]}
+        prompts.append(json.loads(prompt))
+        return {
+            "patches": [{"operation": "replace", "path": "app.py", "content": "x = 2\n"}],
+            "investigation_updates": [],
+        }
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
-    status, _, pending, details = core_agent.executar_agente(
+    status, text, pending, details = core_agent.executar_agente(
         "Mude x para 2", _config(),
         projeto={"caminho_origem": str(tmp_path)},
-        conversation_context={"recent_messages": [
-            {"role": "user", "content": "Não use arquivos de rotas separados."},
-        ]},
         retornar_detalhes=True,
     )
-    assert status == "needs_user"
-    assert pending is not None
-    assert len(prompts) == 3
-    assert details["runtime_phase"] == "write_patch_only"
+    assert status == "failed"
+    assert pending is None
+    assert "read the existing file before replace" in text
+    assert any(
+        item.get("decision") == "patch_validation" and item.get("outcome") == "rejected"
+        for item in details["decision_history"]
+    )
+    assert all("runtime_phase" not in payload for payload in prompts)

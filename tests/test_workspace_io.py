@@ -17,21 +17,21 @@ def _audio_14_linhas():
     return "".join(f"valor_{numero} = {numero}\n" for numero in range(1, 15))
 
 
-def test_read_range_devolve_as_14_linhas_numeradas_e_hash_fresco(tmp_path):
+def test_file_read_range_devolve_as_14_linhas_numeradas_e_hash_fresco(tmp_path):
     conteudo = _audio_14_linhas()
     (tmp_path / "audio.py").write_text(conteudo, encoding="utf-8")
 
     resultado = ler_faixa_projeto(tmp_path, "audio.py", 1, 14, max_linhas=14)
 
-    assert resultado["linha_inicio"] == 1
-    assert resultado["linha_fim"] == 14
-    assert "     1 | valor_1 = 1" in resultado["trecho_numerado"]
-    assert "    14 | valor_14 = 14" in resultado["trecho_numerado"]
+    assert resultado["line_start"] == 1
+    assert resultado["line_end"] == 14
+    assert "     1 | valor_1 = 1" in resultado["numbered_content"]
+    assert "    14 | valor_14 = 14" in resultado["numbered_content"]
     assert resultado["content_hash"] == hashlib.sha256(conteudo.encode("utf-8")).hexdigest()
     assert resultado["file_hash"] == hashlib.sha256(conteudo.encode("utf-8")).hexdigest()
 
 
-def test_read_range_recusa_janela_acima_do_limite_e_travessia(tmp_path):
+def test_file_read_range_recusa_janela_acima_do_limite_e_travessia(tmp_path):
     (tmp_path / "a.py").write_text("1\n2\n3\n4\n", encoding="utf-8")
 
     try:
@@ -65,17 +65,17 @@ def test_list_tree_respeita_filtro_limites_e_motivos_ignorados(tmp_path):
         tmp_path, limite=20, profundidade=3, filtro="*.py",
     )
 
-    caminhos = [item["caminho"] for item in resultado["entradas"]]
+    caminhos = [item["path"] for item in resultado["entries"]]
     assert caminhos == ["src/audio.py"]
     assert resultado["ignorados_por_motivo"]["gitignore"] >= 1
     assert resultado["ignorados_por_motivo"]["segredo"] >= 1
     assert resultado["ignorados_por_motivo"]["padrao_interno"] >= 1
     assert resultado["ignorados_por_motivo"]["extensao_nao_suportada"] >= 1
-    assert resultado["ignorados_por_motivo"]["filtro"] >= 1
+    assert resultado["ignorados_por_motivo"]["filter"] >= 1
 
     limitado = listar_arvore_projeto(tmp_path, limite=1, profundidade=3)
     assert limitado["total_retornado"] == 1
-    assert limitado["truncado"] is True
+    assert limitado["truncated"] is True
     assert limitado["varredura_completa"] is False
 
 

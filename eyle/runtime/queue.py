@@ -38,10 +38,8 @@ def _parse_utc(valor):
         instante = datetime.fromisoformat(str(valor).replace("Z", "+00:00"))
     except (TypeError, ValueError):
         return None
-    # Bancos antigos ou editados manualmente podem conter timestamps sem
-    # timezone. Trate-os como UTC em vez de derrubar /status na subtracao.
     if instante.tzinfo is None:
-        instante = instante.replace(tzinfo=timezone.utc)
+        return None
     return instante.astimezone(timezone.utc)
 
 
@@ -61,78 +59,95 @@ def _serializar(valor):
     return json.dumps(valor, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
-def _inicializar_schema(conexao, caminho_banco):
-    """Cria/migra o schema uma vez por arquivo, nao em toda conexao."""
+QUEUE_SCHEMA_VERSION = "5.6"
+
+_EXPECTED_TABLE_COLUMNS = {
+    "jobs": [
+        "id", "tipo", "payload", "status", "tentativas", "criado_em", "atualizado_em",
+        "iniciado_em", "concluido_em", "resultado", "erro", "worker_id", "progresso",
+        "progresso_seq", "cancel_requested", "cancel_reason",
+    ],
+    "runtime_meta": ["chave", "valor"],
+    "worker_heartbeat": ["worker_id", "status", "job_id", "atualizado_em", "detalhe", "pid"],
+}
+
+
+def _table_columns(conexao, table):
+    return [str(row[1]) for row in conexao.execute(f"PRAGMA table_info({table})")]
+
+
+def _validate_schema(conexao):
+    for table, expected in _EXPECTED_TABLE_COLUMNS.items():
+        observed = _table_columns(conexao, table)
+        if observed != expected:
+            raise RuntimeError(
+                f"QUEUE_SCHEMA_INCOMPATIBLE:{table}:expected={','.join(expected)}:observed={','.join(observed)}"
+            )
+    row = conexao.execute(
+        "SELECT valor FROM runtime_meta WHERE chave = 'schema_version'"
+    ).fetchone()
+    if row is None or str(row[0]) != QUEUE_SCHEMA_VERSION:
+        observed = "missing" if row is None else str(row[0])
+        raise RuntimeError(f"QUEUE_SCHEMA_INCOMPATIBLE:version:{observed}")
+
+
+def _inicializar_schema(conexao, caminho_banco, *, new_database):
+    """Create exactly the Rev5.6 queue schema or reject the existing database."""
     with _schema_lock:
         if caminho_banco in _schemas_prontos:
             return
-        conexao.execute(
-            """
-            CREATE TABLE IF NOT EXISTS jobs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                tipo TEXT NOT NULL,
-                payload TEXT NOT NULL,
-                status TEXT NOT NULL,
-                tentativas INTEGER NOT NULL DEFAULT 0,
-                criado_em TEXT NOT NULL,
-                atualizado_em TEXT NOT NULL,
-                iniciado_em TEXT,
-                concluido_em TEXT,
-                resultado TEXT,
-                erro TEXT,
-                worker_id TEXT,
-                progresso TEXT,
-                progresso_seq INTEGER NOT NULL DEFAULT 0,
-                cancel_requested INTEGER NOT NULL DEFAULT 0,
-                cancel_reason TEXT
-            )
-            """
-        )
-        conexao.execute(
-            "CREATE INDEX IF NOT EXISTS idx_jobs_status_id ON jobs(status, id)"
-        )
-        conexao.execute(
-            """
-            CREATE TABLE IF NOT EXISTS runtime_meta (
-                chave TEXT PRIMARY KEY,
-                valor TEXT NOT NULL
-            )
-            """
-        )
-        conexao.execute(
-            "INSERT OR IGNORE INTO runtime_meta (chave, valor) VALUES ('queue_instance_id', ?)",
-            (uuid.uuid4().hex,),
-        )
-        conexao.execute(
-            """
-            CREATE TABLE IF NOT EXISTS worker_heartbeat (
-                worker_id TEXT PRIMARY KEY,
-                status TEXT NOT NULL,
-                job_id INTEGER,
-                atualizado_em TEXT NOT NULL,
-                detalhe TEXT,
-                pid INTEGER
-            )
-            """
-        )
-        colunas_jobs = {row[1] for row in conexao.execute("PRAGMA table_info(jobs)")}
-        if "worker_id" not in colunas_jobs:
-            conexao.execute("ALTER TABLE jobs ADD COLUMN worker_id TEXT")
-        if "progresso" not in colunas_jobs:
-            conexao.execute("ALTER TABLE jobs ADD COLUMN progresso TEXT")
-        if "progresso_seq" not in colunas_jobs:
+        if new_database:
             conexao.execute(
-                "ALTER TABLE jobs ADD COLUMN progresso_seq INTEGER NOT NULL DEFAULT 0"
+                """
+                CREATE TABLE jobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tipo TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    tentativas INTEGER NOT NULL DEFAULT 0,
+                    criado_em TEXT NOT NULL,
+                    atualizado_em TEXT NOT NULL,
+                    iniciado_em TEXT,
+                    concluido_em TEXT,
+                    resultado TEXT,
+                    erro TEXT,
+                    worker_id TEXT,
+                    progresso TEXT,
+                    progresso_seq INTEGER NOT NULL DEFAULT 0,
+                    cancel_requested INTEGER NOT NULL DEFAULT 0,
+                    cancel_reason TEXT
+                )
+                """
             )
-        if "cancel_requested" not in colunas_jobs:
+            conexao.execute("CREATE INDEX idx_jobs_status_id ON jobs(status, id)")
             conexao.execute(
-                "ALTER TABLE jobs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0"
+                """
+                CREATE TABLE runtime_meta (
+                    chave TEXT PRIMARY KEY,
+                    valor TEXT NOT NULL
+                )
+                """
             )
-        if "cancel_reason" not in colunas_jobs:
-            conexao.execute("ALTER TABLE jobs ADD COLUMN cancel_reason TEXT")
-        colunas_hb = {row[1] for row in conexao.execute("PRAGMA table_info(worker_heartbeat)")}
-        if "pid" not in colunas_hb:
-            conexao.execute("ALTER TABLE worker_heartbeat ADD COLUMN pid INTEGER")
+            conexao.executemany(
+                "INSERT INTO runtime_meta (chave, valor) VALUES (?, ?)",
+                [
+                    ("queue_instance_id", uuid.uuid4().hex),
+                    ("schema_version", QUEUE_SCHEMA_VERSION),
+                ],
+            )
+            conexao.execute(
+                """
+                CREATE TABLE worker_heartbeat (
+                    worker_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    job_id INTEGER,
+                    atualizado_em TEXT NOT NULL,
+                    detalhe TEXT,
+                    pid INTEGER
+                )
+                """
+            )
+        _validate_schema(conexao)
         _schemas_prontos.add(caminho_banco)
 
 
@@ -150,7 +165,7 @@ def _conectar():
     conexao.execute("PRAGMA busy_timeout = 5000")
     conexao.execute("PRAGMA journal_mode = WAL")
     conexao.execute("PRAGMA synchronous = NORMAL")
-    _inicializar_schema(conexao, caminho_banco)
+    _inicializar_schema(conexao, caminho_banco, new_database=not existia)
     return conexao
 
 
@@ -206,9 +221,9 @@ def adicionar(evento):
     """Persiste um evento e devolve o ID numerico do job criado."""
     if not isinstance(evento, dict):
         raise TypeError("evento precisa ser um dict")
-    tipo = str(evento.get("tipo") or "").strip()
+    tipo = str(evento.get("type") or "").strip()
     if not tipo:
-        raise ValueError("evento precisa informar 'tipo'")
+        raise ValueError("evento precisa informar 'type'")
 
     agora = _agora_utc()
     with _abrir_conexao() as conexao:

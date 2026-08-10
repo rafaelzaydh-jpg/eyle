@@ -14,6 +14,9 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List
 
 
+MEMORY_SCHEMA_VERSION = "5.6"
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -29,13 +32,27 @@ def _memory_path(base_dir: str, project_root: str) -> str:
     return os.path.join(directory, f"{_project_key(project_root)}.json")
 
 
+def _empty_memory(project_root: str = "") -> Dict[str, Any]:
+    return {
+        "schema_version": MEMORY_SCHEMA_VERSION,
+        "project_root": os.path.realpath(project_root) if project_root else "",
+        "entries": [],
+    }
+
+
 def _load(path: str) -> Dict[str, Any]:
     try:
         with open(path, "r", encoding="utf-8") as handle:
             data = json.load(handle)
-        return data if isinstance(data, dict) else {"entries": []}
-    except (OSError, json.JSONDecodeError):
-        return {"entries": []}
+    except FileNotFoundError:
+        return _empty_memory()
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("MEMORY_STORE_INVALID") from error
+    if not isinstance(data, dict) or data.get("schema_version") != MEMORY_SCHEMA_VERSION:
+        raise ValueError("MEMORY_SCHEMA_INCOMPATIBLE")
+    if not isinstance(data.get("entries"), list):
+        raise ValueError("MEMORY_STORE_INVALID")
+    return data
 
 
 def _save(path: str, data: Dict[str, Any]) -> None:
@@ -70,10 +87,8 @@ def search_memory(base_dir: str, project_root: str, query: str = "", limit: int 
     data = _load(path)
     terms = [term.casefold() for term in str(query or "").split() if term.strip()]
     results: List[Dict[str, Any]] = []
-    changed = False
     for entry in list(data.get("entries") or []):
         if not isinstance(entry, dict):
-            changed = True
             continue
         files = entry.get("files") or []
         stale = False
@@ -86,7 +101,6 @@ def search_memory(base_dir: str, project_root: str, query: str = "", limit: int 
                 stale = True
                 break
         if stale:
-            changed = True
             continue
         haystack = " ".join([
             str(entry.get("text") or ""),
@@ -104,25 +118,6 @@ def search_memory(base_dir: str, project_root: str, query: str = "", limit: int 
         })
         if len(results) >= max(1, min(int(limit or 8), 20)):
             break
-    if changed:
-        # Keep valid non-matching entries too; only stale/invalid entries leave.
-        cleaned = []
-        for entry in list(data.get("entries") or []):
-            if not isinstance(entry, dict):
-                continue
-            stale = False
-            for item in entry.get("files") or []:
-                if not isinstance(item, dict):
-                    continue
-                relative = str(item.get("path") or "")
-                expected = str(item.get("file_hash") or "")
-                if relative and expected and _live_hash(project_root, relative) != expected:
-                    stale = True
-                    break
-            if not stale:
-                cleaned.append(entry)
-        data["entries"] = cleaned[-200:]
-        _save(path, data)
     return results
 
 
@@ -159,6 +154,6 @@ def store_memory(
     }
     entries = [item for item in entries if item.get("id") != entry["id"]]
     entries.append(entry)
-    data = {"project_root": os.path.realpath(project_root), "entries": entries[-200:]}
+    data = {"schema_version": MEMORY_SCHEMA_VERSION, "project_root": os.path.realpath(project_root), "entries": entries[-200:]}
     _save(path, data)
     return entry

@@ -86,19 +86,6 @@ def _run_case(config: Dict[str, Any], case_id: str) -> Dict[str, Any]:
         project = {} if case_id == "greeting" else {"caminho_origem": root}
         before = _snapshot(root)
         cfg = copy.deepcopy(config)
-        cfg["_runtime_agent_budget"] = {
-            "max_llm_calls": int((cfg.get("agent") or {}).get("max_llm_calls", 12)),
-            "max_prompt_tokens": int((cfg.get("agent") or {}).get("max_prompt_tokens", 96000)),
-            "max_completion_tokens": int((cfg.get("agent") or {}).get("max_completion_tokens", 9000)),
-            "max_generated_tokens": int((cfg.get("agent") or {}).get("max_completion_tokens", 9000)),
-            "max_total_tokens": int((cfg.get("agent") or {}).get("max_total_tokens", 105000)),
-            "llm_calls": 0, "llm_requests": 0, "prompt_tokens_reserved": 0,
-            "prompt_tokens_estimated_raw": 0, "prompt_tokens_actual": 0,
-            "prompt_tokens_cached": 0, "prompt_tokens_uncached": 0,
-            "prompt_tokens_effective": 0,
-            "generated_tokens": 0, "completion_tokens_actual": 0,
-            "reasoning_tokens_actual": 0, "total_tokens_effective": 0,
-        }
         started = time.perf_counter()
         status, text, pending, details = executar_agente(
             request, cfg, projeto=project, retornar_detalhes=True,
@@ -115,7 +102,7 @@ def _run_case(config: Dict[str, Any], case_id: str) -> Dict[str, Any]:
         tools = list((details or {}).get("tools_used") or [])
         expected_read = case_id != "greeting"
         read_ok = (not expected_read) or any(
-            tool in {"read_file", "read_range", "search_code", "find_symbol", "list_tree"}
+            tool in {"read_file", "search_code", "find_symbol", "list_tree"}
             for tool in tools
         )
         claim_ledger = list((details or {}).get("claim_evidence") or [])

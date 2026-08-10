@@ -18,7 +18,7 @@ def _usar_fila_temporaria(monkeypatch, tmp_path):
 
 def test_fila_persiste_progresso_incremental(monkeypatch, tmp_path):
     _usar_fila_temporaria(monkeypatch, tmp_path)
-    job_id = queue.adicionar({"tipo": "pergunta", "texto": "analise"})
+    job_id = queue.adicionar({"type": "pergunta", "texto": "analise"})
     queue.proximo(timeout=0, worker_id="worker-test")
 
     assert queue.atualizar_progresso(
@@ -80,7 +80,13 @@ def test_navegador_nao_reabre_job_terminal_cacheado():
 def test_config_valida_stream_responses():
     import pytest
     from eyle.runtime.config import ConfigError, validar_config
+    from tests.canonical import base_config
 
-    assert validar_config({"llm": {"stream_responses": True}})["llm"]["stream_responses"] is True
+    cfg = base_config()
+    cfg["llm"]["stream_responses"] = True
+    assert validar_config(cfg)["llm"]["stream_responses"] is True
+
+    cfg = base_config()
+    cfg["llm"]["stream_responses"] = "sim"
     with pytest.raises(ConfigError, match="llm.stream_responses"):
-        validar_config({"llm": {"stream_responses": "sim"}})
+        validar_config(cfg)

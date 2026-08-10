@@ -17,13 +17,13 @@ def extract_python_definitions(lines):
             name=f"{prefix}.{node.name}" if prefix else node.name
             decorators=getattr(node,"decorator_list",None) or []
             start=min([node.lineno]+[d.lineno for d in decorators]); end=getattr(node,"end_lineno",None) or node.lineno
-            definitions.append({"nome":name,"linha_inicio":start,"linha_fim":end,"tipo":"classe" if isinstance(node,ast.ClassDef) else "funcao_assincrona" if isinstance(node,ast.AsyncFunctionDef) else "funcao"})
+            definitions.append({"nome":name,"line_start":start,"line_end":end,"type":"classe" if isinstance(node,ast.ClassDef) else "funcao_assincrona" if isinstance(node,ast.AsyncFunctionDef) else "funcao"})
             if isinstance(node,ast.ClassDef): visit(node.body,name)
-    visit(tree.body); definitions.sort(key=lambda d:(d["linha_inicio"],d["linha_fim"],d["nome"])); return definitions
+    visit(tree.body); definitions.sort(key=lambda d:(d["line_start"],d["line_end"],d["nome"])); return definitions
 
 
 def extract_symbols(lines, extension):
-    if extension == ".py": return [(d["nome"],d["linha_inicio"]) for d in extract_python_definitions(lines)]
+    if extension == ".py": return [(d["nome"],d["line_start"]) for d in extract_python_definitions(lines)]
     result=[]
     if extension in (".js",".ts",".jsx",".tsx"):
         for i,line in enumerate(lines,1):

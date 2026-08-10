@@ -103,16 +103,16 @@ def ler_faixa_projeto(caminho_projeto, caminho_relativo, linha_inicio,
         for numero, linha in enumerate(selecionadas, start=linha_inicio)
     )
     return {
-        "arquivo": caminho_relativo,
-        "linha_inicio": linha_inicio,
-        "linha_fim": linha_fim_real,
-        "linha_fim_solicitada": linha_fim,
-        "total_linhas_arquivo": total_linhas,
-        "trecho_numerado": trecho_numerado,
-        "conteudo": conteudo_lido,
+        "file": caminho_relativo,
+        "line_start": linha_inicio,
+        "line_end": linha_fim_real,
+        "requested_line_end": linha_fim,
+        "total_lines": total_linhas,
+        "numbered_content": trecho_numerado,
+        "content": conteudo_lido,
         "content_hash": hash_faixa(conteudo, linha_inicio, linha_fim_real),
         "file_hash": hash_texto(conteudo),
-        "fim_ajustado_ao_arquivo": linha_fim_real != linha_fim,
+        "end_clamped": linha_fim_real != linha_fim,
     }
 
 
@@ -146,8 +146,8 @@ def listar_arvore_projeto(caminho_projeto, limite=200, profundidade=6,
         "segredo": 0,
         "symlink_externo": 0,
         "extensao_nao_suportada": 0,
-        "filtro": 0,
-        "profundidade": 0,
+        "filter": 0,
+        "depth": 0,
         "erro_leitura": 0,
     }
     truncado = False
@@ -158,9 +158,9 @@ def listar_arvore_projeto(caminho_projeto, limite=200, profundidade=6,
             truncado = True
             return False
         entradas.append({
-            "caminho": caminho_rel.replace(os.sep, "/"),
-            "tipo": tipo,
-            "profundidade": nivel,
+            "path": caminho_rel.replace(os.sep, "/"),
+            "type": tipo,
+            "depth": nivel,
         })
         return True
 
@@ -201,7 +201,7 @@ def listar_arvore_projeto(caminho_projeto, limite=200, profundidade=6,
                     if not adicionar(caminho_rel, "diretorio", nivel):
                         return
                 if nivel >= profundidade:
-                    ignorados["profundidade"] += 1
+                    ignorados["depth"] += 1
                     continue
                 visitar(caminho_seguro, caminho_rel, regras, nivel + 1)
                 continue
@@ -228,22 +228,22 @@ def listar_arvore_projeto(caminho_projeto, limite=200, profundidade=6,
                 ignorados["segredo"] += 1
                 continue
             if not _corresponde_filtro(caminho_rel, filtro):
-                ignorados["filtro"] += 1
+                ignorados["filter"] += 1
                 continue
-            if not adicionar(caminho_rel, "arquivo", nivel):
+            if not adicionar(caminho_rel, "file", nivel):
                 return
 
     visitar(raiz, "", [], 1)
 
-    total_arquivos = sum(1 for item in entradas if item.get("tipo") == "arquivo")
-    total_diretorios = sum(1 for item in entradas if item.get("tipo") == "diretorio")
+    total_arquivos = sum(1 for item in entradas if item.get("type") == "file")
+    total_diretorios = sum(1 for item in entradas if item.get("type") == "diretorio")
     extensoes = {}
     diretorios_raiz = []
     arquivos_raiz = []
     for item in entradas:
-        caminho = str(item.get("caminho") or "")
-        tipo = item.get("tipo")
-        if tipo == "arquivo":
+        caminho = str(item.get("path") or "")
+        tipo = item.get("type")
+        if tipo == "file":
             extensao = os.path.splitext(caminho)[1].lower() or "[sem_extensao]"
             extensoes[extensao] = extensoes.get(extensao, 0) + 1
             if "/" not in caminho:
@@ -253,11 +253,11 @@ def listar_arvore_projeto(caminho_projeto, limite=200, profundidade=6,
 
     inventario_canonico = {
         "schema_version": 1,
-        "entradas": entradas,
-        "limite": limite,
-        "profundidade_maxima": profundidade,
-        "filtro": filtro,
-        "truncado": truncado,
+        "entries": entradas,
+        "limit": limite,
+        "max_depth": profundidade,
+        "filter": filtro,
+        "truncated": truncado,
         "varredura_completa": not truncado,
         "ignorados_por_motivo": ignorados,
     }
@@ -274,9 +274,9 @@ def listar_arvore_projeto(caminho_projeto, limite=200, profundidade=6,
         **inventario_canonico,
         "inventory_hash": inventario_hash,
         "total_retornado": len(entradas),
-        "total_arquivos": total_arquivos,
-        "total_diretorios": total_diretorios,
-        "diretorios_raiz": diretorios_raiz,
-        "arquivos_raiz": arquivos_raiz,
-        "extensoes": dict(sorted(extensoes.items())),
+        "file_count": total_arquivos,
+        "directory_count": total_diretorios,
+        "root_directories": diretorios_raiz,
+        "root_files": arquivos_raiz,
+        "extensions": dict(sorted(extensoes.items())),
     }

@@ -60,7 +60,7 @@ def _detalhe_falha_resultado(resultado):
 
 
 def processar_evento(evento):
-    tipo = evento.get("tipo")
+    tipo = evento.get("type")
 
     if tipo == "pergunta":
         if evento.get("_job_id") is not None:
@@ -231,7 +231,7 @@ def _finalizar_cancelamento(evento, job_id, motivo, worker_id=None, started=None
         queue.registrar_heartbeat(worker_id, "idle")
     duracao_ms = 0.0 if started is None else (time.monotonic() - started) * 1000
     telemetry.record(
-        "job", str(evento.get("tipo") or "unknown"), "cancelled", duracao_ms,
+        "job", str(evento.get("type") or "unknown"), "cancelled", duracao_ms,
         task_id=f"job-{job_id}" if job_id is not None else None,
         job_id=job_id,
         metadata={"error_code": "JOB_CANCELLED", "detail": motivo[:500]},
@@ -242,7 +242,7 @@ def _finalizar_cancelamento(evento, job_id, motivo, worker_id=None, started=None
 
 def processar_proximo(
     timeout=1.0, *, worker_id=None, heartbeat_interval=5,
-    max_invalid_jobs=100, isolate_job=False, job_deadline_seconds=300,
+    max_invalid_jobs=100, isolate_job=False, hard_kill_seconds=300,
     mp_context="spawn",
 ):
     """Processa no maximo um job e persiste conclusao, falha ou timeout."""
@@ -266,7 +266,7 @@ def processar_proximo(
     # Perguntas web sempre rodam em processo terminavel. Sem isso, uma chamada
     # HTTP sincrona da LLM nao pode ser interrompida com seguranca no Windows.
     usar_isolamento = bool(
-        isolate_job or (worker_id is not None and evento.get("tipo") == "pergunta")
+        isolate_job or (worker_id is not None and evento.get("type") == "pergunta")
     )
 
     try:
@@ -279,7 +279,7 @@ def processar_proximo(
                     )
 
             resultado = executar_evento_isolado(
-                evento, job_deadline_seconds,
+                evento, hard_kill_seconds,
                 heartbeat=heartbeat,
                 heartbeat_interval=heartbeat_interval,
                 mp_context=mp_context,
@@ -325,7 +325,7 @@ def processar_proximo(
         if worker_id:
             queue.registrar_heartbeat(worker_id, "error", job_id=job_id, detalhe=error)
         telemetry.record(
-            "job", str(evento.get("tipo") or "unknown"), "timeout" if isinstance(error, JobDeadlineExceeded) else "failed",
+            "job", str(evento.get("type") or "unknown"), "timeout" if isinstance(error, JobDeadlineExceeded) else "failed",
             (time.monotonic() - started) * 1000,
             task_id=f"job-{job_id}" if job_id is not None else None,
             job_id=job_id,
@@ -369,7 +369,7 @@ def processar_proximo(
         if worker_id:
             queue.registrar_heartbeat(worker_id, "error", job_id=job_id, detalhe=detalhe)
         telemetry.record(
-            "job", str(evento.get("tipo") or "unknown"), "failed",
+            "job", str(evento.get("type") or "unknown"), "failed",
             (time.monotonic() - started) * 1000,
             task_id=f"job-{job_id}" if job_id is not None else None,
             job_id=job_id,
@@ -400,7 +400,7 @@ def processar_proximo(
         queue.registrar_heartbeat(worker_id, "idle")
     _limpar_remocoes_pendentes_seguro()
     telemetry.record(
-        "job", str(evento.get("tipo") or "unknown"), "ok",
+        "job", str(evento.get("type") or "unknown"), "ok",
         (time.monotonic() - started) * 1000,
         task_id=f"job-{job_id}" if job_id is not None else None,
         job_id=job_id,
@@ -419,7 +419,7 @@ def _consumer_loop(worker_id, cfg):
                 heartbeat_interval=cfg["heartbeat_interval"],
                 max_invalid_jobs=cfg["max_invalid_jobs"],
                 isolate_job=cfg["isolate_jobs"],
-                job_deadline_seconds=cfg["job_deadline_seconds"],
+                hard_kill_seconds=cfg["hard_kill_seconds"],
                 mp_context=cfg["mp_context"],
             )
             if not processed:
@@ -457,10 +457,7 @@ def loop():
         "heartbeat_interval": max(1, int(cfg_worker.get("heartbeat_interval_seconds", 5))),
         "queue_error_backoff": max(0.1, float(cfg_worker.get("queue_error_backoff_seconds", 1))),
         "max_invalid_jobs": max(1, int(cfg_worker.get("max_invalid_jobs_per_reservation", 100))),
-        "job_deadline_seconds": max(1, int(cfg_worker.get(
-            "job_deadline_seconds",
-            config.get("agent", {}).get("task_deadline_seconds", 900) + 15,
-        ))),
+        "hard_kill_seconds": max(1, int(config.get("agent", {}).get("task_deadline_seconds", 900))) + 15,
         "isolate_jobs": bool(cfg_worker.get("isolate_jobs", True)),
         "mp_context": str(cfg_worker.get("multiprocessing_context", "spawn")),
     }
@@ -472,7 +469,7 @@ def loop():
     print(
         f"[worker] iniciado: consumidores={parallel} "
         f"(configurados={parallel_configurado}), isolamento={cfg['isolate_jobs']}, "
-        f"deadline={cfg['job_deadline_seconds']}s, recuperados={recovered}"
+        f"deadline={cfg['hard_kill_seconds']}s, recuperados={recovered}"
     )
     consumers = []
     for index in range(parallel):

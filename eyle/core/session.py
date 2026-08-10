@@ -1,12 +1,19 @@
-"""One active Eyle agent session.
+"""One active Rev5.6 Eyle agent session.
 
-The session stores only what is needed to continue the current task. The LLM
-controls strategy and prose; the runtime controls tools, writes and evidence.
+Rev5.6 is a clean break. The session stores only canonical semantic/physical
+state that must survive turns or confirmation. Histories and metrics are views
+of their owning ledgers, not parallel persisted fields.
 """
 from __future__ import annotations
-
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+
+from .decision import empty_ledger as empty_decision_ledger, persisted_view as persisted_decisions
+from .evidence import empty_ledger as empty_evidence_ledger, index_view as evidence_index_view, persisted_view as persisted_evidence
+from .observation import empty_ledger as empty_observation_ledger, persisted_view as persisted_observations
+from .write_transaction import empty_transaction
+
+SESSION_SCHEMA_VERSION = "5.6"
 
 
 @dataclass
@@ -14,245 +21,59 @@ class AgentSession:
     request: str
     task_id: Optional[str] = None
     turn: int = 0
-    tool_calls: int = 0
-    earned_tool_extension: int = 0
-    tool_extension_cycles: int = 0
-    committed_progress_epoch: int = 0
-    last_extension_progress_epoch: int = 0
-    committed_progress_history: List[Dict[str, Any]] = field(default_factory=list)
-    progress_credited_evidence_ids: List[str] = field(default_factory=list)
-    tool_extension_history: List[Dict[str, Any]] = field(default_factory=list)
     workspace_epoch: int = 0
-    observation_ledger: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    observation_replays: int = 0
-    decision_ledger: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    repeated_rejected_decisions: int = 0
-    progress_history: List[Dict[str, Any]] = field(default_factory=list)
-    runtime_cycle_start_fingerprint: Optional[str] = None
-    runtime_cycle_start_turn: int = 0
-    workspace_scope: Dict[str, str] = field(default_factory=dict)
+    observation_ledger: Dict[str, Any] = field(default_factory=empty_observation_ledger)
+    decision_ledger: Dict[str, Any] = field(default_factory=empty_decision_ledger)
+    evidence_ledger: Dict[str, Any] = field(default_factory=empty_evidence_ledger)
     investigation: List[Dict[str, Any]] = field(default_factory=list)
-    latest_tool_results: List[Dict[str, Any]] = field(default_factory=list)
-    evidence: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    tool_history: List[Dict[str, Any]] = field(default_factory=list)
-    decision_history: List[Dict[str, Any]] = field(default_factory=list)
-    parse_failures: int = 0
-    patch_failures: int = 0
-    last_tool_signature: Optional[str] = None
-    consecutive_identical_calls: int = 0
-    prompt_snapshots: List[Dict[str, Any]] = field(default_factory=list)
-    phase_history: List[Dict[str, Any]] = field(default_factory=list)
-    relevant_sources: List[Dict[str, Any]] = field(default_factory=list)
-    # Source ranges visible in the CURRENT compiled prompt only.
-    visible_source_ranges: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
-    # Historical coverage is observability only; it must never suppress a reread by itself.
-    historically_seen_source_ranges: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
-    # Evidence explicitly kept available during semantic follow-up.
-    followup_pinned_evidence_ids: List[str] = field(default_factory=list)
     claim_review: Dict[str, Any] = field(default_factory=dict)
-    claim_review_history: List[Dict[str, Any]] = field(default_factory=list)
-    claim_followup_pending: bool = False
-    claim_followup_feedback: str = ""
-    phase: str = "start"
-    investigation_turns: int = 0
-    no_progress_turns: int = 0
-    phase_violations: int = 0
     conversation_background: List[Dict[str, Any]] = field(default_factory=list)
-    write_validation: Dict[str, Any] = field(default_factory=dict)
+    write_transaction: Dict[str, Any] = field(default_factory=empty_transaction)
 
     def evidence_index(self) -> List[Dict[str, Any]]:
-        index: List[Dict[str, Any]] = []
-        pinned = []
-        seen = set()
-        for target in self.investigation:
-            if not isinstance(target, dict):
-                continue
-            for evidence_id in target.get("evidence_ids") or []:
-                evidence_id = str(evidence_id or "").strip()
-                if evidence_id and evidence_id in self.evidence and evidence_id not in seen:
-                    pinned.append(evidence_id)
-                    seen.add(evidence_id)
-        recent = [evidence_id for evidence_id in list(self.evidence.keys())[-40:] if evidence_id not in seen]
-        ordered_ids = pinned + recent
-        for evidence_id in ordered_ids:
-            item = self.evidence.get(evidence_id)
-            if not isinstance(item, dict):
-                continue
-            entry = {
-                "id": evidence_id,
-                "file": item.get("arquivo"),
-                "lines": [item.get("linha_inicio"), item.get("linha_fim")],
-                "file_hash": item.get("file_hash"),
-                "content_hash": item.get("content_hash"),
-            }
-            if evidence_id in seen:
-                entry["pinned"] = True
-            if item.get("source_type"):
-                entry.update({
-                    "source_type": item.get("source_type"),
-                    "stage": item.get("stage"),
-                    "error_code": item.get("error_code"),
-                })
-            index.append(entry)
-        return index
-
-    def record_prompt(self, mode: str, characters: int, estimated_tokens: int, tool_count: int, *, phase: str | None = None, turn: int | None = None, metadata: Dict[str, Any] | None = None) -> None:
-        snapshot = {
-            "mode": mode,
-            "characters": int(characters),
-            "estimated_tokens": int(estimated_tokens),
-            "tool_count": int(tool_count),
-            "phase": phase or self.phase,
-            "turn": int(self.turn if turn is None else turn),
-        }
-        if isinstance(metadata, dict):
-            snapshot.update({key: value for key, value in metadata.items() if value is not None})
-        self.prompt_snapshots.append(snapshot)
-        del self.prompt_snapshots[:-20]
-
-    def record_phase(self, phase: str, *, turn: int | None = None, reason: str = "runtime_state") -> None:
-        phase = str(phase or "start")
-        previous = str(self.phase or "start")
-        if previous == phase and self.phase_history:
-            self.phase = phase
-            return
-        self.phase_history.append({
-            "turn": int(self.turn if turn is None else turn),
-            "from": previous,
-            "to": phase,
-            "reason": str(reason or "runtime_state"),
-        })
-        del self.phase_history[:-50]
-        self.phase = phase
+        return evidence_index_view(self.evidence_ledger, self.investigation)
 
     def to_dict(self) -> Dict[str, Any]:
-        evidence = {
-            key: {
-                field: value for field, value in item.items()
-                if field not in {"conteudo", "trecho_numerado"}
-            }
-            for key, item in self.evidence.items() if isinstance(item, dict)
-        }
-        latest_results = []
-        for result in self.latest_tool_results:
-            if not isinstance(result, dict):
-                continue
-            clone = dict(result)
-            detail = clone.get("detail")
-            if isinstance(detail, dict):
-                clone["detail"] = {
-                    key: value for key, value in detail.items()
-                    if key not in {"conteudo", "trecho_numerado", "resultados"}
-                }
-            latest_results.append(clone)
         return {
+            "session_schema_version": SESSION_SCHEMA_VERSION,
             "request": self.request,
             "task_id": self.task_id,
-            "turn": self.turn,
-            "tool_calls": self.tool_calls,
-            "earned_tool_extension": self.earned_tool_extension,
-            "tool_extension_cycles": self.tool_extension_cycles,
-            "committed_progress_epoch": self.committed_progress_epoch,
-            "last_extension_progress_epoch": self.last_extension_progress_epoch,
-            "committed_progress_history": self.committed_progress_history[-50:],
-            "progress_credited_evidence_ids": self.progress_credited_evidence_ids,
-            "tool_extension_history": self.tool_extension_history[-50:],
-            "workspace_epoch": self.workspace_epoch,
-            "observation_ledger": __import__("eyle.core.observation", fromlist=["persisted_view"]).persisted_view(self.observation_ledger),
-            "observation_replays": self.observation_replays,
-            "decision_ledger": self.decision_ledger,
-            "repeated_rejected_decisions": self.repeated_rejected_decisions,
-            "progress_history": self.progress_history[-50:],
-            "runtime_cycle_start_fingerprint": self.runtime_cycle_start_fingerprint,
-            "runtime_cycle_start_turn": self.runtime_cycle_start_turn,
-            "workspace_scope": self.workspace_scope,
-            "investigation": self.investigation,
-            "latest_tool_results": latest_results,
-            "evidence": evidence,
-            "tool_history": self.tool_history[-30:],
-            "decision_history": self.decision_history[-30:],
-            "parse_failures": self.parse_failures,
-            "patch_failures": self.patch_failures,
-            "prompt_snapshots": self.prompt_snapshots,
-            "phase_history": self.phase_history,
-            "relevant_sources": self.relevant_sources,
-            "visible_source_ranges": self.visible_source_ranges,
-            "historically_seen_source_ranges": self.historically_seen_source_ranges,
-            "followup_pinned_evidence_ids": self.followup_pinned_evidence_ids,
-            "claim_review": self.claim_review,
-            "claim_review_history": self.claim_review_history[-10:],
-            "claim_followup_pending": self.claim_followup_pending,
-            "claim_followup_feedback": self.claim_followup_feedback,
-            "phase": self.phase,
-            "investigation_turns": self.investigation_turns,
-            "no_progress_turns": self.no_progress_turns,
-            "phase_violations": self.phase_violations,
-            "conversation_background": self.conversation_background,
-            "write_validation": self.write_validation,
+            "turn": int(self.turn),
+            "workspace_epoch": int(self.workspace_epoch),
+            "observation_ledger": persisted_observations(self.observation_ledger),
+            "decision_ledger": persisted_decisions(self.decision_ledger),
+            "evidence_ledger": persisted_evidence(self.evidence_ledger),
+            "investigation": [dict(item) for item in self.investigation if isinstance(item, dict)],
+            "claim_review": dict(self.claim_review or {}),
+            "conversation_background": [dict(item) for item in self.conversation_background if isinstance(item, dict)],
+            "write_transaction": dict(self.write_transaction or {}),
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AgentSession":
-        session = cls(
-            request=str(data.get("request") or ""),
-            task_id=data.get("task_id"),
-        )
-        session.turn = int(data.get("turn") or 0)
-        session.tool_calls = int(data.get("tool_calls") or 0)
-        session.earned_tool_extension = max(0, int(data.get("earned_tool_extension") or 0))
-        session.tool_extension_cycles = max(0, int(data.get("tool_extension_cycles") or 0))
-        session.committed_progress_epoch = max(0, int(data.get("committed_progress_epoch") or 0))
-        session.last_extension_progress_epoch = max(0, int(data.get("last_extension_progress_epoch") or 0))
-        session.committed_progress_history = [
-            dict(item) for item in data.get("committed_progress_history") or [] if isinstance(item, dict)
-        ][-50:]
-        credited_ids = [
-            str(item) for item in data.get("progress_credited_evidence_ids") or [] if str(item)
-        ]
-        # Migration-safe monotonicity: older persisted sessions did not carry
-        # the dedicated credit-once set, but their committed progress history
-        # already records which Evidence funded authority. Backfill from it so
-        # resume cannot recycle old Evidence after upgrading to Rev5.2.9.
-        for snapshot in session.committed_progress_history:
-            for evidence_id in snapshot.get("added_evidence_ids") or []:
-                evidence_id = str(evidence_id or "").strip()
-                if evidence_id:
-                    credited_ids.append(evidence_id)
-        session.progress_credited_evidence_ids = list(dict.fromkeys(credited_ids))
-        session.tool_extension_history = [
-            dict(item) for item in data.get("tool_extension_history") or [] if isinstance(item, dict)
-        ][-50:]
+        if not isinstance(data, dict) or data.get("session_schema_version") != SESSION_SCHEMA_VERSION:
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        session = cls(request=str(data.get("request") or ""), task_id=data.get("task_id"))
+        session.turn = max(0, int(data.get("turn") or 0))
         session.workspace_epoch = max(0, int(data.get("workspace_epoch") or 0))
-        session.observation_ledger = {str(k): dict(v) for k, v in (data.get("observation_ledger") or {}).items() if isinstance(v, dict)}
-        session.observation_replays = max(0, int(data.get("observation_replays") or 0))
-        session.decision_ledger = {str(k): dict(v) for k, v in (data.get("decision_ledger") or {}).items() if isinstance(v, dict)}
-        session.repeated_rejected_decisions = max(0, int(data.get("repeated_rejected_decisions") or 0))
-        session.progress_history = [dict(item) for item in data.get("progress_history") or [] if isinstance(item, dict)][-50:]
-        session.runtime_cycle_start_fingerprint = data.get("runtime_cycle_start_fingerprint")
-        session.runtime_cycle_start_turn = max(0, int(data.get("runtime_cycle_start_turn") or 0))
-        raw_scope = data.get("workspace_scope")
-        session.workspace_scope = dict(raw_scope) if isinstance(raw_scope, dict) else {}
+        obs = data.get("observation_ledger")
+        if not isinstance(obs, dict) or not isinstance(obs.get("entries"), dict) or not isinstance(obs.get("events"), list):
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        session.observation_ledger = {
+            "entries": {str(k): dict(v) for k, v in obs.get("entries", {}).items() if isinstance(v, dict)},
+            "events": [dict(item) for item in obs.get("events", []) if isinstance(item, dict)],
+            "pending_results": [dict(item) for item in obs.get("pending_results", []) if isinstance(item, dict)],
+        }
+        decisions = data.get("decision_ledger")
+        if not isinstance(decisions, dict) or not isinstance(decisions.get("events"), list):
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        session.decision_ledger = {"events": [dict(item) for item in decisions.get("events", []) if isinstance(item, dict)]}
+        evidence = data.get("evidence_ledger")
+        if not isinstance(evidence, dict) or not isinstance(evidence.get("items"), dict):
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        session.evidence_ledger = {"items": {str(k): dict(v) for k, v in evidence.get("items", {}).items() if isinstance(v, dict)}}
         session.investigation = [dict(item) for item in data.get("investigation") or [] if isinstance(item, dict)]
-        session.latest_tool_results = list(data.get("latest_tool_results") or [])
-        session.evidence = dict(data.get("evidence") or {})
-        session.tool_history = list(data.get("tool_history") or [])
-        session.decision_history = list(data.get("decision_history") or [])
-        session.parse_failures = int(data.get("parse_failures") or 0)
-        session.patch_failures = int(data.get("patch_failures") or 0)
-        session.prompt_snapshots = list(data.get("prompt_snapshots") or [])
-        session.phase_history = list(data.get("phase_history") or [])
-        session.relevant_sources = list(data.get("relevant_sources") or [])
-        session.visible_source_ranges = dict(data.get("visible_source_ranges") or {})
-        session.historically_seen_source_ranges = dict(data.get("historically_seen_source_ranges") or {})
-        session.followup_pinned_evidence_ids = [str(item) for item in data.get("followup_pinned_evidence_ids") or [] if str(item)]
         session.claim_review = dict(data.get("claim_review") or {})
-        session.claim_review_history = list(data.get("claim_review_history") or [])
-        session.claim_followup_pending = bool(data.get("claim_followup_pending", False))
-        session.claim_followup_feedback = str(data.get("claim_followup_feedback") or "")
-        session.phase = str(data.get("phase") or "start")
-        session.investigation_turns = int(data.get("investigation_turns") or 0)
-        session.no_progress_turns = int(data.get("no_progress_turns") or 0)
-        session.phase_violations = int(data.get("phase_violations") or 0)
-        session.conversation_background = list(data.get("conversation_background") or [])
-        session.write_validation = dict(data.get("write_validation") or {})
+        session.conversation_background = [dict(item) for item in data.get("conversation_background") or [] if isinstance(item, dict)]
+        session.write_transaction = dict(data.get("write_transaction") or {})
         return session

@@ -76,12 +76,12 @@ def collect_project_inventory(root: str, config: Dict[str, Any]) -> Dict[str, An
         max_secret_scan_bytes=int((config or {}).get("agent", {}).get("max_secret_scan_bytes", 64 * 1024)),
     )
     files = [
-        str(item.get("caminho")) for item in inventory.get("entradas") or []
-        if item.get("tipo") == "arquivo" and item.get("caminho")
+        str(item.get("path")) for item in inventory.get("entries") or []
+        if item.get("type") == "file" and item.get("path")
     ]
     directories = [
-        str(item.get("caminho")) for item in inventory.get("entradas") or []
-        if item.get("tipo") == "diretorio" and item.get("caminho")
+        str(item.get("path")) for item in inventory.get("entries") or []
+        if item.get("type") == "diretorio" and item.get("path")
     ]
     return {"inventory": inventory, "files": files, "directories": directories}
 

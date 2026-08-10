@@ -1,177 +1,60 @@
 #!/usr/bin/env python3
-"""Safe observable job history for Eyle.
-
-This module exposes only runtime actions and measurements. It deliberately does
-not expose chain-of-thought, raw prompts, raw model responses, source contents,
-or memory bodies.
-"""
+"""Safe factual job history projected from the canonical ExecutionTrace."""
 from __future__ import annotations
+
+from eyle.core.execution_trace import build_execution_trace
 
 
 def build_public_job_history(registro):
-    """Build a bounded observable execution history without chain-of-thought.
-
-    Only runtime facts are exposed: phases, LLM usage metadata, tool calls with
-    redacted arguments/results, and deterministic post-write validation.
-    Prompts, model raw responses, source contents, hashes and memory bodies stay
-    private.
-    """
     if not isinstance(registro, dict):
         return None
     resultado = registro.get("resultado")
     details = resultado.get("details") if isinstance(resultado, dict) else None
     details = details if isinstance(details, dict) else {}
-    usage = details.get("llm_usage") if isinstance(details.get("llm_usage"), dict) else {}
-    snapshots = details.get("prompt_snapshots") if isinstance(details.get("prompt_snapshots"), list) else []
-    responses = details.get("llm_responses") if isinstance(details.get("llm_responses"), list) else []
-
-    llm_calls = []
-    sent_requests = max(0, int(usage.get("llm_requests", len(responses)) or 0))
-    logical_attempts = max(0, int(usage.get("llm_calls", len(snapshots)) or 0))
-    total_calls = max(len(snapshots), len(responses), logical_attempts)
-    for index in range(total_calls):
-        snap = snapshots[index] if index < len(snapshots) and isinstance(snapshots[index], dict) else {}
-        response = responses[index] if index < len(responses) and isinstance(responses[index], dict) else {}
-        request_status = "sent" if index < sent_requests else "preflight_blocked"
-        prompt_tokens = response.get("prompt_tokens")
-        cached_tokens = response.get("cached_prompt_tokens")
-        uncached_tokens = None
-        if isinstance(prompt_tokens, (int, float)):
-            cached = cached_tokens if isinstance(cached_tokens, (int, float)) else 0
-            uncached_tokens = max(0, prompt_tokens - cached)
-        call = {
-            "call": index + 1,
-            "turn": snap.get("turn"),
-            "phase": snap.get("phase"),
-            "request_status": request_status,
-            "prompt_estimated_tokens": snap.get("estimated_tokens"),
-            "prompt_characters": snap.get("characters"),
-            "tool_count_available": snap.get("tool_count"),
-            "prompt_tokens": prompt_tokens,
-            "cached_prompt_tokens": cached_tokens,
-            "uncached_prompt_tokens": uncached_tokens,
-            "completion_tokens": response.get("completion_tokens"),
-            "reasoning_tokens": response.get("reasoning_tokens"),
-            "finish_reason": response.get("finish_reason"),
-            "provider_model": response.get("provider_model"),
-            "latency_ms": response.get("orchestration_latency_ms", response.get("latency_ms")),
-            "streaming": response.get("streaming"),
-            "structured_profile": response.get("structured_profile"),
-            "structured_mode": response.get("structured_mode"),
-            "structured_capability_source": response.get("structured_capability_source"),
-            "structured_parse_status": response.get("structured_parse_status"),
-            "structured_parse_error": response.get("structured_parse_error"),
-            "structured_parse_detail": response.get("structured_parse_detail"),
-            "structured_top_level_keys": response.get("structured_top_level_keys"),
-            "structured_missing_keys": response.get("structured_missing_keys"),
-        }
-        llm_calls.append({key: value for key, value in call.items() if value is not None})
-
-    decisions = []
-    for index, item in enumerate(details.get("decision_history") or []):
-        if not isinstance(item, dict):
-            continue
-        decisions.append({
-            "call": index + 1,
-            "turn": item.get("turn"),
-            "phase": item.get("phase"),
-            "decision": item.get("decision"),
-            "outcome": item.get("outcome"),
-            "reason": item.get("reason"),
-            "tools": list(item.get("tools") or [])[:8],
-        })
-
-    tools = []
-    for index, item in enumerate(details.get("tool_history") or []):
-        if not isinstance(item, dict):
-            continue
-        result = item.get("result") if isinstance(item.get("result"), dict) else {}
-        tool_name = item.get("tool") or result.get("tool") or "unknown_tool"
-        tools.append({
-            "call": index + 1,
-            "tool": tool_name,
-            "turn": item.get("turn"),
-            "phase": item.get("phase"),
-            "status": item.get("status"),
-            "error_code": item.get("error_code"),
-            "arguments": item.get("arguments") if isinstance(item.get("arguments"), dict) else {},
-            "result": item.get("result") if isinstance(item.get("result"), dict) else {},
-        })
-
-    total_prompt = usage.get("prompt_tokens_actual")
-    total_cached = usage.get("prompt_tokens_cached")
-    total_uncached = usage.get("prompt_tokens_uncached")
-    token_summary = {
-        "prompt_total": total_prompt,
-        "prompt_cached": total_cached,
-        "prompt_new": total_uncached,
-        "prompt_effective": usage.get("prompt_tokens_effective"),
-        "completion": usage.get("completion_tokens_actual", usage.get("generated_tokens")),
-        "reasoning": usage.get("reasoning_tokens_actual"),
-        "effective_total": usage.get("total_tokens_effective"),
-        "administrative_calls": usage.get("administrative_llm_calls"),
-        "administrative_prompt": usage.get("administrative_prompt_tokens"),
-        "administrative_completion": usage.get("administrative_completion_tokens"),
-        "administrative_reasoning": usage.get("administrative_reasoning_tokens"),
-    }
-
-    write_validation = details.get("write_validation")
-    if not isinstance(write_validation, dict):
-        write_validation = {}
-    tool_budget = details.get("tool_budget") if isinstance(details.get("tool_budget"), dict) else {}
-
+    trace = build_execution_trace(
+        details,
+        job_id=registro.get("id"), status=registro.get("status"),
+        created_at=registro.get("criado_em"), started_at=registro.get("iniciado_em"),
+        completed_at=registro.get("concluido_em"),
+        duration_seconds=(registro.get("progresso") or {}).get("elapsed_seconds") if isinstance(registro.get("progresso"), dict) else None,
+        limit=200,
+    )
+    summary = dict(trace.get("summary") or {})
+    token_summary = dict(trace.get("tokens") or {})
+    llm_calls = list(trace.get("llm_calls") or [])
+    logical_ids = {str(item.get("logical_call_id")) for item in llm_calls if item.get("logical_call_id") is not None}
+    sent_requests = sum(1 for item in llm_calls if item.get("request_status") == "sent")
     return {
-        "job_id": registro.get("id"),
-        "status": registro.get("status"),
-        "created_at": registro.get("criado_em"),
-        "started_at": registro.get("iniciado_em"),
-        "completed_at": registro.get("concluido_em"),
-        "duration_seconds": (registro.get("progresso") or {}).get("elapsed_seconds") if isinstance(registro.get("progresso"), dict) else None,
+        "job_id": summary.get("job_id"),
+        "status": summary.get("status"),
+        "created_at": summary.get("created_at"),
+        "started_at": summary.get("started_at"),
+        "completed_at": summary.get("completed_at"),
+        "duration_seconds": summary.get("duration_seconds"),
         "agent": {
-            "turns": details.get("turns"),
-            "tool_calls": details.get("tool_calls"),
-            "tool_budget_base": tool_budget.get("base"),
-            "earned_tool_extension": tool_budget.get("earned_extension"),
-            "tool_budget_effective": tool_budget.get("effective_limit"),
-            "tool_extension_cycles": tool_budget.get("extension_cycles"),
-            "committed_progress_epoch": tool_budget.get("committed_progress_epoch"),
-            "pending_progress_cycles": tool_budget.get("pending_progress_cycles"),
-            "pending_extension_calls": tool_budget.get("pending_extension_calls"),
-            "progress_credited_evidence_count": len(details.get("progress_credited_evidence_ids") or []),
+            "turns": summary.get("turns"),
+            "tool_calls": summary.get("tool_calls"),
+            "tool_call_limit": (summary.get("tool_budget") or {}).get("limit"),
+            "tool_calls_remaining": (summary.get("tool_budget") or {}).get("remaining"),
             "workspace_epoch": details.get("workspace_epoch"),
+            "evidence_count_total": details.get("evidence_count_total"),
             "observation_replays": details.get("observation_replays"),
             "observation_ledger_size": details.get("observation_ledger_size"),
-            "repeated_rejected_decisions": details.get("repeated_rejected_decisions"),
-            "final_phase": details.get("runtime_phase"),
-            "failure_code": details.get("failure_code") or (resultado.get("error_code") if isinstance(resultado, dict) else None),
-            "parse_failures": details.get("parse_failures"),
-            "no_progress_turns": details.get("no_progress_turns"),
-            "phase_violations": details.get("phase_violations"),
+            "repeated_rejected_decisions": summary.get("repeated_rejected_decisions"),
+            "failure_code": summary.get("failure_code") or (resultado.get("error_code") if isinstance(resultado, dict) else None),
+            "task_totals": summary.get("task_totals") if isinstance(summary.get("task_totals"), dict) else {},
         },
-        "tokens": {key: value for key, value in token_summary.items() if value is not None},
+        "tokens": token_summary,
+        "prompt_accounting": trace.get("prompt_accounting") or {},
         "llm": {
-            "logical_attempts": logical_attempts,
+            "logical_attempts": len(logical_ids),
             "requests_sent": sent_requests,
-            "preflight_blocked": max(0, logical_attempts - sent_requests),
+            "preflight_blocked": sum(1 for item in llm_calls if item.get("request_status") == "preflight_blocked"),
         },
         "llm_calls": llm_calls,
-        "decisions": decisions,
-        "tools": tools,
-        "committed_progress_history": list(details.get("committed_progress_history") or [])[-50:],
-        "tool_extension_history": list(details.get("tool_extension_history") or [])[-20:],
-        "progress_history": list(details.get("progress_history") or [])[-50:],
-        "administrative": {
-            "structured_capability": details.get("structured_capability") if isinstance(details.get("structured_capability"), dict) else {},
-            "llm_history": list(details.get("administrative_llm_history") or [])[-30:],
-        },
-        "write_validation": write_validation,
-        "write_failure": details.get("write_failure") if isinstance(details.get("write_failure"), dict) else None,
-        "privacy": {
-            "chain_of_thought_exposed": False,
-            "raw_prompts_exposed": False,
-            "raw_model_responses_exposed": False,
-            "source_contents_exposed": False,
-        },
+        "decisions": list(trace.get("decisions") or []),
+        "tools": list(trace.get("tools") or []),
+        "write_transaction": (trace.get("validation") or {}).get("write_transaction") or {},
+        "claim_review": (trace.get("validation") or {}).get("claim_review") or {},
+        "privacy": dict(trace.get("privacy") or {}),
     }
-
-

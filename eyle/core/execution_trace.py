@@ -1,16 +1,16 @@
-"""Safe observable execution traces for Eyle.
+"""Safe observable execution traces for the canonical Rev5.6 runtime.
 
-The trace contains runtime facts only. It never includes chain-of-thought, raw
-prompts, raw model responses, source bodies, patch bodies, hashes, secrets or
-stored-memory bodies. Diagnosis remains the LLM's job.
+Trace is factual telemetry only: no semantic scheduler, no earned-authority
+history, no chain-of-thought, raw prompts, raw model responses or source bodies.
 """
 from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional
 
+from .prompt_accounting import build_prompt_cost_accounting
 
-_TRACE_LIST_KEYS = ("phases", "context", "llm_calls", "decisions", "tools", "committed_progress_history", "tool_extension_history")
-_TRACE_SECTIONS = {"all", "summary", "context", "llm", "tools", "decisions", "phases", "validation"}
+_TRACE_LIST_KEYS = ("context", "llm_calls", "decisions", "tools")
+_TRACE_SECTIONS = {"all", "summary", "context", "llm", "tools", "decisions", "validation"}
 
 
 def _bounded_list(value: Any, limit: int) -> List[Dict[str, Any]]:
@@ -26,88 +26,76 @@ def _filter_turn(items: Iterable[Dict[str, Any]], turn: Optional[int]) -> List[D
 
 
 def _safe_llm_calls(details: Dict[str, Any], limit: int) -> List[Dict[str, Any]]:
-    usage = details.get("llm_usage") if isinstance(details.get("llm_usage"), dict) else {}
-    snapshots = details.get("prompt_snapshots") if isinstance(details.get("prompt_snapshots"), list) else []
-    responses = details.get("llm_responses") if isinstance(details.get("llm_responses"), list) else []
-    sent_requests = max(0, int(usage.get("llm_requests", len(responses)) or 0))
-    logical_attempts = max(0, int(usage.get("llm_calls", len(snapshots)) or 0))
-    total = max(len(snapshots), len(responses), logical_attempts)
     calls: List[Dict[str, Any]] = []
-    for index in range(total):
-        snap = snapshots[index] if index < len(snapshots) and isinstance(snapshots[index], dict) else {}
-        response = responses[index] if index < len(responses) and isinstance(responses[index], dict) else {}
-        prompt_tokens = response.get("prompt_tokens")
-        cached_tokens = response.get("cached_prompt_tokens")
-        uncached_tokens = None
-        if isinstance(prompt_tokens, (int, float)):
-            cached = cached_tokens if isinstance(cached_tokens, (int, float)) else 0
-            uncached_tokens = max(0, prompt_tokens - cached)
-        call = {
-            "call": index + 1,
-            "turn": snap.get("turn"),
-            "phase": snap.get("phase"),
-            "request_status": "sent" if index < sent_requests else "preflight_blocked",
-            "prompt_estimated_tokens": snap.get("estimated_tokens"),
-            "prompt_characters": snap.get("characters"),
-            "prompt_budget_tokens": snap.get("prompt_budget_tokens"),
-            "output_tokens_reserved": snap.get("output_tokens_reserved"),
-            "tool_count_available": snap.get("tool_count"),
-            "prompt_tokens": prompt_tokens,
-            "cached_prompt_tokens": cached_tokens,
-            "uncached_prompt_tokens": uncached_tokens,
-            "completion_tokens": response.get("completion_tokens"),
-            "reasoning_tokens": response.get("reasoning_tokens"),
-            "finish_reason": response.get("finish_reason"),
-            "provider_model": response.get("provider_model"),
-            "latency_ms": response.get("orchestration_latency_ms", response.get("latency_ms")),
-            "streaming": response.get("streaming"),
-            "structured_profile": response.get("structured_profile"),
-            "structured_mode": response.get("structured_mode"),
-            "structured_capability_source": response.get("structured_capability_source"),
-            "structured_parse_status": response.get("structured_parse_status"),
-            "structured_parse_error": response.get("structured_parse_error"),
-            "structured_parse_detail": response.get("structured_parse_detail"),
-            "structured_top_level_keys": response.get("structured_top_level_keys"),
-            "structured_missing_keys": response.get("structured_missing_keys"),
-        }
-        calls.append({key: value for key, value in call.items() if value is not None})
+    ordinal = 0
+    logical_calls = [dict(item) for item in (details.get("llm_calls") or []) if isinstance(item, dict)]
+    for logical in logical_calls:
+        prompt = dict(logical.get("prompt") or {})
+        attempts = [dict(item) for item in (logical.get("attempts") or []) if isinstance(item, dict)]
+        if not attempts:
+            attempts = [{}]
+        for attempt in attempts:
+            ordinal += 1
+            prompt_tokens = attempt.get("prompt_tokens")
+            cached_tokens = attempt.get("cached_prompt_tokens")
+            uncached_tokens = None
+            if isinstance(prompt_tokens, (int, float)):
+                cached = cached_tokens if isinstance(cached_tokens, (int, float)) else 0
+                uncached_tokens = max(0, int(prompt_tokens) - int(cached))
+            item = {
+                "call": ordinal, "logical_call_id": logical.get("logical_call_id"),
+                "physical_attempt": attempt.get("physical_attempt"), "turn": logical.get("turn"),
+                "mode": logical.get("mode"), "request_status": "sent" if attempt else "preflight_blocked",
+                "prompt_estimated_tokens": prompt.get("estimated_tokens"), "prompt_characters": prompt.get("characters"),
+                "prompt_budget_tokens": prompt.get("prompt_budget_tokens"), "output_tokens_reserved": prompt.get("output_tokens_reserved"),
+                "tool_count_available": prompt.get("tool_count"), "prompt_tokens": prompt_tokens,
+                "cached_prompt_tokens": cached_tokens, "uncached_prompt_tokens": uncached_tokens,
+                "completion_tokens": attempt.get("completion_tokens"), "reasoning_tokens": attempt.get("reasoning_tokens"),
+                "finish_reason": attempt.get("finish_reason"), "provider_model": attempt.get("provider_model"),
+                "latency_ms": attempt.get("orchestration_latency_ms", attempt.get("latency_ms")),
+                "streaming": attempt.get("streaming"), "structured_profile": attempt.get("structured_profile"),
+                "structured_mode": attempt.get("structured_mode"), "structured_parse_status": attempt.get("structured_parse_status"),
+                "structured_parse_error": attempt.get("structured_parse_error"), "structured_parse_detail": attempt.get("structured_parse_detail"),
+                "structured_top_level_keys": attempt.get("structured_top_level_keys"), "structured_missing_keys": attempt.get("structured_missing_keys"),
+                "selected_evidence_count": prompt.get("selected_evidence_count"),
+                "evidence_excerpt_chars_per_item": prompt.get("evidence_excerpt_chars_per_item"),
+                "answer_anchor_count": prompt.get("answer_anchor_count"), "investigation_target_count": prompt.get("investigation_target_count"),
+                "prompt_components": prompt.get("components_after") if isinstance(prompt.get("components_after"), dict) else None,
+            }
+            calls.append({key:value for key,value in item.items() if value is not None})
     return calls[-max(1, int(limit)):]
-
 
 def build_execution_trace(
     details: Dict[str, Any], *, job_id: Optional[int] = None, status: Optional[str] = None,
     created_at: Any = None, started_at: Any = None, completed_at: Any = None,
     duration_seconds: Any = None, limit: int = 100,
 ) -> Dict[str, Any]:
-    """Build one sanitized factual trace from AgentSession/runtime details."""
     details = details if isinstance(details, dict) else {}
     usage = details.get("llm_usage") if isinstance(details.get("llm_usage"), dict) else {}
-    snapshots = _bounded_list(details.get("prompt_snapshots"), limit)
+    logical_calls = _bounded_list(details.get("llm_calls"), limit)
+    snapshots = [dict(item.get("prompt") or {}) | {"turn": item.get("turn"), "mode": item.get("mode")} for item in logical_calls]
 
-    context = []
-    for item in snapshots:
-        context.append({
-            key: item.get(key)
-            for key in (
-                "turn", "phase", "characters", "estimated_tokens", "tool_count",
-                "prompt_budget_tokens", "output_tokens_reserved", "system_prompt_characters",
-                "system_prompt_estimated_tokens", "pre_crop_characters", "pre_crop_estimated_tokens",
-                "crop_applied", "components_before", "components_after",
-            )
-            if item.get(key) is not None
-        })
+    context = [{
+        key: item.get(key)
+        for key in (
+            "turn", "mode", "characters", "estimated_tokens", "tool_count", "active_tool_count",
+            "prompt_budget_tokens", "output_tokens_reserved", "system_prompt_characters",
+            "system_prompt_estimated_tokens", "pre_crop_characters", "pre_crop_estimated_tokens",
+            "crop_applied", "components_before", "components_after",
+            "selected_evidence_count", "evidence_excerpt_chars_per_item",
+            "answer_anchor_count", "investigation_target_count",
+        )
+        if item.get(key) is not None
+    } for item in snapshots]
 
-    decisions = []
-    for index, item in enumerate(_bounded_list(details.get("decision_history"), limit)):
-        decisions.append({
-            "event": index + 1,
-            "turn": item.get("turn"),
-            "phase": item.get("phase"),
-            "decision": item.get("decision"),
-            "outcome": item.get("outcome"),
-            "reason": item.get("reason"),
-            "tools": list(item.get("tools") or [])[:8],
-        })
+    decisions = [{
+        "event": index + 1,
+        "turn": item.get("turn"),
+        "decision": item.get("decision"),
+        "outcome": item.get("outcome"),
+        "reason": item.get("reason"),
+        "tools": list(item.get("tools") or [])[:8],
+    } for index, item in enumerate(_bounded_list(details.get("decision_history"), limit))]
 
     tools = []
     for index, item in enumerate(_bounded_list(details.get("tool_history"), limit)):
@@ -116,16 +104,11 @@ def build_execution_trace(
             "event": index + 1,
             "tool": item.get("tool") or result.get("tool") or "unknown_tool",
             "turn": item.get("turn"),
-            "phase": item.get("phase"),
             "status": item.get("status"),
             "error_code": item.get("error_code"),
             "arguments": item.get("arguments") if isinstance(item.get("arguments"), dict) else {},
             "result": result,
         })
-
-    phases = _bounded_list(details.get("phase_history"), limit)
-    if not phases and details.get("runtime_phase"):
-        phases = [{"turn": details.get("turns"), "from": None, "to": details.get("runtime_phase")}]
 
     tokens = {
         "prompt_total": usage.get("prompt_tokens_actual"),
@@ -136,14 +119,9 @@ def build_execution_trace(
         "completion_remaining": usage.get("completion_tokens_remaining"),
         "reasoning": usage.get("reasoning_tokens_actual"),
         "effective_total": usage.get("total_tokens_effective"),
-        "completion_remaining_pre_call": usage.get("completion_tokens_remaining_pre_call"),
-        "completion_requested_pre_call": usage.get("completion_tokens_requested_pre_call"),
-        "completion_pending_pre_call": usage.get("completion_tokens_pending_pre_call"),
-        "downstream_completion_reserve": usage.get("downstream_completion_reserve_tokens"),
-        "administrative_calls": usage.get("administrative_llm_calls"),
-        "administrative_prompt": usage.get("administrative_prompt_tokens"),
-        "administrative_completion": usage.get("administrative_completion_tokens"),
-        "administrative_reasoning": usage.get("administrative_reasoning_tokens"),
+        "physical_estimated_total": usage.get("total_tokens_physical_estimated"),
+        "physical_remaining": usage.get("physical_tokens_remaining"),
+        "physical_limit": usage.get("physical_tokens_limit"),
     }
     tokens = {key: value for key, value in tokens.items() if value is not None}
 
@@ -158,27 +136,18 @@ def build_execution_trace(
             "turns": details.get("turns"),
             "tool_calls": details.get("tool_calls"),
             "tool_budget": details.get("tool_budget") if isinstance(details.get("tool_budget"), dict) else {},
-            "current_phase": details.get("runtime_phase"),
             "failure_code": details.get("failure_code"),
-            "parse_failures": details.get("parse_failures"),
-            "no_progress_turns": details.get("no_progress_turns"),
-            "phase_violations": details.get("phase_violations"),
+            "repeated_rejected_decisions": details.get("repeated_rejected_decisions"),
+            "task_totals": details.get("task_totals") if isinstance(details.get("task_totals"), dict) else {},
         },
         "tokens": tokens,
-        "phases": phases,
+        "prompt_accounting": build_prompt_cost_accounting(details, limit=limit),
         "context": context,
         "llm_calls": _safe_llm_calls(details, limit),
         "decisions": decisions,
         "tools": tools,
-        "committed_progress_history": _bounded_list(details.get("committed_progress_history"), limit),
-        "tool_extension_history": _bounded_list(details.get("tool_extension_history"), limit),
-        "administrative": {
-            "structured_capability": details.get("structured_capability") if isinstance(details.get("structured_capability"), dict) else {},
-            "llm_history": _bounded_list(details.get("administrative_llm_history"), limit),
-        },
         "validation": {
-            "write_validation": details.get("write_validation") if isinstance(details.get("write_validation"), dict) else {},
-            "write_failure": details.get("write_failure") if isinstance(details.get("write_failure"), dict) else None,
+            "write_transaction": details.get("write_transaction") if isinstance(details.get("write_transaction"), dict) else {},
             "claim_review": details.get("claim_review") if isinstance(details.get("claim_review"), dict) else {},
         },
         "privacy": {
@@ -198,33 +167,26 @@ def build_execution_trace(
 def filter_execution_trace(
     trace: Dict[str, Any], *, section: str = "all", turn: Optional[int] = None, limit: int = 100,
 ) -> Dict[str, Any]:
-    """Return one bounded view of a sanitized trace without diagnosing it."""
     if not isinstance(trace, dict):
         return {}
     section = str(section or "all").strip().lower()
     if section not in _TRACE_SECTIONS:
         raise ValueError("section must be one of: " + ", ".join(sorted(_TRACE_SECTIONS)))
     limit = max(1, min(int(limit or 100), 200))
-
-    base = {
-        "summary": dict(trace.get("summary") or {}),
-        "privacy": dict(trace.get("privacy") or {}),
-    }
+    base = {"summary": dict(trace.get("summary") or {}), "privacy": dict(trace.get("privacy") or {})}
     mapping = {
         "summary": [],
-        "context": ["context"],
-        "llm": ["tokens", "llm_calls"],
+        "context": ["context", "prompt_accounting"],
+        "llm": ["tokens", "llm_calls", "prompt_accounting"],
         "tools": ["tools"],
         "decisions": ["decisions"],
-        "phases": ["phases"],
-        "validation": ["administrative", "validation"],
-        "all": ["tokens", "phases", "context", "llm_calls", "decisions", "tools", "committed_progress_history", "tool_extension_history", "administrative", "validation"],
+        "validation": ["validation"],
+        "all": ["tokens", "prompt_accounting", "context", "llm_calls", "decisions", "tools", "validation"],
     }
     for key in mapping[section]:
         value = trace.get(key)
         if key in _TRACE_LIST_KEYS and isinstance(value, list):
-            filtered = _filter_turn(value, turn)
-            base[key] = filtered[-limit:]
+            base[key] = _filter_turn(value, turn)[-limit:]
         else:
             base[key] = value
     if turn is not None:

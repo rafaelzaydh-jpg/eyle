@@ -2,8 +2,7 @@
 """Execucao de comandos de projeto com isolamento e limites.
 
 Atualizacao 28. O modulo nao oferece um fallback silencioso para um processo
-comum quando a politica exige rede bloqueada: sem Bubblewrap (Linux) ou uma
-imagem Docker explicitamente configurada, a execucao falha fechada.
+comum quando a politica exige rede bloqueada: sem Docker ou Bubblewrap, a execucao falha fechada.
 
 O projeto continua gravavel porque suites de teste costumam criar caches e
 artefatos. Bubblewrap/Docker oferecem isolamento forte. Em Windows, um modo
@@ -19,6 +18,11 @@ import stat
 import subprocess
 import tempfile
 import uuid
+
+DEFAULT_DOCKER_IMAGE = "python:3.12-slim"
+
+from .execution_context import current_execution
+from .workspace_policy import _caminho_parece_segredo, _conteudo_parece_segredo
 
 
 class ErroSandbox(ValueError):
@@ -131,8 +135,31 @@ def _copiar_projeto(caminho_projeto, limites):
 
     temporario = tempfile.TemporaryDirectory(prefix="eyle-sandbox-projeto-")
     destino = os.path.join(temporario.name, "workspace")
+    raiz_real = os.path.realpath(caminho_projeto)
+
+    def ignorar_segredos(diretorio, nomes):
+        ignorados = []
+        for nome in nomes:
+            absoluto = os.path.join(diretorio, nome)
+            relativo = os.path.relpath(absoluto, raiz_real).replace(os.sep, "/")
+            if _caminho_parece_segredo(relativo):
+                ignorados.append(nome); continue
+            try:
+                if os.path.islink(absoluto):
+                    destino_link = os.path.realpath(absoluto)
+                    if destino_link != raiz_real and not destino_link.startswith(raiz_real + os.sep):
+                        ignorados.append(nome)
+                    continue
+                if os.path.isfile(absoluto) and os.path.getsize(absoluto) <= 512 * 1024:
+                    with open(absoluto, "r", encoding="utf-8", errors="replace") as fh:
+                        if _conteudo_parece_segredo(fh.read(512 * 1024)):
+                            ignorados.append(nome)
+            except OSError:
+                continue
+        return ignorados
+
     try:
-        shutil.copytree(caminho_projeto, destino, symlinks=True)
+        shutil.copytree(caminho_projeto, destino, symlinks=True, ignore=ignorar_segredos)
     except (OSError, shutil.Error) as erro:
         temporario.cleanup()
         raise ErroSandbox(f"nao foi possivel criar copia isolada do projeto: {erro}")
@@ -177,9 +204,12 @@ def _comando_bwrap(caminho_projeto, argv, cfg, limites):
             comando.extend(["--ro-bind", origem, origem])
 
     comando.extend(["--dir", "/etc"])
-    for arquivo in ("/etc/passwd", "/etc/group", "/etc/nsswitch.conf", "/etc/ld.so.cache", "/etc/localtime"):
+    for arquivo in ("/etc/passwd", "/etc/group", "/etc/nsswitch.conf", "/etc/ld.so.cache", "/etc/localtime", "/etc/resolv.conf", "/etc/hosts", "/etc/ca-certificates.conf"):
         if os.path.exists(arquivo):
             comando.extend(["--ro-bind", arquivo, arquivo])
+
+    if os.path.isdir("/etc/ssl/certs"):
+        comando.extend(["--dir", "/etc/ssl", "--ro-bind", "/etc/ssl/certs", "/etc/ssl/certs"])
 
     caminho_real = os.path.realpath(caminho_projeto)
     comando.extend([
@@ -202,18 +232,32 @@ def _comando_bwrap(caminho_projeto, argv, cfg, limites):
     return comando, None
 
 
-def _comando_docker(caminho_projeto, argv, cfg, limites):
+def _docker_image(cfg):
+    image = cfg.get("imagem_docker") or DEFAULT_DOCKER_IMAGE
+    if not isinstance(image, str) or not image.strip():
+        raise ErroSandbox("sandbox.imagem_docker precisa ser string nao vazia")
+    return image.strip()
+
+
+def _ensure_docker_container(caminho_projeto, cfg, limites):
+    """Create one writable Docker laboratory per physical job.
+
+    The real workspace is never mounted; ``caminho_projeto`` is already the
+    disposable copied snapshot. Container rootfs + snapshot persist until the
+    ExecutionContext cleanup boundary, allowing apt/pip/npm/toolchains to remain
+    available across multiple run_command calls.
+    """
     docker = shutil.which("docker")
-    imagem = cfg.get("imagem_docker")
     if not docker:
         raise ErroSandbox("Docker nao encontrado")
-    if not isinstance(imagem, str) or not imagem.strip():
-        raise ErroSandbox("backend Docker exige sandbox.imagem_docker explicita")
+    execution = current_execution()
+    if execution is not None and execution.sandbox_container_name:
+        return docker, execution.sandbox_container_name, False
 
-    nome = f"eyle-sandbox-{uuid.uuid4().hex[:12]}"
-    comando = [
-        docker, "run", "--rm", "--pull", "never", "--name", nome,
-        "--read-only", "--cap-drop", "ALL",
+    image = _docker_image(cfg)
+    name = f"eyle-sandbox-{uuid.uuid4().hex[:12]}"
+    command = [
+        docker, "run", "-d", "--pull", "missing", "--name", name,
         "--security-opt", "no-new-privileges",
         "--cpus", str(cfg.get("cpus", 1.0)),
         "--memory", f"{limites['memoria_mb']}m",
@@ -223,19 +267,35 @@ def _comando_docker(caminho_projeto, argv, cfg, limites):
             f"fsize={limites['arquivo_mb'] * 1024 * 1024}:"
             f"{limites['arquivo_mb'] * 1024 * 1024}"
         ),
-        "--tmpfs", "/tmp:rw,noexec,nosuid,size=128m",
+        "--tmpfs", "/tmp:rw,nosuid,size=256m",
         "--mount", f"type=bind,source={os.path.realpath(caminho_projeto)},target=/workspace",
         "--workdir", "/workspace",
-        "--env", "HOME=/tmp",
-        "--env", "TMPDIR=/tmp",
-        "--env", "EYLE_SANDBOX=1",
+        "--env", "HOME=/root", "--env", "TMPDIR=/tmp", "--env", "EYLE_SANDBOX=1",
+        "--network", "bridge",
+        image, "/bin/sh", "-lc", "while :; do sleep 3600; done",
     ]
-    comando.extend(["--network", "none" if cfg.get("bloquear_rede", True) else "bridge"])
-    if hasattr(os, "getuid") and hasattr(os, "getgid"):
-        comando.extend(["--user", f"{os.getuid()}:{os.getgid()}"])
-    comando.append(imagem)
-    comando.extend(argv)
-    return comando, (docker, nome)
+    try:
+        completed = subprocess.run(
+            command, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            timeout=max(30, min(180, limites["timeout"])), check=False, shell=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ErroSandbox(f"nao foi possivel iniciar Docker sandbox: {exc}")
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "docker run falhou").strip()[-1200:]
+        raise ErroSandbox(f"Docker sandbox indisponivel: {detail}")
+    if execution is not None:
+        execution.sandbox_container_name = name
+        execution.sandbox_docker_binary = docker
+        execution.sandbox_backend = "docker"
+    return docker, name, execution is None
+
+
+def _comando_docker(caminho_projeto, shell_command, rel_cwd, cfg, limites):
+    docker, name, cleanup_after = _ensure_docker_container(caminho_projeto, cfg, limites)
+    workdir = "/workspace" if rel_cwd == "." else "/workspace/" + rel_cwd
+    argv = [docker, "exec", "-w", workdir, name, "/bin/sh", "-lc", shell_command]
+    return argv, ((docker, name) if cleanup_after else None)
 
 
 def _ambiente_trusted_local():
@@ -280,6 +340,130 @@ def _matar_grupo(processo):
         pass
 
 
+
+def _strong_backend(cfg):
+    """Resolve a backend satisfying the unrestricted sandbox isolation contract."""
+    backend = str(cfg.get("backend", "auto")).lower()
+    if backend == "auto":
+        if shutil.which("docker"):
+            return "docker"
+        if os.name == "posix" and shutil.which("bwrap"):
+            return "bwrap"
+        raise ErroSandbox("run_command exige Docker ou Bubblewrap; trusted_local/processo nao sao isolamento forte")
+    if backend not in {"bwrap", "docker"}:
+        raise ErroSandbox("run_command aceita somente backends fortes: docker ou bwrap")
+    if backend == "docker" and not shutil.which("docker"):
+        raise ErroSandbox("Docker nao encontrado")
+    if backend == "bwrap" and not (os.name == "posix" and shutil.which("bwrap")):
+        raise ErroSandbox("Bubblewrap nao encontrado")
+    return backend
+
+
+def _safe_sandbox_cwd(workspace, cwd):
+    raw = str(cwd or ".").replace("\\", "/").strip() or "."
+    if os.path.isabs(raw):
+        raise ErroSandbox("cwd do sandbox deve ser relativo ao snapshot")
+    target = os.path.realpath(os.path.join(workspace, raw))
+    root = os.path.realpath(workspace)
+    if target != root and not target.startswith(root + os.sep):
+        raise ErroSandbox("cwd tenta escapar do snapshot do sandbox")
+    if not os.path.isdir(target):
+        raise ErroSandbox("cwd do sandbox nao existe")
+    return target
+
+
+def _agent_sandbox_workspace(caminho_projeto, cfg, limites):
+    """Return one writable snapshot that persists for the current job only."""
+    execution = current_execution()
+    if execution is not None and execution.sandbox_workspace_path and os.path.isdir(execution.sandbox_workspace_path):
+        return execution.sandbox_workspace_path, execution.sandbox_tempdir
+    workspace, tempdir = _copiar_projeto(caminho_projeto, limites)
+    if execution is not None:
+        execution.sandbox_workspace_path = workspace
+        execution.sandbox_tempdir = tempdir
+    return workspace, tempdir
+
+
+def executar_comando_livre_no_sandbox(caminho_projeto, comando, cfg_sandbox=None, *, cwd=".", timeout_segundos=None):
+    """Run an unrestricted shell command inside a strong, disposable project snapshot.
+
+    The command may mutate the snapshot, install workspace-local dependencies,
+    compile and access the network. It never receives the real workspace as a
+    writable mount and never uses trusted_local/process backends. Snapshot state
+    persists across run_command calls in the same execution and is destroyed at
+    the execution boundary.
+    """
+    if not os.path.isdir(caminho_projeto):
+        return {"executado": False, "ok": False, "codigo": None, "saida": "", "erro": "pasta do projeto nao existe"}
+    try:
+        cfg = _config_para_projeto(caminho_projeto, cfg_sandbox)
+        cfg = dict(cfg)
+        cfg["bloquear_rede"] = False
+        cfg["copiar_projeto"] = True
+        limites = _limites(cfg)
+        if timeout_segundos is not None:
+            requested = int(timeout_segundos)
+            if requested < 1 or requested > limites["timeout"]:
+                raise ErroSandbox(f"timeout_segundos deve estar entre 1 e {limites['timeout']}")
+            limites["timeout"] = requested
+        backend = _strong_backend(cfg)
+        workspace, tempdir = _agent_sandbox_workspace(os.path.realpath(caminho_projeto), cfg, limites)
+        cwd_host = _safe_sandbox_cwd(workspace, cwd)
+        rel_cwd = os.path.relpath(cwd_host, workspace).replace(os.sep, "/")
+        shell_command = str(comando or "").strip()
+        if not shell_command or "\x00" in shell_command:
+            raise ErroSandbox("command vazio ou invalido")
+        argv = ["/bin/sh", "-lc", shell_command]
+        if backend == "bwrap":
+            argv_exec, cleanup_docker = _comando_bwrap(workspace, argv, cfg, limites)
+            # _comando_bwrap always enters /workspace; override to requested relative cwd.
+            if "--chdir" in argv_exec:
+                idx = argv_exec.index("--chdir")
+                argv_exec[idx + 1] = "/workspace" if rel_cwd == "." else "/workspace/" + rel_cwd
+        else:
+            argv_exec, cleanup_docker = _comando_docker(workspace, shell_command, rel_cwd, cfg, limites)
+        execution = current_execution()
+        if execution is not None:
+            execution.sandbox_backend = backend
+    except (ErroSandbox, ValueError) as erro:
+        return {"executado": False, "ok": False, "codigo": None, "saida": "", "erro": str(erro)}
+
+    timeout = limites["timeout"]
+    output_file = tempfile.TemporaryFile(mode="w+b")
+    process = None
+    timed_out = False
+    try:
+        process = subprocess.Popen(
+            argv_exec, cwd=workspace, stdin=subprocess.DEVNULL, stdout=output_file, stderr=subprocess.STDOUT,
+            start_new_session=True, shell=False, env=None,
+        )
+        try:
+            code = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _matar_grupo(process); code = process.wait()
+    except OSError as erro:
+        output_file.close()
+        return {"executado": False, "ok": False, "codigo": None, "saida": "", "erro": f"nao foi possivel iniciar o sandbox: {erro}"}
+    finally:
+        if cleanup_docker:
+            docker, name = cleanup_docker
+            try:
+                subprocess.run([docker, "rm", "-f", name], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=False, shell=False)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+
+    output_file.seek(0, os.SEEK_END); size = output_file.tell()
+    max_return = min(limites["saida_kb"] * 1024, 128 * 1024)
+    output_file.seek(max(0, size - max_return))
+    output = output_file.read().decode("utf-8", errors="replace"); output_file.close()
+    return {
+        "executado": True, "ok": (code == 0 and not timed_out), "codigo": code, "saida": output,
+        "erro": f"timeout de {timeout}s excedido" if timed_out else None, "backend": backend,
+        "network_enabled": True, "workspace_isolated": True, "snapshot_persists_for_job": True,
+        "real_workspace_changed": False, "cwd": rel_cwd,
+    }
+
 def executar_no_sandbox(caminho_projeto, comando, cfg_sandbox=None):
     """Executa ``comando`` e devolve contrato pequeno, sem levantar excecao.
 
@@ -304,7 +488,7 @@ def executar_no_sandbox(caminho_projeto, comando, cfg_sandbox=None):
         if backend == "auto":
             if os.name == "posix" and shutil.which("bwrap"):
                 backend = "bwrap"
-            elif shutil.which("docker") and cfg.get("imagem_docker"):
+            elif shutil.which("docker"):
                 backend = "docker"
             elif os.name == "nt" and cfg.get("allow_trusted_local") is True:
                 backend = "trusted_local"
@@ -319,7 +503,7 @@ def executar_no_sandbox(caminho_projeto, comando, cfg_sandbox=None):
         if backend == "bwrap":
             argv_exec, limpeza_docker = _comando_bwrap(caminho_execucao, argv, cfg, limites)
         elif backend == "docker":
-            argv_exec, limpeza_docker = _comando_docker(caminho_execucao, argv, cfg, limites)
+            argv_exec, limpeza_docker = _comando_docker(caminho_execucao, _texto_comando(argv), ".", cfg, limites)
         elif backend in ("process", "processo"):
             argv_exec, limpeza_docker = _comando_processo(caminho_execucao, argv, cfg, limites)
         elif backend in ("trusted_local", "local_confiavel"):
@@ -363,17 +547,13 @@ def executar_no_sandbox(caminho_projeto, comando, cfg_sandbox=None):
         return {"executado": False, "ok": False, "codigo": None,
                 "saida": "", "erro": f"nao foi possivel iniciar o sandbox: {erro}"}
     finally:
-        if excedeu_timeout and limpeza_docker:
+        if limpeza_docker:
             docker, nome = limpeza_docker
             try:
                 subprocess.run(
-                    [docker, "rm", "-f", nome],
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=10,
-                    check=False,
-                    shell=False,
+                    [docker, "rm", "-f", nome], stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=10, check=False, shell=False,
                 )
             except (OSError, subprocess.TimeoutExpired):
                 pass

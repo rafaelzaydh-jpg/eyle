@@ -1,8 +1,9 @@
-"""Rev5.2.9 configuration boundary for the canonical AgentSession core."""
+"""Rev5.6 strict configuration boundary. No legacy aliases or migration keys."""
 from __future__ import annotations
 
 import json
 
+from eyle import __revision__, __schema_version__, __version__
 from eyle.core.claim_review import ClaimConfigError, claim_config
 
 
@@ -18,69 +19,71 @@ _LLM_FIELDS = {
     "base_url", "model", "openai_compatible", "temperature", "max_tokens",
     "context_window_tokens", "connect_timeout_seconds", "read_timeout_seconds",
     "model_discovery_timeout_seconds", "model_discovery_negative_ttl_seconds",
-    "retry_max_attempts", "agent_retry_max_attempts", "retry_base_delay_seconds",
+    "retry_max_attempts", "retry_base_delay_seconds",
     "retry_max_delay_seconds", "retry_jitter_seconds", "max_concurrent_requests",
     "cooldown_seconds", "retry_read_timeouts", "stream_responses",
-    "truncation_retry_multiplier", "truncation_retry_max_tokens",
-    "agent_decision_max_tokens", "agent_patch_max_tokens", "agent_analysis_max_tokens",
+    "agent_max_tokens",
 }
 _AGENT_FIELDS = {
-    "max_tree_entries", "max_tree_depth", "max_read_range_lines",
+    "max_tree_entries", "max_tree_depth", "max_file_read_lines",
     "task_deadline_seconds", "max_llm_calls", "max_secret_scan_bytes",
     "max_prompt_tokens", "max_completion_tokens", "max_total_tokens",
-    "chat_history_token_budget", "final_validation_retries", "max_llm_turns",
-    "max_tool_calls", "max_identical_tool_repeats", "max_patch_dry_run_failures",
-    "committed_progress_extension_calls",
-    "context_view", "max_write_investigation_turns",
-    "max_no_progress_turns", "max_phase_violations", "max_project_scan_entries",
+    "max_llm_turns",
+    "max_tool_calls", "max_patch_dry_run_failures",
+    "context_view", "max_project_scan_entries",
     "max_project_scan_depth", "max_project_file_bytes", "max_inspect_relation_edges",
     "max_git_diff_chars", "max_search_matches", "max_search_ranges", "claims",
-    "max_search_range_lines", "structured_protocol_retries",
+    "max_search_range_lines", "sandbox",
 }
 _CONTEXT_VIEW_FIELDS = {
-    "max_relevant_sources", "max_relevant_source_chars",
+    "max_source_preview_chars",
     "max_symbol_preview_chars", "max_search_source_chars",
 }
 _CONTEXT_FIELDS = {
     "safety_margin_tokens", "chars_per_token_fallback", "cached_prompt_weight",
-    "working_set_target_tokens",
 }
 _CODAR_FIELDS = {"ativado", "testes"}
+
+_WORKER_FIELDS = {
+    "heartbeat_interval_seconds", "queue_error_backoff_seconds",
+    "max_invalid_jobs_per_reservation", "max_parallel_jobs", "isolate_jobs",
+    "stale_worker_seconds", "head_of_line_blocked_seconds", "multiprocessing_context",
+}
+_WEB_FIELDS = {"api_token", "rate_limit"}
+_WEB_RATE_LIMIT_FIELDS = {"requests", "auth_failures", "window_seconds"}
+_CONFIRMATION_FIELDS = {"expiracao_segundos"}
+_TELEMETRY_FIELDS = {"enabled", "window_seconds"}
+_TEST_FIELDS = {"ativado", "comando_python", "comando_node", "timeout_segundos", "sandbox"}
+_SANDBOX_FIELDS = {
+    "backend", "bloquear_rede", "comandos_permitidos", "cpu_segundos", "memoria_mb",
+    "max_processos", "max_arquivos_abertos", "max_saida_kb", "max_arquivo_mb",
+    "copiar_projeto", "max_arquivos_projeto", "max_tamanho_projeto_mb", "cpus",
+    "allow_trusted_local", "timeout_segundos", "imagem_docker",
+}
 _AGENT_POSITIVE_DEFAULTS = {
-    "max_llm_turns": 8,
-    "max_tool_calls": 12,
-    "committed_progress_extension_calls": 4,
-    "max_identical_tool_repeats": 2,
+    "max_llm_turns": 24,
+    "max_tool_calls": 64,
     "max_patch_dry_run_failures": 2,
-    "max_write_investigation_turns": 2,
-    "max_no_progress_turns": 2,
-    "chat_history_token_budget": 700,
     "max_project_scan_entries": 20000,
     "max_project_scan_depth": 32,
     "max_project_file_bytes": 4194304,
     "max_inspect_relation_edges": 60,
     "max_search_range_lines": 16,
-    "max_read_range_lines": 400,
+    "max_file_read_lines": 400,
     "max_tree_entries": 200,
     "max_tree_depth": 6,
     "max_secret_scan_bytes": 65536,
     "max_git_diff_chars": 6000,
     "max_search_matches": 40,
     "max_search_ranges": 12,
-    "task_deadline_seconds": 900,
-    "max_llm_calls": 12,
-    "max_prompt_tokens": 96000,
-    "max_completion_tokens": 9000,
-    "max_total_tokens": 105000,
-}
-_AGENT_NONNEGATIVE_DEFAULTS = {
-    "structured_protocol_retries": 1,
-    "final_validation_retries": 1,
-    "max_phase_violations": 1,
+    "task_deadline_seconds": 1800,
+    "max_llm_calls": 32,
+    "max_prompt_tokens": 90000,
+    "max_completion_tokens": 8000,
+    "max_total_tokens": 98000,
 }
 _CONTEXT_VIEW_POSITIVE_DEFAULTS = {
-    "max_relevant_sources": 4,
-    "max_relevant_source_chars": 3500,
+    "max_source_preview_chars": 3500,
     "max_search_source_chars": 600,
     "max_symbol_preview_chars": 2600,
 }
@@ -109,6 +112,14 @@ def validar_config(config):
     if not isinstance(config, dict):
         raise ConfigError("config precisa ser um objeto")
     _reject_unknown(config, _TOP_LEVEL_FIELDS, "root")
+    expected_identity = {
+        "app_version": __version__,
+        "config_schema_version": __schema_version__,
+        "revision": __revision__,
+    }
+    for key, expected in expected_identity.items():
+        if config.get(key) != expected:
+            raise ConfigError(f"CONFIG_IDENTITY_INCOMPATIBLE:{key}:{config.get(key)!r}")
 
     llm = config.get("llm") or {}
     if not isinstance(llm, dict):
@@ -122,11 +133,46 @@ def validar_config(config):
         ("model_discovery_timeout_seconds", 3),
     ):
         _validate_positive_number(llm, key, default, "llm")
+    _validate_int(llm, "context_window_tokens", 32768, minimum=1, prefix="llm")
+    if int(llm.get("context_window_tokens", 32768) or 32768) > 32768:
+        raise ConfigError("llm.context_window_tokens não pode exceder 32768 na Rev5.6")
 
     codar = config.get("codar") or {}
     if not isinstance(codar, dict):
         raise ConfigError("codar precisa ser um objeto")
     _reject_unknown(codar, _CODAR_FIELDS, "codar")
+    tests = codar.get("testes") or {}
+    if not isinstance(tests, dict):
+        raise ConfigError("codar.testes precisa ser um objeto")
+    _reject_unknown(tests, _TEST_FIELDS, "codar.testes")
+    sandbox = tests.get("sandbox") or {}
+    if not isinstance(sandbox, dict):
+        raise ConfigError("codar.testes.sandbox precisa ser um objeto")
+    _reject_unknown(sandbox, _SANDBOX_FIELDS, "codar.testes.sandbox")
+
+    worker = config.get("worker") or {}
+    if not isinstance(worker, dict):
+        raise ConfigError("worker precisa ser um objeto")
+    _reject_unknown(worker, _WORKER_FIELDS, "worker")
+
+    web = config.get("web") or {}
+    if not isinstance(web, dict):
+        raise ConfigError("web precisa ser um objeto")
+    _reject_unknown(web, _WEB_FIELDS, "web")
+    rate_limit = web.get("rate_limit") or {}
+    if not isinstance(rate_limit, dict):
+        raise ConfigError("web.rate_limit precisa ser um objeto")
+    _reject_unknown(rate_limit, _WEB_RATE_LIMIT_FIELDS, "web.rate_limit")
+
+    confirmations = config.get("confirmacoes") or {}
+    if not isinstance(confirmations, dict):
+        raise ConfigError("confirmacoes precisa ser um objeto")
+    _reject_unknown(confirmations, _CONFIRMATION_FIELDS, "confirmacoes")
+
+    telemetry = config.get("telemetry") or {}
+    if not isinstance(telemetry, dict):
+        raise ConfigError("telemetry precisa ser um objeto")
+    _reject_unknown(telemetry, _TELEMETRY_FIELDS, "telemetry")
 
     agent = config.get("agent") or {}
     if not isinstance(agent, dict):
@@ -134,8 +180,17 @@ def validar_config(config):
     _reject_unknown(agent, _AGENT_FIELDS, "agent")
     for key, default in _AGENT_POSITIVE_DEFAULTS.items():
         _validate_int(agent, key, default, minimum=1, prefix="agent")
-    for key, default in _AGENT_NONNEGATIVE_DEFAULTS.items():
-        _validate_int(agent, key, default, minimum=0, prefix="agent")
+    if int(agent.get("max_total_tokens", 98000) or 98000) > 98000:
+        raise ConfigError("agent.max_total_tokens não pode exceder 98000 na Rev5.6")
+    if int(agent.get("max_prompt_tokens", 90000) or 90000) > 90000:
+        raise ConfigError("agent.max_prompt_tokens não pode exceder 90000 na Rev5.6")
+    if int(agent.get("max_completion_tokens", 8000) or 8000) > 8000:
+        raise ConfigError("agent.max_completion_tokens não pode exceder 8000 na Rev5.6")
+
+    agent_sandbox = agent.get("sandbox") or {}
+    if not isinstance(agent_sandbox, dict):
+        raise ConfigError("agent.sandbox precisa ser um objeto")
+    _reject_unknown(agent_sandbox, _SANDBOX_FIELDS, "agent.sandbox")
 
     context_view = agent.get("context_view") or {}
     if not isinstance(context_view, dict):
@@ -154,7 +209,6 @@ def validar_config(config):
     for key, default in (
         ("safety_margin_tokens", 500),
         ("chars_per_token_fallback", 3),
-        ("working_set_target_tokens", 12000),
     ):
         _validate_int(context, key, default, minimum=1, prefix="context_engine")
 

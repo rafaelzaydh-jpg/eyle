@@ -141,7 +141,7 @@ def test_token_aleatorio_e_persistente_com_permissao_restrita(monkeypatch, tmp_p
 def test_job_expoe_estado_real_sem_payload_nem_resultado(monkeypatch):
     cliente = _cliente(monkeypatch)
     monkeypatch.setattr(routes.queue, "obter", lambda job_id: {
-        "id": job_id, "tipo": "pergunta", "status": "processing",
+        "id": job_id, "type": "pergunta", "status": "processing",
         "tentativas": 1, "payload": {"texto": "segredo", "mensagem_id": 77},
         "resultado": {"resposta": "ainda privada"}, "erro": None,
         "criado_em": "2026-08-01T00:00:00Z",
@@ -182,7 +182,7 @@ def test_health_reflete_worker_e_head_of_line(monkeypatch):
 def test_job_falho_expoe_so_diagnostico_seguro(monkeypatch):
     cliente = _cliente(monkeypatch)
     monkeypatch.setattr(routes.queue, "obter", lambda job_id: {
-        "id": job_id, "tipo": "pergunta", "status": "failed",
+        "id": job_id, "type": "pergunta", "status": "failed",
         "tentativas": 1, "payload": {"texto": "segredo"},
         "resultado": {
             "status": "failed",

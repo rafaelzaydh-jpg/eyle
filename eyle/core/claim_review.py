@@ -5,7 +5,7 @@ proven deterministically stays in the runtime:
 - omitted Claims config resolves to self_check; off is explicit;
 - verifier citations are confined to the EvidenceRecords actually shown;
 - file Evidence is checked for freshness before and after verification;
-- reviewer debt is returned to the Main LLM through runtime-owned follow-up state;
+- reviewer debt is preserved in the canonical Claim Review and rendered back to the Main LLM;
 - the runtime never rewrites a semantic conclusion on behalf of the Main LLM.
 """
 from __future__ import annotations
@@ -15,20 +15,18 @@ import os
 import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from .request_policy import requested_finding_constraints
 from .security import _resolver_caminho_seguro
 from .text_hash import hash_texto, normalizar_quebras
+from .execution_context import current_execution
 
 CLAIM_MODES = {"off", "self_check", "verified"}
-_CLAIMS_FIELDS = {"mode", "verifier", "evidence", "require_supported"}
+_CLAIMS_FIELDS = {"mode", "verifier", "evidence"}
 _VERIFIER_COMMON_FIELDS = {"max_tokens", "temperature"}
 _VERIFIER_VERIFIED_FIELDS = _VERIFIER_COMMON_FIELDS | {"base_url", "model", "openai_compatible"}
 _EVIDENCE_FIELDS = {"max_chars_per_item"}
 
-CLAIM_VERDICTS = {"supported", "contradicted", "insufficient"}
-CLAIM_KINDS = {"fact", "bug", "risk", "recommendation"}
-AUDIT_FINDING_TYPES = {"bug", "risk", "recommendation", "fact"}
 SEMANTIC_GAP_TYPES = {"material_omission", "conflicting_evidence", "scope_gap"}
+GROUNDING_PREFIXES = {"evidence", "runtime", "answer", "investigation"}
 
 
 ANSWER_ANCHOR_MAX_CHARS = 700
@@ -100,36 +98,6 @@ def answer_anchor_map(answer_anchors: Optional[Sequence[Dict[str, Any]]]) -> Dic
     return result
 
 
-def verifier_answer_anchors(
-    answer: str, target_claims: Optional[Sequence[Dict[str, Any]]] = None,
-) -> Tuple[bool, str, List[Dict[str, Any]]]:
-    """Build anchors for initial review or exact local Claim reverify.
-
-    Reverify reuses the original Claim anchor reference and maps it to the
-    target literal quote. This keeps semantic scope local without resending
-    unrelated answer text.
-    """
-    if not target_claims:
-        return True, "ok", build_answer_anchors(answer)
-
-    anchors: List[Dict[str, Any]] = []
-    seen: Dict[str, str] = {}
-    for index, item in enumerate(target_claims, start=1):
-        if not isinstance(item, dict):
-            return False, f"CLAIM_REVERIFY_TARGET_INVALID:{index}", []
-        anchor_id = str(item.get("answer_ref") or "").strip()
-        quote = str(item.get("answer_quote") or "")
-        if not anchor_id or not quote:
-            return False, f"CLAIM_REVERIFY_ANCHOR_REQUIRED:{index}", []
-        previous = seen.get(anchor_id)
-        if previous is not None and previous != quote:
-            return False, f"CLAIM_REVERIFY_ANCHOR_CONFLICT:{anchor_id}", []
-        if previous is None:
-            seen[anchor_id] = quote
-            anchors.append({"id": anchor_id, "text": quote})
-    return True, "ok", anchors
-
-
 class ClaimConfigError(ValueError):
     """Invalid Claims configuration; never silently reinterpreted semantically."""
 
@@ -140,15 +108,6 @@ def _object_field(parent: Dict[str, Any], key: str) -> Dict[str, Any]:
     value = parent.get(key)
     if not isinstance(value, dict):
         raise ClaimConfigError(f"agent.claims.{key} precisa ser um objeto")
-    return value
-
-
-def _bool_field(parent: Dict[str, Any], key: str, default: bool, prefix: str) -> bool:
-    if key not in parent:
-        return default
-    value = parent.get(key)
-    if not isinstance(value, bool):
-        raise ClaimConfigError(f"{prefix}.{key} precisa ser booleano")
     return value
 
 
@@ -246,7 +205,6 @@ def claim_config(config: Dict[str, Any]) -> Dict[str, Any]:
                 evidence, "max_chars_per_item", 2200, 200, "agent.claims.evidence"
             ),
         },
-        "require_supported": _bool_field(raw, "require_supported", True, "agent.claims"),
     }
 
     if mode == "verified":
@@ -264,7 +222,7 @@ def claim_config(config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _excerpt(item: Dict[str, Any], max_chars: int) -> str:
-    text = str(item.get("trecho_numerado") or item.get("conteudo") or "")
+    text = str(item.get("numbered_content") or item.get("content") or "")
     if len(text) <= max_chars:
         return text
     return text[:max_chars].rstrip() + "\n...[evidence excerpt cropped]"
@@ -289,11 +247,11 @@ def compact_evidence(
             continue
         entry = {
             "id": evidence_id,
-            "file": item.get("arquivo"),
-            "lines": [item.get("linha_inicio"), item.get("linha_fim")],
+            "file": item.get("file"),
+            "lines": [item.get("line_start"), item.get("line_end")],
             "cropped": bool(
-                item.get("truncado") or item.get("context_truncated")
-                or len(str(item.get("trecho_numerado") or item.get("conteudo") or "")) > max_chars_per_item
+                item.get("truncated") or item.get("context_truncated")
+                or len(str(item.get("numbered_content") or item.get("content") or "")) > max_chars_per_item
             ),
             "excerpt": _excerpt(item, max_chars_per_item),
         }
@@ -314,6 +272,85 @@ def _ids(value: Any) -> List[str]:
     return result
 
 
+def _grounding_refs(value: Any) -> List[str]:
+    """Normalize ordered verifier grounding coordinates without interpreting them."""
+    return _ids(value)
+
+
+def evidence_ids_from_grounding(refs: Iterable[str]) -> List[str]:
+    out: List[str] = []
+    for ref in refs or []:
+        text = str(ref or "").strip()
+        if text.startswith("evidence:"):
+            evidence_id = text.split(":", 1)[1].strip()
+            if evidence_id and evidence_id not in out:
+                out.append(evidence_id)
+    return out
+
+
+def _bounded_runtime_result(value: Any, max_chars: int = 700) -> Any:
+    try:
+        raw = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+    except (TypeError, ValueError):
+        raw = str(value)
+    if len(raw) <= max_chars:
+        return value
+    return {"truncated": True, "preview": raw[:max_chars]}
+
+
+def compact_runtime_facts(observation_ledger: Dict[str, Any], *, max_items: int = 64) -> List[Dict[str, Any]]:
+    """Expose physical outcomes from the current job as bounded Claim coordinates.
+
+    This is objective projection only: no event is selected for semantic relevance.
+    """
+    events = list((observation_ledger or {}).get("events") or [])
+    execution = current_execution()
+    start = int(execution.observation_event_start or 0) if execution is not None else 0
+    selected = events[start:start + max(1, int(max_items))]
+    result: List[Dict[str, Any]] = []
+    for index, event in enumerate(selected, start=1):
+        if not isinstance(event, dict):
+            continue
+        item = {
+            "id": f"r{index}",
+            "event_id": event.get("event_id"),
+            "turn": event.get("turn"),
+            "tool": event.get("tool"),
+            "status": event.get("status"),
+            "executed": bool(event.get("executed")),
+            "ok": bool(event.get("ok")),
+            "error_code": event.get("error_code"),
+            "result": _bounded_runtime_result(event.get("result") or {}),
+        }
+        result.append({k: v for k, v in item.items() if v is not None})
+    return result
+
+
+def _validate_grounding_refs(
+    refs: Iterable[str], *, visible_evidence_ids: set[str], runtime_fact_ids: set[str],
+    answer_ids: set[str], investigation_ids: set[str],
+) -> Tuple[bool, str]:
+    """Validate coordinates only; never decide whether a coordinate is sufficient."""
+    for raw in refs or []:
+        ref = str(raw or "").strip()
+        if ref == "request":
+            continue
+        if ":" not in ref:
+            return False, f"CLAIM_REVIEW_GROUNDING_REF_INVALID:{ref}"
+        prefix, value = ref.split(":", 1)
+        if prefix not in GROUNDING_PREFIXES or not value:
+            return False, f"CLAIM_REVIEW_GROUNDING_REF_INVALID:{ref}"
+        if prefix == "evidence" and value not in visible_evidence_ids:
+            return False, f"CLAIM_REVIEW_GROUNDING_EVIDENCE_NOT_VISIBLE:{value}"
+        if prefix == "runtime" and value not in runtime_fact_ids:
+            return False, f"CLAIM_REVIEW_GROUNDING_RUNTIME_UNKNOWN:{value}"
+        if prefix == "answer" and value not in answer_ids:
+            return False, f"CLAIM_REVIEW_GROUNDING_ANSWER_UNKNOWN:{value}"
+        if prefix == "investigation" and value not in investigation_ids:
+            return False, f"CLAIM_REVIEW_GROUNDING_INVESTIGATION_UNKNOWN:{value}"
+    return True, "ok"
+
+
 def validate_file_evidence_freshness(
     evidence: Dict[str, Any], evidence_ids: Iterable[str], project_root: Any,
 ) -> Tuple[bool, str]:
@@ -325,7 +362,7 @@ def validate_file_evidence_freshness(
         item = evidence.get(evidence_id)
         if not isinstance(item, dict):
             continue
-        relative = str(item.get("arquivo") or "")
+        relative = str(item.get("file") or "")
         expected = str(item.get("file_hash") or "")
         if not relative or not expected or relative.startswith("<"):
             continue
@@ -342,19 +379,7 @@ def validate_file_evidence_freshness(
     return True, "ok"
 
 
-def _finding_signature(finding_type: str, evidence_ids: Sequence[str], reason: str, target_id: Any = None) -> str:
-    """Build an observational semantic-gap signature without interpreting it."""
-    normalized_reason = re.sub(r"\s+", " ", str(reason or "")).strip().lower()
-    payload = json.dumps({
-        "type": str(finding_type or ""),
-        "evidence_ids": sorted(_ids(list(evidence_ids or []))),
-        "reason": normalized_reason,
-        "target_id": None if target_id is None else str(target_id),
-    }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hash_texto(normalizar_quebras(payload))
-
-
-def semantic_gap_findings(review: Dict[str, Any]) -> List[Dict[str, Any]]:
+def problematic_semantic_gaps(review: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [
         item for item in (review or {}).get("semantic_gaps") or []
         if isinstance(item, dict) and str(item.get("type") or "") in SEMANTIC_GAP_TYPES
@@ -364,6 +389,8 @@ def semantic_gap_findings(review: Dict[str, Any]) -> List[Dict[str, Any]]:
 def _review_summary(
     claims: Sequence[Dict[str, Any]],
     semantic_gaps: Optional[Sequence[Dict[str, Any]]] = None,
+    material_satisfaction: Optional[Dict[str, Any]] = None,
+    answer_consistency: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, int]:
     semantic = [
         item for item in (semantic_gaps or [])
@@ -373,6 +400,9 @@ def _review_summary(
         "supported": sum(1 for claim in claims if claim.get("verdict") == "supported"),
         "contradicted": sum(1 for claim in claims if claim.get("verdict") == "contradicted"),
         "insufficient": sum(1 for claim in claims if claim.get("verdict") == "insufficient"),
+        "material_satisfaction_gap": 1 if str((material_satisfaction or {}).get("status") or "") == "gap" else 0,
+        "material_satisfaction_blocked": 1 if str((material_satisfaction or {}).get("status") or "") == "blocked" else 0,
+        "answer_consistency_conflict": 1 if str((answer_consistency or {}).get("status") or "") == "conflict" else 0,
     }
     if semantic:
         summary.update({
@@ -388,158 +418,106 @@ def normalize_claim_review(
     raw: Dict[str, Any],
     evidence: Dict[str, Any],
     *,
-    request: Any = "",
     answer: Optional[str] = None,
     answer_anchors: Optional[Sequence[Dict[str, Any]]] = None,
     visible_evidence_ids: Optional[Iterable[str]] = None,
-    expected_claim_ids: Optional[Iterable[str]] = None,
     investigation: Optional[Sequence[Dict[str, Any]]] = None,
-    enforce_finding_coverage: bool = True,
+    runtime_facts: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> Tuple[bool, str, Dict[str, Any]]:
-    """Apply deterministic authority checks after strict structured parsing.
-
-    JSON shape, required fields, enums and primitive types belong exclusively
-    to ``llm.structured``. This function validates relationships the schema
-    cannot know: anchors, Evidence authority/visibility, identity uniqueness,
-    requested Finding limits and verdict/Evidence consistency.
-    """
-    visible = set(_ids(list(visible_evidence_ids or []))) if visible_evidence_ids is not None else None
-    expected = set(_ids(list(expected_claim_ids or []))) if expected_claim_ids is not None else None
-    investigation_ids = {str(item.get("id") or "") for item in (investigation or []) if isinstance(item, dict) and str(item.get("id") or "")}
+    """Validate deterministic Claim coordinates after strict structured parsing."""
+    visible_evidence = set(_ids(list(visible_evidence_ids or []))) if visible_evidence_ids is not None else set(evidence)
+    investigation_ids = {
+        str(item.get("id") or "") for item in (investigation or [])
+        if isinstance(item, dict) and str(item.get("id") or "")
+    }
     answer_text = None if answer is None else str(answer)
     resolved_anchors = answer_anchors
     if resolved_anchors is None and answer_text is not None:
         resolved_anchors = build_answer_anchors(answer_text)
     anchors = answer_anchor_map(resolved_anchors)
+    answer_ids = set(anchors)
+    runtime_ids = {
+        str(item.get("id") or "") for item in (runtime_facts or [])
+        if isinstance(item, dict) and str(item.get("id") or "")
+    }
+
+    def normalize_grounding(value: Any, *, label: str) -> Tuple[Optional[List[str]], Optional[str]]:
+        refs = _grounding_refs(value)
+        ok, reason = _validate_grounding_refs(
+            refs, visible_evidence_ids=visible_evidence, runtime_fact_ids=runtime_ids,
+            answer_ids=answer_ids, investigation_ids=investigation_ids,
+        )
+        if not ok:
+            return None, f"{reason}:{label}"
+        return refs, None
+
+    satisfaction_raw = raw.get("material_satisfaction") or {}
+    satisfaction_refs, error = normalize_grounding(satisfaction_raw.get("grounding_refs"), label="material_satisfaction")
+    if error:
+        return False, error, {}
+    material_satisfaction = {
+        "status": str(satisfaction_raw.get("status") or "").strip(),
+        "grounding_refs": satisfaction_refs or [],
+        "reason": str(satisfaction_raw.get("reason") or "").strip()[:240],
+    }
+    consistency_raw = raw.get("answer_consistency") or {}
+    consistency_refs, error = normalize_grounding(consistency_raw.get("grounding_refs"), label="answer_consistency")
+    if error:
+        return False, error, {}
+    answer_consistency = {
+        "status": str(consistency_raw.get("status") or "").strip(),
+        "grounding_refs": consistency_refs or [],
+        "reason": str(consistency_raw.get("reason") or "").strip()[:240],
+    }
 
     claims: List[Dict[str, Any]] = []
-    claim_ids: set[str] = set()
     for index, item in enumerate(raw["claims"], start=1):
-        claim_id = item["id"].strip()
         answer_ref = item["answer_ref"].strip()
         target_id = item.get("target_id")
         if target_id is not None:
             target_id = str(target_id).strip()
         statement = item["statement"].strip()
-        kind = item["kind"]
         verdict = item["verdict"]
-        evidence_ids = _ids(item["evidence_ids"])
+        refs, error = normalize_grounding(item.get("grounding_refs"), label=f"claim:{index}")
+        if error:
+            return False, error, {}
         reason = item["reason"].strip()[:160]
-
-        if claim_id in claim_ids:
-            return False, f"CLAIM_REVIEW_ID_DUPLICATE:{index}", {}
-        if expected is not None and claim_id not in expected:
-            return False, f"CLAIM_REVIEW_UNEXPECTED_CLAIM:{claim_id}", {}
         if answer_ref not in anchors:
             return False, f"CLAIM_REVIEW_ANSWER_REF_INVALID:{index}:{answer_ref}", {}
-        answer_quote = anchors[answer_ref]
         if target_id is not None and target_id not in investigation_ids:
             return False, f"CLAIM_REVIEW_UNKNOWN_TARGET:{index}:{target_id}", {}
-
-        missing = [evidence_id for evidence_id in evidence_ids if evidence_id not in evidence]
-        if missing:
-            return False, "CLAIM_REVIEW_UNKNOWN_EVIDENCE:" + ",".join(missing), {}
-        if visible is not None:
-            invisible = [evidence_id for evidence_id in evidence_ids if evidence_id not in visible]
-            if invisible:
-                return False, "CLAIM_REVIEW_EVIDENCE_NOT_VISIBLE:" + ",".join(invisible), {}
-        if verdict == "supported" and kind in {"fact", "bug", "risk"} and not evidence_ids:
-            return False, f"CLAIM_REVIEW_SUPPORTED_REQUIRES_EVIDENCE:{index}", {}
-        if verdict == "contradicted" and kind in {"fact", "bug", "risk"} and not evidence_ids:
-            return False, f"CLAIM_REVIEW_CONTRADICTED_REQUIRES_EVIDENCE:{index}", {}
-
-        claim_ids.add(claim_id)
         claims.append({
-            "id": claim_id,
-            "answer_ref": answer_ref,
-            "answer_quote": answer_quote,
-            "target_id": target_id,
-            "statement": statement,
-            "kind": kind,
-            "evidence_ids": evidence_ids,
-            "verdict": verdict,
-            "reason": reason,
+            "answer_ref": answer_ref, "answer_quote": anchors[answer_ref],
+            "target_id": target_id, "statement": statement,
+            "grounding_refs": refs or [],
+            "evidence_ids": evidence_ids_from_grounding(refs or []),
+            "verdict": verdict, "reason": reason,
         })
 
-    if expected is not None and claim_ids != expected:
-        missing_claims = sorted(expected - claim_ids)
-        return False, "CLAIM_REVIEW_EXPECTED_CLAIMS_MISSING:" + ",".join(missing_claims), {}
-
-    findings: List[Dict[str, Any]] = []
-    finding_ids: set[str] = set()
-    for index, item in enumerate(raw["findings"], start=1):
-        finding_id = item["id"].strip()
-        finding_type = item["type"]
-        refs = _ids(item["claim_ids"])
-        if finding_id in finding_ids:
-            return False, f"CLAIM_REVIEW_FINDING_ID_DUPLICATE:{index}", {}
-        unknown = [claim_id for claim_id in refs if claim_id not in claim_ids]
-        if unknown:
-            return False, "CLAIM_REVIEW_UNKNOWN_CLAIM:" + ",".join(unknown), {}
-        findings.append({"id": finding_id, "type": finding_type, "claim_ids": refs})
-        finding_ids.add(finding_id)
-
     semantic_gaps: List[Dict[str, Any]] = []
-    semantic_ids: set[str] = set()
     for index, item in enumerate(raw["semantic_gaps"], start=1):
-        gap_id = item["id"].strip()
         gap_type = item["type"]
         gap_target_id = item.get("target_id")
         if gap_target_id is not None:
             gap_target_id = str(gap_target_id).strip()
-        gap_evidence_ids = _ids(item["evidence_ids"])
-        gap_reason = item["reason"].strip()[:240]
-        if gap_id in semantic_ids:
-            return False, f"CLAIM_REVIEW_SEMANTIC_GAP_ID_DUPLICATE:{index}", {}
+        refs, error = normalize_grounding(item.get("grounding_refs"), label=f"semantic_gap:{index}")
+        if error:
+            return False, error, {}
         if gap_target_id is not None and gap_target_id not in investigation_ids:
             return False, f"CLAIM_REVIEW_UNKNOWN_TARGET:{index}:{gap_target_id}", {}
-        missing = [evidence_id for evidence_id in gap_evidence_ids if evidence_id not in evidence]
-        if missing:
-            return False, "CLAIM_REVIEW_UNKNOWN_EVIDENCE:" + ",".join(missing), {}
-        if visible is not None:
-            invisible = [evidence_id for evidence_id in gap_evidence_ids if evidence_id not in visible]
-            if invisible:
-                return False, "CLAIM_REVIEW_EVIDENCE_NOT_VISIBLE:" + ",".join(invisible), {}
-        if gap_type in {"material_omission", "conflicting_evidence"} and not gap_evidence_ids:
-            return False, f"CLAIM_REVIEW_SEMANTIC_GAP_EVIDENCE_REQUIRED:{index}:{gap_type}", {}
         semantic_gaps.append({
-            "id": gap_id,
-            "type": gap_type,
-            "target_id": gap_target_id,
-            "evidence_ids": gap_evidence_ids,
-            "reason": gap_reason,
-            "signature": _finding_signature(gap_type, gap_evidence_ids, gap_reason, gap_target_id),
+            "type": gap_type, "target_id": gap_target_id,
+            "grounding_refs": refs or [],
+            "evidence_ids": evidence_ids_from_grounding(refs or []),
+            "required_property": item["required_property"].strip()[:300],
+            "reason": item["reason"].strip()[:240],
         })
-        semantic_ids.add(gap_id)
-
-    constraints = requested_finding_constraints(request)
-    structured_claims = [claim for claim in claims if claim.get("kind") in {"bug", "risk", "recommendation"}]
-    findings_mode = bool(findings) or bool(constraints.get("overall") is not None or constraints.get("by_kind"))
-    if enforce_finding_coverage and findings_mode and structured_claims:
-        coverage: Dict[str, set[str]] = {}
-        for finding in findings:
-            for claim_id in finding.get("claim_ids") or []:
-                coverage.setdefault(claim_id, set()).add(str(finding.get("type") or ""))
-        for claim in structured_claims:
-            claim_id = str(claim.get("id"))
-            kind = str(claim.get("kind"))
-            if kind not in coverage.get(claim_id, set()):
-                return False, f"CLAIM_REVIEW_FINDING_COVERAGE_REQUIRED:{claim_id}:{kind}", {}
-
-    overall = constraints.get("overall")
-    if overall is not None and len(findings) > int(overall):
-        return False, f"CLAIM_REVIEW_FINDING_LIMIT_EXCEEDED:{len(findings)}>{overall}", {}
-    by_kind = constraints.get("by_kind") or {}
-    for kind, limit in by_kind.items():
-        count = sum(1 for finding in findings if finding.get("type") == kind)
-        if count > int(limit):
-            return False, f"CLAIM_REVIEW_KIND_LIMIT_EXCEEDED:{kind}:{count}>{limit}", {}
 
     return True, "ok", {
-        "claims": claims,
-        "findings": findings,
-        "semantic_gaps": semantic_gaps,
-        "summary": _review_summary(claims, semantic_gaps),
+        "material_satisfaction": material_satisfaction,
+        "answer_consistency": answer_consistency,
+        "claims": claims, "semantic_gaps": semantic_gaps,
+        "summary": _review_summary(claims, semantic_gaps, material_satisfaction, answer_consistency),
     }
 
 
@@ -560,13 +538,11 @@ def claim_evidence_ledger(review: Dict[str, Any], evidence: Dict[str, Any]) -> L
             item = evidence.get(evidence_id) or {}
             sources.append({
                 "evidence_id": evidence_id,
-                "file": item.get("arquivo"),
-                "lines": [item.get("linha_inicio"), item.get("linha_fim")],
+                "file": item.get("file"),
+                "lines": [item.get("line_start"), item.get("line_end")],
                 "source_type": item.get("source_type"),
             })
         ledger.append({
-            "id": claim.get("id"),
-            "kind": claim.get("kind"),
             "answer_ref": claim.get("answer_ref"),
             "target_id": claim.get("target_id"),
             "answer_quote": claim.get("answer_quote"),
@@ -583,162 +559,17 @@ def claim_review_output_budget(
     *,
     base_tokens: int = 900,
     available_tokens: Optional[int] = None,
-    target_claims: Optional[Sequence[Dict[str, Any]]] = None,
-    target_semantic_gaps: Optional[Sequence[Dict[str, Any]]] = None,
     answer_anchor_count: Optional[int] = None,
 ) -> int:
-    """Choose an elastic verifier completion ceiling.
-
-    Claim count has no semantic quota. The runtime estimates only physical
-    capacity from the answer/anchors (or the explicit local reverify targets)
-    and clips that estimate solely to the job's remaining completion budget.
-    Unused ceiling is never charged.
-    """
+    """Choose a physical completion ceiling for the one global verifier pass."""
     base = max(128, int(base_tokens or 900))
-    if target_claims or target_semantic_gaps:
-        estimated_material_claims = max(1, len(list(target_claims or target_semantic_gaps or [])))
-        desired = 620 + (estimated_material_claims * 220)
-    else:
-        answer_chars = len(str(answer or ""))
-        by_text = max(1, (answer_chars + 159) // 160)
-        by_anchor = max(1, int(answer_anchor_count or 0)) if answer_anchor_count else 1
-        estimated_material_claims = max(by_text, by_anchor)
-        desired = 720 + (estimated_material_claims * 180)
-    desired = max(base, int(desired))
+    answer_chars = len(str(answer or ""))
+    by_text = max(1, (answer_chars + 159) // 160)
+    by_anchor = max(1, int(answer_anchor_count or 0)) if answer_anchor_count else 1
+    desired = max(base, 720 + (max(by_text, by_anchor) * 180))
     if available_tokens is None:
-        return desired
-    physical = max(1, int(available_tokens))
-    return min(desired, physical)
-
-
-_RECOVERABLE_CLAIM_PROTOCOL_PREFIXES = (
-    "CLAIM_REVIEW_SUPPORTED_REQUIRES_EVIDENCE:",
-    "CLAIM_REVIEW_CONTRADICTED_REQUIRES_EVIDENCE:",
-)
-_RECOVERABLE_SEMANTIC_GAP_PROTOCOL_PREFIXES = (
-    "CLAIM_REVIEW_SEMANTIC_GAP_EVIDENCE_REQUIRED:",
-)
-
-
-def claim_protocol_recovery_target(
-    raw: Any, reason: str, answer_anchors: Optional[Sequence[Dict[str, Any]]],
-) -> Tuple[bool, str, Dict[str, Any], Optional[int]]:
-    """Build one safe local reverify target for a malformed verifier Claim.
-
-    Recovery is allowed only when Claim identity and answer_ref already provide
-    an exact deterministic scope. The runtime never invents a verdict, kind or
-    Evidence selection; the verifier must decide those again locally.
-    """
-    text_reason = str(reason or "")
-    if not text_reason.startswith(_RECOVERABLE_CLAIM_PROTOCOL_PREFIXES):
-        return False, "CLAIM_PROTOCOL_RECOVERY_NOT_APPLICABLE", {}, None
-    match = re.search(r":(\d+)(?::|$)", text_reason)
-    if not match:
-        return False, "CLAIM_PROTOCOL_RECOVERY_INDEX_REQUIRED", {}, None
-    index = int(match.group(1))
-    claims_raw = raw["claims"]
-    if index < 1 or index > len(claims_raw):
-        return False, "CLAIM_PROTOCOL_RECOVERY_TARGET_MISSING", {}, None
-    item = claims_raw[index - 1]
-    claim_id = item["id"].strip()
-    answer_ref = item["answer_ref"].strip()
-    anchors = answer_anchor_map(answer_anchors)
-    answer_quote = anchors.get(answer_ref, "")
-    if not claim_id or not answer_ref or not answer_quote:
-        return False, "CLAIM_PROTOCOL_RECOVERY_SCOPE_UNAVAILABLE", {}, None
-    target = {
-        "claim_id": claim_id,
-        "answer_ref": answer_ref,
-        "answer_quote": answer_quote,
-        "target_id": item.get("target_id"),
-        "kind": item["kind"],
-        "evidence_ids": [],
-    }
-    return True, "ok", target, index
-
-
-def semantic_gap_protocol_recovery_target(
-    raw: Any, reason: str,
-) -> Tuple[bool, str, Dict[str, Any], Optional[int]]:
-    """Build one exact local re-evaluation target for a malformed Semantic Gap.
-
-    The runtime identifies only the malformed array element. It never changes
-    the gap type, chooses Evidence, or decides whether the gap should exist.
-    Those semantic decisions remain with the verifier.
-    """
-    text_reason = str(reason or "")
-    if not text_reason.startswith(_RECOVERABLE_SEMANTIC_GAP_PROTOCOL_PREFIXES):
-        return False, "SEMANTIC_GAP_PROTOCOL_RECOVERY_NOT_APPLICABLE", {}, None
-    match = re.search(r":(\d+)(?::|$)", text_reason)
-    if not match:
-        return False, "SEMANTIC_GAP_PROTOCOL_RECOVERY_INDEX_REQUIRED", {}, None
-    index = int(match.group(1))
-    gaps_raw = raw["semantic_gaps"]
-    if index < 1 or index > len(gaps_raw):
-        return False, "SEMANTIC_GAP_PROTOCOL_RECOVERY_TARGET_MISSING", {}, None
-    item = gaps_raw[index - 1]
-    gap_id = item["id"].strip()
-    if not gap_id:
-        return False, "SEMANTIC_GAP_PROTOCOL_RECOVERY_SCOPE_UNAVAILABLE", {}, None
-    return True, "ok", {
-        "id": gap_id,
-        "type": item["type"],
-        "target_id": item.get("target_id"),
-        "evidence_ids": list(item["evidence_ids"]),
-        "reason": item["reason"],
-    }, index
-
-
-def finding_protocol_recovery_target(
-    raw: Any, reason: str,
-) -> Tuple[bool, str, Dict[str, Any]]:
-    """Identify the Claim whose Finding coverage is inconsistent.
-
-    The runtime only isolates the deterministic relation that failed. It never
-    creates or retypes a Finding; the verifier must regenerate Findings.
-    """
-    text_reason = str(reason or "")
-    prefix = "CLAIM_REVIEW_FINDING_COVERAGE_REQUIRED:"
-    if not text_reason.startswith(prefix):
-        return False, "FINDING_PROTOCOL_RECOVERY_NOT_APPLICABLE", {}
-    parts = text_reason[len(prefix):].split(":", 1)
-    if len(parts) != 2 or not parts[0] or not parts[1]:
-        return False, "FINDING_PROTOCOL_RECOVERY_TARGET_REQUIRED", {}
-    claim_id, kind = parts[0], parts[1]
-    claims = [item for item in raw.get("claims") or [] if isinstance(item, dict)] if isinstance(raw, dict) else []
-    claim = next((item for item in claims if str(item.get("id") or "") == claim_id), None)
-    if not claim or str(claim.get("kind") or "") != kind:
-        return False, "FINDING_PROTOCOL_RECOVERY_SCOPE_UNAVAILABLE", {}
-    return True, "ok", {
-        "claim_id": claim_id,
-        "kind": kind,
-        "claim": dict(claim),
-    }
-
-
-def finding_recovery_prompt(request: Any, raw_review: Dict[str, Any], target: Dict[str, Any]) -> str:
-    """Ask the verifier to regenerate only the complete Findings array."""
-    claims = []
-    for item in raw_review.get("claims") or []:
-        if not isinstance(item, dict):
-            continue
-        claims.append({
-            "id": item.get("id"),
-            "kind": item.get("kind"),
-            "statement": item.get("statement"),
-            "verdict": item.get("verdict"),
-        })
-    payload = {
-        "task": "reverify_findings",
-        "request": str(request or ""),
-        "target_claim_id": target.get("claim_id"),
-        "target_kind": target.get("kind"),
-        "preserved_claims": claims,
-        "existing_findings": [
-            dict(item) for item in raw_review.get("findings") or [] if isinstance(item, dict)
-        ],
-    }
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+        return int(desired)
+    return min(int(desired), max(1, int(available_tokens)))
 
 
 def review_prompt(
@@ -746,83 +577,31 @@ def review_prompt(
     evidence_view: List[Dict[str, Any]],
     request: Any,
     *,
-    target_claims: Optional[List[Dict[str, Any]]] = None,
-    target_semantic_gaps: Optional[List[Dict[str, Any]]] = None,
     answer_anchors: Optional[List[Dict[str, Any]]] = None,
     investigation: Optional[List[Dict[str, Any]]] = None,
-    workspace_scope: Optional[Dict[str, Any]] = None,
-    scope_only: bool = False,
+    runtime_facts: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
-    """Build the minimum semantic-review packet with deterministic anchors.
+    """Build the sole canonical semantic-review packet.
 
-    The verifier receives one literal representation of the answer: anchors.
-    The full answer is not duplicated beside them. The LLM chooses ``answer_ref``
-    semantically; the runtime resolves the exact quote after the call.
+    There are no scope-only, Claim-only, Findings-only or semantic-gap repair
+    tasks in Rev5.6. Claim always audits the complete provisional answer.
     """
-    if answer_anchors is not None:
-        anchors = answer_anchors
-    else:
-        anchors_ok, _anchors_reason, anchors = verifier_answer_anchors(answer, target_claims)
-        if not anchors_ok:
-            anchors = []
+    anchors = answer_anchors if answer_anchors is not None else build_answer_anchors(answer)
     public_anchors = [
         {"id": str(item.get("id") or ""), "text": str(item.get("text") or "")}
         for item in anchors
         if isinstance(item, dict) and item.get("id")
     ]
-    if scope_only:
-        task = "verify_workspace_scope"
-    elif target_semantic_gaps:
-        task = "reverify_semantic_gap"
-    elif target_claims:
-        task = "reverify_claims"
-    else:
-        task = "verify_claims"
     payload: Dict[str, Any] = {
-        "task": task,
+        "task": "verify_claims",
+        "request": str(request or ""),
         "answer_anchors": public_anchors,
         "evidence": evidence_view,
+        "runtime_facts": [dict(item) for item in (runtime_facts or []) if isinstance(item, dict)],
         "investigation": [dict(item) for item in (investigation or []) if isinstance(item, dict)],
-        "workspace_scope": dict(workspace_scope or {}),
     }
-    if scope_only:
-        payload["request"] = str(request or "")
-        payload["instructions"] = (
-            "Audit only whether workspace_scope=none is semantically valid for this request and answer. "
-            "Return claims=[] and findings=[]. If current workspace facts are materially required, emit exactly one "
-            "scope_gap with target_id=null and evidence_ids=[]; otherwise semantic_gaps=[]. Do not fact-check "
-            "workspace-independent content in this task."
-        )
-    elif target_claims:
-        payload["target_claims"] = [
-            {
-                "claim_id": item.get("claim_id"),
-                "answer_ref": item.get("answer_ref"),
-                "target_id": item.get("target_id"),
-                "kind": item.get("kind"),
-                "evidence_ids": list(item.get("evidence_ids") or []),
-            }
-            for item in target_claims
-            if isinstance(item, dict)
-        ]
-    elif target_semantic_gaps:
-        payload["request"] = str(request or "")
-        payload["target_semantic_gaps"] = [
-            {
-                "id": item.get("id"),
-                "type": item.get("type"),
-                "target_id": item.get("target_id"),
-                "evidence_ids": list(item.get("evidence_ids") or []),
-                "reason": item.get("reason", ""),
-            }
-            for item in target_semantic_gaps
-            if isinstance(item, dict)
-        ]
-    else:
-        # The request is needed only on the initial pass to decide materiality,
-        # bounded Findings and semantic gaps in the conclusion as a whole.
-        payload["request"] = str(request or "")
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+
 
 def review_followup_feedback(review: Dict[str, Any]) -> str:
     """Serialize reviewer debt without adding runtime semantics.
@@ -830,8 +609,8 @@ def review_followup_feedback(review: Dict[str, Any]) -> str:
     The Claim Verifier already decided which material statements are
     contradicted/insufficient and which semantic gaps exist. The runtime only
     preserves those coordinates (Claim id, answer_ref, target_id, Evidence ids
-    and reason) so the Main LLM can choose the correction. Evidence bodies stay
-    runtime-owned and are rehydrated separately when pinned.
+    and reason) so the Main LLM can choose the correction. The serialized text is
+    derived from the stored Claim Review; it is not a second persisted state.
     """
     claims = []
     for claim in problematic_claims(review):
@@ -839,34 +618,39 @@ def review_followup_feedback(review: Dict[str, Any]) -> str:
         if verdict not in {"contradicted", "insufficient"}:
             continue
         claims.append({
-            "id": claim.get("id"),
             "answer_ref": claim.get("answer_ref"),
             "target_id": claim.get("target_id"),
             "statement": claim.get("statement"),
             "verdict": verdict,
+            "grounding_refs": list(claim.get("grounding_refs") or []),
             "evidence_ids": list(claim.get("evidence_ids") or []),
             "reason": claim.get("reason", ""),
         })
     gaps = []
-    for gap in semantic_gap_findings(review):
+    for gap in problematic_semantic_gaps(review):
         gaps.append({
-            "id": gap.get("id"),
             "type": gap.get("type"),
             "target_id": gap.get("target_id"),
+            "grounding_refs": list(gap.get("grounding_refs") or []),
             "evidence_ids": list(gap.get("evidence_ids") or []),
+            "required_property": gap.get("required_property", ""),
             "reason": gap.get("reason", ""),
-            "signature": gap.get("signature"),
         })
+    material_satisfaction = dict((review or {}).get("material_satisfaction") or {})
+    answer_consistency = dict((review or {}).get("answer_consistency") or {})
     payload = {
         "code": "CLAIM_REVIEW_FOLLOWUP",
+        "material_satisfaction": material_satisfaction,
+        "answer_consistency": answer_consistency,
         "claims": claims,
         "semantic_gaps": gaps,
         "instruction": (
-            "The semantic reviewer found material debt. You remain the only producer of task semantics. "
-            "You decide the next action: reinterpret existing Evidence, investigate with available tools, "
-            "narrow/remove an unsupported or contradicted statement, correct workspace work when required, "
-            "cover the reported omission/conflict/scope gap, or explicitly state a limitation. "
-            "The reviewer does not choose tools or rewrite your answer."
+            "The semantic reviewer rejected factual support, material delivery, or visible answer consistency. You remain the only producer of task semantics. "
+            "You decide the next action. Decide whether the debt is answer-only or requires new investigation. If answer_consistency=conflict and retained Evidence already "
+            "decides the issue, correct the final directly and reconcile the visible verdicts without new tools; otherwise continue/create the material target and investigate "
+            "the missing proof. You may also narrow/remove unsupported statements or state a real limitation. "
+            "Use semantic_gaps[].required_property as the precise unresolved property when present. Preserve the requested property; "
+            "do not replace it with an easier proxy. The reviewer does not choose tools or rewrite your answer."
         ),
     }
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)

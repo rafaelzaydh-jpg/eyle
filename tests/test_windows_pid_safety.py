@@ -66,16 +66,14 @@ def test_pid_fora_da_faixa_nao_derruba_probe_posix(monkeypatch):
     assert process.pid_ativo(10**30) is False
 
 
-def test_timestamp_legado_sem_timezone_nao_derruba_status():
-    idade = queue._idade_segundos("2020-01-01T00:00:00")
-    assert idade is not None
-    assert idade > 0
+def test_timestamp_sem_timezone_e_rejeitado_pelo_contrato_atual():
+    assert queue._idade_segundos("2020-01-01T00:00:00") is None
 
 
 def test_recovery_trata_heartbeat_invalido_como_interrompido(monkeypatch, tmp_path):
     monkeypatch.setattr(queue, "DB_PATH", str(tmp_path / "fila.sqlite3"))
     queue._schemas_prontos.clear()
-    job_id = queue.adicionar({"tipo": "pergunta", "texto": "travado"})
+    job_id = queue.adicionar({"type": "pergunta", "texto": "travado"})
     assert queue.proximo(timeout=0, worker_id="worker-corrompido")["_job_id"] == job_id
     queue.registrar_heartbeat("worker-corrompido", "processing", job_id=job_id, pid=os.getpid())
 

@@ -5,6 +5,7 @@ Transporta o único protocolo AgentSession para o backend configurado.
 """
 import hashlib
 import json
+import math
 import random
 import socket
 import sys
@@ -14,6 +15,7 @@ import urllib.request
 import urllib.error
 from contextlib import contextmanager
 
+from eyle.core.execution_context import ExecutionContext, current_execution  # noqa: E402
 from eyle.core.token_budget import estimate_tokens as estimar_tokens  # noqa: E402
 from eyle.runtime import telemetry  # noqa: E402
 from eyle.runtime import limiter  # noqa: E402
@@ -25,9 +27,8 @@ from llm.response_adapter import (  # noqa: E402
 from llm.structured import (  # noqa: E402
     StructuredResponseError, contract_instruction, json_schema_response_format,
     mandatory_top_level_keys, observed_top_level, parse_profile_response,
-    retry_instruction, schema_for_profile,
+    schema_for_profile,
 )
-from llm import capabilities as structured_capabilities  # noqa: E402
 
 
 class ErroLLM(RuntimeError):
@@ -407,41 +408,37 @@ def _finish_reason_truncado(metadata):
     return reason in {"length", "max_tokens", "max_output_tokens", "token_limit"}
 
 
-def _registrar_metadata_runtime(config, metadata):
-    runtime = (config or {}).get("_runtime_agent_budget")
-    if not isinstance(runtime, dict):
-        return
+def _latest_attempt(execution: ExecutionContext | None):
+    if execution is None:
+        return None
+    call = execution.latest_call()
+    attempts = call.get("attempts") if isinstance(call, dict) else None
+    return attempts[-1] if isinstance(attempts, list) and attempts else None
+
+
+def _registrar_metadata_runtime(execution: ExecutionContext | None, metadata):
+    if execution is None:
+        return None
+    call = execution.latest_call()
+    if not isinstance(call, dict):
+        call = execution.begin_call(mode=str((metadata or {}).get("profile") or "default"), turn=0, prompt={})
     clean = {key: value for key, value in dict(metadata or {}).items() if value is not None}
+    clean["logical_call_id"] = call.get("logical_call_id")
     requested = clean.get("max_tokens_requested")
     actual = clean.get("completion_tokens")
     if isinstance(requested, (int, float)) and isinstance(actual, (int, float)):
-        # A per-call max is a ceiling, never a quota. Expose the unused
-        # headroom explicitly; it remains available to later calls because the
-        # task-wide pool is debited only by actual completion usage.
         clean["completion_tokens_ceiling_unused"] = max(0, int(requested) - max(0, int(actual)))
-    runtime["last_llm_response"] = clean
-    history = runtime.setdefault("llm_responses", [])
-    history.append(clean)
-    del history[:-50]
+    return execution.add_attempt(call, clean)
 
 
-def _structured_response_format(profile, mode):
-    if mode == "json_schema":
-        return json_schema_response_format(profile)
-    if mode == "json_object":
-        return {"type": "json_object"}
-    if mode == "prompt":
-        return None
-    raise ErroLLM(
-        f"Modo estruturado desconhecido: {mode}",
-        transient=False, error_code="STRUCTURED_MODE_UNKNOWN",
-    )
+def _structured_response_format(profile):
+    return json_schema_response_format(profile)
 
 
 def _chamar_ollama(
     base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
     max_tokens=None, read_timeout=None, on_chunk=None,
-    schema_estruturado=None, perfil=None, structured_mode=None,
+    schema_estruturado=None, perfil=None,
 ):
     url = base_url.rstrip("/") + "/api/chat"
     options = {"temperature": temperature}
@@ -457,15 +454,7 @@ def _chamar_ollama(
         "options": options,
     }
     if perfil is not None:
-        if structured_mode == "json_schema":
-            payload["format"] = schema_estruturado or _schema_para_perfil(perfil)
-        elif structured_mode == "json_object":
-            payload["format"] = "json"
-        elif structured_mode != "prompt":
-            raise ErroLLM(
-                f"Modo estruturado desconhecido: {structured_mode}",
-                transient=False, error_code="STRUCTURED_MODE_UNKNOWN",
-            )
+        payload["format"] = schema_estruturado or _schema_para_perfil(perfil)
     dados = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=dados, headers={"Content-Type": "application/json"})
     with _abrir_url(req, timeout, read_timeout or timeout) as resp:
@@ -485,9 +474,9 @@ def _chamar_ollama(
             meta = _ultima_metadata_backend()
             meta.update({
                 "structured_profile": perfil,
-                "structured_mode": structured_mode if perfil is not None else None,
+                "structured_mode": "json_schema" if perfil is not None else None,
                 "structured_transport": (
-                    f"ollama_{structured_mode}" if perfil is not None else "text"
+                    "ollama_json_schema" if perfil is not None else "text"
                 ),
                 "structured_source": "content",
             })
@@ -516,12 +505,11 @@ def _chamar_ollama(
 def _chamar_openai_compatible(
     base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
     max_tokens=None, read_timeout=None, on_chunk=None,
-    schema_estruturado=None, perfil=None, on_request=None, structured_mode=None,
+    schema_estruturado=None, perfil=None, on_request=None,
 ):
     """Call one OpenAI-compatible Chat Completions endpoint.
 
-    Structured transport is explicit: json_schema, json_object or prompt.  The
-    caller has already behaviorally verified the selected capability.
+    Structured profiles require strict JSON Schema transport.
     """
     if on_request is not None:
         on_request()
@@ -538,7 +526,7 @@ def _chamar_openai_compatible(
     if max_tokens:
         payload["max_tokens"] = max_tokens
     if perfil is not None:
-        fmt = _structured_response_format(perfil, structured_mode)
+        fmt = _structured_response_format(perfil)
         if fmt is not None:
             payload["response_format"] = fmt
     dados = json.dumps(payload).encode("utf-8")
@@ -582,8 +570,8 @@ def _chamar_openai_compatible(
     except urllib.error.HTTPError as exc:
         body = _ler_corpo_http_error(exc)
         code = (
-            "STRUCTURED_OUTPUT_REJECTED"
-            if perfil is not None and structured_mode != "prompt" and getattr(exc, "code", None) in (400, 404, 422)
+            "LLM_STRUCTURED_OUTPUT_UNAVAILABLE"
+            if perfil is not None and getattr(exc, "code", None) in (400, 404, 422)
             else "HTTP_ERROR"
         )
         raise ErroLLM(
@@ -605,9 +593,9 @@ def _chamar_openai_compatible(
     meta = _ultima_metadata_backend()
     meta.update({
         "structured_profile": perfil,
-        "structured_mode": structured_mode if perfil is not None else None,
+        "structured_mode": "json_schema" if perfil is not None else None,
         "structured_transport": (
-            f"openai_{structured_mode}" if perfil is not None else "text"
+            "openai_json_schema" if perfil is not None else "text"
         ),
         "structured_source": source,
     })
@@ -615,299 +603,26 @@ def _chamar_openai_compatible(
     return text
 
 
-def _record_administrative_probe(config, *, mode, ok, metadata=None, source="probe"):
-    runtime = (config or {}).get("_runtime_agent_budget")
-    if not isinstance(runtime, dict):
+def _timeout_restante(execution: ExecutionContext | None):
+    if execution is None:
+        return None
+    return max(0.0, float(execution.deadline_monotonic) - time.monotonic())
+
+
+def _reservar_orcamento_llm(execution: ExecutionContext | None):
+    if execution is None:
         return
-    meta = dict(metadata or {})
-    runtime["administrative_llm_calls"] = int(runtime.get("administrative_llm_calls", 0) or 0) + 1
-    for runtime_key, meta_key in (
-        ("administrative_prompt_tokens", "prompt_tokens"),
-        ("administrative_completion_tokens", "completion_tokens"),
-        ("administrative_reasoning_tokens", "reasoning_tokens"),
-    ):
-        value = meta.get(meta_key)
-        if isinstance(value, (int, float)):
-            runtime[runtime_key] = int(runtime.get(runtime_key, 0) or 0) + int(value)
-    history = runtime.setdefault("administrative_llm_history", [])
-    history.append({
-        "kind": "structured_capability_probe",
-        "mode": mode,
-        "ok": bool(ok),
-        "source": source,
-        "provider_model": meta.get("provider_model"),
-        "finish_reason": meta.get("finish_reason"),
-        "prompt_tokens": meta.get("prompt_tokens"),
-        "completion_tokens": meta.get("completion_tokens"),
-    })
-    del history[:-30]
+    if len(execution.llm_calls) > int(execution.max_llm_calls):
+        raise ErroLLM("O limite global de chamadas LLM da tarefa foi atingido.", transient=False, error_code="MAX_LLM_CALLS_EXCEEDED")
 
 
-def _probe_nonce(base_url, model, mode):
-    material = f"{base_url}|{model}|{mode}|{time.time_ns()}".encode("utf-8")
-    return hashlib.sha256(material).hexdigest()[:16]
-
-
-def _probe_schema(nonce):
-    # Exercise the JSON-Schema features used by Eyle's real profiles instead of
-    # trusting a provider that only supports a trivial object subset.
-    return {
-        "type": "object",
-        "properties": {
-            "schema_probe": {"type": "string", "enum": [nonce]},
-            "items": {"type": "array", "maxItems": 0},
-            "optional": {"anyOf": [{"type": "null"}, {"type": "string"}]},
-        },
-        "required": ["schema_probe", "items", "optional"],
-        "additionalProperties": False,
-    }
-
-
-def _probe_result(mode, text, nonce):
-    try:
-        value = json.loads(str(text or ""))
-    except json.JSONDecodeError:
-        return False
-    if mode == "json_schema":
-        return isinstance(value, dict) and value == {"schema_probe": nonce, "items": [], "optional": None}
-    if mode == "json_object":
-        return isinstance(value, dict)
-    if mode == "prompt":
-        return isinstance(value, dict) and value == {"prompt_probe": nonce}
-    return False
-
-
-def _probe_structured_mode(
-    *, base_url, model, openai_compatible, mode, connect_timeout, read_timeout, config,
-):
-    """Behaviorally verify one structured-output mechanism.
-
-    Probe calls are administrative: they are observable and token-accounted in
-    their own counters, but do not consume AgentSession turns/tools or the job's
-    normal LLM-call/completion ceilings.
-    """
-    nonce = _probe_nonce(base_url, model, mode)
-    system = (
-        "You are a transport capability probe. Follow the user instruction exactly unless "
-        "the API response-format mechanism itself enforces another representation."
-    )
-    if mode == "json_schema":
-        user = (
-            'Return exactly this JSON object and no other keys: '
-            + json.dumps({"prompt_probe": nonce}, separators=(",", ":"))
-        )
-    elif mode == "json_object":
-        user = f"Return plain text PROBE-{nonce}, not a JSON object, with no braces or quotes."
-    elif mode == "prompt":
-        user = (
-            "Return exactly one JSON object with no prose: "
-            + json.dumps({"prompt_probe": nonce}, separators=(",", ":"))
-        )
-    else:
-        return False
-
-    max_tokens = 96
-    timeout = max(0.2, min(float(connect_timeout), 10.0))
-    read = max(timeout, min(float(read_timeout), 30.0))
-    metadata = {}
-    try:
-        if openai_compatible:
-            url = _endpoint_openai(base_url, "chat/completions")
-            payload = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "temperature": 0,
-                "stream": False,
-                "max_tokens": max_tokens,
-            }
-            if mode == "json_schema":
-                payload["response_format"] = {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "eyle_capability_probe",
-                        "strict": True,
-                        "schema": _probe_schema(nonce),
-                    },
-                }
-            elif mode == "json_object":
-                payload["response_format"] = {"type": "json_object"}
-            req = urllib.request.Request(
-                url, data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-            )
-            try:
-                with _abrir_url(req, timeout, read) as resp:
-                    raw = resp.read().decode("utf-8", errors="replace")
-            except urllib.error.HTTPError as exc:
-                if getattr(exc, "code", None) in (400, 422):
-                    _record_administrative_probe(config, mode=mode, ok=False, source="http_rejected")
-                    return False
-                raise
-            try:
-                body = json.loads(raw)
-                normalized = normalize_openai_chat_response(body)
-            except (json.JSONDecodeError, ResponseEnvelopeError) as exc:
-                _record_administrative_probe(config, mode=mode, ok=False, source="invalid_envelope")
-                return False
-            text = normalized.usable_text()
-            metadata = _metadata_resposta_normalizada(normalized)
-        else:
-            url = base_url.rstrip("/") + "/api/chat"
-            payload = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "stream": False,
-                "options": {"temperature": 0, "num_predict": max_tokens},
-            }
-            if mode == "json_schema":
-                payload["format"] = _probe_schema(nonce)
-            elif mode == "json_object":
-                payload["format"] = "json"
-            req = urllib.request.Request(
-                url, data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-            )
-            try:
-                with _abrir_url(req, timeout, read) as resp:
-                    raw = resp.read().decode("utf-8", errors="replace")
-            except urllib.error.HTTPError as exc:
-                if getattr(exc, "code", None) in (400, 422):
-                    _record_administrative_probe(config, mode=mode, ok=False, source="http_rejected")
-                    return False
-                raise
-            try:
-                body = json.loads(raw)
-                normalized = normalize_ollama_chat_response(body)
-            except (json.JSONDecodeError, ResponseEnvelopeError):
-                _record_administrative_probe(config, mode=mode, ok=False, source="invalid_envelope")
-                return False
-            text = normalized.usable_text()
-            metadata = _metadata_resposta_normalizada(normalized)
-    except urllib.error.URLError as exc:
-        raise ErroLLM(
-            f"Falha de transporte durante o handshake administrativo: {exc}",
-            transient=True, error_code="STRUCTURED_HANDSHAKE_TRANSPORT_ERROR",
-        ) from exc
-    except (socket.timeout, TimeoutError) as exc:
-        raise ErroLLM(
-            f"Timeout durante o handshake administrativo: {exc}",
-            transient=True, error_code="STRUCTURED_HANDSHAKE_TIMEOUT",
-        ) from exc
-
-    ok = _probe_result(mode, text, nonce)
-    _record_administrative_probe(config, mode=mode, ok=ok, metadata=metadata)
-    return ok
-
-
-def _ensure_structured_capability(
-    *, base_url, model, openai_compatible, connect_timeout, read_timeout, config,
-):
-    transport = "openai_compatible" if openai_compatible else "ollama"
-
-    def probe(mode):
-        return _probe_structured_mode(
-            base_url=base_url, model=model, openai_compatible=openai_compatible,
-            mode=mode, connect_timeout=connect_timeout, read_timeout=read_timeout,
-            config=config,
-        )
-
-    try:
-        result = structured_capabilities.ensure_capability(
-            transport=transport, base_url=base_url, model=model, probe=probe,
-        )
-    except RuntimeError as exc:
-        raise ErroLLM(
-            "A conexão LLM não demonstrou nenhum modo estruturado utilizável.",
-            transient=False, error_code="LLM_STRUCTURED_OUTPUT_UNAVAILABLE",
-        ) from exc
-    result = dict(result)
-    result.update({
-        "transport": transport,
-        "model": str(model),
-    })
-    runtime = (config or {}).get("_runtime_agent_budget")
-    if isinstance(runtime, dict):
-        previous = runtime.get("structured_capability")
-        keep_previous = (
-            result.get("source") == "process"
-            and isinstance(previous, dict)
-            and previous.get("fingerprint") == result.get("fingerprint")
-            and previous.get("mode") == result.get("mode")
-            and previous.get("source") in {"renegotiated", "revalidated", "cache_verified", "cache_verified_retry", "probe"}
-        )
-        if not keep_previous:
-            runtime["structured_capability"] = dict(result)
-    return result
-
-
-def _revalidate_structured_capability(
-    *, base_url, model, openai_compatible, current_mode, connect_timeout, read_timeout, config,
-):
-    transport = "openai_compatible" if openai_compatible else "ollama"
-
-    def probe(mode):
-        return _probe_structured_mode(
-            base_url=base_url, model=model, openai_compatible=openai_compatible,
-            mode=mode, connect_timeout=connect_timeout, read_timeout=read_timeout,
-            config=config,
-        )
-
-    try:
-        result = structured_capabilities.revalidate_capability(
-            transport=transport, base_url=base_url, model=model,
-            current_mode=current_mode, probe=probe,
-        )
-    except RuntimeError as exc:
-        raise ErroLLM(
-            "A conexão LLM deixou de demonstrar um modo estruturado utilizável.",
-            transient=False, error_code="LLM_STRUCTURED_OUTPUT_UNAVAILABLE",
-        ) from exc
-    runtime = (config or {}).get("_runtime_agent_budget")
-    if isinstance(runtime, dict):
-        runtime["structured_capability"] = dict(result)
-    return result
-
-def _timeout_restante(config):
-    runtime = (config or {}).get("_runtime_agent_budget") or {}
-    deadline = runtime.get("deadline_monotonic")
-    if deadline is None:
+def _completion_budget_remaining(execution: ExecutionContext | None):
+    if execution is None:
         return None
-    return max(0.0, float(deadline) - time.monotonic())
+    return max(0, int(execution.max_completion_tokens) - int(execution.completion_tokens_actual or 0))
 
 
-def _reservar_orcamento_llm(config):
-    """Conta a chamada no ponto comum a todas as chamadas LLM, antes do envio ao backend."""
-    runtime = (config or {}).get("_runtime_agent_budget")
-    if not isinstance(runtime, dict):
-        return
-    max_calls = int(runtime.get("max_llm_calls", 0) or 0)
-    atual = int(runtime.get("llm_calls", 0) or 0)
-    if max_calls > 0 and atual >= max_calls:
-        raise ErroLLM(
-            "O limite global de chamadas LLM da tarefa foi atingido.",
-            transient=False, error_code="MAX_LLM_CALLS_EXCEEDED",
-        )
-    runtime["llm_calls"] = atual + 1
-
-
-def _completion_budget_remaining(config):
-    runtime = (config or {}).get("_runtime_agent_budget")
-    if not isinstance(runtime, dict):
-        return None
-    maximum = int(runtime.get("max_completion_tokens", runtime.get("max_generated_tokens", 0)) or 0)
-    if maximum <= 0:
-        return None
-    used = int(runtime.get("generated_tokens", runtime.get("completion_tokens_actual", 0)) or 0)
-    return max(0, maximum - used)
-
-
-def _preflight_completion_budget(config, max_tokens, *, pending_completion_tokens=0):
+def _preflight_completion_budget(config, execution: ExecutionContext | None, max_tokens, *, pending_completion_tokens=0):
     """Reject an impossible LLM request before any backend call is sent.
 
     ``downstream_completion_reserve_tokens`` protects only the next mandatory
@@ -915,10 +630,9 @@ def _preflight_completion_budget(config, max_tokens, *, pending_completion_token
     not a semantic decision: the runtime never chooses what the model should
     say or which evidence matters.
     """
-    runtime = (config or {}).get("_runtime_agent_budget")
-    if not isinstance(runtime, dict):
+    if execution is None:
         return {"remaining": None, "requested": int(max_tokens or 0), "downstream_reserve": 0}
-    remaining = _completion_budget_remaining(config)
+    remaining = _completion_budget_remaining(execution)
     requested = max(0, int(max_tokens or 0))
     pending = max(0, int(pending_completion_tokens or 0))
     cfg_llm = (config or {}).get("llm") or {}
@@ -926,10 +640,6 @@ def _preflight_completion_budget(config, max_tokens, *, pending_completion_token
         downstream = max(0, int(cfg_llm.get("downstream_completion_reserve_tokens", 0) or 0))
     except (TypeError, ValueError):
         downstream = 0
-    runtime["completion_tokens_remaining_pre_call"] = remaining
-    runtime["downstream_completion_reserve_tokens"] = downstream
-    runtime["completion_tokens_requested_pre_call"] = requested
-    runtime["completion_tokens_pending_pre_call"] = pending
     if remaining is not None and pending + requested + downstream > remaining:
         raise ErroLLM(
             "A próxima chamada LLM não cabe no orçamento de saída restante sem consumir a reserva da próxima etapa obrigatória.",
@@ -950,7 +660,7 @@ def _prompt_cache_weight(config):
     return min(1.0, max(0.0, value))
 
 
-def _reservar_requisicao_llm(config, prompt_sistema, prompt_usuario, max_tokens):
+def _reservar_requisicao_llm(config, execution: ExecutionContext | None, prompt_sistema, prompt_usuario, max_tokens):
     """Preflight and account one real backend request.
 
     The provider still receives the complete prompt on every request, but the
@@ -958,27 +668,28 @@ def _reservar_requisicao_llm(config, prompt_sistema, prompt_usuario, max_tokens)
     forever. Real provider cache metadata replaces this estimate after the
     response arrives. Context-window safety remains based on the full prompt.
     """
-    runtime = (config or {}).get("_runtime_agent_budget")
-    if not isinstance(runtime, dict):
+    if execution is None:
         return {"estimated_prompt_tokens": 0, "estimated_effective_tokens": 0}
-    _preflight_completion_budget(config, max_tokens)
+    _preflight_completion_budget(config, execution, max_tokens)
     cfg_llm = (config or {}).get("llm", {})
     cfg_context = (config or {}).get("context_engine", {})
     chars_per_token = max(1, int(cfg_context.get("chars_per_token_fallback", 3) or 3))
     system_tokens = estimar_tokens(prompt_sistema, chars_per_token)
     user_tokens = estimar_tokens(prompt_usuario, chars_per_token)
     prompt_tokens = system_tokens + user_tokens
+    multiplier = execution.prompt_token_calibration if execution is not None else 1.0
+    calibrated_prompt_tokens = int(math.ceil(prompt_tokens * max(1.0, float(multiplier))))
     response_reserved = max(0, int(max_tokens or 0))
     margin = max(0, int(cfg_context.get("safety_margin_tokens", 256) or 0))
-    window = max(1, int(cfg_llm.get("context_window_tokens", 32768) or 32768))
-    if prompt_tokens + response_reserved + margin > window:
+    window = min(32768, max(1, int(cfg_llm.get("context_window_tokens", 32768) or 32768)))
+    if calibrated_prompt_tokens + response_reserved + margin > window:
         raise ErroLLM(
             "O prompt e a saída reservada excedem a janela de contexto do modelo.",
             transient=False, error_code="PROMPT_CONTEXT_BUDGET_EXCEEDED",
         )
 
     system_hash = hashlib.sha256(str(prompt_sistema or "").encode("utf-8")).hexdigest()
-    seen_hashes = runtime.setdefault("system_prompt_hashes", [])
+    seen_hashes = execution.system_prompt_hashes
     repeated_system = system_hash in seen_hashes
     if not repeated_system:
         seen_hashes.append(system_hash)
@@ -986,27 +697,31 @@ def _reservar_requisicao_llm(config, prompt_sistema, prompt_usuario, max_tokens)
     cache_weight = _prompt_cache_weight(config)
     effective_estimate = user_tokens + int(round(system_tokens * (cache_weight if repeated_system else 1.0)))
 
-    current_prompt = int(runtime.get("prompt_tokens_effective", 0) or 0)
-    max_prompt = int(runtime.get("max_prompt_tokens", 0) or 0)
-    if max_prompt > 0 and current_prompt + effective_estimate > max_prompt:
+    current_prompt_effective = int(execution.prompt_tokens_effective or 0)
+    current_prompt_physical = max(int(execution.prompt_tokens_budgeted_physical or 0), int(execution.prompt_tokens_actual or 0))
+    current_prompt_estimated_raw = int(execution.prompt_tokens_estimated_raw or 0)
+    reserved_prompt_tokens = calibrated_prompt_tokens
+    max_prompt = int(execution.max_prompt_tokens or 0)
+    if max_prompt > 0 and current_prompt_physical + reserved_prompt_tokens > max_prompt:
         raise ErroLLM(
-            "O limite global efetivo de tokens de entrada da tarefa seria excedido.",
+            "O limite físico acumulado de tokens de entrada da mensagem seria excedido.",
             transient=False, error_code="MAX_PROMPT_TOKENS_EXCEEDED",
         )
-    current_completion = int(runtime.get("generated_tokens", 0) or 0)
-    max_total = int(runtime.get("max_total_tokens", 0) or 0)
-    if max_total > 0 and current_prompt + current_completion + effective_estimate + response_reserved > max_total:
+    current_completion = int(execution.completion_tokens_actual or 0)
+    max_total = int(execution.max_total_tokens or 0)
+    if max_total > 0 and current_prompt_physical + current_completion + reserved_prompt_tokens + response_reserved > max_total:
         raise ErroLLM(
-            "O limite global efetivo de tokens da tarefa seria excedido pela próxima chamada.",
+            "O limite físico total de tokens da mensagem seria excedido pela próxima chamada.",
             transient=False, error_code="MAX_TOTAL_TOKENS_EXCEEDED",
         )
 
-    runtime["llm_requests"] = int(runtime.get("llm_requests", 0) or 0) + 1
-    runtime["prompt_tokens_reserved"] = int(runtime.get("prompt_tokens_reserved", 0) or 0) + prompt_tokens
-    runtime["prompt_tokens_estimated_raw"] = int(runtime.get("prompt_tokens_estimated_raw", 0) or 0) + prompt_tokens
-    runtime["prompt_tokens_effective"] = current_prompt + effective_estimate
+    execution.prompt_tokens_budgeted_physical = current_prompt_physical + reserved_prompt_tokens
+    execution.prompt_tokens_estimated_raw = current_prompt_estimated_raw + prompt_tokens
+    execution.prompt_tokens_effective = current_prompt_effective + effective_estimate
     return {
         "estimated_prompt_tokens": prompt_tokens,
+        "budgeted_prompt_tokens": reserved_prompt_tokens,
+        "prompt_token_calibration": round(float(multiplier), 4),
         "estimated_effective_tokens": effective_estimate,
         "estimated_system_tokens": system_tokens,
         "estimated_user_tokens": user_tokens,
@@ -1015,9 +730,8 @@ def _reservar_requisicao_llm(config, prompt_sistema, prompt_usuario, max_tokens)
     }
 
 
-def _finalizar_requisicao_llm(config, reservation, metadata):
-    runtime = (config or {}).get("_runtime_agent_budget")
-    if not isinstance(runtime, dict) or not isinstance(reservation, dict):
+def _finalizar_requisicao_llm(config, execution: ExecutionContext | None, reservation, metadata):
+    if execution is None or not isinstance(reservation, dict):
         return
     if reservation.get("finalized"):
         return
@@ -1027,31 +741,28 @@ def _finalizar_requisicao_llm(config, reservation, metadata):
     cached = (metadata or {}).get("cached_prompt_tokens")
     if isinstance(actual, (int, float)):
         actual = max(0, int(actual))
-        runtime["prompt_tokens_actual"] = int(runtime.get("prompt_tokens_actual", 0) or 0) + actual
+        execution.prompt_tokens_actual += actual
         if isinstance(cached, (int, float)):
             cached = min(actual, max(0, int(cached)))
             uncached = max(0, actual - cached)
             effective_actual = uncached + int(round(cached * _prompt_cache_weight(config)))
-            runtime["prompt_tokens_cached"] = int(runtime.get("prompt_tokens_cached", 0) or 0) + cached
-            runtime["prompt_tokens_uncached"] = int(runtime.get("prompt_tokens_uncached", 0) or 0) + uncached
+            execution.prompt_tokens_cached += cached
+            execution.prompt_tokens_uncached += uncached
         elif estimated_raw > 0:
             # Preserve the repeated-prefix discount when the provider reports
             # only the total prompt count and no cache breakdown.
             ratio = estimated_effective / estimated_raw
             effective_actual = int(round(actual * ratio))
-            runtime["prompt_tokens_uncached"] = int(runtime.get("prompt_tokens_uncached", 0) or 0) + actual
+            execution.prompt_tokens_uncached += actual
         else:
             effective_actual = actual
-            runtime["prompt_tokens_uncached"] = int(runtime.get("prompt_tokens_uncached", 0) or 0) + actual
-        runtime["prompt_tokens_effective"] = max(
-            0, int(runtime.get("prompt_tokens_effective", 0) or 0) + effective_actual - estimated_effective,
-        )
+            execution.prompt_tokens_uncached += actual
+        execution.prompt_tokens_effective = max(0, int(execution.prompt_tokens_effective or 0) + effective_actual - estimated_effective)
     reservation["finalized"] = True
 
 
-def _registrar_tokens_gerados(config, resposta, metadata_respostas=None):
-    runtime = (config or {}).get("_runtime_agent_budget")
-    if not isinstance(runtime, dict):
+def _registrar_tokens_gerados(config, execution: ExecutionContext | None, resposta, metadata_respostas=None):
+    if execution is None:
         return
     metadata_respostas = list(metadata_respostas or [])
     reais = [
@@ -1064,35 +775,28 @@ def _registrar_tokens_gerados(config, resposta, metadata_respostas=None):
         for item in metadata_respostas
         if isinstance(item, dict) and isinstance(item.get("reasoning_tokens"), (int, float))
     )
-    runtime["reasoning_tokens_actual"] = int(runtime.get("reasoning_tokens_actual", 0) or 0) + reasoning
+    execution.reasoning_tokens_actual += reasoning
     chars_por_token = max(
         1, int((config or {}).get("context_engine", {}).get("chars_per_token_fallback", 3)),
     )
     estimativa = sum(reais) if reais else (
         len(str(resposta or "")) + chars_por_token - 1
     ) // chars_por_token
-    total = int(runtime.get("generated_tokens", 0) or 0) + estimativa
-    max_tokens = int(runtime.get("max_completion_tokens", runtime.get("max_generated_tokens", 0)) or 0)
-    runtime["generated_tokens"] = total
-    runtime["completion_tokens_actual"] = total
-    runtime["completion_tokens_remaining"] = max(0, max_tokens - total) if max_tokens > 0 else None
+    total = int(execution.completion_tokens_actual or 0) + estimativa
+    max_tokens = int(execution.max_completion_tokens or 0)
+    execution.completion_tokens_actual = total
     if max_tokens > 0 and total > max_tokens:
         raise ErroLLM(
             "O limite global de tokens de saída da tarefa foi excedido.",
             transient=False, error_code="MAX_COMPLETION_TOKENS_EXCEEDED",
         )
-    max_total = int(runtime.get("max_total_tokens", 0) or 0)
-    # Most OpenAI-compatible providers include reasoning in completion_tokens.
-    # It is exposed separately for observability, but not double-counted here.
-    effective_total = int(runtime.get("prompt_tokens_effective", 0) or 0) + total
-    runtime["total_tokens_effective"] = effective_total
-    runtime["provider_reported_tokens"] = (
-        int(runtime.get("prompt_tokens_actual", 0) or 0)
-        + int(runtime.get("completion_tokens_actual", 0) or 0)
-    )
-    if max_total > 0 and effective_total > max_total:
+    max_total = int(execution.max_total_tokens or 0)
+    # Cache discounts remain diagnostic only. The hard 98k message budget is
+    # physical: full prompt attempts plus generated output.
+    physical_total = int(execution.prompt_tokens_estimated_raw or 0) + total
+    if max_total > 0 and physical_total > max_total:
         raise ErroLLM(
-            "O limite global de tokens da tarefa foi excedido.",
+            "O limite físico total de tokens da mensagem foi excedido.",
             transient=False, error_code="MAX_TOTAL_TOKENS_EXCEEDED",
         )
 
@@ -1116,14 +820,14 @@ def _max_tokens_da_chamada(cfg_llm, perfil):
     return valor if valor > 0 else None
 
 
-def _timeouts_da_chamada(cfg_llm, perfil, config):
+def _timeouts_da_chamada(cfg_llm, perfil, config, execution: ExecutionContext | None = None):
     connect_timeout = float(cfg_llm.get("connect_timeout_seconds", 5))
     perfil_chave = f"{perfil}_timeout_seconds" if perfil else None
     read_timeout = float(
         cfg_llm.get(perfil_chave, cfg_llm.get("read_timeout_seconds", 120))
         if perfil_chave else cfg_llm.get("read_timeout_seconds", 120)
     )
-    restante = _timeout_restante(config)
+    restante = _timeout_restante(execution)
     if restante is not None:
         if restante <= 0:
             raise ErroLLM(
@@ -1172,7 +876,7 @@ def _metricas_stream(metadata, estimativa_tokens, segundos):
     return tokens, tps
 
 
-def _criar_callback_stream(config, perfil, visivel, chars_por_token):
+def _criar_callback_stream(execution: ExecutionContext | None, perfil, visivel, chars_por_token):
     partes = []
     inicio = [None]
     ultima_metadata = [{}]
@@ -1198,7 +902,7 @@ def _criar_callback_stream(config, perfil, visivel, chars_por_token):
         if visivel:
             campos["partial_text"] = texto[-16000:]
         job_progress.publicar(
-            config, "generating" if not done else "validating",
+            execution, "generating" if not done else "validating",
             mensagem if not done else "Geracao concluida; validando a resposta",
             force=bool(done), min_interval=0.18, **campos,
         )
@@ -1207,11 +911,9 @@ def _criar_callback_stream(config, perfil, visivel, chars_por_token):
 
 
 def _chamar_llm_impl(
-    prompt_sistema, prompt_usuario, config, perfil=None, stream_visible=False,
-    _capability_recovery=False,
+    prompt_sistema, prompt_usuario, config, execution: ExecutionContext | None = None, perfil=None, stream_visible=False,
 ):
     """Chama o backend com limites, isolamento e retry transitório."""
-    canonical_system_prompt = prompt_sistema
     cfg_llm = config.get("llm", {})
     base_url = cfg_llm.get("base_url", "http://localhost:11434")
     configured_model = cfg_llm.get("model", "qwen2.5:7b-instruct-q4_0")
@@ -1220,7 +922,7 @@ def _chamar_llm_impl(
     openai_compatible = cfg_llm.get("openai_compatible", False)
     max_tokens = _max_tokens_da_chamada(cfg_llm, perfil)
     connect_timeout, read_timeout, deadline_restante = _timeouts_da_chamada(
-        cfg_llm, perfil, config,
+        cfg_llm, perfil, config, execution,
     )
 
     if openai_compatible:
@@ -1233,30 +935,18 @@ def _chamar_llm_impl(
             negative_ttl=cfg_llm.get("model_discovery_negative_ttl_seconds", 60),
         )
 
-    structured_capability = None
-    structured_mode = None
+    structured_mode = "json_schema" if perfil is not None else None
     if perfil is not None:
-        structured_capability = _ensure_structured_capability(
-            base_url=base_url, model=model, openai_compatible=openai_compatible,
-            connect_timeout=connect_timeout, read_timeout=read_timeout, config=config,
-        )
-        structured_mode = structured_capability["mode"]
         prompt_sistema = prompt_sistema.rstrip() + "\n\n" + contract_instruction(perfil)
 
     job_progress.publicar(
-        config, "llm_wait", "Aguardando a LLM local",
+        execution, "llm_wait", "Aguardando a LLM local",
         profile=perfil or "default",
     )
-    _preflight_completion_budget(config, max_tokens)
-    _reservar_orcamento_llm(config)
+    _preflight_completion_budget(config, execution, max_tokens)
+    _reservar_orcamento_llm(execution)
 
-    chave_tentativas = (
-        "agent_retry_max_attempts" if perfil == "agent" else "retry_max_attempts"
-    )
-    tentativas = max(
-        1,
-        int(cfg_llm.get(chave_tentativas, cfg_llm.get("retry_max_attempts", 3))),
-    )
+    tentativas = max(1, int(cfg_llm.get("retry_max_attempts", 3)))
     base_delay = max(0.0, float(cfg_llm.get("retry_base_delay_seconds", 0.5)))
     max_delay = max(base_delay, float(cfg_llm.get("retry_max_delay_seconds", 2.0)))
     jitter = max(0.0, float(cfg_llm.get("retry_jitter_seconds", 0.2)))
@@ -1267,7 +957,7 @@ def _chamar_llm_impl(
     semaforo = _semaforo_backend(
         chave_backend, cfg_llm.get("max_concurrent_requests", 1),
     )
-    restante = _timeout_restante(config)
+    restante = _timeout_restante(execution)
     espera_semaforo = read_timeout if restante is None else min(read_timeout, restante)
     if not semaforo.acquire(timeout=max(0.1, espera_semaforo)):
         raise ErroLLM(
@@ -1312,11 +1002,11 @@ def _chamar_llm_impl(
         for tentativa in range(1, tentativas + 1):
             _esperar_cooldown(
                 chave_backend,
-                deadline=(config.get("_runtime_agent_budget") or {}).get("deadline_monotonic"),
+                deadline=execution.deadline_monotonic if execution is not None else None,
             )
-            connect_atual, read_atual, _ = _timeouts_da_chamada(cfg_llm, perfil, config)
+            connect_atual, read_atual, _ = _timeouts_da_chamada(cfg_llm, perfil, config, execution)
             job_progress.publicar(
-                config, "llm_request",
+                execution, "llm_request",
                 "Solicitando geracao a LLM local" if tentativa == 1 else "Tentando a LLM novamente",
                 profile=perfil or "default", attempt=tentativa, max_attempts=tentativas,
                 partial_text="" if stream_visible else None,
@@ -1335,7 +1025,7 @@ def _chamar_llm_impl(
 
                     def before_request():
                         reservations.append(_reservar_requisicao_llm(
-                            config, prompt_sistema, prompt_usuario, token_limit,
+                            config, execution, prompt_sistema, prompt_usuario, token_limit,
                         ))
 
                     if openai_compatible:
@@ -1345,7 +1035,6 @@ def _chamar_llm_impl(
                             read_timeout=read_atual, on_chunk=callback,
                             on_request=before_request,
                             schema_estruturado=(_schema_para_perfil(perfil) if perfil is not None else None), perfil=perfil,
-                            structured_mode=structured_mode,
                         )
                     else:
                         before_request()
@@ -1354,11 +1043,10 @@ def _chamar_llm_impl(
                             connect_atual, max_tokens=token_limit,
                             read_timeout=read_atual, on_chunk=callback,
                             schema_estruturado=(_schema_para_perfil(perfil) if perfil is not None else None), perfil=perfil,
-                            structured_mode=structured_mode,
                         )
                     metadata_backend = _ultima_metadata_backend()
                     if reservations:
-                        _finalizar_requisicao_llm(config, reservations[-1], metadata_backend)
+                        _finalizar_requisicao_llm(config, execution, reservations[-1], metadata_backend)
                     metadata_backend["latency_ms"] = round(
                         (time.monotonic() - inicio_backend) * 1000, 2,
                     )
@@ -1374,89 +1062,19 @@ def _chamar_llm_impl(
                     "provider": ("openai_compatible" if openai_compatible else "ollama"),
                     "profile": perfil or "default",
                     "max_tokens_requested": max_tokens,
-                    "structured_mode": structured_mode if perfil is not None else None,
-                    "structured_capability_source": (
-                        structured_capability.get("source") if isinstance(structured_capability, dict) else None
-                    ),
-                    "structured_connection_fingerprint": (
-                        structured_capability.get("fingerprint") if isinstance(structured_capability, dict) else None
-                    ),
+                    "structured_mode": "json_schema" if perfil is not None else None,
                 })
                 if _finish_reason_truncado(metadata_resposta):
-                    retry_limit_key = f"{perfil}_truncation_retry_max_tokens" if perfil else None
-                    retry_multiplier_key = f"{perfil}_truncation_retry_multiplier" if perfil else None
-                    retry_limit = int(
-                        cfg_llm.get(retry_limit_key, cfg_llm.get("truncation_retry_max_tokens", 2048))
-                        if retry_limit_key else cfg_llm.get("truncation_retry_max_tokens", 2048)
-                    )
-                    multiplier = max(1.1, float(
-                        cfg_llm.get(retry_multiplier_key, cfg_llm.get("truncation_retry_multiplier", 2.0))
-                        if retry_multiplier_key else cfg_llm.get("truncation_retry_multiplier", 2.0)
-                    ))
-                    current = int(max_tokens or cfg_llm.get("max_tokens") or 700)
-                    expanded = max(current + 256, int(current * multiplier))
-                    expanded = min(expanded, retry_limit)
-                    metadata_resposta.update({
-                        "truncated": True,
-                        "truncation_retry_planned": bool(expanded > current and not streaming_ativado),
-                    })
-                    _registrar_metadata_runtime(config, metadata_resposta)
+                    metadata_resposta.update({"truncated": True})
+                    _registrar_metadata_runtime(execution, metadata_resposta)
                     metadata_chamadas.append(dict(metadata_resposta))
-                    if expanded <= current or streaming_ativado:
-                        _registrar_tokens_gerados(config, resposta, metadata_chamadas)
-                        raise ErroLLM(
-                            "A resposta do modelo foi interrompida pelo limite de tokens.",
-                            transient=False, error_code="MODEL_OUTPUT_TRUNCATED",
-                        )
-                    _diagnostico(
-                        "MODEL_OUTPUT_TRUNCATED_RETRY", profile=perfil or "default",
-                        configured_model=str(configured_model), resolved_model=str(model),
-                        previous_max_tokens=current, retry_max_tokens=expanded,
+                    _registrar_tokens_gerados(config, execution, resposta, metadata_chamadas)
+                    raise ErroLLM(
+                        "A resposta do modelo foi interrompida pelo limite físico de saída.",
+                        transient=False, error_code="MODEL_OUTPUT_TRUNCATED",
                     )
-                    pending_completion = sum(
-                        int(item.get("completion_tokens") or 0)
-                        for item in metadata_chamadas
-                        if isinstance(item, dict) and isinstance(item.get("completion_tokens"), (int, float))
-                    )
-                    try:
-                        _preflight_completion_budget(
-                            config, expanded, pending_completion_tokens=pending_completion,
-                        )
-                        _reservar_orcamento_llm(config)
-                    except ErroLLM:
-                        # The truncated attempt was a real provider call and
-                        # must remain charged even when the retry is rejected
-                        # before transmission.
-                        _registrar_tokens_gerados(config, resposta, metadata_chamadas)
-                        raise
-                    resposta, metadata_resposta = chamar_backend(expanded, None)
-                    metadata_resposta.update({
-                        "configured_model": str(configured_model),
-                        "resolved_model": str(metadata_resposta.get("provider_model") or model),
-                        "provider": ("openai_compatible" if openai_compatible else "ollama"),
-                        "profile": perfil or "default",
-                        "max_tokens_requested": expanded,
-                        "truncation_retry": True,
-                        "truncated": _finish_reason_truncado(metadata_resposta),
-                        "structured_mode": structured_mode if perfil is not None else None,
-                        "structured_capability_source": (
-                            structured_capability.get("source") if isinstance(structured_capability, dict) else None
-                        ),
-                        "structured_connection_fingerprint": (
-                            structured_capability.get("fingerprint") if isinstance(structured_capability, dict) else None
-                        ),
-                    })
-                    _registrar_metadata_runtime(config, metadata_resposta)
-                    metadata_chamadas.append(dict(metadata_resposta))
-                    if _finish_reason_truncado(metadata_resposta):
-                        _registrar_tokens_gerados(config, resposta, metadata_chamadas)
-                        raise ErroLLM(
-                            "A resposta do modelo continuou truncada após a repetição com orçamento maior.",
-                            transient=False, error_code="MODEL_OUTPUT_TRUNCATED",
-                        )
-                else:
-                    _registrar_metadata_runtime(config, metadata_resposta)
-                    metadata_chamadas.append(dict(metadata_resposta))
+                _registrar_metadata_runtime(execution, metadata_resposta)
+                metadata_chamadas.append(dict(metadata_resposta))
                 if not isinstance(resposta, str) or not resposta.strip():
                     raise ErroLLM(
                         "O backend respondeu sem conteúdo utilizável.",
@@ -1465,9 +1083,16 @@ def _chamar_llm_impl(
                 ultimo_erro = None
                 break
             except urllib.error.HTTPError as erro_http:
-                ultimo_erro = _erro_http(
-                    base_url, erro_http, _ler_corpo_http_error(erro_http),
-                )
+                if perfil is not None and getattr(erro_http, "code", None) in (400, 404, 422):
+                    ultimo_erro = ErroLLM(
+                        _mensagem_http_error(base_url, erro_http, _ler_corpo_http_error(erro_http)),
+                        transient=False, status_code=getattr(erro_http, "code", None),
+                        error_code="LLM_STRUCTURED_OUTPUT_UNAVAILABLE",
+                    )
+                else:
+                    ultimo_erro = _erro_http(
+                        base_url, erro_http, _ler_corpo_http_error(erro_http),
+                    )
             except urllib.error.URLError as erro_rede:
                 motivo = getattr(erro_rede, "reason", None)
                 eh_timeout = isinstance(motivo, (socket.timeout, TimeoutError)) or (
@@ -1517,7 +1142,7 @@ def _chamar_llm_impl(
                 atraso = min(max_delay, base_delay * (2 ** (tentativa - 1)))
                 if jitter:
                     atraso += random.uniform(0, jitter)
-            restante = _timeout_restante(config)
+            restante = _timeout_restante(execution)
             if restante is not None:
                 if restante <= 0:
                     raise ErroLLM(
@@ -1526,7 +1151,7 @@ def _chamar_llm_impl(
                     )
                 atraso = min(atraso, restante)
             job_progress.publicar(
-                config, "retry", "A LLM falhou; preparando nova tentativa",
+                execution, "retry", "A LLM falhou; preparando nova tentativa",
                 profile=perfil or "default", attempt=tentativa, max_attempts=tentativas,
                 error=str(ultimo_erro)[:500],
             )
@@ -1543,27 +1168,22 @@ def _chamar_llm_impl(
         limiter.release(slot_processo)
         semaforo.release()
 
-    _registrar_tokens_gerados(config, resposta, metadata_chamadas)
+    _registrar_tokens_gerados(config, execution, resposta, metadata_chamadas)
     parsed_response = resposta
     if perfil is not None:
         try:
             parsed_response = parse_profile_response(resposta, perfil or "agent")
-            runtime_meta = (config or {}).get("_runtime_agent_budget") or {}
-            last = runtime_meta.get("last_llm_response")
+            last = _latest_attempt(execution)
             if isinstance(last, dict):
                 last["structured_parse_status"] = "valid"
                 last["structured_profile"] = perfil or "agent"
                 last["structured_top_level_keys"] = sorted(parsed_response.keys())
-                history = runtime_meta.get("llm_responses") or []
-                if history and isinstance(history[-1], dict):
-                    history[-1].update(last)
         except StructuredResponseError as error:
-            runtime_meta = (config or {}).get("_runtime_agent_budget") or {}
             observed = observed_top_level(resposta)
             observed_keys = sorted(observed.keys()) if isinstance(observed, dict) else []
             required_keys = list(mandatory_top_level_keys(perfil or "agent"))
             missing_keys = [key for key in required_keys if key not in observed_keys]
-            last = runtime_meta.get("last_llm_response")
+            last = _latest_attempt(execution)
             if isinstance(last, dict):
                 last["structured_parse_status"] = "invalid"
                 last["structured_parse_error"] = error.code
@@ -1571,25 +1191,6 @@ def _chamar_llm_impl(
                 last["structured_profile"] = perfil or "agent"
                 last["structured_top_level_keys"] = observed_keys
                 last["structured_missing_keys"] = missing_keys
-                history = runtime_meta.get("llm_responses") or []
-                if history and isinstance(history[-1], dict):
-                    history[-1].update(last)
-
-            if perfil is not None and not _capability_recovery and structured_mode:
-                revalidated = _revalidate_structured_capability(
-                    base_url=base_url, model=model, openai_compatible=openai_compatible,
-                    current_mode=structured_mode, connect_timeout=connect_timeout,
-                    read_timeout=read_timeout, config=config,
-                )
-                if revalidated.get("mode") != structured_mode:
-                    if isinstance(last, dict):
-                        last["structured_capability_changed"] = True
-                        last["structured_recovered_mode"] = revalidated.get("mode")
-                    return _chamar_llm_impl(
-                        canonical_system_prompt, prompt_usuario, config,
-                        perfil=perfil, stream_visible=stream_visible,
-                        _capability_recovery=True,
-                    )
 
             raise ErroLLM(
                 f"Structured response for {perfil or 'agent'} is invalid: {error.detail}",
@@ -1602,7 +1203,7 @@ def _chamar_llm_impl(
     if stream_visible and not streaming_ativado:
         campos_finais["partial_text"] = str(resposta or "")[-16000:]
     job_progress.publicar(
-        config, "validating", "Resposta gerada; executando validacoes",
+        execution, "validating", "Resposta gerada; executando validacoes",
         **campos_finais,
     )
 
@@ -1610,57 +1211,32 @@ def _chamar_llm_impl(
 
 
 def _chamar_llm(
-    prompt_sistema, prompt_usuario, config, perfil=None, stream_visible=False,
+    prompt_sistema, prompt_usuario, config, execution: ExecutionContext | None = None, perfil=None, stream_visible=False,
 ):
     """Fronteira observavel de toda chamada LLM, do AgentSession."""
     inicio = time.monotonic()
-    runtime = (config or {}).get("_runtime_agent_budget") or {}
+    if execution is None:
+        execution = current_execution() or ExecutionContext.from_config(config)
+    if execution.latest_call() is None:
+        execution.begin_call(mode=perfil or "default", turn=0, prompt={})
     status = "ok"
     metadata = {"profile": perfil or "default", "structured": perfil is not None}
     try:
         resposta = _chamar_llm_impl(
-            prompt_sistema, prompt_usuario, config,
+            prompt_sistema, prompt_usuario, config, execution,
             perfil=perfil,
             stream_visible=stream_visible,
         )
         metadata["estimated_output_chars"] = len(str(resposta or ""))
-        last_response = runtime.get("last_llm_response")
+        last_response = _latest_attempt(execution)
         if isinstance(last_response, dict):
             elapsed_ms = round((time.monotonic() - inicio) * 1000, 2)
             last_response["orchestration_latency_ms"] = elapsed_ms
             if not isinstance(last_response.get("latency_ms"), (int, float)):
                 last_response["latency_ms"] = elapsed_ms
-            history = runtime.get("llm_responses") or []
-            if history and isinstance(history[-1], dict):
-                history[-1]["orchestration_latency_ms"] = elapsed_ms
-                if not isinstance(history[-1].get("latency_ms"), (int, float)):
-                    history[-1]["latency_ms"] = elapsed_ms
             metadata.update({key: value for key, value in last_response.items() if value is not None})
         return resposta
     except ErroLLM as erro:
-        if perfil is not None and erro.error_code == "STRUCTURED_OUTPUT_REJECTED":
-            capability = runtime.get("structured_capability") if isinstance(runtime, dict) else None
-            if isinstance(capability, dict) and capability.get("mode"):
-                revalidated = _revalidate_structured_capability(
-                    base_url=((config or {}).get("llm") or {}).get("base_url"),
-                    model=capability.get("model") or ((config or {}).get("llm") or {}).get("model"),
-                    openai_compatible=(capability.get("transport") == "openai_compatible"),
-                    current_mode=str(capability.get("mode")),
-                    connect_timeout=float(((config or {}).get("llm") or {}).get("connect_timeout_seconds", 5)),
-                    read_timeout=float(((config or {}).get("llm") or {}).get("read_timeout_seconds", 120)),
-                    config=config,
-                )
-                if revalidated.get("mode") != capability.get("mode"):
-                    resposta = _chamar_llm_impl(
-                        prompt_sistema, prompt_usuario, config, perfil=perfil,
-                        stream_visible=stream_visible, _capability_recovery=True,
-                    )
-                    status = "ok"
-                    metadata.update({
-                        "structured_transport_recovered": True,
-                        "structured_mode": revalidated.get("mode"),
-                    })
-                    return resposta
         status = "error"
         metadata.update({
             "error_code": erro.error_code,
@@ -1676,7 +1252,7 @@ def _chamar_llm(
         telemetry.record(
             "llm", perfil or "default", status,
             (time.monotonic() - inicio) * 1000,
-            task_id=runtime.get("task_id"), job_id=runtime.get("source_job_id"),
+            task_id=execution.task_id, job_id=execution.source_job_id,
             metadata=metadata,
         )
 
@@ -1684,44 +1260,58 @@ def _chamar_llm(
 
 PROMPT_AGENTE = """You are Eyle, a coding agent. Return JSON only.
 
-Return exactly: action, tool_calls, patches, needs_user, final, workspace_scope, investigation_updates. action=tool_calls|patches|needs_user|final; unused payloads are null. final={answer,evidence_ids,limitations} or null. workspace_scope={mode,reason}, mode=none|read|write. investigation_updates items are exactly {id,goal,status,evidence_ids,reason}, status=open|established|dismissed.
+Return exactly: tool_calls, patches, needs_user, final, investigation_updates. Exactly one of tool_calls, patches, needs_user, or final is non-null. final={answer,limitations}. needs_user={question,missing_information}. investigation_updates items are exactly {id,goal,status,evidence_ids,reason}, status=open|established|dismissed.
 
-You own semantics. Use read when correctness depends on current workspace facts, write when the request asks to change workspace, none only when workspace-independent. Preserve read/write once declared. Runtime validates contracts; it does not infer intent.
+You are the semantic brain. The request is the complete canonical task input; conversation_background is context. Decide the work, tools, semantic debt and when to finish. Runtime validates physical reality/contracts but never classifies intent, chooses goals or decides Evidence sufficiency. physical_limits are hard fuses; exhaustion fails the task and no budget is earned.
 
-request is the only active task; conversation_background is context; investigation_map is navigation. investigation is canonical; send only changed targets; [] means no change. Goals are immutable. Open targets may accumulate Evidence: if YOU judge new Evidence material, attach it immediately. evidence_ids in investigation_updates are additive delta: send only newly material IDs; Runtime retains committed target Evidence. Prefer separate targets for independently provable debts. Runtime never chooses relevance. Targets are facts/properties, not tool steps. established needs retained-or-new Evidence + reason; dismissed needs reason. Evidence that already funded committed progress cannot fund tool authority again.
+needs_user is ONLY for an already-active concrete task that is materially blocked because a specific fact or choice must come from the user before work can continue. missing_information must name that concrete blocker; question asks only for it. Never use needs_user for greetings, social conversation, invitations to provide a task, optional information, generic "how can I help?" follow-ups, or information you can obtain with available tools. If no concrete task is blocked, return final. A resumed user clarification becomes part of request itself and remains canonical across later tools and Claim review.
 
-Follow runtime_phase/action_policy and available_tools. Grounded facts/bugs/risks need real Evidence; final cites evidence_ids. Missing Evidence means investigate or state uncertainty. Claims and target coverage are reviewed separately. Claim Review independently verifies provisional final and never grants tools. Runtime extends tools only from valid committed Investigation progress. Batch at most 4 independent tools; oversized batches are atomic. Do not repeat covered observations. Writes use one transaction: replace/create={operation,path,content}; delete={operation,path}; update={operation,path,line_start,line_end,new_code}. Dry-run never writes; confirmed apply does. Never claim an unconfirmed write. Answer in the user's language and tone.
+Investigation is YOUR semantic working memory, never a Runtime requirement. Keep it empty if no unresolved material question must survive this turn; otherwise create a durable target. Do not drop/rename declared goals. Attach material Evidence. established requires Evidence; dismissed requires reason. For multiple unresolved candidates, open/close targets instead of carrying debt only transiently.
+
+Identify the actual property requested before gathering Evidence. Never replace it with an easier proxy. Definitions, references, imports, compilation, tests, signatures, names and markers prove only what they directly observe. If the property depends on behavior, execution, reachability, causality, compatibility, completeness, absence or another stronger relation, establish that stronger property. Stop when retained Evidence is sufficient; do no work that cannot change the conclusion.
+
+capability_index is the compact list of callable unused tools; active_tools contains expanded contracts only after first request. Any listed tool may be called immediately; no selector/activation step exists. physical_limits.terminal_capabilities lists non-retryable tool failures for this job; never request them again. symbol_relations reports structural facts/paths, never liveness semantics. run_command is unrestricted only inside its per-job sandbox snapshot; it never writes the real workspace. Use tools only when useful, batch at most 4 independent calls, and do not repeat retained observations unless reality changed.
+
+Real workspace writes use one transaction: replace/create={operation,path,content}; delete={operation,path}; update={operation,path,line_start,line_end,new_code}. Dry-run never writes; confirmed apply does. Never claim an unconfirmed write.
+
+Final is for the user: lead with the result, hide internal Evidence/Claim mechanics unless asked, and match the user's language/tone.
 """
 
-PROMPT_CLAIM_VERIFIER = """You are Eyle Claim Verifier. Return JSON only. Verify every material factual Claim.
+PROMPT_CLAIM_VERIFIER = """You are Eyle Claim Verifier. Return JSON only. You are the independent semantic auditor. Never request tools, edits, plans or create Investigation.
 
-Claim coverage: include every materially necessary atomic Claim; there is no fixed Claim-count limit. around 6 is common, 12 is valid when materially necessary, and 20+ is valid only for genuinely broad material answers. These numbers are guidance, never quotas or limits. Never duplicate Claims, omit material assertions to reduce count, or split propositions artificially.
+There is one task only: verify_claims. Audit the complete provisional answer against the canonical request and supplied grounding coordinates. Every response MUST include material_satisfaction={status,grounding_refs,reason}, answer_consistency={status,grounding_refs,reason}, claims and semantic_gaps.
 
-For EVERY Claim, always return all of these fields:
-id: unique non-empty identifier.
-answer_ref: MUST be exactly one id supplied in answer_anchors. Never copy, rewrite, paraphrase, or invent answer text.
-target_id: existing Investigation target id when this Claim semantically belongs to that target; otherwise null. For an insufficient OR contradicted Claim tied to an existing target, target_id MUST name that target so the runtime can reopen exactly the debt you identified.
-statement: statement must be exactly one atomic factual proposition expressed by answer_ref. Never omit statement. Even when verdict is supported, statement remains mandatory.
-kind: MUST be exactly one of fact, bug, risk, recommendation. Use fact for architectural, structural, quantitative, implementation, location, usage, or flow facts. Do not create more specific kind values.
-evidence_ids: only supplied IDs.
-verdict: MUST be exactly one of supported, contradicted, insufficient. Do not create alternative or more specific verdict values.
-reason: reason must always be present as a string <=160 chars; empty allowed for obvious support.
+Grounding coordinates are typed and literal. Use only coordinates present in the packet:
+- request = the canonical user task itself.
+- answer:<anchor_id> = literal visible answer text.
+- evidence:<EvidenceID> = source/runtime Evidence shown in evidence.
+- runtime:<runtime_fact_id> = physical execution fact shown in runtime_facts.
+- investigation:<target_id> = declared semantic-debt coordinate; its reason is argument, never factual authority.
+Grounding is not synonymous with EvidenceLedger. Omissions or instruction failures may be grounded by request + answer anchors. Physical impossibility may be grounded by runtime facts. Source-code assertions normally require source Evidence.
 
-Use only supplied Evidence. A supported or contradicted fact/bug/risk requires at least one evidence_id; otherwise use insufficient. Return findings and semantic_gaps arrays, empty when none. findings group bounded fact/bug/risk/recommendation Claims; claim_ids MUST contain Claim.id values, never answer_ref values. semantic_gaps NEVER contain claim_ids and contain exactly id, type, target_id, evidence_ids, reason. target_id MUST be an existing Investigation target id when the gap challenges that target, otherwise null when the material gap is missing from the declared contract. material_omission means supplied material Evidence was omitted or represented one-sidedly and MUST cite at least one supplied evidence_id. conflicting_evidence means supplied Evidence materially conflicts and MUST cite the relevant supplied evidence_ids. scope_gap means requested material scope is unanswered, unsupported, or established only by proxy/partial investigation; it MAY use evidence_ids=[] when the gap comes from missing investigation rather than an existing Evidence item. A narrow search or marker absence cannot establish absence of a broader property. Never use material_omission or conflicting_evidence with evidence_ids=[].
+First judge material delivery. material_satisfaction.status is satisfied|gap|blocked. Use blocked only when the requested action cannot physically be completed in the current execution and the answer accurately reports that limitation; blocked MUST cite at least one runtime:* grounding. A truthful grounded blocked outcome is a valid final delivery, not a reason to demand impossible repeated execution. Then judge answer consistency. Then atomize every materially necessary factual/architectural/bug/risk/recommendation Claim. Finally audit declared Investigation closure.
 
-On task=verify_workspace_scope, audit only whether the Main LLM's workspace_scope=none is semantically valid for the supplied request and answer: return claims=[] and findings=[]; if current workspace facts are materially required, emit exactly one scope_gap with target_id=null and evidence_ids=[], otherwise semantic_gaps=[]. Do not fact-check workspace-independent content in that task. On the initial global review, verify both material Claims and the supplied Investigation Contract against the request and Evidence. A target marked established/dismissed may be challenged by an insufficient or contradicted Claim carrying that target_id, or by a semantic_gap using its target_id. If the request has a material uncovered scope that is absent from the contract, emit a semantic_gap with target_id=null. For Claim reverification return only requested Claim IDs, preserve answer_ref and target_id, and return findings=[] and semantic_gaps=[]. For task=reverify_findings return claims=[], semantic_gaps=[], and the complete corrected findings array for the supplied preserved_claims; do not alter Claim semantics. For task=reverify_semantic_gap return claims=[], findings=[], and zero or one semantic_gap. Preserve the target gap id if retaining it. Re-evaluate its type, target_id, evidence_ids and reason semantically; do not change type merely to satisfy the protocol. Return semantic_gaps=[] if the target is not a valid material gap. Never request tools, edits, plans or investigation."""
+For each Claim return exactly: answer_ref,target_id,statement,grounding_refs,verdict,reason. answer_ref names a supplied answer anchor. target_id names an existing Investigation target when applicable, otherwise null. verdict=supported|contradicted|insufficient. grounding_refs must be non-empty. Cite the coordinates that genuinely discriminate the proposition; do not cite the answer itself as circular proof of an external fact. If the available coordinates do not establish the proposition, use insufficient.
 
-def executar_agente(prompt_usuario, config):
+Investigation is semantic debt declared by the Main LLM, not by Runtime. Empty Investigation is valid. If a materially required property was not established, emit scope_gap. If an existing target was falsely closed, tie the gap/insufficient Claim to that target_id. Do not accept an easier proxy: definitions, references, imports, compilation, tests, signatures, successful commands, names or markers prove only what they directly observe unless they genuinely discriminate the requested property.
+
+semantic_gaps items contain exactly type,target_id,grounding_refs,required_property,reason. type=material_omission|conflicting_evidence|scope_gap. grounding_refs must be non-empty. required_property states the unresolved material property precisely enough that the Main LLM can decide how to establish or narrow it; do not prescribe tools. material_omission may cite request and answer anchors without source Evidence. conflicting_evidence cites the conflicting coordinates. scope_gap may cite request and/or Investigation when the missing proof was never gathered.
+
+answer_consistency={status,grounding_refs,reason}, status=consistent|conflict. Ground it in answer anchors. Return no unsupported administrative prose.
+"""
+
+
+def executar_agente(prompt_usuario, config, execution: ExecutionContext | None = None):
     """Run the canonical structured Eyle agent reasoning profile."""
     return _chamar_llm(
-        PROMPT_AGENTE, prompt_usuario, config,
+        PROMPT_AGENTE, prompt_usuario, config, execution,
         perfil="agent",
     )
 
 
-def executar_verificador_claims(prompt_usuario, config):
+def executar_verificador_claims(prompt_usuario, config, execution: ExecutionContext | None = None):
     """Run a bounded semantic review pass with no tool authority."""
     return _chamar_llm(
-        PROMPT_CLAIM_VERIFIER, prompt_usuario, config,
+        PROMPT_CLAIM_VERIFIER, prompt_usuario, config, execution,
         perfil="claim_verifier",
     )

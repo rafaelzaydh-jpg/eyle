@@ -3,6 +3,7 @@ import json
 
 import eyle.core.agent as core_agent
 from eyle.core.session import AgentSession
+from eyle.core.write_transaction import begin as begin_write_transaction, set_status as set_write_status
 from eyle.runtime import service
 
 
@@ -10,62 +11,40 @@ def _config(tests_enabled=True):
     return {
         "llm": {
             "context_window_tokens": 10000,
-            "agent_decision_max_tokens": 1400,
-            "agent_patch_max_tokens": 4200,
+            "agent_max_tokens": 4200,
         },
         "context_engine": {"safety_margin_tokens": 500, "chars_per_token_fallback": 3},
         "agent": {
             "max_llm_turns": 4,
             "max_tool_calls": 8,
-            "max_identical_tool_repeats": 2,
-            "structured_protocol_retries": 1,
-            "final_validation_retries": 1,
-            "chat_history_token_budget": 2400,
-            "max_read_range_lines": 400,
+            "max_file_read_lines": 400,
             "claims": {"mode": "off"},
-            "context_view": {"max_relevant_sources": 4, "max_relevant_source_chars": 3500, "max_symbol_preview_chars": 2600, "max_search_source_chars": 600},
+            "context_view": {"max_source_preview_chars": 3500, "max_symbol_preview_chars": 2600, "max_search_source_chars": 600},
         },
         "codar": {
             "ativado": True,
             "testes": {"ativado": tests_enabled, "timeout_segundos": 30},
         },
-        "_runtime_agent_budget": {
-            "max_llm_calls": 10,
-            "max_prompt_tokens": 12000,
-            "max_completion_tokens": 6000,
-            "max_total_tokens": 18000,
-            "llm_calls": 0,
-            "llm_requests": 0,
-        },
+
     }
 
 
-def _pending_replace_and_create(root):
+def _session_pending_replace_and_create(root):
     original = (root / "routes.py").read_text(encoding="utf-8")
-    return {
-        "continuation_kind": "write_confirmation",
-        "write_transaction": {
-            "patches": [
-                    {
-                        "operation": "replace",
-                        "path": "routes.py",
-                        "content": "def amor():\n    return render_template('amor.html')\n",
-                        "file_hash_expected": hashlib.sha256(original.encode()).hexdigest(),
-                    },
-                    {
-                        "operation": "create",
-                        "path": "templates/amor.html",
-                        "content": "<h1>Amor</h1>\n",
-                    },
-                ]
-        }
-    }
+    patches = [
+        {"operation":"replace","path":"routes.py","content":"def amor():\n    return render_template('amor.html')\n","file_hash_expected":hashlib.sha256(original.encode()).hexdigest()},
+        {"operation":"create","path":"templates/amor.html","content":"<h1>Amor</h1>\n"},
+    ]
+    session = AgentSession("mova o html")
+    session.write_transaction = begin_write_transaction(patches=patches, turn=1)
+    set_write_status(session.write_transaction, "awaiting_confirmation")
+    return session, {"continuation_kind":"write_confirmation","transaction_id":session.write_transaction["transaction_id"]}
 
 
 def test_failed_tests_expose_exact_output_and_structured_report(monkeypatch, tmp_path):
     routes = tmp_path / "routes.py"
     routes.write_text("def amor():\n    return '<h1>Amor</h1>'\n", encoding="utf-8")
-    pending = _pending_replace_and_create(tmp_path)
+    session, pending = _session_pending_replace_and_create(tmp_path)
     diagnostic = (
         "'python -m pytest -q' falhou no sandbox (codigo 1).\n"
         "E   NameError: name 'render_template' is not defined\n"
@@ -80,7 +59,7 @@ def test_failed_tests_expose_exact_output_and_structured_report(monkeypatch, tmp
     })
 
     status, text, _, details = core_agent._resume_set(
-        AgentSession("mova o html"), pending, _config(),
+        session, pending, _config(),
         {"caminho_origem": str(tmp_path)}, True,
     )
 
@@ -122,17 +101,19 @@ def test_follow_up_can_cite_runtime_failure_instead_of_restored_code(monkeypatch
         payload = json.loads(prompt)
         prompts.append(payload)
         runtime_sources = [
-            source for source in payload["relevant_sources"]
-            if source.get("source_type") == "runtime_validation"
+            item.get("detail") for item in payload["latest_tool_results"]
+            if isinstance(item, dict)
+            and isinstance(item.get("detail"), dict)
+            and item["detail"].get("source_type") == "runtime_validation"
         ]
         assert runtime_sources
         assert runtime_sources[0]["error_code"] == "TESTS_FAILED"
+        assert "render_template" in runtime_sources[0]["content"]
         return {
             "final": {
                 "answer": "Os testes falharam porque render_template não estava definido.",
-                "evidence_ids": ["ev-runtime-0001"],
+                "limitations": [],
             },
-            "workspace_scope": {"mode": "read", "reason": "The answer depends on persisted runtime validation Evidence."},
             "investigation_updates": [{
                 "id": "T1", "goal": "Establish why the prior project tests failed",
                 "status": "established", "evidence_ids": ["ev-runtime-0001"],

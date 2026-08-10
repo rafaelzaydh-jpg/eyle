@@ -437,9 +437,10 @@ def _resultado_agente(status, texto, detalhes):
     }
 
 
-def _processar_agente(pergunta, config, projeto, task_id=None, conversation_context=None):
+def _processar_agente(pergunta, config, projeto, task_id=None, conversation_context=None, source_job_id=None):
     config_execucao = dict(config)
-    job_progress.publicar(config_execucao, "agent", "Eyle iniciou a tarefa")
+    if source_job_id is not None:
+        job_progress.publicar_job(source_job_id, "agent", "Eyle iniciou a tarefa")
     try:
         status, texto, estado_pendente, detalhes = _desempacotar_resultado_agente(
             executar_agente(
@@ -448,7 +449,7 @@ def _processar_agente(pergunta, config, projeto, task_id=None, conversation_cont
                 projeto=projeto,
                 retornar_detalhes=True,
                 task_id=task_id,
-                conversation_context=conversation_context,
+                conversation_context=conversation_context, source_job_id=source_job_id,
             )
         )
     except ErroLLM as erro:
@@ -456,15 +457,13 @@ def _processar_agente(pergunta, config, projeto, task_id=None, conversation_cont
     if status == "needs_user" and estado_pendente:
         estado_pendente = salvar_agent_pendente(estado_pendente, projeto=projeto, config=config_execucao)
         texto = estado_pendente["pergunta_ao_usuario"]
-    job_progress.publicar(
-        config_execucao, "finalizing", "Montando a resposta final",
-        partial_text=texto[-16000:] if isinstance(texto, str) else None,
-    )
+    if source_job_id is not None:
+        job_progress.publicar_job(source_job_id, "finalizing", "Montando a resposta final", partial_text=texto[-16000:] if isinstance(texto, str) else None)
     registrar_mensagem("assistant", texto, metadata=_metadata_resposta_agente(status, detalhes))
     return _resultado_agente(status, texto, detalhes)
 
 
-def _retomar_agente_pendente(pendente, config, resposta_usuario=None):
+def _retomar_agente_pendente(pendente, config, resposta_usuario=None, source_job_id=None, task_id=None):
     projeto = carregar_projeto()
     try:
         status, texto, nova_pendencia, detalhes = _desempacotar_resultado_agente(
@@ -474,8 +473,8 @@ def _retomar_agente_pendente(pendente, config, resposta_usuario=None):
                 projeto=projeto,
                 retomar=pendente,
                 retornar_detalhes=True,
-                task_id=(pendente.get("estado") or {}).get("task_id"),
-                resposta_usuario=resposta_usuario,
+                task_id=task_id or (pendente.get("estado") or {}).get("task_id"),
+                resposta_usuario=resposta_usuario, source_job_id=source_job_id,
             )
         )
     except ErroLLM as erro:
@@ -503,51 +502,48 @@ def processar(pergunta, registrar_pergunta=True, historico_snapshot=None,
     _JOB_ATUAL_ID.set(source_job_id)
     _MENSAGEM_ORIGEM_ATUAL_ID.set(source_message_id)
     config = dict(carregar_config() or {})
-    cfg_agent = config.get("agent", {})
-    deadline = max(1, int(cfg_agent.get("task_deadline_seconds", 900)))
-    agora = time.monotonic()
-    config["_runtime_agent_budget"] = {
-        "started_monotonic": agora,
-        "deadline_monotonic": agora + deadline,
-        "task_id": task_id,
-        "source_job_id": source_job_id,
-        "max_llm_calls": max(1, int(cfg_agent.get("max_llm_calls", 12))),
-        "max_generated_tokens": max(1, int(cfg_agent.get("max_completion_tokens", 9000))),
-        "max_completion_tokens": max(1, int(cfg_agent.get("max_completion_tokens", 9000))),
-        "max_prompt_tokens": max(1, int(cfg_agent.get("max_prompt_tokens", 96000))),
-        "max_total_tokens": max(1, int(cfg_agent.get("max_total_tokens", 105000))),
-        "llm_calls": 0, "llm_requests": 0,
-        "prompt_tokens_reserved": 0, "prompt_tokens_estimated_raw": 0,
-        "prompt_tokens_actual": 0, "prompt_tokens_cached": 0,
-        "prompt_tokens_uncached": 0, "prompt_tokens_effective": 0,
-        "generated_tokens": 0,
-        "reasoning_tokens_actual": 0, "provider_reported_tokens": 0,
-        "history_messages_omitted": 0,
-    }
     projeto = carregar_projeto()
     if registrar_pergunta:
         registrar_mensagem("user", pergunta)
 
     pendente = carregar_agent_pendente()
-    if pendente and pendente.get("continuation_kind") == "user_input":
-        return _retomar_agente_pendente(pendente, config, resposta_usuario=pergunta)
+    if pendente:
+        valida, motivo = _validar_pendencia(pendente, projeto)
+        if not valida:
+            limpar_agent_pendente()
+            pendente = None
+
     controle = _controle_pendencia(pergunta) if pendente else None
     if not pendente and _EXPLICIT_CONTROL.fullmatch(str(pergunta or "")):
         return _resultado_controle_pendencia("Não existe alteração aguardando confirmação.")
-    if controle:
+
+    if pendente and controle == "cancelar":
         selecionada, erro = _selecionar_pendencia(pergunta, pendente)
         if erro:
             return _resultado_controle_pendencia(erro)
-        valida, motivo = _validar_pendencia(selecionada, projeto)
-        if not valida:
-            limpar_agent_pendente()
-            return _resultado_controle_pendencia(f"A pendência foi descartada: {motivo}.")
-        if controle == "aplicar":
-            return _retomar_agente_pendente(selecionada, config, resposta_usuario=pergunta)
         return _cancelar_agente_pendente(selecionada)
+
+    if pendente and pendente.get("continuation_kind") == "user_input":
+        # Natural text, including a plain "sim", is the requested clarification.
+        # Only explicit cancel above is control authority for this continuation kind.
+        return _retomar_agente_pendente(
+            pendente, config, resposta_usuario=pergunta,
+            source_job_id=source_job_id, task_id=task_id,
+        )
+
+    if pendente and controle == "aplicar":
+        selecionada, erro = _selecionar_pendencia(pergunta, pendente)
+        if erro:
+            return _resultado_controle_pendencia(erro)
+        if selecionada.get("continuation_kind") != "write_confirmation":
+            return _resultado_controle_pendencia("Essa pendência não é uma confirmação de escrita.")
+        return _retomar_agente_pendente(
+            selecionada, config, resposta_usuario=pergunta,
+            source_job_id=source_job_id, task_id=task_id,
+        )
+
     if pendente:
-        # A new natural-language request supersedes the unapplied proposal.
-        # It reaches the same AgentSession instead of being classified by keywords.
+        # A new natural-language request supersedes an unapplied write proposal.
         limpar_agent_pendente()
 
     origem = carregar_conversa() if historico_snapshot is None else historico_snapshot
@@ -555,6 +551,6 @@ def processar(pergunta, registrar_pergunta=True, historico_snapshot=None,
     conversation_context = {"recent_messages": historico[-12:]}
     return _processar_agente(
         pergunta, config, projeto, task_id=task_id,
-        conversation_context=conversation_context,
+        conversation_context=conversation_context, source_job_id=source_job_id,
     )
 

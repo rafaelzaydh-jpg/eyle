@@ -33,8 +33,8 @@ def localizar_simbolo(caminho_projeto, caminho_relativo, simbolo):
     restantes o fim ainda e a linha anterior ao proximo simbolo do arquivo.
     Linhas em branco no limite sao removidas do recorte.
 
-    Devolve {"linha_inicio", "linha_fim", "codigo_original",
-    "total_linhas_arquivo"} ou None se o arquivo nao existe mais, o
+    Devolve {"line_start", "line_end", "codigo_original",
+    "total_lines"} ou None se o arquivo nao existe mais, o
     caminho tenta escapar da raiz do projeto (bug 3 do plano de correcao),
     ou o simbolo nao foi encontrado (pode ter sido renomeado/removido
     desde a ultima leitura) -- nunca inventa uma posicao.
@@ -60,8 +60,8 @@ def localizar_simbolo(caminho_projeto, caminho_relativo, simbolo):
         ]
         if len(encontrados) != 1:
             return None
-        linha_inicio = encontrados[0]["linha_inicio"]
-        linha_fim = encontrados[0]["linha_fim"]
+        linha_inicio = encontrados[0]["line_start"]
+        linha_fim = encontrados[0]["line_end"]
     else:
         simbolos = extract_symbols(linhas, ext)
         encontrados = [linha for nome, linha in simbolos if nome == simbolo]
@@ -80,10 +80,10 @@ def localizar_simbolo(caminho_projeto, caminho_relativo, simbolo):
 
     codigo_original = "\n".join(linhas[linha_inicio - 1:linha_fim])
     return {
-        "linha_inicio": linha_inicio,
-        "linha_fim": linha_fim,
+        "line_start": linha_inicio,
+        "line_end": linha_fim,
         "codigo_original": codigo_original,
-        "total_linhas_arquivo": len(linhas),
+        "total_lines": len(linhas),
     }
 
 
@@ -115,7 +115,7 @@ def localizar_simbolo_no_projeto(caminho_projeto, simbolo, extensoes=None, limit
             localizado = localizar_simbolo(raiz, relativo, simbolo)
             if localizado is None:
                 continue
-            resultados.append({"arquivo": relativo, "simbolo": simbolo, **localizado})
+            resultados.append({"file": relativo, "simbolo": simbolo, **localizado})
             if len(resultados) >= max(1, int(limite)):
                 return resultados
     return resultados

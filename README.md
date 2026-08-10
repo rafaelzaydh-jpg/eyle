@@ -4,95 +4,192 @@
 
 # Eyle
 
-**Version:** 2.7.4 · **Schema:** 5.4 · **Revision:** rev5.2.9-progress-earned-authority
+**Version:** 2.7.4 · **Schema:** 5.6 · **Revision:** rev5.6-grounded-outcomes-docker-backend
 
-## Rev5.2.9 — Progress-Earned Authority
+## Rev5.6 — Grounded Outcomes & Docker Backend
 
-Rev5.2.9 keeps the Rev5.2.8 architecture and removes an artificial authority ceiling rather than adding a new subsystem. The base fuse remains 12 physical tools, but every runtime-validated committed-progress epoch can unlock +4 tools exactly once when the physical gate needs them; there is no cumulative +8 ceiling. A durable global credit-once Evidence set prevents old Evidence from being remapped or reopened to mint authority again. `investigation_updates.evidence_ids` is now truly additive, so the Main Agent sends only newly material Evidence IDs and runtime retains prior committed Evidence automatically. Claim rework also receives deterministic remaining-capacity feedback so scarce LLM calls can be used for investigation first and finalization last. Normal 8-turn and 12-LLM-call limits are unchanged.
+Rev5.6 keeps the canonical task-input and property-directed architecture of Rev5.5.5, then fixes the verification/execution boundary exposed by the next benchmarks: Claim grounding is no longer synonymous with EvidenceLedger IDs, non-retryable physical failures become terminal capability facts for the current job, `symbol_relations` understands common registration/binding structures and can project only the requested edge direction, and `run_command` uses a persistent Docker sandbox by default when Docker is available.
 
-## Rev5.2.8 — Canonical Runtime Cleanup
+> **The Main LLM decides what must be done. Runtime decides what may physically happen. Claim independently challenges the result.**
 
-Rev5.2.8 adds no agent, tool, ledger or budget. It tightens the existing Runtime contracts after the legacy-audit benchmark exposed a false `ADMINISTRATIVE_LOOP`: Decision Ledger identity now includes objective observed state and physical authority, while runtime progress ignores free-form Investigation `reason/status` churn. Invalid tool batches fail atomically before tool authority, and the public tool ABI uses one canonical vocabulary (`path`, `line_start`, `line_end`, `symbol`, `limit`, `depth`, `filter`) with no legacy aliases. Open Investigation targets are explicitly allowed to accumulate Evidence incrementally when the Main Agent judges it material. The retired lexical workspace/write classifiers and the old semantic-read signature compatibility wrapper are deleted. Physical limits are unchanged.
-
-## Rev5.2.7 — Two-Brain Claim Follow-up & Loop Control
-
-Rev5.2.7 removed the `claim_repair` semantic profile and routes `contradicted`, `insufficient` and semantic gaps back to the Main Agent through deterministic Runtime reopen/pin/feedback. Only `agent` produces task semantics and only `claim_verifier` independently judges them.
-
-## Rev5.2.5 — Transactional Contract Authority
-
-Rev5.2.5 keeps the 12-tool base fuse but moves progressive authority out of Claim Review and into the runtime contract administrator. The Main LLM now sends only `investigation_updates`; the runtime owns the canonical Investigation Contract, commits structurally valid target updates independently, preserves accepted siblings when another update fails, and deposits objective `committed_progress` when real Evidence is attached or a target is validly established. That deposit becomes dormant authority: only when the physical tool gate would block an atomic batch, open debt still exists, and new committed progress has appeared since the previous extension can runtime grant +4 tool calls, capped at +8 in this release. Claim Review remains only the second-brain semantic verifier of the provisional final. The history panel keeps **expand all / collapse all** and now exposes committed progress and earned extensions.
-
-Eyle is a local-first coding agent built around one `AgentSession`, deterministic tools, runtime-owned Evidence, supervised transactional writes, and one semantic Claim Review before grounded answers are accepted.
-
-> **The LLM decides semantics. The runtime validates contracts.**
-
-## Why Eyle exists
-
-Eyle lets a connected LLM investigate a real workspace without turning the runtime into a second hidden agent. The LLM decides what must be established, how to investigate, what Evidence supports its conclusions, and what to say. The runtime owns structure, state, tool execution, hashes, freshness, safety, budgets, confirmation and deterministic validation.
-
-The core is provider-agnostic. Qwen, Llama and other compatible models use the same Eyle protocol; only `llm/` adapts to the structured-output behavior actually delivered by the connection.
-
-## Architecture
+### Semantic authority
 
 ```text
-interface
-→ runtime/service
-→ AgentSession
-   ├─ current request + conversation background
-   ├─ Investigation Contract (what remains to establish)
-   ├─ investigation_map (where the agent has already navigated)
-   └─ Evidence + runtime state
-→ administrative structured handshake
-→ main LLM ↔ transactional Investigation updates
-→ runtime contract admin ↔ 16 deterministic tools + live workspace
-→ deterministic Final Gate
-→ Claim Review (single semantic 2FA)
-   ├─ supported → response
-   ├─ contradicted → Runtime reopens mapped debt → Main Agent
-   └─ insufficient / semantic gap → same directed follow-up route
+USER
+ ↓
+Main LLM
+ ├─ chooses tools
+ ├─ decides whether semantic debt exists
+ └─ creates Investigation only when needed
+        ↓
+      Tools → Observation → Evidence
+        ↓
+      Main LLM → Final
+        ↓
+      Claim Review
+        ├─ accepted → user
+        └─ semantic debt → Main LLM
 ```
 
-The administrative handshake is not an agent tool. It behaviorally verifies `json_schema`, then `json_object`, then prompt-driven JSON, and Eyle always validates structured output locally.
+`Investigation=[]` is valid and means only that the Main LLM has declared no persistent semantic debt. Workspace access does not imply Investigation.
+
+If the Main LLM declares a target, Runtime preserves that commitment mechanically: the target cannot disappear or silently change goal, `established` requires real Evidence, and an open target blocks Final acceptance. Runtime never invents a target.
+
+Claim has one global semantic review path. It may report a missing material debt with `target_id=null`; only the Main LLM may decide to create a new Investigation target.
+
+
+### Grounded outcomes
+
+Claim verifies the provisional answer against typed grounding coordinates instead of forcing every conclusion through EvidenceLedger:
+
+```text
+request                     → canonical user task
+answer:<anchor>             → bounded answer anchor
+evidence:<id>               → citable source/tool Evidence
+runtime:<fact>              → objective execution/runtime fact
+investigation:<target>      → declared semantic debt
+```
+
+A material omission may be grounded by the request and answer; an external code fact normally needs source Evidence; a physical impossibility such as an unavailable sandbox may be grounded by Runtime Facts. `blocked` is a truthful material outcome when physical reality prevents execution. Runtime validates that cited coordinates exist; it does not decide which coordinates are semantically sufficient.
+
+Non-retryable tool failures are recorded in `ExecutionContext.terminal_capabilities`. The capability disappears from the callable view for the rest of that job, preventing repeated attempts at a physical condition that cannot change during the execution.
+
+### Progressive capabilities and general tools
+
+The first Agent call no longer receives all expanded tool contracts. It receives `capability_index`: compact signatures plus purpose for unused tools. A tool can be called immediately from that index; no selector/router call exists. After the Main LLM actually requests a tool, later calls move it to `active_tools` with the expanded contract. Activation is derived from the DecisionLedger, not persisted as another state machine.
+
+### Training budget
+
+One user message/job has a hard physical envelope:
+
+```text
+Llama Server context per request  <= 32768
+prompt attempts per message/job   <= 90000
+generated output per message/job  <= 8000
+physical total per message/job     <= 98000
+```
+
+Every backend attempt charges its full estimated prompt even when cached. Cache weighting remains diagnostic only. Turns/tools/calls/deadline remain independent fuses. Budget exhaustion fails the task; no progress-earned extension exists.
+
+In default `self_check`, a Final with no Observation, Evidence, Investigation or WriteTransaction skips Claim because there is no grounded runtime state to audit. Explicit `verified` mode still verifies every Final. This is state-based, not a chat/simple-task classifier.
+
+
+### Canonical state ownership
+
+Rev5.6 applies the ObservationLedger rule across the runtime: **one factual responsibility, one canonical owner; histories, counters and prompt/UI views are derived.**
+
+```text
+ObservationLedger  → physical tool reality / replay / coverage
+EvidenceLedger     → citable factual Evidence lifecycle
+DecisionLedger     → decisions + deterministic rejection identity
+LLMCallLedger      → logical LLM calls + provider attempts
+WriteTransaction   → mutation lifecycle / validation / rollback
+Investigation      → semantic debt declared by Main LLM
+ClaimReview        → independent semantic audit
+```
+
+`ExecutionContext` owns run-scoped physical budgets/deadline and LLMCallLedger. Configuration is not mutated into execution state. There are no parallel `prompt_snapshots`/`llm_responses`, `decision_history` state, Session `tool_history`, or duplicated pending patch payloads.
+
+### What Rev5.6 removed
+
+- `workspace_scope`; physical reads/writes are observable from tools and patches;
+- `final.evidence_ids` / `answer_evidence_ids`; Investigation owns target Evidence and Claim sees runtime Evidence;
+- lexical `request_policy` and the parallel Claim `findings[]` subsystem;
+- generic `AGENT_NO_PROGRESS`; only deterministic repeated rejected/replay decisions are fused;
+- parallel `relevant_sources` / `visible_source_ranges`; ObservationLedger owns observation identity and coverage;
+- persisted Claim follow-up copies; follow-up is derived from the canonical Claim Review;
+- duplicate post-write tool reread; deterministic full-output verification remains;
+- public `read_range`; `read_file` accepts optional `line_start` / `line_end`;
+- Agent-side tool-class sets; the executable `TOOLS` registry owns availability and Evidence production;
+- `INVESTIGATION_REQUIRED` and workspace→Investigation coupling;
+- semantic task router / lexical fast paths;
+- task classes such as simple/complex/utility/analysis;
+- semantic phase scheduler (`analysis_*`, `write_*` steering);
+- Progress Earned Authority and “+4 tools” extensions;
+- specialized Claim/Gaps/Findings recovery lanes;
+- obsolete Investigation snapshot helpers and dead session state;
+- Final-as-string and other superseded runtime interfaces;
+- session, queue and project-memory migration bridges;
+- legacy tool argument aliases and mixed internal record aliases;
+- index-based prompt/response correlation fallback;
+- structured-output capability negotiation/cache, `json_object`/prompt downgrade and structural repair calls;
+- automatic `finish_reason=length` re-call and Agent-specific transport retry policy;
+- Claim/Gaps recovery identity fields (`claim.id`, `claim.kind`, `semantic_gap.id`, signatures);
+- revision-specific tests that existed only to keep deleted APIs alive.
+
+### No backward compatibility
+
+Rev5.6 has one canonical runtime contract. Previous Eyle session, queue, project-memory and configuration schemas are not resumed or migrated. Incompatible persisted state fails explicitly.
+
+Current schemas:
+
+```text
+config/session/queue/project-memory → 5.6
+```
+
+Current transport portability is explicit, not a compatibility layer: structured Agent/Claim calls require strict JSON Schema. OpenAI-compatible and Ollama transports are supported only when they honor that canonical structured mechanism. The Python search fallback when `rg` is unavailable remains current operational portability.
+
+## Runtime responsibilities
+
+Runtime remains deliberately non-semantic. It owns:
+
+- deterministic tool validation/execution;
+- Evidence identity, hashes and freshness;
+- Observation Ledger and physical replay protection;
+- workspace epoch;
+- path/security boundaries;
+- write dry-run, confirmation, transaction, verification and rollback;
+- persistent queue/memory schemas;
+- token/tool/turn/deadline **physical fuses**;
+- sanitized execution trace and telemetry.
+
+Physical limits never decide whether a semantic investigation is complete.
+
+## Main LLM responsibilities
+
+The Main LLM owns:
+
+- understanding the request;
+- deciding what observable fact would settle a material property;
+- choosing tools;
+- deciding whether persistent semantic debt exists;
+- creating/updating Investigation targets;
+- deciding Evidence relevance/sufficiency;
+- deciding when to stop investigating;
+- proposing writes;
+- producing the user-facing Final.
 
 ## Investigation Contract
 
-Rev5.2 replaces the old free-form `plan` with a persistent semantic ledger. In Rev5.2.5 the runtime owns the canonical ledger and the Main LLM sends only target deltas through `investigation_updates`. Unmentioned targets stay committed exactly as they were; accepted Evidence cannot silently disappear. The Main LLM still decides all target semantics and declares only materially necessary targets:
+Canonical target shape:
 
 ```json
 {
-  "id": "T3",
-  "goal": "Establish AgentSession's role in the real execution path",
+  "id": "T1",
+  "goal": "Establish whether the module participates in active runtime flow",
   "status": "open",
   "evidence_ids": [],
   "reason": ""
 }
 ```
 
-Targets may be `open`, `established`, or `dismissed`. Existing target IDs cannot silently disappear and their goals cannot silently change. `established` requires real runtime Evidence and a reason; `dismissed` requires a reason. Updates are committed independently, so one invalid sibling does not erase accepted work. The runtime validates only those mechanical invariants—it never decides whether the Evidence actually proves the goal.
+Statuses: `open`, `established`, `dismissed`.
 
-A grounded final cannot be accepted while a declared target is still `open`. Claim Review receives the same contract and can challenge an `established`/`dismissed` target with `target_id`, causing the runtime to reopen exactly that target. A material scope missing from the contract is reported with `target_id=null`; the Main LLM decides how to incorporate it.
-
-`investigation` and `investigation_map` are deliberately separate: the first is **purpose**, the second is **navigation history**.
+`reason` is the Main LLM's semantic argument, never factual authority. Evidence remains the factual substrate.
 
 ## Tools
 
-The Main Agent still sees exactly 16 public tools:
+Eyle exposes 17 deterministic public tools:
 
-`calculate`, `agent_info`, `project_stats`, `count_tokens`, `inspect_project`, `list_tree`, `search_code`, `find_symbol`, `read_range`, `read_file`, `memory_search`, `memory_store`, `run_tests`, `execution_trace`, `git_status`, and `git_diff`.
+`calculate`, `agent_info`, `project_stats`, `count_tokens`, `inspect_project`, `list_tree`, `search_code`, `symbol_relations`, `find_symbol`, `read_file`, `run_command`, `memory_search`, `memory_store`, `run_tests`, `execution_trace`, `git_status`, `git_diff`.
 
-Rev5.2 does **not** add Planner/ResearchManager agents, callers/callees/reference tools, semantic file ranking, or a new read-range coverage system. The current benchmark showed a direction problem, not a discovery-tool problem.
+Writes are not public tools. The Main LLM emits one canonical `patches` transaction and Runtime owns dry-run/confirmation/apply/verification/rollback.
 
-Writing remains one model-facing protocol: `action=patches`. Runtime performs the transaction dry-run, confirmation, apply, compile/tests/reread and rollback path.
+## Docker-first sandbox backend
 
-## Evidence and Claim Review
+`run_command` is free to create/delete files, install packages, download dependencies, compile and execute arbitrary commands inside its disposable job sandbox. `backend=auto` prefers Docker and falls back to Bubblewrap. Docker uses one persistent container per job (default image `python:3.12-slim`, pulled on demand when missing), so package/toolchain installation and root-filesystem changes survive later `run_command` calls in the same job.
 
-Full Evidence remains runtime-owned. The model receives bounded views. Evidence associated with Investigation targets is pinned only as compact metadata (`ID`, file, lines, hashes), so an early target does not lose its source pointer after many later observations.
-
-Claim Review is the only independent semantic verifier. It checks material Claims and target coverage after a provisional final. It does **not** grant tool authority, define `committed_progress`, rewrite the answer, or choose tools. Local Claim, Semantic Gap and Finding protocol recovery only repairs the verifier's own malformed structured output; semantic debt from `contradicted`, `insufficient` or gaps is returned to the Main Agent through runtime-owned follow-up state.
-
-## Context boundaries
-
-`request` is the only active task. `conversation_background` is stable, bounded and non-authoritative across every turn of the current job. `investigation_map` preserves observable current-task discoveries across semantic follow-up. Blocked duplicate/covered reads are not counted as executed identical tools.
+The real workspace is never mounted read-write. Runtime first creates a sanitized snapshot, mounts only that copy as `/workspace`, omits protected secrets, and destroys the container/snapshot at job end. If no strong backend is available, `run_command` returns a non-retryable `SANDBOX_UNAVAILABLE` Runtime Fact instead of falling back to a trusted local process.
 
 ## Run
 
@@ -103,42 +200,32 @@ python main.py perguntar "Analyze the project"
 python main.py serve
 ```
 
-For development:
+Development:
 
 ```bash
 python -m pip install -r requirements-dev.lock
 python -m pytest -q
 ```
 
-## Configuration
-
-Edit `config.json` for the LLM endpoint, model and runtime limits. Structured-output capability is behaviorally probed and cached machine-locally in `context/llm_capabilities.json`, which is ignored by Git.
-
-See [Configuration](docs/configuration.md).
-
-## Validation
-
-Rev5.2.9 should be published only after the extracted artifact passes:
+Release verification:
 
 ```bash
 python -m eyle.devtools.release_identity
-python -m compileall -q .
+python -m compileall -q eyle llm main.py
 python -m pytest -q
 node --check web/static/app.js
 ```
-
-See [Benchmarking](docs/benchmark.md) for the real AgentSession acceptance scenario.
-
-## License
-
-Eyle is **source-available, not open-source software**. Personal, private, non-commercial use is permitted under [LICENSE.md](LICENSE.md). Redistribution, publication of modified copies, commercial use, sublicensing, sale, or offering Eyle as a service require prior written permission.
 
 ## Documentation
 
 - [Architecture](docs/architecture.md)
 - [Technical overview](docs/technical-overview.md)
 - [Configuration](docs/configuration.md)
-- [Benchmarking](docs/benchmark.md)
-- [Publishing to Git](docs/github-publishing.md)
-- [Changelog](CHANGELOG.md)
+- [Benchmark](docs/benchmark.md)
+- [Publishing](docs/github-publishing.md)
+- [Historical changelog](CHANGELOG.md)
 - [Português](README.pt-BR.md)
+
+## License
+
+Eyle is **source-available, not open-source software**. See [LICENSE.md](LICENSE.md).
