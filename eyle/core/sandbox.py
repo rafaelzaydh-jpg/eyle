@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""Execucao de comandos de projeto com isolamento e limites.
+"""Project command execution with explicit isolation contracts.
 
-Atualizacao 28. O modulo nao oferece um fallback silencioso para um processo
-comum quando a politica exige rede bloqueada: sem Docker ou Bubblewrap, a execucao falha fechada.
-
-O projeto continua gravavel porque suites de teste costumam criar caches e
-artefatos. Bubblewrap/Docker oferecem isolamento forte. Em Windows, um modo
-``trusted_local`` explicitamente autorizado pode executar somente comandos da
-allowlist, sem shell, em snapshot temporario, com timeout e ambiente filtrado.
-Esse modo nao promete isolamento de rede nem limites de kernel.
+``run_command`` accepts only strong disposable backends (Docker or Bubblewrap).
+The supervised ``run_tests`` path has its own narrower allowlisted policy and may
+use an explicitly configured local process backend when its network/resource
+contract permits it. Neither path silently upgrades local execution into strong
+isolation, and real-workspace writes remain outside this module's authority.
 """
 import os
 import shlex

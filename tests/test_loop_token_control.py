@@ -40,6 +40,9 @@ def test_fixed_agent_prompt_is_compact():
     assert "Investigation is YOUR semantic working memory" in llm_mod.PROMPT_AGENTE
     assert "never a Runtime requirement" in llm_mod.PROMPT_AGENTE
     assert "1-based sentence" not in llm_mod.PROMPT_AGENTE
+    assert "either polarity is a valid result" in llm_mod.PROMPT_AGENTE
+    assert "same target/candidate before exploring another" in llm_mod.PROMPT_AGENTE
+    assert "otherwise leave include_text_references false" in llm_mod.PROMPT_AGENTE
 
 
 def test_common_multifile_write_reaches_transaction_in_three_calls(monkeypatch, tmp_path):
@@ -95,7 +98,7 @@ def test_semantic_read_coverage_blocks_overlapping_range(monkeypatch, tmp_path):
             and item.get("source_observation_tool") == "read_file"
             for item in payload["latest_tool_results"]
         )
-        return {"final": {"answer": "app.py define x como 1.", "limitations": []}, "investigation_updates": [investigation_target(goal="Establish what app.py defines", status="established", evidence_ids=["ev-0001"], reason="app.py was read")]}
+        return {"final": {"answer": "app.py define x como 1.", "limitations": [], "evidence_ids": ["ev-0001"]}, "investigation_updates": [investigation_target(goal="Establish what app.py defines", status="established", evidence_ids=["ev-0001"], reason="app.py was read")]}
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
     status, _, _, details = core_agent.executar_agente(

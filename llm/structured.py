@@ -8,6 +8,7 @@ markdown fences, or translates alternate protocol shapes.
 from __future__ import annotations
 
 import json
+import re
 from copy import deepcopy
 from typing import Any, Dict, Iterable
 
@@ -37,7 +38,7 @@ _PATCH_SCHEMA = {
 _INVESTIGATION_TARGET_SCHEMA = {
     "type": "object",
     "properties": {
-        "id": {"type": "string", "minLength": 1, "maxLength": 80},
+        "id": {"type": "string", "minLength": 1, "maxLength": 80, "pattern": r"^[A-Za-z0-9._-]+$"},
         "goal": {"type": "string", "minLength": 1, "maxLength": 500},
         "status": {"type": "string", "enum": ["open", "established", "dismissed"]},
         "evidence_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
@@ -90,8 +91,9 @@ _AGENT_SCHEMA = {
                     "properties": {
                         "answer": {"type": "string", "minLength": 1},
                         "limitations": {"type": "array", "items": {"type": "string"}},
+                        "evidence_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
                     },
-                    "required": ["answer", "limitations"],
+                    "required": ["answer", "limitations", "evidence_ids"],
                     "additionalProperties": False,
                 },
             ]
@@ -102,9 +104,10 @@ _AGENT_SCHEMA = {
     "additionalProperties": False,
 }
 
+_GROUNDING_REF_PATTERN = r"^(?:request|(?:answer|evidence|runtime|investigation):[A-Za-z0-9._-]+)$"
 _GROUNDING_REFS_SCHEMA = {
     "type": "array", "minItems": 1,
-    "items": {"type": "string", "minLength": 1, "maxLength": 160},
+    "items": {"type": "string", "minLength": 1, "maxLength": 160, "pattern": _GROUNDING_REF_PATTERN},
 }
 
 _CLAIM_REVIEW_SCHEMA = {
@@ -135,8 +138,8 @@ _CLAIM_REVIEW_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "answer_ref": {"type": "string", "minLength": 1, "maxLength": 80},
-                    "target_id": {"anyOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 80}]},
+                    "answer_ref": {"type": "string", "minLength": 1, "maxLength": 80, "pattern": r"^answer:a[1-9][0-9]*$"},
+                    "target_id": {"anyOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 100, "pattern": r"^investigation:[A-Za-z0-9._-]+$"}]},
                     "statement": {"type": "string", "minLength": 1, "maxLength": 500},
                     "grounding_refs": _GROUNDING_REFS_SCHEMA,
                     "verdict": {"type": "string", "enum": ["supported", "contradicted", "insufficient"]},
@@ -152,7 +155,7 @@ _CLAIM_REVIEW_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "type": {"type": "string", "enum": ["material_omission", "conflicting_evidence", "scope_gap"]},
-                    "target_id": {"anyOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 80}]},
+                    "target_id": {"anyOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 100, "pattern": r"^investigation:[A-Za-z0-9._-]+$"}]},
                     "grounding_refs": _GROUNDING_REFS_SCHEMA,
                     "required_property": {"type": "string", "minLength": 1, "maxLength": 300},
                     "reason": {"type": "string", "minLength": 1, "maxLength": 240},
@@ -383,15 +386,39 @@ def parse_agent_response(raw: Any) -> Dict[str, Any]:
         }
     if active != "final" or final is None:
         raise StructuredResponseError("AGENT_FINAL_INVALID", "final must be the only non-null result payload")
-    final_keys = {"answer", "limitations"}
+    final_keys = {"answer", "limitations", "evidence_ids"}
     final = _exact_item(
         final, final_keys, code="AGENT_FINAL_SHAPE_INVALID",
-        detail="final must contain exactly answer and limitations",
+        detail="final must contain exactly answer, limitations and evidence_ids",
     )
     _string(final["answer"], code="AGENT_FINAL_ANSWER_INVALID", detail="final.answer must be a non-empty string")
     if not isinstance(final["limitations"], list) or any(not isinstance(item, str) for item in final["limitations"]):
         raise StructuredResponseError("AGENT_FINAL_LIMITATIONS_INVALID", "final.limitations must be an array of strings")
+    _string_list(final["evidence_ids"], code="AGENT_FINAL_EVIDENCE_INVALID", detail="final.evidence_ids must be an array of non-empty Evidence IDs")
     return {"final": dict(final), "investigation_updates": value["investigation_updates"]}
+
+
+def _claim_grounding_refs(value: Any, *, detail: str) -> None:
+    _string_list(value, code="CLAIM_REVIEW_GROUNDING_REFS_INVALID", detail=detail)
+    if not value:
+        raise StructuredResponseError("CLAIM_REVIEW_GROUNDING_REFS_REQUIRED", detail)
+    invalid = next((item for item in value if re.fullmatch(_GROUNDING_REF_PATTERN, item) is None), None)
+    if invalid is not None:
+        raise StructuredResponseError("CLAIM_REVIEW_GROUNDING_REF_FORMAT_INVALID", f"noncanonical grounding ref: {invalid}")
+
+
+def _canonical_answer_ref(value: Any, *, detail: str) -> None:
+    _string(value, code="CLAIM_REVIEW_ANSWER_REF_INVALID", detail=detail)
+    if re.fullmatch(r"answer:a[1-9][0-9]*", value) is None:
+        raise StructuredResponseError("CLAIM_REVIEW_ANSWER_REF_INVALID", detail)
+
+
+def _canonical_target_ref(value: Any, *, detail: str, code: str) -> None:
+    if value is None:
+        return
+    _string(value, code=code, detail=detail)
+    if re.fullmatch(r"investigation:[A-Za-z0-9._-]+", value) is None:
+        raise StructuredResponseError(code, detail)
 
 
 def parse_claim_review_response(raw: Any) -> Dict[str, Any]:
@@ -406,9 +433,7 @@ def parse_claim_review_response(raw: Any) -> Dict[str, Any]:
     )
     if satisfaction["status"] not in {"satisfied", "gap", "blocked"}:
         raise StructuredResponseError("CLAIM_REVIEW_MATERIAL_SATISFACTION_STATUS_INVALID", "material_satisfaction.status is invalid")
-    _string_list(satisfaction["grounding_refs"], code="CLAIM_REVIEW_GROUNDING_REFS_INVALID", detail="material_satisfaction.grounding_refs must be a non-empty array")
-    if not satisfaction["grounding_refs"]:
-        raise StructuredResponseError("CLAIM_REVIEW_GROUNDING_REFS_REQUIRED", "material_satisfaction.grounding_refs must not be empty")
+    _claim_grounding_refs(satisfaction["grounding_refs"], detail="material_satisfaction.grounding_refs must be a non-empty canonical-ref array")
     _string(satisfaction["reason"], code="CLAIM_REVIEW_MATERIAL_SATISFACTION_REASON_INVALID", detail="material_satisfaction.reason must be non-empty")
 
     consistency = _exact_item(
@@ -418,9 +443,7 @@ def parse_claim_review_response(raw: Any) -> Dict[str, Any]:
     )
     if consistency["status"] not in {"consistent", "conflict"}:
         raise StructuredResponseError("CLAIM_REVIEW_ANSWER_CONSISTENCY_STATUS_INVALID", "answer_consistency.status is invalid")
-    _string_list(consistency["grounding_refs"], code="CLAIM_REVIEW_GROUNDING_REFS_INVALID", detail="answer_consistency.grounding_refs must be a non-empty array")
-    if not consistency["grounding_refs"]:
-        raise StructuredResponseError("CLAIM_REVIEW_GROUNDING_REFS_REQUIRED", "answer_consistency.grounding_refs must not be empty")
+    _claim_grounding_refs(consistency["grounding_refs"], detail="answer_consistency.grounding_refs must be a non-empty canonical-ref array")
     _string(consistency["reason"], code="CLAIM_REVIEW_ANSWER_CONSISTENCY_REASON_INVALID", detail="answer_consistency.reason must be non-empty")
 
     for key in ("claims", "semantic_gaps"):
@@ -430,13 +453,10 @@ def parse_claim_review_response(raw: Any) -> Dict[str, Any]:
     claim_keys = {"answer_ref", "target_id", "statement", "grounding_refs", "verdict", "reason"}
     for index, item in enumerate(value["claims"], start=1):
         item = _exact_item(item, claim_keys, code="CLAIM_REVIEW_CLAIM_SHAPE_INVALID", detail=f"claims[{index}] must contain exactly the canonical Claim fields")
-        _string(item["answer_ref"], code="CLAIM_REVIEW_ANSWER_REF_INVALID", detail=f"claims[{index}].answer_ref must be non-empty")
-        if item["target_id"] is not None:
-            _string(item["target_id"], code="CLAIM_REVIEW_TARGET_INVALID", detail=f"claims[{index}].target_id must be null or non-empty")
+        _canonical_answer_ref(item["answer_ref"], detail=f"claims[{index}].answer_ref must be a supplied answer:* ref")
+        _canonical_target_ref(item["target_id"], detail=f"claims[{index}].target_id must be null or a supplied investigation:* ref", code="CLAIM_REVIEW_TARGET_INVALID")
         _string(item["statement"], code="CLAIM_REVIEW_STATEMENT_INVALID", detail=f"claims[{index}].statement must be non-empty")
-        _string_list(item["grounding_refs"], code="CLAIM_REVIEW_GROUNDING_REFS_INVALID", detail=f"claims[{index}].grounding_refs must be a non-empty array")
-        if not item["grounding_refs"]:
-            raise StructuredResponseError("CLAIM_REVIEW_GROUNDING_REFS_REQUIRED", f"claims[{index}].grounding_refs must not be empty")
+        _claim_grounding_refs(item["grounding_refs"], detail=f"claims[{index}].grounding_refs must be a non-empty canonical-ref array")
         if item["verdict"] not in {"supported", "contradicted", "insufficient"}:
             raise StructuredResponseError("CLAIM_REVIEW_VERDICT_INVALID", f"claims[{index}].verdict is invalid")
         _string(item["reason"], code="CLAIM_REVIEW_REASON_INVALID", detail=f"claims[{index}].reason must be a string", nonempty=False)
@@ -446,11 +466,8 @@ def parse_claim_review_response(raw: Any) -> Dict[str, Any]:
         item = _exact_item(item, gap_keys, code="CLAIM_REVIEW_SEMANTIC_GAP_SHAPE_INVALID", detail=f"semantic_gaps[{index}] must contain exactly type, target_id, grounding_refs, required_property and reason")
         if item["type"] not in {"material_omission", "conflicting_evidence", "scope_gap"}:
             raise StructuredResponseError("CLAIM_REVIEW_SEMANTIC_GAP_TYPE_INVALID", f"semantic_gaps[{index}].type is invalid")
-        if item["target_id"] is not None:
-            _string(item["target_id"], code="CLAIM_REVIEW_SEMANTIC_GAP_TARGET_INVALID", detail=f"semantic_gaps[{index}].target_id must be null or non-empty")
-        _string_list(item["grounding_refs"], code="CLAIM_REVIEW_GROUNDING_REFS_INVALID", detail=f"semantic_gaps[{index}].grounding_refs must be a non-empty array")
-        if not item["grounding_refs"]:
-            raise StructuredResponseError("CLAIM_REVIEW_GROUNDING_REFS_REQUIRED", f"semantic_gaps[{index}].grounding_refs must not be empty")
+        _canonical_target_ref(item["target_id"], detail=f"semantic_gaps[{index}].target_id must be null or a supplied investigation:* ref", code="CLAIM_REVIEW_SEMANTIC_GAP_TARGET_INVALID")
+        _claim_grounding_refs(item["grounding_refs"], detail=f"semantic_gaps[{index}].grounding_refs must be a non-empty canonical-ref array")
         _string(item["required_property"], code="CLAIM_REVIEW_REQUIRED_PROPERTY_INVALID", detail=f"semantic_gaps[{index}].required_property must be non-empty")
         _string(item["reason"], code="CLAIM_REVIEW_SEMANTIC_GAP_REASON_INVALID", detail=f"semantic_gaps[{index}].reason must be non-empty")
     return value

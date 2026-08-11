@@ -12,7 +12,7 @@ from tests.canonical import base_config
 
 def test_session_persists_only_canonical_state_owners():
     state = AgentSession("x").to_dict()
-    assert state["session_schema_version"] == SESSION_SCHEMA_VERSION == "5.6"
+    assert state["session_schema_version"] == SESSION_SCHEMA_VERSION == "5.7.1"
     assert set(state) == {
         "session_schema_version", "request", "task_id", "turn", "workspace_epoch",
         "observation_ledger", "decision_ledger", "evidence_ledger", "investigation",

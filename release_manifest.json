@@ -1,31 +1,37 @@
 {
   "release": "2.7.4",
   "app_version": "2.7.4",
-  "config_schema_version": "5.6",
-  "revision": "rev5.6-grounded-outcomes-docker-backend",
+  "config_schema_version": "5.7.1",
+  "revision": "rev5.7.1-directed-observation-context-projection",
   "released_at": "2026-08-10",
-  "title": "Rev5.6 Grounded Outcomes & Docker Backend",
+  "title": "Rev5.7.1 Directed Observation & Context Projection",
   "compatibility": {
     "backward_compatible": false,
-    "session_schema": "5.6",
-    "queue_schema": "5.6",
-    "project_memory_schema": "5.6",
+    "session_schema": "5.7.1",
+    "queue_schema": "5.7.1",
+    "project_memory_schema": "5.7.1",
     "policy": "One current contract only. Previous Eyle sessions, queue databases, project memory and configuration are rejected rather than migrated or adapted."
   },
   "architecture": {
-    "main_llm": "Owns task semantics and property-directed investigation: identifies the material property, chooses tools/grounding, manages Investigation debt and decides when enough has been established without substituting easier proxies.",
-    "runtime": "Owns physical authority, deterministic tool execution, structural relation facts, sandbox lifecycle, Observation/Evidence/Decision ledgers, transactions, persistence, resource fuses and terminal capability facts. It never decides semantic sufficiency.",
+    "main_llm": "Owns task semantics, Investigation and stopping. It chooses capabilities and decides whether an objective frontier is material; Runtime never turns frontier presence into semantic debt.",
+    "runtime": "Owns physical authority, deterministic tool execution, canonical ObservationResult projection, opaque snapshot-handle storage, ledgers, transactions, persistence and resource fuses. It validates and records objective coverage/frontiers without interpreting their relevance.",
     "claim": "One independent semantic review path grounded by typed coordinates across request, answer anchors, source Evidence, Runtime Facts and Investigation. Runtime validates coordinate existence; Claim decides what those coordinates establish.",
     "grounded_outcomes": "material_satisfaction is satisfied|gap|blocked. Physical blockage is a valid truthful outcome when supported by Runtime Facts; semantic gaps state required_property without prescribing tools.",
     "investigation": "Optional persistent semantic debt declared only by the Main LLM. Runtime mechanically preserves identity, goals, Evidence binding and legal transitions.",
     "observation_map": "Derived from ObservationLedger; Runtime Facts for Claim are bounded projections of objective current-job observations, not a second factual ledger.",
-    "tool_registry": "TOOLS is the sole executable registry. Progressive capability_index/active_tools views remain canonical; symbol_relations provides structural facts and run_command provides unrestricted isolated execution without a selector/router.",
+    "tool_registry": "TOOLS is the sole executable registry. Every capability exposes compact/full contracts plus a domain-neutral effect class (observe|execute|mutate). Progressive capability_index/active_tools remains selector-free.",
     "terminal_capabilities": "ExecutionContext records non-retryable tool failures for the current physical job and excludes those capabilities from later callable projections; this is physical reality, not semantic routing.",
     "structured_transport": "Agent and Claim require strict JSON Schema. Claim grounding arrays are non-empty in the canonical schema/parser contract; no downgrade, repair call or truncation retry exists.",
     "state_ownership": "ObservationLedger owns tool reality/replay/coverage; EvidenceLedger owns citable source Evidence; DecisionLedger owns decisions/rejection identity; LLMCallLedger owns logical/provider calls; WriteTransaction owns real mutations; ExecutionContext owns job resources/terminal capabilities/sandbox lifecycle.",
     "sandbox": "backend=auto prefers Docker and falls back to Bubblewrap. Docker uses one persistent disposable container per job with a writable sanitized project snapshot, network and package/toolchain freedom. The real workspace is never mounted read-write; only WriteTransaction can mutate it.",
     "writes": "One WriteTransaction owns proposal, dry-run, confirmation, apply, validation, failure and rollback. Sandbox mutations never authorize workspace writes.",
-    "final": "One canonical object: answer and limitations."
+    "final": "One canonical object: answer, limitations and Main-selected evidence_ids. Claim receives only Evidence explicitly selected by Main in final or Investigation.",
+    "structural_relations": "symbol_relations keeps query=relations as the local structural view and query=reachability as the query-shaped path view. Reachability resolves local/import bindings before global-name fallback and exposes only frontiers on the root-side coverage of the requested property.",
+    "observation_contract": "Every executed tool result uses one canonical envelope: physical status fields plus observations, coverage, frontiers and handles. Empty optional observation fields are legal; tools are not forced to invent frontier state.",
+    "observation_handles": "Opaque handles address bounded observation snapshots, not semantic conclusions. Handles persist in ObservationLedger for the job/session, are materialized through expand_observation(handle), and become stale when workspace_epoch changes.",
+    "directed_observation": "Query-shaped observation brings the capability request closer to the objective property. Import/alias-aware reachability materializes complete paths when possible; unresolved frontier payloads are limited to the actual query coverage rather than project-global uncertainty.",
+    "context_projection": "Canonical world/task state remains complete in ledgers. Main prompts receive a hot projection: bounded recent/pinned Evidence and Observation indexes, only the two most recent expanded tool contracts, and bounded current-delta tool results. Older capabilities remain callable through the compact capability index.",
+    "claim_projection": "Claim grounding is projected by Main authority: final.evidence_ids plus Evidence explicitly attached to Investigation. Runtime validates IDs and freshness but does not infer semantic relevance."
   },
   "canonical_structured_profiles": {
     "agent": [
@@ -58,6 +64,7 @@
     "list_tree",
     "search_code",
     "symbol_relations",
+    "expand_observation",
     "find_symbol",
     "read_file",
     "run_command",
@@ -93,24 +100,37 @@
   },
   "validation": {
     "command": "python -m pytest -q",
-    "current_result": "155 passed, 1 skipped (Flask unavailable in build environment)"
+    "current_result": "177 passed, 1 skipped (Flask unavailable in build environment)"
   },
   "added": [
-    "typed Claim grounding coordinates spanning request/answer/Evidence/Runtime Facts/Investigation",
-    "blocked material outcome grounded by objective Runtime Facts",
-    "non-retryable job-scoped terminal capability state",
-    "symbol_relations registry_binding, assignment_binding and callback_argument structural edges",
-    "symbol_relations directed incoming/outgoing projections with opt-in literal text references",
-    "Docker-first persistent per-job sandbox backend with auto-pull default image and Bubblewrap fallback",
-    "persistent Docker rootfs and project snapshot across run_command calls in one job",
-    "canonical tool result retryable field"
+    "import/alias-aware structural call resolution before global name fallback",
+    "query-shaped frontier filtering limited to unresolved sites on the root-side reachability coverage",
+    "bounded hot context projection for Evidence index, Observation map, active tool contracts and current tool-result delta",
+    "Main-selected final.evidence_ids as the canonical Claim Evidence projection",
+    "canonical ObservationResult envelope with observations, coverage, frontiers and handles for every executed capability",
+    "domain-neutral capability effect metadata: observe, execute or mutate",
+    "symbol_relations(query=reachability) as the first query-shaped observation, with objective Python entrypoint discovery and complete shortest-path materialization",
+    "objective completion metadata: coverage.objective_complete and coverage.objective_result",
+    "optional unresolved frontiers only when an unmaterialized physical/static continuation can still prevent completion",
+    "opaque bounded observation snapshot handles plus generic expand_observation(handle)",
+    "workspace-epoch invalidation for observation snapshot handles",
+    "Main prompt guidance to stop after a discriminating complete directed observation rather than walking a proven path node by node"
   ],
   "preserved": [
-    "canonical task input integrity across needs_user continuation",
-    "property-directed Evidence discipline",
+    "complete canonical EvidenceLedger and ObservationLedger state outside model context",
+    "all physically available tools remain callable; context projection never acts as a semantic router",
+    "Rev5.6.2 property-completion behavior and adaptive physical token budget",
+    "Main/Runtime/Claim authority boundary and optional Main-owned Investigation",
+    "strict structured transport and grounded Claim review",
     "progressive capabilities without selector/router",
-    "98k physical job envelope and 32768 per-call context cap",
+    "98k physical job envelope, 8000 completion sub-fuse and 32768 per-call context cap",
     "single confirmed WriteTransaction path for real workspace mutation",
+    "workspace_epoch as Eyle-owned mutation/replay coordinate rather than a global filesystem fingerprint",
+    "query=relations behavior of symbol_relations as the default local relation view",
     "clean-break persistence policy"
+  ],
+  "removed": [
+    "no semantic router, planner, FrontierLedger, candidate state machine, universal resource graph or universal effect transaction was introduced",
+    "no Runtime rule treats a frontier as mandatory semantic debt or decides that an Investigation must continue"
   ]
 }

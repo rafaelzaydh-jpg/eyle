@@ -113,7 +113,7 @@ def candidates_from_tool(tool: str, detail: Any) -> List[Dict[str, Any]]:
     if tool == "list_tree" and isinstance(detail, dict) and detail.get("inventory_hash"):
         inventory=json.dumps({"entries":detail.get("entries") or [],"truncated":bool(detail.get("truncated")),"varredura_completa":bool(detail.get("varredura_completa")),"filter":detail.get("filter")},ensure_ascii=False,sort_keys=True,separators=(",",":"))
         return [{"file":"<workspace-tree>","line_start":None,"line_end":None,"file_hash":detail.get("inventory_hash"),"content_hash":hash_texto(inventory),"content":inventory,"source_type":"workspace_tree"}]
-    if tool in {"project_stats","count_tokens","inspect_project","symbol_relations"} and isinstance(detail,dict):
+    if tool in {"project_stats","count_tokens","inspect_project","symbol_relations","expand_observation"} and isinstance(detail,dict):
         content=json.dumps(detail,ensure_ascii=False,sort_keys=True,separators=(",",":"),default=str)
         source_hash=detail.get("scan_hash") or detail.get("measurement_hash") or detail.get("inspection_hash") or hash_texto(content)
         return [{"file":f"<tool:{tool}>","line_start":None,"line_end":None,"file_hash":source_hash,"content_hash":hash_texto(content),"content":content,"source_type":tool}]

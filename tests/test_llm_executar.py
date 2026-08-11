@@ -61,7 +61,7 @@ def _capture(monkeypatch, response):
 def _agent_json(answer="ok"):
     return json.dumps({
         "tool_calls": None, "patches": None,
-        "needs_user": None, "final": {"answer": answer, "limitations": []},
+        "needs_user": None, "final": {"answer": answer, "limitations": [], "evidence_ids": []},
         "investigation_updates": [],
     })
 

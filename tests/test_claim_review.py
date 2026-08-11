@@ -18,15 +18,16 @@ def test_one_global_claim_review_can_accept_grounded_final_without_investigation
                 "tool_calls": [{"tool": "count_tokens", "arguments": {}}],
                 "investigation_updates": [],
             }
+        evidence_ids = list((payload.get("latest_tool_results") or [{}])[0].get("evidence_ids") or [])
         return {
-            "final": {"answer": "O projeto foi medido.", "limitations": []},
+            "final": {"answer": "O projeto foi medido.", "limitations": [], "evidence_ids": evidence_ids},
             "investigation_updates": [],
         }
 
     def fake_claim(prompt, _config):
         payload = json.loads(prompt)
         claim_calls.append(payload)
-        evidence_id = payload["evidence"][0]["id"]
+        evidence_ref = payload["evidence"][0]["ref"]; evidence_id = evidence_ref.split(":", 1)[1]
         return review(claims=[claim(evidence_ids=[evidence_id], reason="The measurement supports the answer.")])
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake_agent)
@@ -58,7 +59,7 @@ def test_scope_gap_with_null_target_never_creates_runtime_target(monkeypatch, tm
             }
         if len(agent_calls) == 2:
             return {
-                "final": {"answer": "Conclusão ampla prematura.", "limitations": []},
+                "final": {"answer": "Conclusão ampla prematura.", "limitations": [], "evidence_ids": []},
                 "investigation_updates": [],
             }
         # Main LLM, not Runtime, chooses to declare the debt after Claim feedback.
@@ -92,3 +93,8 @@ def test_scope_gap_with_null_target_never_creates_runtime_target(monkeypatch, tm
     assert details["investigation"] == [{
         "id": "T1", "goal": "Establish active reachability", "status": "open", "evidence_ids": [], "reason": ""
     }]
+    claim_events = [
+        item for item in details["decision_history"]
+        if item.get("decision") == "claim_review" and item.get("outcome") == "insufficient"
+    ]
+    assert claim_events[-1]["required_properties"] == ["Active-flow reachability"]

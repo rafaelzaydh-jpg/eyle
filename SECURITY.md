@@ -26,6 +26,9 @@ Eyle is designed to fail closed around project writes and command execution:
 - protected secret paths and files matching the secret-content policy are omitted
   from unrestricted sandbox snapshots so command execution cannot bypass the
   workspace read boundary;
+- a network-enabled sandbox protects host/workspace integrity, not confidentiality
+  of non-secret source copied into that sandbox; code visible to an executed process
+  can in principle be transmitted over the network;
 - `git_status` and `git_diff` are inspection-only; Rev5 does not expose Git mutation commands to the LLM;
 - test and diff text returned to the model is bounded to reduce context flooding;
 - patches are applied atomically and can be rolled back;

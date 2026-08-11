@@ -1,4 +1,4 @@
-"""Rev5.6 strict configuration boundary. No legacy aliases or migration keys."""
+"""Rev5.7.1 strict configuration boundary. No legacy aliases or migration keys."""
 from __future__ import annotations
 
 import json
@@ -135,7 +135,7 @@ def validar_config(config):
         _validate_positive_number(llm, key, default, "llm")
     _validate_int(llm, "context_window_tokens", 32768, minimum=1, prefix="llm")
     if int(llm.get("context_window_tokens", 32768) or 32768) > 32768:
-        raise ConfigError("llm.context_window_tokens não pode exceder 32768 na Rev5.6")
+        raise ConfigError("llm.context_window_tokens não pode exceder 32768 na Rev5.7.1")
 
     codar = config.get("codar") or {}
     if not isinstance(codar, dict):
@@ -181,11 +181,11 @@ def validar_config(config):
     for key, default in _AGENT_POSITIVE_DEFAULTS.items():
         _validate_int(agent, key, default, minimum=1, prefix="agent")
     if int(agent.get("max_total_tokens", 98000) or 98000) > 98000:
-        raise ConfigError("agent.max_total_tokens não pode exceder 98000 na Rev5.6")
+        raise ConfigError("agent.max_total_tokens não pode exceder 98000 na Rev5.7.1")
     if int(agent.get("max_prompt_tokens", 90000) or 90000) > 90000:
-        raise ConfigError("agent.max_prompt_tokens não pode exceder 90000 na Rev5.6")
+        raise ConfigError("agent.max_prompt_tokens não pode exceder 90000 na Rev5.7.1")
     if int(agent.get("max_completion_tokens", 8000) or 8000) > 8000:
-        raise ConfigError("agent.max_completion_tokens não pode exceder 8000 na Rev5.6")
+        raise ConfigError("agent.max_completion_tokens não pode exceder 8000 na Rev5.7.1")
 
     agent_sandbox = agent.get("sandbox") or {}
     if not isinstance(agent_sandbox, dict):

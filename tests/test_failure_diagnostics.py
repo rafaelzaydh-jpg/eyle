@@ -113,6 +113,7 @@ def test_follow_up_can_cite_runtime_failure_instead_of_restored_code(monkeypatch
             "final": {
                 "answer": "Os testes falharam porque render_template não estava definido.",
                 "limitations": [],
+                "evidence_ids": ["ev-runtime-0001"],
             },
             "investigation_updates": [{
                 "id": "T1", "goal": "Establish why the prior project tests failed",

@@ -7,7 +7,7 @@ import eyle.core.agent as core_agent
 import eyle.core.sandbox as sandbox_mod
 import eyle.core.tools as tools
 from eyle.core.execution_context import ExecutionContext, bind_execution, reset_execution
-from eyle.core.observation import semantic_signature
+from eyle.core.observation import observation_signature
 from eyle.core.session import AgentSession
 from tests.canonical import agent_tools, base_config, investigation_target, tool_call
 
@@ -85,7 +85,7 @@ def test_unrestricted_run_command_refuses_weak_backend(monkeypatch):
 
 
 def test_run_command_is_not_replayable_because_sandbox_state_can_change():
-    assert semantic_signature("run_command", {"command": "echo x"}) is None
+    assert observation_signature("run_command", {"command": "echo x"}) is None
 
 
 def test_find_symbol_model_view_is_location_only(tmp_path):
@@ -114,7 +114,7 @@ def test_repeated_identical_investigation_transition_fails_on_second_repetition(
             )
         # Deliberately repeat the same invalid established transition with no evidence IDs.
         return {
-            "final": {"answer": "2", "limitations": []},
+            "final": {"answer": "2", "limitations": [], "evidence_ids": []},
             "investigation_updates": [investigation_target("T1", goal=goal, status="established", evidence_ids=[], reason="Known")],
         }
 

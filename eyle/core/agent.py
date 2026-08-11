@@ -28,7 +28,7 @@ from .decision import (
 from .evidence import items as _evidence_items, register_candidates as _evidence_register, register_tool_detail as _register_evidence, freshest_for_path as _evidence_freshest_for_path, rehydrate as _rehydrate_evidence, seed_runtime_failure as _seed_failure_evidence
 from .write_transaction import begin as _begin_write_transaction, set_status as _set_write_status, record_validation as _record_write_validation, increment_attempt as _increment_write_attempt, record_failure as _record_write_failure, clear_failure as _clear_write_failure, public_view as _write_transaction_view
 from .observation import (
-    semantic_signature as _observation_signature, lookup as _lookup_observation,
+    observation_signature as _observation_signature, lookup as _lookup_observation,
     lookup_covering as _lookup_covering_observation, record as _record_observation,
     record_replay as _record_observation_replay, navigation_view as _observation_map,
     pending_results as _pending_observation_results, set_pending_results as _set_pending_observation_results,
@@ -176,8 +176,80 @@ def _tool_views(
     requested = [name for name in _requested_tool_names(session.decision_ledger) if name in allowed]
     active_set = set(requested)
     index = gerar_indice_capabilities(config=config, allowed_names=allowed - active_set)
-    active = gerar_catalogo_tools(config=config, allowed_names=requested, compact=True) if requested else []
+    # P1 context projection: expanded contracts are a hot working-set view, not
+    # permanent prompt baggage. Keep only the most recently requested distinct
+    # capabilities expanded; older capabilities return to the compact index and
+    # remain fully callable. This is recency, not semantic routing.
+    recent_limit = 2
+    recent: List[str] = []
+    for name in reversed(requested):
+        if name not in recent:
+            recent.append(name)
+        if len(recent) >= recent_limit:
+            break
+    recent.reverse()
+    active_set = set(recent)
+    index = gerar_indice_capabilities(config=config, allowed_names=allowed - active_set)
+    active = gerar_catalogo_tools(config=config, allowed_names=recent, compact=True) if recent else []
     return allowed, index, active
+
+
+def _project_evidence_index(session: AgentSession, *, recent_limit: int = 8) -> List[Dict[str, Any]]:
+    """Bound the model-facing Evidence index without deleting canonical Evidence.
+
+    Investigation-pinned IDs were explicitly selected by the Main LLM and are
+    therefore retained. Unpinned history is represented by a deterministic recent
+    window. Runtime never ranks Evidence by semantic relevance.
+    """
+    full = session.evidence_index()
+    pinned = [item for item in full if isinstance(item, dict) and item.get("pinned") is True]
+    pinned_ids = {str(item.get("id") or "") for item in pinned}
+    recent = [item for item in full if isinstance(item, dict) and str(item.get("id") or "") not in pinned_ids]
+    return pinned + recent[-max(0, int(recent_limit)): ]
+
+
+def _project_observation_map(session: AgentSession, *, recent_limit: int = 6) -> List[Dict[str, Any]]:
+    """Return a navigation index, not the entire historical observation map.
+
+    Observations remain canonical in ObservationLedger. Entries carrying Evidence
+    explicitly attached to Investigation are pinned; the rest is a recent window.
+    """
+    full = _observation_map(session)
+    target_ids = set(target_evidence_ids(session.investigation))
+    pinned = [
+        item for item in full if isinstance(item, dict)
+        and target_ids.intersection(str(eid) for eid in item.get("evidence_ids") or [])
+    ]
+    pinned_keys = {(item.get("turn"), item.get("observation_signature"), item.get("tool")) for item in pinned}
+    recent = [
+        item for item in full if isinstance(item, dict)
+        and (item.get("turn"), item.get("observation_signature"), item.get("tool")) not in pinned_keys
+    ]
+    return pinned + recent[-max(0, int(recent_limit)): ]
+
+
+def _project_pending_results(session: AgentSession) -> List[Dict[str, Any]]:
+    """Project only the current delta; full results stay in ObservationLedger."""
+    projected: List[Dict[str, Any]] = []
+    for raw in _pending_observation_results(session):
+        if not isinstance(raw, dict):
+            continue
+        item = copy.deepcopy(raw)
+        # Keep query-shaped observations useful, but bound pathological payloads
+        # before they become repeated prompt tax.
+        for _ in range(32):
+            if len(json.dumps(item, ensure_ascii=False, default=str)) <= 7000:
+                break
+            detail = item.get("detail")
+            if isinstance(detail, (dict, list)) and _shrink_structured_once(detail):
+                item["context_compacted"] = True
+                continue
+            if _shrink_structured_once(item):
+                item["context_compacted"] = True
+                continue
+            break
+        projected.append(item)
+    return projected
 
 
 def _compact_non_read_result(tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
@@ -224,8 +296,10 @@ def _observable_tool_arguments(tool: str, arguments: Dict[str, Any]) -> Dict[str
     if tool == "search_code":
         return {"query": str(arguments.get("query") or "")[:240]}
     if tool in {"find_symbol", "symbol_relations"}:
-        keys = ("symbol", "path", "roots", "direction", "include_text_references", "max_depth", "max_edges") if tool == "symbol_relations" else ("symbol", "path")
+        keys = ("symbol", "query", "path", "roots", "direction", "include_text_references", "max_depth", "max_edges") if tool == "symbol_relations" else ("symbol", "path")
         return {k: arguments.get(k) for k in keys if arguments.get(k) is not None}
+    if tool == "expand_observation":
+        return {"handle": str(arguments.get("handle") or "")[:240]}
     if tool == "calculate":
         return {"expression": str(arguments.get("expression") or "")[:240]}
     if tool == "count_tokens":
@@ -276,6 +350,14 @@ def _observable_tool_result(tool: str, result: Dict[str, Any]) -> Dict[str, Any]
         public["error_code"] = str(result.get("error_code"))[:120]
     if result.get("retryable") is not None:
         public["retryable"] = bool(result.get("retryable"))
+    if result.get("coverage"):
+        public["coverage"] = result.get("coverage")
+    if result.get("frontiers"):
+        public["frontiers"] = list(result.get("frontiers") or [])[:12]
+    if result.get("handles"):
+        public["handles"] = list(result.get("handles") or [])[:12]
+    if result.get("observations"):
+        public["observations"] = list(result.get("observations") or [])[:12]
     detail = result.get("detail")
     if isinstance(detail, str):
         public["detail"] = detail[:500]
@@ -503,16 +585,25 @@ def _model_tool_result(session: AgentSession, tool: str, result: Dict[str, Any],
             elif tool == "symbol_relations":
                 detail = {
                     "symbol": clone.get("symbol"), "path_filter": clone.get("path_filter"),
+                    "query": clone.get("query") or "relations",
                     "direction": clone.get("direction"), "include_text_references": clone.get("include_text_references"),
                     "backend": clone.get("backend"), "evidence_id": clone.get("evidence_id"),
-                    "definitions": list(clone.get("definitions") or [])[:24],
-                    "incoming": list(clone.get("incoming") or [])[:32],
-                    "outgoing": list(clone.get("outgoing") or [])[:32],
-                    "structural_references": list(clone.get("structural_references") or [])[:24],
-                    "imports": list(clone.get("imports") or [])[:24],
-                    "root_reachability": list(clone.get("root_reachability") or [])[:24],
-                    "unresolved_dynamic": list(clone.get("unresolved_dynamic") or [])[:16],
-                    "coverage": clone.get("coverage") or {},
+                    "counts": {
+                        "definitions": len(clone.get("definitions") or []),
+                        "incoming": len(clone.get("incoming") or []),
+                        "outgoing": len(clone.get("outgoing") or []),
+                        "structural_references": len(clone.get("structural_references") or []),
+                        "imports": len(clone.get("imports") or []),
+                        "text_references": len(clone.get("text_references") or []),
+                        "unresolved_dynamic": len(clone.get("unresolved_dynamic") or []),
+                    },
+                    "definitions": list(clone.get("definitions") or [])[:8],
+                    "incoming": list(clone.get("incoming") or [])[:12],
+                    "outgoing": list(clone.get("outgoing") or [])[:12],
+                    "structural_references": list(clone.get("structural_references") or [])[:8],
+                    "imports": list(clone.get("imports") or [])[:8],
+                    "root_reachability": list(clone.get("root_reachability") or [])[:12],
+                    "unresolved_dynamic": list(clone.get("unresolved_dynamic") or [])[:8],
                     "semantics": "structural_facts_only",
                 }
             elif tool == "run_command":
@@ -521,7 +612,7 @@ def _model_tool_result(session: AgentSession, tool: str, result: Dict[str, Any],
                     detail["output"] = str(detail.get("output") or "")[-5000:]
             else:
                 detail = clone
-        return {
+        model_result = {
             "tool": tool,
             "status": result.get("status"),
             "ok": result.get("ok"),
@@ -532,6 +623,11 @@ def _model_tool_result(session: AgentSession, tool: str, result: Dict[str, Any],
             "detail": detail,
             "evidence_ids": evidence_ids,
         }
+        for field in ("observations", "coverage", "frontiers", "handles"):
+            value = result.get(field)
+            if value:
+                model_result[field] = copy.deepcopy(value)
+        return model_result
     compact = _compact_non_read_result(tool, result)
     if evidence_ids:
         compact["evidence_ids"] = evidence_ids
@@ -761,11 +857,25 @@ def _agent_config(config: Dict[str, Any], session: AgentSession, project: Dict[s
     """Authorize one final-capable Main-LLM response without semantic phases."""
     clone = dict(config)
     llm = dict(config.get("llm") or {})
-    llm["agent_max_tokens"] = max(1, int(llm.get("agent_max_tokens", 3600) or 3600))
+    configured_ceiling = max(1, int(llm.get("agent_max_tokens", 3600) or 3600))
+    llm["agent_max_tokens"] = configured_ceiling
+    llm["agent_max_tokens_configured"] = configured_ceiling
     if _claim_required(session, config) or _claim_review_has_debt(session.claim_review):
-        llm["downstream_completion_reserve_tokens"] = int(claim_config(config)["verifier"]["max_tokens"])
+        downstream = int(claim_config(config)["verifier"]["max_tokens"])
+        llm["downstream_completion_reserve_tokens"] = downstream
     else:
+        downstream = 0
         llm.pop("downstream_completion_reserve_tokens", None)
+
+    # max_tokens is a ceiling, not an allocation. Compile the prompt against the
+    # output budget that can actually fit while preserving the mandatory Claim
+    # reserve. Transport repeats this clamp defensively before the backend call.
+    execution = current_execution()
+    if execution is not None:
+        remaining = max(0, int(execution.max_completion_tokens) - int(execution.completion_tokens_actual or 0))
+        available = max(0, remaining - downstream)
+        if available > 0:
+            llm["agent_max_tokens"] = min(configured_ceiling, available)
     clone["llm"] = llm
     return clone
 
@@ -870,9 +980,9 @@ def _compile_prompt(
         "investigation": session.investigation,
         "project": _project_descriptor(project),
         "conversation_background": session.conversation_background,
-        "observation_map": _observation_map(session),
-        "latest_tool_results": _pending_observation_results(session),
-        "evidence_index": session.evidence_index(),
+        "observation_map": _project_observation_map(session),
+        "latest_tool_results": _project_pending_results(session),
+        "evidence_index": _project_evidence_index(session),
         "physical_limits": {
             "tool_calls_remaining": tool_budget["remaining"],
             "llm_turns_remaining_after_this_call": max(
@@ -888,7 +998,9 @@ def _compile_prompt(
         "runtime_feedback": _merged_runtime_feedback(feedback, _persistent_claim_feedback(session, config)),
     }
     claim_config(config)
-    output_tokens = int((config.get("llm") or {}).get("agent_max_tokens", 3600) or 3600)
+    llm_cfg = config.get("llm") or {}
+    output_tokens = int(llm_cfg.get("agent_max_tokens", 3600) or 3600)
+    output_tokens_configured = int(llm_cfg.get("agent_max_tokens_configured", output_tokens) or output_tokens)
     calibration = execution.prompt_token_calibration if execution is not None else 1.0
     window_prompt_budget = available_user_prompt_tokens(
         config, PROMPT_AGENTE, output_tokens=output_tokens,
@@ -909,7 +1021,9 @@ def _compile_prompt(
             "characters": len(prompt), "estimated_tokens": post_crop_tokens, "tool_count": len(allowed),
             "active_tool_count": len(active_tools),
             "prompt_budget_tokens": prompt_budget, "window_user_prompt_budget_tokens": window_prompt_budget,
-            "output_tokens_reserved": output_tokens, "system_prompt_characters": len(PROMPT_AGENTE),
+            "output_tokens_requested": output_tokens_configured, "output_tokens_reserved": output_tokens,
+            "completion_ceiling_clamped": output_tokens < output_tokens_configured,
+            "system_prompt_characters": len(PROMPT_AGENTE),
             "system_prompt_estimated_tokens": system_tokens, "pre_crop_characters": len(pre_crop),
             "pre_crop_estimated_tokens": pre_crop_tokens, "crop_applied": len(pre_crop) != len(prompt),
             "components_before": components_before, "components_after": components_after,
@@ -1071,7 +1185,7 @@ def _run_claim_verification(
 ) -> Tuple[bool, str, Dict[str, Any], List[Dict[str, Any]]]:
     """Run the single canonical Claim Review path.
 
-    Rev5.6 has one strict Claim pass. Structured transport is canonical JSON
+    Rev5.7.1 has one strict Claim pass. Structured transport is canonical JSON
     Schema; invalid structured output fails instead of entering a repair lane.
     """
     cfg = claim_config(config)
@@ -1102,7 +1216,7 @@ def _run_claim_verification(
     )
     if not fit_ok:
         return False, fit_reason, {}, []
-    visible_ids = [str(item.get("id")) for item in view if item.get("id")]
+    visible_ids = [str(item.get("ref")).split(":", 1)[1] for item in view if str(item.get("ref") or "").startswith("evidence:")]
     if len(visible_ids) != len(selected_ids):
         visible_set = set(visible_ids)
         missing_view = [item for item in selected_ids if item not in visible_set]
@@ -1244,7 +1358,7 @@ def _details(
     job_decision_events = all_decision_events[dec_start:]
     tool_history = [{
         "turn": item.get("turn"), "tool": item.get("tool"), "status": item.get("status"),
-        "error_code": item.get("error_code"), "semantic_signature": item.get("semantic_signature"),
+        "error_code": item.get("error_code"), "observation_signature": item.get("observation_signature"),
         "arguments": copy.deepcopy(item.get("arguments") or {}),
         "result": copy.deepcopy(item.get("result") or {}),
         "evidence_ids": list(item.get("evidence_ids") or []), "replay_reason": item.get("replay_reason"),
@@ -1715,10 +1829,11 @@ def _normalized_path(value: Any) -> str:
 def _record_decision(
     session: AgentSession, decision_type: str, outcome: str, *,
     reason: Optional[str] = None, tools: Optional[List[str]] = None,
+    required_properties: Optional[List[str]] = None,
 ) -> None:
     _decision_record(
         session.decision_ledger, turn=session.turn, decision=decision_type,
-        outcome=outcome, reason=reason, tools=tools,
+        outcome=outcome, reason=reason, tools=tools, required_properties=required_properties,
     )
 
 def _action_signature(tool: str, arguments: Dict[str, Any]) -> str:
@@ -2012,10 +2127,14 @@ def _run(
                 return _return("success", answer, None, _details(session, "success", config, limitations=limitations), full)
 
             if ok:
-                # Claim is the one semantic challenger. Runtime does not classify
-                # the request and does not decide which Evidence is semantically
-                # relevant. The verifier sees the task's complete Evidence set.
-                review_evidence_ids = list(_evidence_items(session.evidence_ledger).keys())
+                # Claim is the one semantic challenger. P1 projection keeps semantic
+                # authority with Main: final.evidence_ids plus Evidence previously
+                # attached by Main to Investigation are the verifier working set.
+                # Runtime never ranks or selects Evidence by inferred relevance.
+                review_evidence_ids = list(dict.fromkeys(
+                    [str(item) for item in final_obj.get("evidence_ids") or [] if str(item)]
+                    + target_evidence_ids(session.investigation)
+                ))
                 _record_decision(session, "final", "provisional")
                 try:
                     review_ok, review_reason, review, _evidence_view = _run_claim_verification(
@@ -2096,7 +2215,14 @@ def _run(
                             session, "investigation_contract", "reopened",
                             reason=",".join(reopened_targets),
                         )
-                    _record_decision(session, "claim_review", review_outcome, reason=review_reason)
+                    required_properties = [
+                        str(item.get("required_property") or "").strip()
+                        for item in review.get("semantic_gaps") or [] if isinstance(item, dict)
+                    ]
+                    _record_decision(
+                        session, "claim_review", review_outcome, reason=review_reason,
+                        required_properties=[item for item in required_properties if item],
+                    )
                     feedback = review_followup_feedback(review)
 
                     # Claim can contest omitted debt (target_id=null), but Runtime
@@ -2191,8 +2317,8 @@ def _run(
                 continue
 
             _record_decision(session, "tool_validation", "validated", tools=[tool])
-            semantic_signature = _observation_signature(tool, normalized)
-            if semantic_signature and semantic_signature in seen_batch_observations:
+            observation_signature = _observation_signature(tool, normalized)
+            if observation_signature and observation_signature in seen_batch_observations:
                 duplicate = {
                     "tool": tool, "status": "replayed", "ok": True,
                     "executed": False, "changed": False,
@@ -2203,11 +2329,11 @@ def _run(
                 preflight_replays += 1
                 next_results.append(duplicate)
                 _record_decision(session, "tool_preflight", "batch_duplicate", reason="BATCH_DUPLICATE_SUPPRESSED", tools=[tool])
-                _record_observation_replay(session, {"tool": tool, "arguments": normalized, "public_arguments": _observable_tool_arguments(tool, normalized), "semantic_signature": semantic_signature}, duplicate, reason="BATCH_DUPLICATE_SUPPRESSED", public_result={"status":"replayed","ok":True,"executed":False,"changed":False})
+                _record_observation_replay(session, {"tool": tool, "arguments": normalized, "public_arguments": _observable_tool_arguments(tool, normalized), "observation_signature": observation_signature}, duplicate, reason="BATCH_DUPLICATE_SUPPRESSED", public_result={"status":"replayed","ok":True,"executed":False,"changed":False})
                 continue
-            if semantic_signature:
-                seen_batch_observations.add(semantic_signature)
-                previous = _lookup_observation(session, semantic_signature)
+            if observation_signature:
+                seen_batch_observations.add(observation_signature)
+                previous = _lookup_observation(session, observation_signature)
                 replay_reason = "OBSERVATION_REHYDRATED"
                 if previous is None:
                     previous = _lookup_covering_observation(session, tool, normalized)
@@ -2231,7 +2357,7 @@ def _run(
             novel_calls.append({
                 "tool": tool,
                 "arguments": normalized,
-                "semantic_signature": semantic_signature,
+                "observation_signature": observation_signature,
                 "action_signature": _action_signature(tool, normalized),
             })
 
@@ -2323,7 +2449,7 @@ def _run(
         for item in novel_calls:
             tool = item["tool"]
             normalized = item["arguments"]
-            semantic_signature = item["semantic_signature"]
+            observation_signature = item["observation_signature"]
             execution = current_execution()
             terminal_failure = execution.terminal_capability(tool) if execution is not None else None
             if terminal_failure is not None:
@@ -2334,13 +2460,15 @@ def _run(
                 }
                 _record_decision(session, "tool_execution", "blocked", reason=result["error_code"], tools=[tool])
                 model_result = _model_tool_result(session, tool, result, config, normalized)
-                _record_observation(session, semantic_signature, tool, normalized, result, model_result, public_arguments=_observable_tool_arguments(tool, normalized), public_result=_observable_tool_result(tool, result))
+                _record_observation(session, observation_signature, tool, normalized, result, model_result, public_arguments=_observable_tool_arguments(tool, normalized), public_result=_observable_tool_result(tool, result))
                 next_results.append(model_result)
                 continue
             context = {
                 "config": config, "projeto": project, "evidence": _evidence_items(session.evidence_ledger),
                 "execution_trace": _current_trace_snapshot(session, config),
                 "available_tools": sorted(allowed),
+                "observation_handles": session.observation_ledger.setdefault("handles", {}),
+                "workspace_epoch": int(session.workspace_epoch),
             }
             result = executar_tool(tool, normalized, context)
             if result.get("executed") is True:
@@ -2356,7 +2484,7 @@ def _run(
             if execution is not None and result.get("ok") is False and result.get("retryable") is False:
                 execution.mark_terminal_capability(tool, error_code=str(result.get("error_code") or "CAPABILITY_UNAVAILABLE"), detail=result.get("detail"))
             model_result = _model_tool_result(session, tool, result, config, normalized)
-            _record_observation(session, semantic_signature, tool, normalized, result, model_result, public_arguments=_observable_tool_arguments(tool, normalized), public_result=_observable_tool_result(tool, result))
+            _record_observation(session, observation_signature, tool, normalized, result, model_result, public_arguments=_observable_tool_arguments(tool, normalized), public_result=_observable_tool_result(tool, result))
             next_results.append(model_result)
             if not result.get("ok") and result.get("error_code") in TERMINAL_TOOL_ERRORS:
                 text = f"A ferramenta encontrou um erro terminal: {result.get('error_code')}."
@@ -2388,11 +2516,11 @@ def _executar_agente_bound(
             session = AgentSession.from_dict(retomar.get("estado") or {})
         except ValueError as error:
             if str(error) == "SESSION_SCHEMA_INCOMPATIBLE":
-                text = "O estado persistido pertence a outro contrato de sessão e não pode ser retomado na Rev5.6."
+                text = "O estado persistido pertence a outro contrato de sessão e não pode ser retomado na Rev5.7.1."
                 details = {
                     "status": "failed",
                     "failure_code": "SESSION_SCHEMA_INCOMPATIBLE",
-                    "limitations": ["Rev5.6 não migra nem adapta sessões de revisões anteriores."],
+                    "limitations": ["Rev5.7.1 não migra nem adapta sessões de revisões anteriores."],
                 }
                 return _return("failed", text, None, details, full)
             raise

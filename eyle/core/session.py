@@ -1,6 +1,6 @@
-"""One active Rev5.6 Eyle agent session.
+"""One active Rev5.7.1 Eyle agent session.
 
-Rev5.6 is a clean break. The session stores only canonical semantic/physical
+Rev5.7.1 is a clean break. The session stores only canonical semantic/physical
 state that must survive turns or confirmation. Histories and metrics are views
 of their owning ledgers, not parallel persisted fields.
 """
@@ -13,7 +13,7 @@ from .evidence import empty_ledger as empty_evidence_ledger, index_view as evide
 from .observation import empty_ledger as empty_observation_ledger, persisted_view as persisted_observations
 from .write_transaction import empty_transaction
 
-SESSION_SCHEMA_VERSION = "5.6"
+SESSION_SCHEMA_VERSION = "5.7.1"
 
 
 @dataclass
@@ -57,12 +57,14 @@ class AgentSession:
         session.turn = max(0, int(data.get("turn") or 0))
         session.workspace_epoch = max(0, int(data.get("workspace_epoch") or 0))
         obs = data.get("observation_ledger")
-        if not isinstance(obs, dict) or not isinstance(obs.get("entries"), dict) or not isinstance(obs.get("events"), list):
+        if (not isinstance(obs, dict) or not isinstance(obs.get("entries"), dict)
+                or not isinstance(obs.get("events"), list) or not isinstance(obs.get("handles"), dict)):
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
         session.observation_ledger = {
             "entries": {str(k): dict(v) for k, v in obs.get("entries", {}).items() if isinstance(v, dict)},
             "events": [dict(item) for item in obs.get("events", []) if isinstance(item, dict)],
             "pending_results": [dict(item) for item in obs.get("pending_results", []) if isinstance(item, dict)],
+            "handles": {str(k): dict(v) for k, v in obs.get("handles", {}).items() if isinstance(v, dict)},
         }
         decisions = data.get("decision_ledger")
         if not isinstance(decisions, dict) or not isinstance(decisions.get("events"), list):

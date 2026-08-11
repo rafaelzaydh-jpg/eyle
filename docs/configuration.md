@@ -1,4 +1,4 @@
-# Configuration — Rev5.6
+# Configuration — Rev5.7.1
 
 `config.json` is the strict current-release contract.
 
@@ -7,8 +7,8 @@ Required identity:
 ```json
 {
   "app_version": "2.7.4",
-  "config_schema_version": "5.6",
-  "revision": "rev5.6-grounded-outcomes-docker-backend"
+  "config_schema_version": "5.7.1",
+  "revision": "rev5.7.1-directed-observation-context-projection"
 }
 ```
 
@@ -28,7 +28,7 @@ max_total_tokens       98000
 task_deadline_seconds  1800
 ```
 
-`max_total_tokens=98000` is a physical per-message/job training envelope. Full prompt attempts count against it even when the provider reports cache hits; cache weighting is diagnostic only. `max_prompt_tokens=90000` and `max_completion_tokens=8000` are independent sub-fuses.
+`max_total_tokens=98000` is the physical per-message/job inference envelope. Full prompt attempts count against it even when the provider reports cache hits; cache weighting is diagnostic only. `max_prompt_tokens=90000` and `max_completion_tokens=8000` are independent sub-fuses.
 
 `llm.context_window_tokens` is capped at **32768** for the current Llama Server. The runtime subtracts the system prompt, output reservation and safety margin before compiling the user payload. Values above 32768 are rejected.
 

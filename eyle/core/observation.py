@@ -7,10 +7,11 @@ are derived from this one state.
 from __future__ import annotations
 import copy, hashlib, json
 from typing import Any, Dict, List, Optional
+from .observation_contract import persisted_handles
 
 
 def empty_ledger() -> Dict[str, Any]:
-    return {"entries": {}, "events": [], "pending_results": []}
+    return {"entries": {}, "events": [], "pending_results": [], "handles": {}}
 
 
 def _entries(session: Any) -> Dict[str, Dict[str, Any]]:
@@ -43,12 +44,22 @@ def _norm_path(value: Any) -> str:
     return str(value or "").replace("\\", "/").strip().lstrip("./").lower()
 
 
-def semantic_signature(tool: str, arguments: Dict[str, Any]) -> Optional[str]:
+def observation_signature(tool: str, arguments: Dict[str, Any]) -> Optional[str]:
     if tool == "list_tree":
         return "tree:" + json.dumps({"filter": str(arguments.get("filter") or "").strip().lower(), "depth": arguments.get("depth"), "limit": arguments.get("limit")}, sort_keys=True, separators=(",", ":"), default=str)
     if tool == "search_code": return "search:" + " ".join(str(arguments.get("query") or "").lower().split())
     if tool == "find_symbol": return f"symbol:{_norm_path(arguments.get('path'))}:{str(arguments.get('symbol') or '').strip().lower()}"
-    if tool == "symbol_relations": return "relations:" + json.dumps({"symbol": str(arguments.get("symbol") or "").strip().lower(), "path": _norm_path(arguments.get("path")), "roots": [str(x) for x in (arguments.get("roots") or [])], "max_depth": arguments.get("max_depth")}, sort_keys=True, separators=(",", ":"), default=str)
+    if tool == "symbol_relations":
+        return "relations:" + json.dumps({
+            "symbol": str(arguments.get("symbol") or "").strip().lower(),
+            "path": _norm_path(arguments.get("path")),
+            "roots": [str(x) for x in (arguments.get("roots") or [])],
+            "direction": str(arguments.get("direction") or "both").strip().lower(),
+            "include_text_references": bool(arguments.get("include_text_references", False)),
+            "query": str(arguments.get("query") or "relations").strip().lower(),
+            "max_depth": int(arguments.get("max_depth") or (12 if str(arguments.get("query") or "relations").strip().lower() == "reachability" else 6)),
+            "max_edges": int(arguments.get("max_edges") or 60),
+        }, sort_keys=True, separators=(",", ":"), default=str)
     if tool == "read_file":
         if arguments.get("line_start") is not None and arguments.get("line_end") is not None:
             return f"file:{_norm_path(arguments.get('path'))}:{arguments.get('line_start')}:{arguments.get('line_end')}"
@@ -101,7 +112,7 @@ def result_fingerprint(result: Dict[str, Any]) -> str:
 
 
 def _append_event(session: Any, *, tool: str, arguments: Dict[str, Any], result: Dict[str, Any],
-                  model_result: Dict[str, Any], semantic_signature: Optional[str], status: str,
+                  model_result: Dict[str, Any], observation_signature: Optional[str], status: str,
                   replay_reason: Optional[str] = None, public_arguments: Optional[Dict[str, Any]] = None,
                   public_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     events=_events(session)
@@ -110,7 +121,7 @@ def _append_event(session: Any, *, tool: str, arguments: Dict[str, Any], result:
         "workspace_epoch":int(getattr(session,"workspace_epoch",0)), "tool":str(tool),
         "arguments":copy.deepcopy(public_arguments if public_arguments is not None else arguments), "status":str(status),
         "executed":result.get("executed") is True, "ok":result.get("ok") is True,
-        "error_code":result.get("error_code"), "retryable":result.get("retryable"), "semantic_signature":semantic_signature,
+        "error_code":result.get("error_code"), "retryable":result.get("retryable"), "observation_signature":observation_signature,
         "evidence_ids":list(model_result.get("evidence_ids") or []),
         "result":copy.deepcopy(public_result if public_result is not None else result),
     }
@@ -124,7 +135,7 @@ def record(session: Any, signature: Optional[str], tool: str, arguments: Dict[st
            public_result: Optional[Dict[str, Any]] = None) -> None:
     """Record one physical tool outcome and reusable identity when applicable."""
     _append_event(session, tool=tool, arguments=arguments, result=result, model_result=model_result,
-                  semantic_signature=signature, status=str(result.get("status") or ("success" if result.get("ok") else "failed")),
+                  observation_signature=signature, status=str(result.get("status") or ("success" if result.get("ok") else "failed")),
                   public_arguments=public_arguments, public_result=public_result)
     if not signature or result.get("executed") is not True: return
     reusable = result.get("ok") is True or result.get("error_code") in {"SYMBOL_NOT_FOUND", "TEST_RUNNER_UNAVAILABLE"} or (tool == "run_tests" and result.get("executed") is True)
@@ -142,7 +153,7 @@ def record(session: Any, signature: Optional[str], tool: str, arguments: Dict[st
             source_coverage={"file":_norm_path(raw_detail.get("file") or arguments.get("path")),"line_start":int(raw_detail.get("line_start")),"line_end":int(raw_detail.get("line_end")),"total_lines":int(raw_detail.get("total_lines")) if raw_detail.get("total_lines") is not None else None,"file_hash":raw_detail.get("file_hash")}
         except (TypeError,ValueError): source_coverage=None
     _entries(session)[key]={
-        "semantic_signature":signature,"workspace_epoch":int(getattr(session,"workspace_epoch",0)),"tool":tool,
+        "observation_signature":signature,"workspace_epoch":int(getattr(session,"workspace_epoch",0)),"tool":tool,
         "arguments":copy.deepcopy(arguments),"public_arguments":copy.deepcopy(public_arguments if public_arguments is not None else arguments),
         "result_fingerprint":result_fingerprint(result),
         "evidence_ids":list(model_result.get("evidence_ids") or []),"coverage_complete":bool(raw_detail.get("coverage_complete")),
@@ -153,7 +164,7 @@ def record_replay(session: Any, entry: Dict[str, Any], model_result: Dict[str, A
                   public_result: Optional[Dict[str, Any]] = None) -> None:
     result={"status":"replayed","ok":True,"executed":False,"changed":False,"error_code":None}
     _append_event(session, tool=str(entry.get("tool") or ""), arguments=dict(entry.get("arguments") or {}),
-                  result=result, model_result=model_result, semantic_signature=entry.get("semantic_signature"),
+                  result=result, model_result=model_result, observation_signature=entry.get("observation_signature"),
                   status="replayed", replay_reason=reason,
                   public_arguments=dict(entry.get("public_arguments") or entry.get("arguments") or {}),
                   public_result=public_result or {"status":"replayed","ok":True,"executed":False,"changed":False})
@@ -166,19 +177,19 @@ def event_history(session: Any, *, limit: int=50) -> List[Dict[str, Any]]:
         if not isinstance(event,dict): continue
         out.append({
             "turn":event.get("turn"),"tool":event.get("tool"),"status":event.get("status"),"error_code":event.get("error_code"),"retryable":event.get("retryable"),
-            "semantic_signature":event.get("semantic_signature"),"arguments":copy.deepcopy(event.get("arguments") or {}),
+            "observation_signature":event.get("observation_signature"),"arguments":copy.deepcopy(event.get("arguments") or {}),
             "result":copy.deepcopy(event.get("result") or {}),"evidence_ids":list(event.get("evidence_ids") or []),"replay_reason":event.get("replay_reason"),
         })
     return out
 
 
 def navigation_view(session: Any) -> List[Dict[str, Any]]:
-    ordered=sorted((item for item in _entries(session).values() if isinstance(item,dict)),key=lambda item:(int(item.get("turn") or 0),str(item.get("semantic_signature") or "")))
+    ordered=sorted((item for item in _entries(session).values() if isinstance(item,dict)),key=lambda item:(int(item.get("turn") or 0),str(item.get("observation_signature") or "")))
     out=[]
     for item in ordered:
         entry={"turn":item.get("turn"),"tool":item.get("tool"),"evidence_ids":list(item.get("evidence_ids") or [])}
-        if item.get("semantic_signature"):
-            entry["semantic_signature"]=item.get("semantic_signature")
+        if item.get("observation_signature"):
+            entry["observation_signature"]=item.get("observation_signature")
         coverage=item.get("source_coverage") if isinstance(item.get("source_coverage"),dict) else None
         if coverage:
             entry["source_coverage"]={
@@ -214,7 +225,7 @@ def persisted_view(ledger: Dict[str, Any]) -> Dict[str, Any]:
         safe_entries[str(key)]={
             field:copy.deepcopy(value.get(field))
             for field in (
-                "semantic_signature","workspace_epoch","tool","arguments","public_arguments",
+                "observation_signature","workspace_epoch","tool","arguments","public_arguments",
                 "result_fingerprint","evidence_ids","coverage_complete","source_coverage","turn"
             )
             if value.get(field) is not None
@@ -227,8 +238,8 @@ def persisted_view(ledger: Dict[str, Any]) -> Dict[str, Any]:
             field:copy.deepcopy(item.get(field))
             for field in (
                 "event_id","turn","workspace_epoch","tool","arguments","status","executed",
-                "ok","error_code","semantic_signature","evidence_ids","result","replay_reason"
+                "ok","error_code","observation_signature","evidence_ids","result","replay_reason"
             )
             if item.get(field) is not None
         })
-    return {"entries":safe_entries,"events":safe_events,"pending_results":[]}
+    return {"entries":safe_entries,"events":safe_events,"pending_results":[],"handles":persisted_handles(ledger)}

@@ -76,6 +76,7 @@ def build_answer_anchors(answer: str, *, max_chars: int = ANSWER_ANCHOR_MAX_CHAR
         anchor_id = f"a{len(anchors) + 1}"
         anchors.append({
             "id": anchor_id,
+            "ref": f"answer:{anchor_id}",
             "text": text[start:end],
             "start": start,
             "end": end,
@@ -246,7 +247,7 @@ def compact_evidence(
         if not isinstance(item, dict):
             continue
         entry = {
-            "id": evidence_id,
+            "ref": f"evidence:{evidence_id}",
             "file": item.get("file"),
             "lines": [item.get("line_start"), item.get("line_end")],
             "cropped": bool(
@@ -312,7 +313,7 @@ def compact_runtime_facts(observation_ledger: Dict[str, Any], *, max_items: int 
         if not isinstance(event, dict):
             continue
         item = {
-            "id": f"r{index}",
+            "ref": f"runtime:r{index}",
             "event_id": event.get("event_id"),
             "turn": event.get("turn"),
             "tool": event.get("tool"),
@@ -430,15 +431,20 @@ def normalize_claim_review(
         str(item.get("id") or "") for item in (investigation or [])
         if isinstance(item, dict) and str(item.get("id") or "")
     }
+    investigation_refs = {f"investigation:{target_id}" for target_id in investigation_ids}
     answer_text = None if answer is None else str(answer)
     resolved_anchors = answer_anchors
     if resolved_anchors is None and answer_text is not None:
         resolved_anchors = build_answer_anchors(answer_text)
+    anchor_text_by_ref = {
+        str(item.get("ref") or f"answer:{item.get('id')}"): str(item.get("text") or "")
+        for item in (resolved_anchors or []) if isinstance(item, dict) and (item.get("ref") or item.get("id"))
+    }
     anchors = answer_anchor_map(resolved_anchors)
-    answer_ids = set(anchors)
+    answer_ids = {ref.split(":", 1)[1] for ref in anchor_text_by_ref if ref.startswith("answer:")}
     runtime_ids = {
-        str(item.get("id") or "") for item in (runtime_facts or [])
-        if isinstance(item, dict) and str(item.get("id") or "")
+        str(item.get("ref") or "").split(":", 1)[1] for item in (runtime_facts or [])
+        if isinstance(item, dict) and str(item.get("ref") or "").startswith("runtime:")
     }
 
     def normalize_grounding(value: Any, *, label: str) -> Tuple[Optional[List[str]], Optional[str]]:
@@ -475,19 +481,20 @@ def normalize_claim_review(
         answer_ref = item["answer_ref"].strip()
         target_id = item.get("target_id")
         if target_id is not None:
-            target_id = str(target_id).strip()
+            target_ref = str(target_id).strip()
+            if target_ref not in investigation_refs:
+                return False, f"CLAIM_REVIEW_UNKNOWN_TARGET:{index}:{target_ref}", {}
+            target_id = target_ref.split(":", 1)[1]
         statement = item["statement"].strip()
         verdict = item["verdict"]
         refs, error = normalize_grounding(item.get("grounding_refs"), label=f"claim:{index}")
         if error:
             return False, error, {}
         reason = item["reason"].strip()[:160]
-        if answer_ref not in anchors:
+        if answer_ref not in anchor_text_by_ref:
             return False, f"CLAIM_REVIEW_ANSWER_REF_INVALID:{index}:{answer_ref}", {}
-        if target_id is not None and target_id not in investigation_ids:
-            return False, f"CLAIM_REVIEW_UNKNOWN_TARGET:{index}:{target_id}", {}
         claims.append({
-            "answer_ref": answer_ref, "answer_quote": anchors[answer_ref],
+            "answer_ref": answer_ref, "answer_quote": anchor_text_by_ref[answer_ref],
             "target_id": target_id, "statement": statement,
             "grounding_refs": refs or [],
             "evidence_ids": evidence_ids_from_grounding(refs or []),
@@ -499,12 +506,13 @@ def normalize_claim_review(
         gap_type = item["type"]
         gap_target_id = item.get("target_id")
         if gap_target_id is not None:
-            gap_target_id = str(gap_target_id).strip()
+            gap_target_ref = str(gap_target_id).strip()
+            if gap_target_ref not in investigation_refs:
+                return False, f"CLAIM_REVIEW_UNKNOWN_TARGET:{index}:{gap_target_ref}", {}
+            gap_target_id = gap_target_ref.split(":", 1)[1]
         refs, error = normalize_grounding(item.get("grounding_refs"), label=f"semantic_gap:{index}")
         if error:
             return False, error, {}
-        if gap_target_id is not None and gap_target_id not in investigation_ids:
-            return False, f"CLAIM_REVIEW_UNKNOWN_TARGET:{index}:{gap_target_id}", {}
         semantic_gaps.append({
             "type": gap_type, "target_id": gap_target_id,
             "grounding_refs": refs or [],
@@ -584,13 +592,13 @@ def review_prompt(
     """Build the sole canonical semantic-review packet.
 
     There are no scope-only, Claim-only, Findings-only or semantic-gap repair
-    tasks in Rev5.6. Claim always audits the complete provisional answer.
+    tasks in Rev5.7. Claim always audits the complete provisional answer.
     """
     anchors = answer_anchors if answer_anchors is not None else build_answer_anchors(answer)
     public_anchors = [
-        {"id": str(item.get("id") or ""), "text": str(item.get("text") or "")}
+        {"ref": str(item.get("ref") or f"answer:{item.get('id')}"), "text": str(item.get("text") or "")}
         for item in anchors
-        if isinstance(item, dict) and item.get("id")
+        if isinstance(item, dict) and (item.get("ref") or item.get("id"))
     ]
     payload: Dict[str, Any] = {
         "task": "verify_claims",
@@ -598,7 +606,15 @@ def review_prompt(
         "answer_anchors": public_anchors,
         "evidence": evidence_view,
         "runtime_facts": [dict(item) for item in (runtime_facts or []) if isinstance(item, dict)],
-        "investigation": [dict(item) for item in (investigation or []) if isinstance(item, dict)],
+        "investigation": [
+            {
+                "ref": f"investigation:{item.get('id')}",
+                "goal": item.get("goal"), "status": item.get("status"),
+                "evidence_refs": [f"evidence:{eid}" for eid in (item.get("evidence_ids") or [])],
+                "reason": item.get("reason"),
+            }
+            for item in (investigation or []) if isinstance(item, dict) and item.get("id")
+        ],
     }
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
 

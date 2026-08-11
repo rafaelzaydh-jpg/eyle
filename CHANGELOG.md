@@ -1,5 +1,56 @@
 # Changelog
 
+## Rev5.7.1 — Directed Observation & Context Projection — 2026-08-10
+
+- Hardens `symbol_relations(query="reachability")` with file-local/import/alias resolution before project-global name fallback.
+- Makes unresolved frontiers query-shaped: only unresolved sites on the root-side coverage of the requested reachability property can keep the result open; unrelated project-global dynamic calls are no longer surfaced as semantic bait.
+- Adds P1 Context Projection while preserving complete canonical ledgers: Evidence and Observation prompt indexes are bounded to pinned+recent windows, expanded tool contracts are limited to the two most recently requested tools, and current tool-result deltas are bounded before prompt assembly.
+- Adds P1 Claim Projection: `final={answer,limitations,evidence_ids}` and Claim receives only Evidence explicitly selected by Main in the final plus Evidence Main already attached to Investigation. Runtime validates IDs/freshness and never infers semantic relevance.
+- Clean break: config/session/queue/project-memory schemas are exact 5.7.1. No migration or compatibility bridge from 5.7 is added.
+- Adds regressions for duplicate-name import resolution, bounded hot context projection and Main-selected Claim Evidence.
+- Separates current-runtime documentation from future architectural direction and rewrites the GitHub README around the shipped coding-agent product instead of revision-by-revision engineering notes.
+- Current validation: 177 passed, 1 skipped because Flask is unavailable in the build environment.
+
+## Rev5.7 — Directed Observation — 2026-08-10
+
+- Preserves the Rev5.6.2 Main/Runtime/Claim authority boundary and does not add a semantic router, planner or new semantic state machine.
+- Introduces the canonical Rev5.7 tool result envelope: physical status plus optional `observations`, `coverage`, `frontiers` and `handles` for every executable capability.
+- Adds a domain-neutral registry `effect` class (`observe|execute|mutate`) while retaining concrete tool `effects` metadata as the sole physical implementation detail.
+- Adds `symbol_relations(query="reachability")`, the first query-shaped observation. With no explicit roots it uses objective Python entrypoint signals, materializes the shortest structural root-to-target path and exposes edge coordinates.
+- Positive directed reachability sets `coverage.objective_complete=true` and deliberately suppresses unrelated dynamic frontiers, so a discriminating positive path does not create more exploration debt.
+- Negative/incomplete directed reachability exposes only physical/static continuation boundaries that can prevent completion. Large unresolved payloads remain behind handles.
+- Adds generic `expand_observation(handle)`: Runtime materializes a bounded page from an opaque observation snapshot without domain interpretation. Snapshot handles are persisted by ObservationLedger and become stale after `workspace_epoch` changes.
+- Extends `symbol_relations` ObservationLedger identity with the query mode and uses a 12-hop default for directed reachability (configurable up to 32) without changing the 6-hop local-relations default.
+- Keeps the fixed Main prompt within the existing compact-prompt regression while teaching the Main to prefer directed reachability and not walk an already-proven path node by node.
+- Adds deterministic Rev5.7 regressions for directed positive paths, unresolved frontier/handle expansion, handle staleness, capability effect classes and bounded model projection.
+- Clean break: config/session/queue/project-memory schemas are exact 5.7.
+- Current validation: 174 passed, 1 skipped because Flask is unavailable in the build environment.
+
+## Rev5.6.2 — Property Completion & Adaptive Budget — 2026-08-10
+
+- Treats per-call `max_tokens` as a ceiling instead of a prepaid allocation: Runtime preserves mandatory downstream Claim output and clamps the current call to the remaining completion budget. The 8000 completion fuse and 98000 total physical envelope are unchanged.
+- Adds candidate-completion guidance to the Main contract: after materially investigating one chosen candidate, either polarity of the requested property is a valid result unless the request explicitly requires one.
+- Directs Claim recovery to the same target/candidate through `semantic_gaps[].required_property` before broadening to another candidate.
+- Keeps literal `symbol_relations` text references opt-in and tells the Main LLM to request them only when they discriminate the active property.
+- Adds objective `python_main_guard` structural edges for `if __name__ == "__main__": ...` entry calls, without inferring live/dead semantics.
+- Exposes bounded Claim `required_properties` in DecisionLedger history so recovery quality is observable without exposing raw prompts or chain-of-thought.
+- Clean break: config/session/queue/project-memory schemas are exact 5.6.2.
+- Current validation: 166 passed, 1 skipped because Flask is unavailable in the build environment.
+
+## Rev5.6.1 — Contract Fidelity & Structural Query Control — 2026-08-10
+
+- Fixes `symbol_relations` replay identity so direction, literal-reference projection, depth and edge limits cannot collide.
+- Enforces the canonical tool JSON-Schema subset before execution, including enum and array item validation.
+- Exposes small enums in the progressive capability index instead of hiding values the Runtime later requires.
+- Makes Claim packets expose complete literal grounding refs only (`answer:*`, `evidence:*`, `runtime:*`, `investigation:*`); Claim no longer constructs transport prefixes.
+- Tightens Claim structured schemas so malformed grounding refs and noncanonical answer refs fail at the structured boundary.
+- Compacts model-facing `symbol_relations` rows while preserving counts and objective coverage.
+- Clarifies epistemic stopping: an open Investigation does not require indefinite search when a material, non-redundant attempt cannot establish the requested property.
+- Renames ObservationLedger `semantic_signature` to `observation_signature`; no compatibility alias or migration path is retained.
+- Deliberately does not add an AST/project-graph cache or a new epoch/state owner. `workspace_epoch` remains only the existing runtime invalidation coordinate for Eyle-owned writes.
+- Clean break: config/session/queue/project-memory schemas are exact 5.6.1.
+- Current validation: 163 passed, 1 skipped because Flask is unavailable in the build environment.
+
 ## Rev5.6 — Grounded Outcomes & Docker Backend — 2026-08-10
 
 - Replaces Evidence-only Claim grounding with typed coordinates: `request`, `answer:<anchor>`, `evidence:<id>`, `runtime:<fact>`, and `investigation:<target>`. Runtime validates coordinate existence; Claim owns semantic sufficiency.
@@ -41,7 +92,7 @@
 - Replaces the full expanded tool catalog on every Agent call with progressive model views: compact `capability_index` for unused callable tools and expanded `active_tools` only after actual Main-LLM requests.
 - Tool activation is derived from canonical DecisionLedger events; there is no Tool Selector LLM, activation call, semantic router or persisted active-tool state. First use is directly validated against the canonical `TOOLS[name].input_schema`.
 - Removes `tool_taxonomy` from the Main-LLM prompt. Registry category/effect metadata remains Runtime-owned.
-- Adds a hard training envelope per user message/job: 90k prompt attempts, 8k completion and 98k physical total tokens. Every backend attempt charges its full prompt even when cached; cache discount is diagnostic only.
+- Adds a hard physical inference envelope per user message/job: 90k prompt attempts, 8k completion and 98k physical total tokens. Every backend attempt charges its full prompt even when cached; cache discount is diagnostic only.
 - Hard-caps each backend request to the current Llama Server context of 32768 tokens, in both strict config validation and the physical prompt compiler.
 - Exposes remaining physical token budget to the Main LLM alongside remaining tool/turn fuses so it can prioritize decisive work without Runtime deciding semantic sufficiency.
 - Reframes Investigation in the Agent contract as the Main LLM's own semantic working memory. Multi-candidate audits are instructed to create/close persistent targets instead of carrying unresolved questions only in transient reasoning.

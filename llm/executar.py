@@ -623,31 +623,37 @@ def _completion_budget_remaining(execution: ExecutionContext | None):
 
 
 def _preflight_completion_budget(config, execution: ExecutionContext | None, max_tokens, *, pending_completion_tokens=0):
-    """Reject an impossible LLM request before any backend call is sent.
+    """Fit the next output ceiling inside the remaining physical budget.
 
-    ``downstream_completion_reserve_tokens`` protects only the next mandatory
-    semantic stage already known by the caller. It is authority/budget state,
-    not a semantic decision: the runtime never chooses what the model should
-    say or which evidence matters.
+    ``max_tokens`` is a ceiling, not a prepaid allocation. The Runtime protects
+    the next mandatory downstream semantic stage, then clamps the current call
+    to whatever can still physically fit. It fails only when no positive output
+    budget remains for the current call.
     """
-    if execution is None:
-        return {"remaining": None, "requested": int(max_tokens or 0), "downstream_reserve": 0}
-    remaining = _completion_budget_remaining(execution)
     requested = max(0, int(max_tokens or 0))
     pending = max(0, int(pending_completion_tokens or 0))
+    if execution is None:
+        return {
+            "remaining": None, "requested": requested, "effective": requested,
+            "pending": pending, "downstream_reserve": 0, "clamped": False,
+        }
+    remaining = _completion_budget_remaining(execution)
     cfg_llm = (config or {}).get("llm") or {}
     try:
         downstream = max(0, int(cfg_llm.get("downstream_completion_reserve_tokens", 0) or 0))
     except (TypeError, ValueError):
         downstream = 0
-    if remaining is not None and pending + requested + downstream > remaining:
+    available = max(0, int(remaining or 0) - pending - downstream)
+    effective = min(requested, available) if requested > 0 else 0
+    if requested > 0 and effective <= 0:
         raise ErroLLM(
-            "A próxima chamada LLM não cabe no orçamento de saída restante sem consumir a reserva da próxima etapa obrigatória.",
+            "Não resta orçamento positivo de saída para a próxima chamada LLM após preservar a etapa obrigatória seguinte.",
             transient=False, error_code="MAX_COMPLETION_BUDGET_INSUFFICIENT",
         )
     return {
-        "remaining": remaining, "requested": requested, "pending": pending,
-        "downstream_reserve": downstream,
+        "remaining": remaining, "requested": requested, "effective": effective,
+        "pending": pending, "downstream_reserve": downstream,
+        "available_for_call": available, "clamped": bool(requested > 0 and effective < requested),
     }
 
 
@@ -670,7 +676,9 @@ def _reservar_requisicao_llm(config, execution: ExecutionContext | None, prompt_
     """
     if execution is None:
         return {"estimated_prompt_tokens": 0, "estimated_effective_tokens": 0}
-    _preflight_completion_budget(config, execution, max_tokens)
+    completion_fit = _preflight_completion_budget(config, execution, max_tokens)
+    if max_tokens is not None:
+        max_tokens = int(completion_fit.get("effective") or 0)
     cfg_llm = (config or {}).get("llm", {})
     cfg_context = (config or {}).get("context_engine", {})
     chars_per_token = max(1, int(cfg_context.get("chars_per_token_fallback", 3) or 3))
@@ -943,7 +951,19 @@ def _chamar_llm_impl(
         execution, "llm_wait", "Aguardando a LLM local",
         profile=perfil or "default",
     )
-    _preflight_completion_budget(config, execution, max_tokens)
+    completion_fit = _preflight_completion_budget(config, execution, max_tokens)
+    if max_tokens is not None:
+        max_tokens = int(completion_fit.get("effective") or 0)
+    latest_call = execution.latest_call() if execution is not None else None
+    if isinstance(latest_call, dict):
+        prompt_meta = latest_call.setdefault("prompt", {})
+        prompt_meta.setdefault("output_tokens_requested", int(completion_fit.get("requested") or 0))
+        prompt_meta["output_tokens_reserved"] = int(max_tokens or 0)
+        prompt_meta["completion_budget_remaining_before_call"] = completion_fit.get("remaining")
+        prompt_meta["downstream_completion_reserve_tokens"] = int(completion_fit.get("downstream_reserve") or 0)
+        prompt_meta["completion_ceiling_clamped"] = bool(
+            prompt_meta.get("completion_ceiling_clamped") or completion_fit.get("clamped")
+        )
     _reservar_orcamento_llm(execution)
 
     tentativas = max(1, int(cfg_llm.get("retry_max_attempts", 3)))
@@ -1258,42 +1278,39 @@ def _chamar_llm(
 
 
 
-PROMPT_AGENTE = """You are Eyle, a coding agent. Return JSON only.
+PROMPT_AGENTE = """You are Eyle. JSON only.
 
-Return exactly: tool_calls, patches, needs_user, final, investigation_updates. Exactly one of tool_calls, patches, needs_user, or final is non-null. final={answer,limitations}. needs_user={question,missing_information}. investigation_updates items are exactly {id,goal,status,evidence_ids,reason}, status=open|established|dismissed.
+Return exactly: tool_calls, patches, needs_user, final, investigation_updates. Exactly one action payload is non-null. final={answer,limitations,evidence_ids}; choose supporting Evidence IDs or [] for ungrounded chat. needs_user={question,missing_information}. investigation_updates={id,goal,status,evidence_ids,reason}[], status=open|established|dismissed.
 
-You are the semantic brain. The request is the complete canonical task input; conversation_background is context. Decide the work, tools, semantic debt and when to finish. Runtime validates physical reality/contracts but never classifies intent, chooses goals or decides Evidence sufficiency. physical_limits are hard fuses; exhaustion fails the task and no budget is earned.
+You are the semantic brain. request is canonical task input; conversation_background is context. Decide goals, tools, semantic debt and when to finish. Runtime validates physical contracts/reality but never classifies intent or Evidence sufficiency. physical_limits are hard fuses; no budget is earned. needs_user only when an active concrete task cannot continue without a specific user fact/choice. Never use it for greetings or optional facts. Otherwise return final. A resumed clarification becomes part of the canonical request.
 
-needs_user is ONLY for an already-active concrete task that is materially blocked because a specific fact or choice must come from the user before work can continue. missing_information must name that concrete blocker; question asks only for it. Never use needs_user for greetings, social conversation, invitations to provide a task, optional information, generic "how can I help?" follow-ups, or information you can obtain with available tools. If no concrete task is blocked, return final. A resumed user clarification becomes part of request itself and remains canonical across later tools and Claim review.
+Investigation is YOUR semantic working memory, never a Runtime requirement. Keep it empty unless material debt must survive the turn. Preserve target identity. established requires Evidence; dismissed requires reason.
 
-Investigation is YOUR semantic working memory, never a Runtime requirement. Keep it empty if no unresolved material question must survive this turn; otherwise create a durable target. Do not drop/rename declared goals. Attach material Evidence. established requires Evidence; dismissed requires reason. For multiple unresolved candidates, open/close targets instead of carrying debt only transiently.
+Identify the actual requested property. Never replace it with an easier proxy. Definitions, references, imports, tests, signatures and names prove only what they directly observe. Stop when retained Evidence discriminates the property; do no work that cannot change the conclusion. For choose/find-a-candidate tasks, once one candidate is materially investigated, either polarity is a valid result unless explicitly constrained; do not abandon it because of the result. After Claim feedback, address semantic_gaps[].required_property for the same target/candidate before exploring another. If one material non-redundant attempt still cannot establish the property and uncertainty is allowed, dismiss with reason and final with the limitation.
 
-Identify the actual property requested before gathering Evidence. Never replace it with an easier proxy. Definitions, references, imports, compilation, tests, signatures, names and markers prove only what they directly observe. If the property depends on behavior, execution, reachability, causality, compatibility, completeness, absence or another stronger relation, establish that stronger property. Stop when retained Evidence is sufficient; do no work that cannot change the conclusion.
+capability_index lists unused callable tools; active_tools expands a tool after first request. terminal_capabilities are non-retryable. Tools may expose observations, coverage, frontiers and handles: objective facts, not conclusions. A frontier is an unmaterialized continuation boundary; YOU decide whether it can change the Investigation. expand_observation materializes a bounded snapshot handle.
 
-capability_index is the compact list of callable unused tools; active_tools contains expanded contracts only after first request. Any listed tool may be called immediately; no selector/activation step exists. physical_limits.terminal_capabilities lists non-retryable tool failures for this job; never request them again. symbol_relations reports structural facts/paths, never liveness semantics. run_command is unrestricted only inside its per-job sandbox snapshot; it never writes the real workspace. Use tools only when useful, batch at most 4 independent calls, and do not repeat retained observations unless reality changed.
+symbol_relations reports structural facts, never liveness semantics. For root-to-symbol/path questions prefer query=reachability; omit roots to use objective Python entrypoint signals. If coverage.objective_complete and the observation discriminates the property, stop; do not walk the proven path node-by-node. Request text references only when they can discriminate the current property; otherwise leave include_text_references false.
+
+run_command is unrestricted only in its job sandbox and never writes the real workspace. Use tools only when useful, batch at most 4 independent calls, and never repeat retained observations unless reality changed.
 
 Real workspace writes use one transaction: replace/create={operation,path,content}; delete={operation,path}; update={operation,path,line_start,line_end,new_code}. Dry-run never writes; confirmed apply does. Never claim an unconfirmed write.
 
-Final is for the user: lead with the result, hide internal Evidence/Claim mechanics unless asked, and match the user's language/tone.
+Final: lead with the result, hide Evidence/Claim mechanics unless asked, and match the user's language/tone.
 """
 
 PROMPT_CLAIM_VERIFIER = """You are Eyle Claim Verifier. Return JSON only. You are the independent semantic auditor. Never request tools, edits, plans or create Investigation.
 
 There is one task only: verify_claims. Audit the complete provisional answer against the canonical request and supplied grounding coordinates. Every response MUST include material_satisfaction={status,grounding_refs,reason}, answer_consistency={status,grounding_refs,reason}, claims and semantic_gaps.
 
-Grounding coordinates are typed and literal. Use only coordinates present in the packet:
-- request = the canonical user task itself.
-- answer:<anchor_id> = literal visible answer text.
-- evidence:<EvidenceID> = source/runtime Evidence shown in evidence.
-- runtime:<runtime_fact_id> = physical execution fact shown in runtime_facts.
-- investigation:<target_id> = declared semantic-debt coordinate; its reason is argument, never factual authority.
+Grounding coordinates are typed and literal. Every citable item in the packet already contains its complete `ref`; copy those refs exactly and never construct, shorten, prefix or infer a coordinate yourself. `request` is the only standalone ref. Answer anchors, Evidence, Runtime Facts and Investigation targets expose refs such as answer:a1, evidence:ev-0001, runtime:r1 and investigation:inv-1.
 Grounding is not synonymous with EvidenceLedger. Omissions or instruction failures may be grounded by request + answer anchors. Physical impossibility may be grounded by runtime facts. Source-code assertions normally require source Evidence.
 
 First judge material delivery. material_satisfaction.status is satisfied|gap|blocked. Use blocked only when the requested action cannot physically be completed in the current execution and the answer accurately reports that limitation; blocked MUST cite at least one runtime:* grounding. A truthful grounded blocked outcome is a valid final delivery, not a reason to demand impossible repeated execution. Then judge answer consistency. Then atomize every materially necessary factual/architectural/bug/risk/recommendation Claim. Finally audit declared Investigation closure.
 
-For each Claim return exactly: answer_ref,target_id,statement,grounding_refs,verdict,reason. answer_ref names a supplied answer anchor. target_id names an existing Investigation target when applicable, otherwise null. verdict=supported|contradicted|insufficient. grounding_refs must be non-empty. Cite the coordinates that genuinely discriminate the proposition; do not cite the answer itself as circular proof of an external fact. If the available coordinates do not establish the proposition, use insufficient.
+For each Claim return exactly: answer_ref,target_id,statement,grounding_refs,verdict,reason. answer_ref copies a supplied answer:* ref. target_id copies a supplied investigation:* ref when applicable, otherwise null. verdict=supported|contradicted|insufficient. grounding_refs must be non-empty. Cite the coordinates that genuinely discriminate the proposition; do not cite the answer itself as circular proof of an external fact. If the available coordinates do not establish the proposition, use insufficient.
 
-Investigation is semantic debt declared by the Main LLM, not by Runtime. Empty Investigation is valid. If a materially required property was not established, emit scope_gap. If an existing target was falsely closed, tie the gap/insufficient Claim to that target_id. Do not accept an easier proxy: definitions, references, imports, compilation, tests, signatures, successful commands, names or markers prove only what they directly observe unless they genuinely discriminate the requested property.
+Investigation is semantic debt declared by the Main LLM, not by Runtime. Empty Investigation is valid. If a materially required property was not established, emit scope_gap. If an existing target was falsely closed, tie the gap/insufficient Claim to its supplied investigation:* target_id. Do not accept an easier proxy: definitions, references, imports, compilation, tests, signatures, successful commands, names or markers prove only what they directly observe unless they genuinely discriminate the requested property.
 
 semantic_gaps items contain exactly type,target_id,grounding_refs,required_property,reason. type=material_omission|conflicting_evidence|scope_gap. grounding_refs must be non-empty. required_property states the unresolved material property precisely enough that the Main LLM can decide how to establish or narrow it; do not prescribe tools. material_omission may cite request and answer anchors without source Evidence. conflicting_evidence cites the conflicting coordinates. scope_gap may cite request and/or Investigation when the missing proof was never gathered.
 

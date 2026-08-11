@@ -16,7 +16,7 @@ from eyle.runtime import queue as runtime_queue
 def _config():
     return {
         "app_version": "2.7.4",
-        "revision": "rev5.6-grounded-outcomes-docker-backend",
+        "revision": "rev5.7.1-directed-observation-context-projection",
         "llm": {
             "model": "auto",
             "context_window_tokens": 10000,
@@ -53,7 +53,7 @@ def test_execution_trace_is_one_registered_read_only_observer():
     assert item["effects"] == ["NONE"]
     assert "diagnos" in contract
     assert "chain-of-thought" in contract
-    assert len(tools.TOOLS) == 17
+    assert len(tools.TOOLS) == 18
     assert "read_range" not in tools.TOOLS
 
 
@@ -160,6 +160,7 @@ def test_agent_can_choose_execution_trace_and_cite_it(monkeypatch, tmp_path):
         return {"final": {
             "answer": "O trace atual registra a composição do contexto sem expor o prompt bruto.",
             "limitations": [],
+            "evidence_ids": [evidence_id],
         },
         "investigation_updates": [{"id": "T1", "goal": "Establish what the current trace records", "status": "established", "evidence_ids": [evidence_id], "reason": "The trace Evidence was observed."}]}
 

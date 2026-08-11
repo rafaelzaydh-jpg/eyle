@@ -1,4 +1,4 @@
-"""Safe observable execution traces for the canonical Rev5.6 runtime.
+"""Safe observable execution traces for the canonical Rev5.7 runtime.
 
 Trace is factual telemetry only: no semantic scheduler, no earned-authority
 history, no chain-of-thought, raw prompts, raw model responses or source bodies.

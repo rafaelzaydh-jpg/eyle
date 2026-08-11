@@ -1,71 +1,167 @@
-# Technical overview — Eyle Rev5.6
+# Technical overview — Eyle Rev5.7.1
 
-Rev5.6 keeps canonical state ownership and adds progressive tool disclosure plus a hard training budget so the Main LLM cannot spend an open-ended execution envelope.
+Eyle uses one Main-LLM execution loop with deterministic capabilities, canonical observation/evidence state, bounded model-facing projection, supervised writes and optional Claim Review.
 
 ## Agent loop
 
-Each Main LLM call receives the active request, optional Investigation, latest tool results, an ObservationLedger-derived `observation_map`, Evidence index and physical limits. Tool discovery is progressive: `capability_index` contains compact signatures/purposes for tools not yet used; `active_tools` contains expanded contracts only for tools the Main LLM actually requested before. Any indexed tool can be called immediately, so there is no selector call. First use itself activates the expanded view for later turns. The Main LLM directly chooses tools, patches, user input or Final.
+```text
+request
+  ↓
+Main LLM
+  ├─ Investigation updates
+  ├─ tool/tool_calls
+  ├─ patches
+  └─ Final
+        ↓
+Runtime validation/execution
+        ↓
+ObservationLedger → EvidenceLedger
+        ↓
+projected next-turn context
+```
 
-There is no semantic router, task classifier, `workspace_scope`, phase scheduler or Investigation requirement.
+There is no semantic router, task classifier, `workspace_scope`, phase scheduler, Tool Selector or runtime-created Investigation target.
+
+## Tool discovery and hot contracts
+
+The first Agent call receives a compact `capability_index`. Any indexed capability may be called immediately.
+
+After use, full tool contracts are not accumulated forever. The model-facing hot set contains only the two most recently requested distinct tools in `active_tools`; older tools return to compact capability navigation and remain callable.
+
+This is deterministic context projection derived from DecisionLedger events, not semantic tool selection.
 
 ## Canonical state ownership
 
 ```text
-ObservationLedger → physical tool events, replay identity, source coverage and pending observation view
-EvidenceLedger    → Evidence identity, persistence, rehydration, freshness and index
-DecisionLedger    → decision event history and rejection identity
+ObservationLedger → physical tool events, replay identity, coverage and continuation snapshots
+EvidenceLedger    → Evidence identity, persistence, rehydration, freshness and navigation
+DecisionLedger    → decision events and deterministic rejection identity
 LLMCallLedger     → prompt metadata + provider attempts in one logical-call record
 WriteTransaction  → patches, attempts, validation, failures and rollback
+Investigation     → semantic debt declared by Main LLM
+ClaimReview       → semantic audit
 ```
 
-`ExecutionContext` owns run-scoped physical budgets/deadline and the LLMCallLedger. `config` remains immutable configuration. `runtime/history.py`, Prompt Accounting and `execution_trace` project these owners instead of rebuilding parallel runtime state.
+`ExecutionContext` owns run-scoped physical budgets/deadline, terminal capabilities and LLMCallLedger. History, Prompt Accounting and `execution_trace` project these owners rather than rebuilding parallel state.
 
-## Evidence pipeline
+## Capability result pipeline
 
 ```text
-Tool
-→ normalized observable result
+Capability
+→ normalized physical result
 → ObservationLedger
-→ Evidence
-→ Main LLM
+→ optional Evidence
+→ bounded model projection
 ```
 
-Runtime validates identity/freshness. It never decides whether Evidence proves a semantic conclusion.
+All executable tools share the same physical envelope:
+
+```text
+status / ok / executed / changed / error_code / retryable
+observations[] / coverage / frontiers[] / handles[]
+detail
+```
+
+The observation fields may be empty. `effect=observe|execute|mutate` is registry metadata for physical behavior, not a task classifier.
+
+## Directed structural observation
+
+For code reachability, Main can request:
+
+```text
+symbol_relations(symbol="...", query="reachability")
+```
+
+The capability builds/resolves the current Python structural graph for the query, starts from explicit roots or objective entrypoint signals, and searches for a path to the target.
+
+A positive result can return the complete path with edge coordinates and `coverage.objective_complete=true`. Incomplete results may expose objective frontiers such as depth boundaries or unresolved relevant structural transitions. Larger continuation payloads remain behind opaque handles and can be materialized with `expand_observation`.
+
+The capability establishes structural relations only; Main decides what those relations mean for the user's requested property.
+
+## Context projection
+
+Canonical state is deliberately larger than repeated prompt state.
+
+Main receives a bounded hot projection rather than every accumulated Evidence/Observation/tool contract on every turn. Current projection includes Investigation-pinned plus recent Evidence/Observation navigation, bounded latest tool deltas and the two hot tool contracts.
+
+```text
+canonical ledgers  ██████████████████████████████
+model view         ███████
+```
+
+Projection is deterministic and navigational. Runtime does not semantically rank claims or choose the Evidence that matters.
+
+## Evidence and Final
+
+Tool observations may register Evidence. Runtime owns identity and freshness; Main owns relevance and sufficiency.
+
+Final is:
+
+```json
+{
+  "answer": "...",
+  "limitations": [],
+  "evidence_ids": ["ev-..."]
+}
+```
+
+Those `evidence_ids`, plus Evidence Main already attached to Investigation, define the source-Evidence subset sent to Claim Review.
 
 ## Claim pipeline
 
 ```text
 Final with grounded runtime state
-→ one Claim Review
-→ accepted
-   OR debt returned to Main LLM
+→ Claim Review
+→ supported
+   OR semantic debt returned to Main
 
-self_check Final with zero Observation/Evidence/Investigation/write state
-→ direct acceptance (no semantic router; there is simply no grounded state to audit)
+self_check Final with zero grounded runtime state
+→ direct acceptance
 
 verified mode
 → Claim always runs
 ```
 
-There are no Findings lane, targeted Claim recovery, semantic-gap recovery or structural repair retries.
+Claim can use `request`, `answer:*`, `evidence:*`, `runtime:*` and `investigation:*` grounding coordinates. It cannot call tools or mutate the project.
 
-## Context and training budget
+## Physical inference budget
 
-There is no artificial working-set target, fixed Evidence-count cap, fixed observation-count cap, `chat_history_token_budget`, `relevant_sources` or `visible_source_ranges`. Compact canonical state remains available until the real model context window and safety margin require physical cropping.
+Current default job envelope:
 
-The current Llama Server window is hard-capped at **32768 tokens per backend request**. One user message/job also has a **98000-token physical envelope** across Agent, transport attempts and Claim. Prompt attempts are charged in full; cache discounts do not buy more budget. Current sub-fuses are 90000 prompt tokens and 8000 completion tokens.
+```text
+backend request context <= 32768
+prompt attempts         <= 90000
+completion              <= 8000
+physical total          <= 98000
+```
+
+Prompt attempts are charged in full even when the provider reports cache hits. Turns, tools, LLM calls and deadline are independent fuses. Per-call output reservation is adaptively fitted while preserving mandatory downstream Claim reserve.
+
+## Writes and command execution
+
+Real project writes follow one path:
+
+```text
+patches → dry-run → confirmation → apply → verification → success/rollback
+```
+
+`run_command` is unrestricted only inside a strong disposable project snapshot. It cannot mutate the real workspace directly.
 
 ## Structured output
 
-Structured Agent/Claim calls require JSON Schema strict. Unsupported backend capability is a hard boundary error. No capability negotiation/cache, JSON-object downgrade, prompt fallback or truncation re-call exists.
+Structured Agent/Claim calls require strict JSON Schema. Unsupported backend capability is a hard boundary error. There is no capability negotiation/cache, JSON-object downgrade, prompt fallback or structural-repair retry.
 
-## No compatibility layer
+## Persistence
 
 ```text
-session         5.6 exact
-queue           5.6 exact
-project memory  5.6 exact
-config          5.6 exact
+session         5.7.1 exact
+queue           5.7.1 exact
+project memory  5.7.1 exact
+config          5.7.1 exact
 ```
 
 Deprecated aliases, migration bridges and dual-read contracts do not exist.
+
+## Scope
+
+This overview documents the current coding-agent runtime. Broader reuse of the observation protocol is a future design direction documented in [architectural-direction.md](architectural-direction.md), not a current non-coding product claim.

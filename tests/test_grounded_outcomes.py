@@ -7,6 +7,7 @@ import eyle.core.agent as core_agent
 import eyle.core.sandbox as sandbox_mod
 import eyle.core.tools as tools
 from eyle.core.claim_review import build_answer_anchors, normalize_claim_review
+from eyle.core.code_relations import analyze_symbol_relations
 from eyle.core.execution_context import ExecutionContext, bind_execution, reset_execution
 from llm.structured import StructuredResponseError, parse_claim_review_response
 from tests.canonical import agent_final, agent_tools, base_config, review, claim, tool_call
@@ -52,7 +53,7 @@ def test_runtime_fact_can_ground_blocked_outcome_without_evidence_ledger():
         material_reason="The requested sandbox action cannot execute in this job.",
     )
     runtime_facts = [{
-        "id": "r1", "tool": "run_command", "status": "failed", "ok": False,
+        "ref": "runtime:r1", "tool": "run_command", "status": "failed", "ok": False,
         "executed": False, "error_code": "SANDBOX_UNAVAILABLE",
     }]
     ok, reason, normalized = normalize_claim_review(
@@ -105,15 +106,15 @@ def test_nonretryable_tool_failure_becomes_runtime_fact_and_final_can_be_blocked
     def fake_claim(prompt, _config):
         packet = json.loads(prompt)
         claim_packets.append(packet)
-        runtime_id = packet["runtime_facts"][0]["id"]
+        runtime_ref = packet["runtime_facts"][0]["ref"]
         return review(
             claims=[claim(
                 statement="The sandbox capability is unavailable in this job",
-                grounding_refs=[f"runtime:{runtime_id}"], verdict="supported",
+                grounding_refs=[runtime_ref], verdict="supported",
                 reason="Runtime recorded the non-retryable capability failure.",
             )],
             material_status="blocked",
-            material_grounding=[f"runtime:{runtime_id}", "request", "answer:a1"],
+            material_grounding=[runtime_ref, "request", "answer:a1"],
             material_reason="The requested action is physically blocked in this execution.",
         )
 
@@ -190,3 +191,23 @@ def test_docker_backend_reuses_one_container_per_job(monkeypatch, tmp_path):
     finally:
         execution.cleanup_sandbox()
         reset_execution(token)
+
+
+def test_symbol_relations_reports_python_main_guard_even_with_ambiguous_main_names(tmp_path):
+    (tmp_path / "a.py").write_text(
+        "def main():\n    return 1\n\nif __name__ == '__main__':\n    main()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "b.py").write_text("def main():\n    return 2\n", encoding="utf-8")
+    detail = analyze_symbol_relations(
+        str(tmp_path), "main", path="a.py", direction="incoming",
+        include_text_references=False, max_depth=4, max_edges=20,
+    )
+    assert len(detail["definitions"]) == 1
+    assert any(
+        edge["kind"] == "python_main_guard"
+        and edge["from"] == "a.py::<module>"
+        and edge["to"] == "a.py::main"
+        for edge in detail["incoming"]
+    )
+    assert "python_main_guard" in detail["reachability_edge_kinds"]

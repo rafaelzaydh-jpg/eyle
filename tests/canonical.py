@@ -34,11 +34,12 @@ def agent_patches(patches, investigation=None):
 
 def agent_final(final, investigation=None):
     if isinstance(final, str):
-        final = {"answer": final, "limitations": []}
+        final = {"answer": final, "limitations": [], "evidence_ids": []}
     else:
         final = {
             "answer": str((final or {}).get("answer") or ""),
             "limitations": list((final or {}).get("limitations") or []),
+            "evidence_ids": list((final or {}).get("evidence_ids") or []),
         }
     return {
         "final": final,
@@ -57,7 +58,7 @@ def agent_needs_user(message, investigation=None, *, missing_information="A conc
 
 
 def claim(
-    *, answer_ref="a1", target_id=None, statement="supported fact",
+    *, answer_ref="answer:a1", target_id=None, statement="supported fact",
     evidence_ids=None, grounding_refs=None, verdict="supported", reason="",
 ):
     refs = list(grounding_refs or [])
@@ -65,6 +66,8 @@ def claim(
         refs = [f"evidence:{item}" for item in (evidence_ids or [])]
     if not refs:
         refs = ["request"]
+    if target_id is not None and not str(target_id).startswith("investigation:"):
+        target_id = f"investigation:{target_id}"
     return {
         "answer_ref": answer_ref, "target_id": target_id, "statement": statement,
         "grounding_refs": refs, "verdict": verdict, "reason": reason,
@@ -96,8 +99,8 @@ def review(
 def base_config(*, claims_mode="off", tests_enabled=False):
     return {
         "app_version": "2.7.4",
-        "config_schema_version": "5.6",
-        "revision": "rev5.6-grounded-outcomes-docker-backend",
+        "config_schema_version": "5.7.1",
+        "revision": "rev5.7.1-directed-observation-context-projection",
         "llm": {
             "context_window_tokens": 32768,
             "agent_max_tokens": 3600,

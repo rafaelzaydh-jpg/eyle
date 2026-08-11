@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List
 
 
-MEMORY_SCHEMA_VERSION = "5.6"
+MEMORY_SCHEMA_VERSION = "5.7.1"
 
 
 def _utc_now() -> str:

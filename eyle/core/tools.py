@@ -40,26 +40,47 @@ from eyle.core.project_inspection import (  # noqa: E402
 from eyle.core.git_tools import git_status as inspect_git_status, git_diff as inspect_git_diff  # noqa: E402
 from eyle.core.execution_trace import build_execution_trace, filter_execution_trace  # noqa: E402
 from eyle.core.code_relations import analyze_symbol_relations  # noqa: E402
+from eyle.core.observation_contract import (  # noqa: E402
+    materialize_snapshot_handle, normalize_effect, register_snapshot_handle, result_observation_fields,
+)
 from eyle.core.sandbox import executar_comando_livre_no_sandbox  # noqa: E402
 from eyle.core.workspace_policy import _caminho_parece_segredo  # noqa: E402
 
 PROJECT_BASE_DIR = os.path.dirname(BASE_DIR)
 MEMORY_DIR = os.path.join(PROJECT_BASE_DIR, "memory")
 
-_CAMPOS_RESULTADO = ("status", "ok", "executed", "changed", "error_code", "detail", "retryable")
+_CAMPOS_RESULTADO = ("status", "ok", "executed", "changed", "error_code", "detail", "retryable", "observations", "coverage", "frontiers", "handles")
 
 
-def _resultado(status, ok, executed, changed=False, error_code=None, detail=None, retryable=None):
-    """Monta o contrato unico de retorno das tools (Atualizacao 21)."""
+def _resultado(status, ok, executed, changed=False, error_code=None, detail=None, retryable=None,
+               observations=None, coverage=None, frontiers=None, handles=None):
+    """Canonical Rev5.7 tool result envelope.
+
+    The physical status fields remain mandatory. Objective observation fields are
+    always present but may be empty, so every capability shares one Runtime
+    contract without forcing domain-specific payloads onto simple tools.
+    """
+    observation_fields = result_observation_fields(
+        observations=observations, coverage=coverage, frontiers=frontiers, handles=handles,
+    )
     return {
         "status": status, "ok": bool(ok), "executed": bool(executed),
         "changed": bool(changed), "error_code": error_code, "detail": detail,
         "retryable": None if retryable is None else bool(retryable),
+        **observation_fields,
     }
 
 
-def _sucesso(detail=None, changed=False):
-    return _resultado("success", True, True, changed=changed, detail=detail)
+def _sucesso(detail=None, changed=False, *, observations=None, coverage=None, frontiers=None, handles=None):
+    if isinstance(detail, dict):
+        if observations is None: observations = detail.get("observations")
+        if coverage is None: coverage = detail.get("coverage")
+        if frontiers is None: frontiers = detail.get("frontiers")
+        if handles is None: handles = detail.get("handles")
+    return _resultado(
+        "success", True, True, changed=changed, detail=detail,
+        observations=observations, coverage=coverage, frontiers=frontiers, handles=handles,
+    )
 
 
 def _falha(error_code, detail, executed=False, changed=False, retryable=None):
@@ -320,7 +341,7 @@ def _tool_search_code(arguments, ctx):
 
 
 def _tool_symbol_relations(arguments, ctx):
-    """Return structural relationships for one symbol without semantic liveness labels."""
+    """Return local relations or a query-shaped structural reachability observation."""
     root = _caminho_projeto(ctx)
     if not root:
         return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
@@ -329,19 +350,75 @@ def _tool_symbol_relations(arguments, ctx):
         return _falha("SECRET_PATH_BLOCKED", "arquivo protegido pela política unificada de segredos do workspace", executed=True)
     config = (ctx or {}).get("config") or {}
     agent_cfg = config.get("agent") or {}
+    query = str(arguments.get("query") or "relations")
+    default_depth = 12 if query == "reachability" else 6
     try:
         detail = analyze_symbol_relations(
             root, arguments["symbol"], path=path, roots=list(arguments.get("roots") or []),
             direction=str(arguments.get("direction") or "both"),
             include_text_references=bool(arguments.get("include_text_references", False)),
-            max_depth=int(arguments.get("max_depth") or 6),
+            max_depth=int(arguments.get("max_depth") or default_depth),
             max_edges=int(arguments.get("max_edges") or 60),
             max_files=max(1, int(agent_cfg.get("max_project_scan_entries", 20000) or 20000)),
             max_file_bytes=max(1024, int(agent_cfg.get("max_project_file_bytes", 4 * 1024 * 1024) or 4 * 1024 * 1024)),
+            query=query,
         )
-        return _sucesso(detail)
+        handle_store = (ctx or {}).get("observation_handles")
+        handles = []
+        payloads = list(detail.pop("continuation_payloads", []) or [])
+        if isinstance(handle_store, dict):
+            for payload in payloads:
+                if not isinstance(payload, dict):
+                    continue
+                summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+                handle = register_snapshot_handle(
+                    handle_store, kind=f"symbol_relations.{payload.get('frontier_kind') or 'continuation'}",
+                    payload=payload, workspace_epoch=int((ctx or {}).get("workspace_epoch") or 0),
+                    source_tool="symbol_relations",
+                    description=f"Continuation from symbol_relations for {arguments.get('symbol')}",
+                    page_size=12,
+                )
+                handles.append(handle)
+                index = len(handles) - 1
+                for frontier in detail.get("frontiers") or []:
+                    if isinstance(frontier, dict) and frontier.get("continuation_index") == index:
+                        frontier.pop("continuation_index", None)
+                        frontier["handle"] = handle["id"]
+                        if summary.get("count") is not None:
+                            frontier.setdefault("count", summary.get("count"))
+        else:
+            for frontier in detail.get("frontiers") or []:
+                if isinstance(frontier, dict): frontier.pop("continuation_index", None)
+        detail["handles"] = handles
+        return _sucesso(detail, handles=handles)
     except (OSError, ValueError) as error:
         return _falha("RELATION_SCAN_FAILED", str(error), executed=True)
+
+
+def _tool_expand_observation(arguments, ctx):
+    """Materialize one bounded page behind an opaque observation handle."""
+    store = (ctx or {}).get("observation_handles")
+    if not isinstance(store, dict):
+        return _falha("HANDLE_STORE_UNAVAILABLE", "observation handle store unavailable", executed=False, retryable=False)
+    materialized, error = materialize_snapshot_handle(
+        store, str(arguments.get("handle") or ""), workspace_epoch=int((ctx or {}).get("workspace_epoch") or 0),
+    )
+    if error:
+        return _falha(error, "observation handle is unavailable for the current workspace epoch", executed=True, retryable=False)
+    payload = materialized.get("payload") if isinstance(materialized, dict) else None
+    observations = []
+    if isinstance(payload, dict) and isinstance(payload.get("items"), list):
+        observations = [item for item in payload.get("items") or [] if isinstance(item, dict)]
+    elif isinstance(payload, list):
+        observations = [item for item in payload if isinstance(item, dict)]
+    elif isinstance(payload, dict):
+        observations = [payload]
+    detail = dict(materialized or {})
+    detail["observations"] = observations
+    return _sucesso(
+        detail, observations=observations, coverage=detail.get("coverage"),
+        frontiers=detail.get("frontiers"), handles=detail.get("handles"),
+    )
 
 
 def _tool_find_symbol(arguments, ctx):
@@ -833,14 +910,28 @@ TOOLS = {
         "caveats": ["Reports structural facts only; it never labels code live/dead/legacy or proves runtime behavior. Static resolution can be incomplete for dynamic dispatch, reflection, plugins or ambiguous names."],
         "input_schema": _schema_objeto({
             "symbol": {"type": "string", "minLength": 1, "description": "Code symbol name to inspect."},
+            "query": {"type": "string", "enum": ["relations", "reachability"], "description": "relations returns local structural facts; reachability asks for a root-to-symbol structural path and only material frontiers."},
             "path": _CAMINHO,
-            "roots": {"type": "array", "description": "Optional caller/root symbols, node ids or project-relative files from which to test structural reachability."},
+            "roots": {"type": "array", "items": {"type": "string", "minLength": 1}, "description": "Optional caller/root symbols, node ids or project-relative files from which to test structural reachability."},
             "direction": {"type": "string", "enum": ["incoming", "outgoing", "both"], "description": "Project only the requested relation direction; default both."},
             "include_text_references": {"type": "boolean", "description": "Include literal text-reference rows. Default false because structural queries usually do not need them."},
-            "max_depth": {"type": "integer", "minimum": 1, "maximum": 12, "description": "Maximum structural-graph hops for optional root reachability."},
+            "max_depth": {"type": "integer", "minimum": 1, "maximum": 32, "description": "Maximum structural-graph hops for root reachability. Directed reachability defaults to 12; local relations default to 6."},
             "max_edges": {"type": "integer", "minimum": 10, "maximum": 500, "description": "Maximum relation rows returned per relation family."},
         }, ["symbol"]),
         "fn": _tool_symbol_relations,
+    },
+    "expand_observation": {
+        "description": "Materialize one bounded continuation page from an opaque handle returned by a prior objective observation.",
+        "availability": "workspace",
+        "produces_evidence": True,
+        "category": "READ_ONLY",
+        "effects": ["NONE"],
+        "returns": "A bounded snapshot continuation with objective observations, coverage, any remaining frontier and a next handle when more is available.",
+        "caveats": ["Rev5.7 handles address observation snapshots, not guaranteed-live resources; handles become stale after the Runtime workspace epoch changes."],
+        "input_schema": _schema_objeto({
+            "handle": {"type": "string", "minLength": 1, "description": "Opaque continuation handle previously returned by a tool observation."},
+        }, ["handle"]),
+        "fn": _tool_expand_observation,
     },
     "find_symbol": {
         "description": "Locate a symbol in a known file or across the live project.",
@@ -911,7 +1002,7 @@ TOOLS = {
         "input_schema": _schema_objeto({
             "text": {"type": "string", "minLength": 1, "description": "Compact project fact to persist in external project memory."},
             "kind": {"type": "string", "description": "Optional memory category; defaults to fact when omitted."},
-            "evidence_ids": {"type": "array", "description": "Current-task evidence IDs that substantiate the stored fact."},
+            "evidence_ids": {"type": "array", "items": {"type": "string", "minLength": 1}, "description": "Current-task evidence IDs that substantiate the stored fact."},
         }, ["text", "evidence_ids"]),
         "fn": _tool_memory_store,
     },
@@ -978,6 +1069,13 @@ TOOLS = {
 # configuracao para valores numericos antes de chegar ao modelo.
 for _entrada_tool in TOOLS.values():
     _entrada_tool.setdefault("limits", {})
+    _effects = set(_entrada_tool.get("effects") or [])
+    if _entrada_tool.get("category") == "EDIT":
+        _entrada_tool["effect"] = "mutate"
+    elif any(str(item) not in {"NONE"} for item in _effects):
+        _entrada_tool["effect"] = "execute"
+    else:
+        _entrada_tool["effect"] = "observe"
 TOOLS["list_tree"]["limits"] = {
     "max_entradas": {"config_key": "agent.max_tree_entries", "default": 200},
     "max_profundidade": {"config_key": "agent.max_tree_depth", "default": 6},
@@ -1036,7 +1134,11 @@ def _compact_input_contract(schema):
             bounds.append(f">={spec.get('minimum')}")
         if spec.get("maximum") is not None:
             bounds.append(f"<={spec.get('maximum')}")
-        head = kind + ((" " + " ".join(bounds)) if bounds else "")
+        enum_values = [str(value) for value in (spec.get("enum") or [])]
+        if enum_values and len(enum_values) <= 6:
+            head = "|".join(enum_values) + ("?" if name not in required else "")
+        else:
+            head = kind + ((" " + " ".join(bounds)) if bounds else "")
         description = _compact_arg_description(spec.get("description"))
         inputs[name] = f"{head} | {description}" if description else head
     return inputs
@@ -1053,8 +1155,9 @@ def _minimal_tool_signature(name, schema):
     args = []
     for arg_name, spec in (schema.get("properties") or {}).items():
         spec = spec if isinstance(spec, dict) else {}
-        kind = type_labels.get(spec.get("type", "any"), spec.get("type", "any"))
+        enum_values = [str(value) for value in (spec.get("enum") or [])]
         optional = "" if arg_name in required else "?"
+        kind = "|".join(enum_values) if enum_values and len(enum_values) <= 6 else type_labels.get(spec.get("type", "any"), spec.get("type", "any"))
         args.append(f"{arg_name}{optional}:{kind}")
     return f"{name}({','.join(args)})"
 
@@ -1103,6 +1206,7 @@ def gerar_catalogo_tools(config=None, allowed_names=None, compact=False):
             item = {
                 "name": public_name,
                 "purpose": entrada.get("description", "")[:200],
+                "effect": normalize_effect(entrada.get("effect")),
                 "inputs": _compact_input_contract(schema),
                 "returns": str(entrada.get("returns") or "")[:220],
             }
@@ -1117,6 +1221,7 @@ def gerar_catalogo_tools(config=None, allowed_names=None, compact=False):
                 "name": public_name,
                 "description": entrada.get("description", ""),
                 "category": entrada.get("category", "READ_ONLY"),
+                "effect": normalize_effect(entrada.get("effect")),
                 "effects": list(entrada.get("effects") or ["NONE"]),
                 "input_schema": schema,
                 "returns": entrada.get("returns", ""),
@@ -1142,6 +1247,41 @@ def _tipo_json_valido(valor, tipo):
     if tipo == "array":
         return isinstance(valor, list)
     return False
+
+
+def _validar_valor_schema(valor, regra, caminho):
+    """Validate the JSON-Schema subset used by canonical tool inputs."""
+    regra = regra if isinstance(regra, dict) else {}
+    tipo = regra.get("type")
+    if tipo and not _tipo_json_valido(valor, tipo):
+        return f"argumento '{caminho}' precisa ser do tipo {tipo}"
+    if "enum" in regra and valor not in list(regra.get("enum") or []):
+        permitidos = ", ".join(str(item) for item in (regra.get("enum") or []))
+        return f"argumento '{caminho}' precisa ser um de: {permitidos}"
+    if tipo == "string":
+        if len(valor.strip()) < int(regra.get("minLength", 0) or 0):
+            return f"argumento '{caminho}' nao pode ser vazio"
+        if "maxLength" in regra and len(valor) > int(regra["maxLength"]):
+            return f"argumento '{caminho}' precisa ter no maximo {regra['maxLength']} caracteres"
+        if regra.get("pattern") and not re.fullmatch(str(regra["pattern"]), valor):
+            return f"argumento '{caminho}' nao corresponde ao formato esperado"
+    if tipo in ("integer", "number"):
+        if "minimum" in regra and valor < regra["minimum"]:
+            return f"argumento '{caminho}' precisa ser >= {regra['minimum']}"
+        if "maximum" in regra and valor > regra["maximum"]:
+            return f"argumento '{caminho}' precisa ser <= {regra['maximum']}"
+    if tipo == "array":
+        if "minItems" in regra and len(valor) < int(regra["minItems"]):
+            return f"argumento '{caminho}' precisa ter pelo menos {regra['minItems']} item(ns)"
+        if "maxItems" in regra and len(valor) > int(regra["maxItems"]):
+            return f"argumento '{caminho}' precisa ter no maximo {regra['maxItems']} item(ns)"
+        item_schema = regra.get("items")
+        if isinstance(item_schema, dict):
+            for index, item in enumerate(valor):
+                error = _validar_valor_schema(item, item_schema, f"{caminho}[{index}]")
+                if error:
+                    return error
+    return None
 
 
 def validar_chamada_tool(nome, arguments):
@@ -1181,35 +1321,9 @@ def validar_chamada_tool(nome, arguments):
         regra = propriedades.get(nome_campo)
         if regra is None:
             continue
-        tipo = regra.get("type")
-        if not _tipo_json_valido(valor, tipo):
-            return None, _falha(
-                "INVALID_ARGUMENT",
-                f"argumento '{nome_campo}' precisa ser do tipo {tipo}",
-            )
-        if tipo == "string" and len(valor.strip()) < regra.get("minLength", 0):
-            return None, _falha("INVALID_ARGUMENT", f"argumento '{nome_campo}' nao pode ser vazio")
-        if tipo == "string" and "maxLength" in regra and len(valor) > regra["maxLength"]:
-            return None, _falha(
-                "INVALID_ARGUMENT",
-                f"argumento '{nome_campo}' precisa ter no maximo {regra['maxLength']} caracteres",
-            )
-        if tipo == "string" and regra.get("pattern") and not re.fullmatch(regra["pattern"], valor):
-            return None, _falha(
-                "INVALID_ARGUMENT",
-                f"argumento '{nome_campo}' nao corresponde ao formato esperado",
-            )
-        if tipo in ("integer", "number"):
-            if "minimum" in regra and valor < regra["minimum"]:
-                return None, _falha(
-                    "INVALID_ARGUMENT",
-                    f"argumento '{nome_campo}' precisa ser >= {regra['minimum']}",
-                )
-            if "maximum" in regra and valor > regra["maximum"]:
-                return None, _falha(
-                    "INVALID_ARGUMENT",
-                    f"argumento '{nome_campo}' precisa ser <= {regra['maximum']}",
-                )
+        erro = _validar_valor_schema(valor, regra, nome_campo)
+        if erro:
+            return None, _falha("INVALID_ARGUMENT", erro)
     if "line_start" in normalizados and "line_end" in normalizados:
         if normalizados["line_end"] < normalizados["line_start"]:
             return None, _falha(

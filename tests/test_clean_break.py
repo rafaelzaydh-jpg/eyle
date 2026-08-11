@@ -16,7 +16,7 @@ from eyle.core import tools
 
 def test_session_schema_is_exact_and_old_state_is_not_migrated():
     current = AgentSession("x").to_dict()
-    assert current["session_schema_version"] == SESSION_SCHEMA_VERSION == "5.6"
+    assert current["session_schema_version"] == SESSION_SCHEMA_VERSION == "5.7.1"
     assert AgentSession.from_dict(current).request == "x"
     old = dict(current)
     old["session_schema_version"] = "5.4"
@@ -68,7 +68,7 @@ def test_final_has_one_canonical_object_shape():
     ok, reason, *_ = validate_final("legacy string final", {}, investigation=[])
     assert not ok and reason == "FINAL_INVALID"
     ok, reason, answer, limitations = validate_final(
-        {"answer": "ok", "limitations": []},
+        {"answer": "ok", "limitations": [], "evidence_ids": []},
         {}, investigation=[]
     )
     assert ok and reason == "ok" and answer == "ok" and limitations == []
@@ -133,17 +133,17 @@ def test_rev551_rejects_rev55_session_identity():
         AgentSession.from_dict(current)
 
 
-def test_agent_contract_has_no_workspace_scope_or_final_evidence_ids():
+def test_agent_contract_has_no_workspace_scope_and_final_evidence_ids_are_canonical():
     payload = {
         "tool_calls": None, "patches": None, "needs_user": None,
-        "final": {"answer": "ok", "limitations": []},
+        "final": {"answer": "ok", "limitations": [], "evidence_ids": []},
         "investigation_updates": [],
     }
     assert parse_agent_response(payload)["final"]["answer"] == "ok"
     with pytest.raises(StructuredResponseError):
         parse_agent_response({**payload, "workspace_scope": {"mode": "read"}})
     bad = dict(payload)
-    bad["final"] = {"answer": "ok", "evidence_ids": [], "limitations": []}
+    bad["final"] = {"answer": "ok", "limitations": []}
     with pytest.raises(StructuredResponseError):
         parse_agent_response(bad)
 
@@ -207,7 +207,7 @@ def test_claim_atomic_contract_has_no_recovery_identity_fields():
         "material_satisfaction": {"status": "satisfied", "grounding_refs": ["request"], "reason": "complete"},
         "answer_consistency": {"status": "consistent", "grounding_refs": ["answer:a1"], "reason": "consistent"},
         "claims": [{
-            "answer_ref": "a1", "target_id": None, "statement": "fact",
+            "answer_ref": "answer:a1", "target_id": None, "statement": "fact",
             "grounding_refs": ["evidence:ev-1"], "verdict": "supported", "reason": "observed",
         }],
         "semantic_gaps": [],
@@ -240,5 +240,6 @@ def test_tool_registry_has_one_identity_and_contract_source():
         assert "output_schema" not in entry
         assert entry.get("category")
         assert entry.get("effects")
+        assert entry.get("effect") in {"observe", "execute", "mutate"}
         assert entry.get("availability")
         assert isinstance(entry.get("produces_evidence"), bool)

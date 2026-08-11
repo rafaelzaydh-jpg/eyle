@@ -60,7 +60,7 @@ def test_resume_clarification_is_canonical_across_tool_and_claim(monkeypatch, tm
     resumed_prompts = []
     outputs = iter([
         agent_tools(tool_call("find_symbol", {"symbol": "AgentSession"})),
-        agent_final("session.py:1"),
+        agent_final({"answer": "session.py:1", "evidence_ids": ["ev-0001"]}),
     ])
     monkeypatch.setattr(
         core_agent,
@@ -73,7 +73,7 @@ def test_resume_clarification_is_canonical_across_tool_and_claim(monkeypatch, tm
         "executar_verificador_claims",
         lambda prompt, _cfg: claim_prompts.append(json.loads(prompt)) or review(
             claims=[claim(
-                answer_ref="a1",
+                answer_ref="answer:a1",
                 statement="AgentSession is defined in session.py at line 1",
                 evidence_ids=["ev-0001"],
                 verdict="supported",
@@ -148,9 +148,11 @@ def test_expired_user_input_pending_cannot_capture_new_request(monkeypatch, tmp_
 
 def test_agent_prompt_defines_needs_user_as_blocking_not_conversation():
     from llm.executar import PROMPT_AGENTE
-    assert "ONLY for an already-active concrete task" in PROMPT_AGENTE
-    assert "Never use needs_user for greetings" in PROMPT_AGENTE
-    assert "A resumed user clarification becomes part of request itself" in PROMPT_AGENTE
+    lower = PROMPT_AGENTE.lower()
+    assert "needs_user only when an active concrete task cannot continue" in lower
+    assert "never use it for greetings" in lower
+    assert "otherwise return final" in lower
+    assert "resumed clarification becomes part of the canonical request" in lower
 
 
 

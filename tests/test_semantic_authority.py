@@ -25,6 +25,7 @@ def test_workspace_fact_needs_no_investigation(monkeypatch, tmp_path):
             "final": {
                 "answer": f"O projeto tem aproximadamente {count} tokens.",
                 "limitations": ["A contagem é estimada."],
+                "evidence_ids": list(result.get("evidence_ids") or []),
             },
             "investigation_updates": [],
         }
@@ -53,7 +54,7 @@ def test_declared_open_debt_blocks_final(monkeypatch, tmp_path):
         nonlocal calls
         calls += 1
         return {
-            "final": {"answer": "Prematuro.", "limitations": []},
+            "final": {"answer": "Prematuro.", "limitations": [], "evidence_ids": []},
             "investigation_updates": [{
                 "id": "T1",
                 "goal": "Establish whether the module participates in active runtime flow",

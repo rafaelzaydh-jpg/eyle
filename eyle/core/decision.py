@@ -20,6 +20,7 @@ def _events(ledger: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def record(ledger: Dict[str, Any], *, turn: int, decision: str, outcome: str,
            reason: Optional[str] = None, tools: Optional[List[str]] = None,
+           required_properties: Optional[List[str]] = None,
            rejection_fingerprint: Optional[str] = None,
            rejection_code: Optional[str] = None) -> Dict[str, Any]:
     events = _events(ledger)
@@ -31,6 +32,8 @@ def record(ledger: Dict[str, Any], *, turn: int, decision: str, outcome: str,
         item["reason"] = str(reason)[:240]
     if tools:
         item["tools"] = [str(tool) for tool in tools[:8]]
+    if required_properties:
+        item["required_properties"] = [str(value)[:300] for value in required_properties[:4] if str(value).strip()]
     if rejection_fingerprint:
         item["rejection_fingerprint"] = str(rejection_fingerprint)
         item["rejection_code"] = str(rejection_code or reason or decision)

@@ -120,3 +120,41 @@ def test_provider_token_counts_calibrate_future_context_and_budget():
     )
     uncalibrated = available_user_prompt_tokens(cfg, "system", output_tokens=3600)
     assert calibrated < uncalibrated
+
+
+def test_completion_ceiling_clamps_current_call_and_preserves_claim_reserve():
+    from eyle.core.execution_context import bind_execution, reset_execution
+    from eyle.core.session import AgentSession
+
+    cfg = base_config(claims_mode="self_check")
+    execution = ExecutionContext.from_config(cfg)
+    execution.completion_tokens_actual = 3680
+    session = AgentSession("investigue")
+    session.observation_ledger.setdefault("events", []).append({"tool": "project_stats", "executed": True})
+
+    token = bind_execution(execution)
+    try:
+        call_cfg = core_agent._agent_config(cfg, session, {})
+        assert call_cfg["llm"]["agent_max_tokens_configured"] == 3600
+        assert call_cfg["llm"]["downstream_completion_reserve_tokens"] == 900
+        assert call_cfg["llm"]["agent_max_tokens"] == 3420
+
+        fit = llm_mod._preflight_completion_budget(call_cfg, execution, 3600)
+        assert fit["requested"] == 3600
+        assert fit["effective"] == 3420
+        assert fit["downstream_reserve"] == 900
+        assert fit["clamped"] is True
+    finally:
+        reset_execution(token)
+
+
+def test_completion_ceiling_still_fails_when_only_downstream_reserve_remains():
+    cfg = base_config(claims_mode="self_check")
+    cfg = dict(cfg)
+    cfg["llm"] = dict(cfg["llm"])
+    cfg["llm"]["downstream_completion_reserve_tokens"] = 900
+    execution = ExecutionContext.from_config(cfg)
+    execution.completion_tokens_actual = 7100
+    with pytest.raises(llm_mod.ErroLLM) as exc:
+        llm_mod._preflight_completion_budget(cfg, execution, 3600)
+    assert exc.value.error_code == "MAX_COMPLETION_BUDGET_INSUFFICIENT"

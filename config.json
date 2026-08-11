@@ -148,6 +148,6 @@
     "window_seconds": 3600
   },
   "app_version": "2.7.4",
-  "config_schema_version": "5.6",
-  "revision": "rev5.6-grounded-outcomes-docker-backend"
+  "config_schema_version": "5.7.1",
+  "revision": "rev5.7.1-directed-observation-context-projection"
 }
