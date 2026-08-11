@@ -132,5 +132,12 @@
   "removed": [
     "no semantic router, planner, FrontierLedger, candidate state machine, universal resource graph or universal effect transaction was introduced",
     "no Runtime rule treats a frontier as mandatory semantic debt or decides that an Investigation must continue"
-  ]
+  ],
+  "publication": {
+    "status": "public",
+    "public_tag": "v2.7.4-rev5.7.1",
+    "first_supported_public_release": true,
+    "tag_format": "v<app_version>-rev<schema_version>",
+    "pre_public_history": "Earlier repository revisions/tags are engineering milestones preserved by Git history, not supported public releases."
+  }
 }

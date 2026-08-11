@@ -1,5 +1,7 @@
 # Changelog
 
+**Public release baseline:** `v2.7.4-rev5.7.1` is the first supported public Eyle release. Entries below Rev5.7.1 are preserved as **pre-public engineering history**; they document the path to the current architecture but are not supported public releases and should not be recreated as public Git tags. Git commit history remains the canonical record of those development milestones.
+
 ## Rev5.7.1 — Directed Observation & Context Projection — 2026-08-10
 
 - Hardens `symbol_relations(query="reachability")` with file-local/import/alias resolution before project-global name fallback.
@@ -280,7 +282,7 @@
 - kept 16 public tools and the existing 8-turn / 12-tool / 9k-completion physical limits unchanged; added eight focused Rev5.2.3 regressions.
 
 
-This file tracks public release-level changes. Detailed experimental and intermediate revision notes were intentionally removed before the Rev5 Git publication; Git history is the canonical record for future development.
+The entries in this section are pre-public engineering milestones. They are retained for technical context only; Git history is the canonical record of the detailed development sequence.
 
 ## Rev5.2.2 — Runtime Contract Hardening — 2026-08-08
 
@@ -327,9 +329,9 @@ This file tracks public release-level changes. Detailed experimental and interme
 - tagged failed assistant jobs and excluded them from future conversation background;
 - removed obsolete `agent.task_context_token_budget` from the public config schema.
 
-## Rev5 — GitHub Release — 2026-08-08
+## Rev5 — Pre-public consolidation milestone — 2026-08-08
 
-Rev5 is the publication baseline built from the validated Rev4.13.13 runtime. It does not redesign the agent loop; it consolidates the current architecture and removes accumulated release-document clutter.
+Rev5 was an internal consolidation milestone built from the validated Rev4.13.13 runtime. It was not the public release baseline. It consolidated the agent loop and removed accumulated development-document clutter on the path to Rev5.7.1.
 
 ### Current architecture
 

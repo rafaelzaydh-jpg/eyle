@@ -198,7 +198,7 @@ node --check web/static/app.js
 - [Configuração](docs/configuration.md) — configuração atual e fusíveis físicos.
 - [Benchmarks](docs/benchmark.md) — regressões e baselines de eficiência.
 - [Publicação](docs/github-publishing.md) — checks de empacotamento.
-- [Changelog](CHANGELOG.md) — histórico de releases.
+- [Changelog](CHANGELOG.md) — releases públicas e histórico técnico pré-público preservado.
 - [English](README.md)
 
 ## Licença

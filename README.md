@@ -198,7 +198,7 @@ node --check web/static/app.js
 - [Configuration](docs/configuration.md) — strict current configuration and physical fuses.
 - [Benchmark contract](docs/benchmark.md) — regression and efficiency baselines.
 - [Publishing](docs/github-publishing.md) — release packaging checks.
-- [Changelog](CHANGELOG.md) — historical release changes.
+- [Changelog](CHANGELOG.md) — public releases and preserved pre-public engineering history.
 - [Português](README.pt-BR.md)
 
 ## License
