@@ -36,6 +36,45 @@ A future architectural change should be judged by a simple question:
 
 Domain knowledge should stay outside the Core unless the state truly belongs to the universal agent protocol.
 
+## Compatibility doctrine
+
+> **Compatibility inside the Core is suspicious. Compatibility behind adapters/capabilities is desirable.**
+
+The Core should expose one exact canonical contract for each responsibility. It should not accept alternate field names, historical payload shapes, language aliases, dual-read/dual-write formats or silent downgrade paths merely to tolerate external variation. If a Core contract changes, Eyle should make a clean break and reject the previous shape.
+
+External variability belongs at a boundary that owns it:
+
+```text
+provider / environment / domain protocol
+                ↓
+        adapter or capability
+                ↓
+       canonical Core contract
+```
+
+Examples of desirable compatibility behind adapters include OpenAI-compatible vs Ollama transport, Docker vs Bubblewrap execution, OS-specific process details, and future domain capability packs. The adapter may know many external protocols; AgentSession should know one.
+
+### Future structured-output compatibility
+
+Rev5.7.5 intentionally keeps Agent and Claim on one strict JSON-Schema contract. A future LLM adapter layer may support providers that expose structured output through different native mechanisms, for example:
+
+```text
+provider A  json_schema
+provider B  tool/function call
+provider C  json_object
+provider D  constrained/plain text protocol
+             ↓
+      provider adapter
+             ↓
+canonical Agent/Claim object
+             ↓
+     strict Core validation
+```
+
+This is not permission to restore the old Core-level `json_schema -> json_object -> prompt` fallback chain. The compatibility decision and provider-specific parsing must stay inside the adapter. The Core sees one canonical profile or a transport/adapter failure.
+
+This boundary is what can eventually let Eyle connect to a wider range of LLM runtimes without teaching the Core every provider protocol.
+
 ## Observation as the universal boundary
 
 The strongest candidate for a stable Tool → Runtime boundary is a domain-neutral observation envelope:
@@ -78,7 +117,7 @@ coverage
 └─ domain data  optional capability-defined metadata
 ```
 
-The exact schema should be proven by multiple capabilities before being frozen. Current Rev5.7.1 code-reachability fields such as `files_scanned`, `roots_tested`, `shortest_path_hops` and `objective_result=reachable` are **domain payload**, not universal Coverage semantics.
+The exact schema should be proven by multiple capabilities before being frozen. Current Rev5.7.5 code-reachability fields such as `files_scanned`, `roots_tested`, `shortest_path_hops` and `objective_result=reachable` are **domain payload**, not universal Coverage semantics.
 
 ### Examples
 
@@ -280,7 +319,7 @@ This could support:
 - coverage-aware study/revision systems;
 - bounded model context even when the stored knowledge space is large.
 
-None of these are current Rev5.7.1 product capabilities. They are examples validating why the observation protocol should remain domain-neutral.
+None of these are current Rev5.7.5 product capabilities. They are examples validating why the observation protocol should remain domain-neutral.
 
 ## Context projection follows the same principle
 

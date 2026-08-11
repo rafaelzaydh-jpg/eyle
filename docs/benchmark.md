@@ -1,3 +1,23 @@
+# Rev5.7.5 benchmark contract
+
+## Exact report schema
+
+Benchmark artifacts now have an independent `benchmark_schema_version` (`1`). The producer and both comparators use one shared validator. Only the canonical English keys are accepted; historical aliases such as `papel`, `casos`, `results` or `case_id` are incompatible. `read_ok`, `factual_ok`, `write_ok` and `unauthorized_write` are mandatory and missing gates are never interpreted as success.
+
+This schema is intentionally independent from the Eyle release/session schema so benchmark-format changes can be explicit without inventing compatibility parsers.
+
+Rev5.7.5 preserves the Rev5.7.3 directed-reachability benchmark behavior and keeps the negative `request_requires_write` class as a regression target. The observed pre-fix run required 11 turns, 6 physical tools, 5 Evidence items, 37,113 provider prompt tokens and 3 Claim passes before correctly concluding that no productive static path was confirmed while dynamic frontiers prevented an absolute impossibility claim.
+
+The directed-reachability contract removes three mechanical causes from that loop:
+
+- directed reachability is auto-exhaustive over the finite resolved graph; no 5→12→32 depth escalation;
+- generic dynamic uncertainty is one non-expandable boundary unless the unresolved site has target-directed corridor evidence;
+- invalid/missing/stale continuation IDs cannot retire `expand_observation`.
+
+The semantic acceptance rule remains unchanged: a positive resolved path may establish structural reachability; a negative search with a remaining dynamic boundary is explicitly inconclusive for absolute absence. Claim remains semantic authority for the delivered answer.
+
+---
+
 # Rev5.7.1 benchmark contract
 
 Benchmarks measure whether work follows task necessity rather than infrastructure pressure.

@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List
 
 
-MEMORY_SCHEMA_VERSION = "5.7.1"
+MEMORY_SCHEMA_VERSION = "5.7.5"
 
 
 def _utc_now() -> str:
@@ -50,8 +50,22 @@ def _load(path: str) -> Dict[str, Any]:
         raise ValueError("MEMORY_STORE_INVALID") from error
     if not isinstance(data, dict) or data.get("schema_version") != MEMORY_SCHEMA_VERSION:
         raise ValueError("MEMORY_SCHEMA_INCOMPATIBLE")
-    if not isinstance(data.get("entries"), list):
+    if set(data) != {"schema_version", "project_root", "entries"}:
         raise ValueError("MEMORY_STORE_INVALID")
+    if not isinstance(data["project_root"], str) or not isinstance(data["entries"], list):
+        raise ValueError("MEMORY_STORE_INVALID")
+    for entry in data["entries"]:
+        if not isinstance(entry, dict) or set(entry) != {"id", "kind", "text", "files", "created_at"}:
+            raise ValueError("MEMORY_STORE_INVALID")
+        if not all(isinstance(entry[key], str) for key in ("id", "kind", "text", "created_at")):
+            raise ValueError("MEMORY_STORE_INVALID")
+        if not isinstance(entry["files"], list):
+            raise ValueError("MEMORY_STORE_INVALID")
+        for file_ref in entry["files"]:
+            if not isinstance(file_ref, dict) or set(file_ref) != {"path", "file_hash"}:
+                raise ValueError("MEMORY_STORE_INVALID")
+            if not isinstance(file_ref["path"], str) or not isinstance(file_ref["file_hash"], str):
+                raise ValueError("MEMORY_STORE_INVALID")
     return data
 
 

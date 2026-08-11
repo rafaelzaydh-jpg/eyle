@@ -1,4 +1,4 @@
-# Eyle Rev5.7.1 architecture
+# Eyle Rev5.7.5 architecture
 
 This document describes the **current runtime architecture**. Future design goals are kept separately in [architectural-direction.md](architectural-direction.md) so planned abstractions are not confused with shipped behavior.
 
@@ -146,7 +146,7 @@ Registry entries expose `effect=observe|execute|mutate` as a small domain-neutra
 
 ### Coverage
 
-In Rev5.7.1, `coverage` is capability-defined objective metadata describing what the returned observation established or examined. The Core transports and records it; domain-specific meaning remains with the originating capability.
+In Rev5.7.5, `coverage` is capability-defined objective metadata describing what the returned observation established or examined. The Core transports and records it; domain-specific meaning remains with the originating capability.
 
 For current Python reachability this includes fields such as `objective_complete`, `objective_result`, roots tested, scan completeness and shortest path length. These are **current tool fields**, not a claim that all future Coverage must use code/reachability semantics.
 
@@ -156,7 +156,7 @@ A `frontier` is an objective continuation boundary not materialized by the curre
 
 ### Handle
 
-A `handle` addresses an observation continuation without injecting its complete payload into the prompt. Rev5.7.1 snapshot handles are opaque, bounded, persisted with ObservationLedger and invalidated when the workspace epoch no longer matches. `expand_observation` materializes the addressed snapshot page without code-domain semantic interpretation.
+A `handle` addresses an observation continuation without injecting its complete payload into the prompt. Rev5.7.5 snapshot handles are opaque, bounded, persisted with ObservationLedger and invalidated when the workspace epoch no longer matches. `expand_observation` materializes the addressed snapshot page without code-domain semantic interpretation.
 
 ```text
 WORLD STATE != MODEL CONTEXT
@@ -223,10 +223,16 @@ A network-enabled sandbox protects host/workspace integrity, **not confidentiali
 
 ## Persistence
 
-Rev5.7.1 is a clean break. Config, Session, queue and project-memory schemas are exact 5.7.1. Earlier state is rejected, never migrated or adapted.
+Rev5.7.5 is a clean break. Config, Session, queue and project-memory schemas are exact 5.7.5. Session and project-memory loaders reject missing or unknown same-version envelope fields instead of defaulting/filtering them. Earlier state is rejected, never migrated or adapted.
+
+Core contracts use one canonical English representation. Provider/environment variability belongs behind adapters or capabilities; it must not create aliases or dual-read contracts inside AgentSession/Runtime state.
 
 ## Future architectural direction
 
 The current product remains a coding agent. The broader design direction is to make `Observation`, `Coverage`, `Frontier` and `Handle` increasingly domain-neutral so future capabilities can reuse the same Core observation protocol without embedding their domain into `AgentSession`.
 
 That direction is documented separately in [architectural-direction.md](architectural-direction.md) and must not be read as a claim that non-coding toolpacks are currently implemented.
+
+## Canonical boundary hardening in Rev5.7.5
+
+Rev5.7.5 applies the compatibility doctrine to remaining P1/P2 boundaries. `search_code` may execute through ripgrep or Python, but both backends consume the same deterministic file universe and pass candidates through the same ordering/truncation function before an Observation is produced. Conversation messages are normalized by Runtime into `{role, content}` before reaching Core. Pending continuation is independently versioned (`pending_schema_version=1`) and exact; it is persisted in English and never dual-read or migrated. `agent_info` has one registry field, `registered_tools`.

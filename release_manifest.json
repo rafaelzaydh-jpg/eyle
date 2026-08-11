@@ -1,16 +1,20 @@
 {
   "release": "2.7.4",
   "app_version": "2.7.4",
-  "config_schema_version": "5.7.1",
-  "revision": "rev5.7.1-directed-observation-context-projection",
-  "released_at": "2026-08-10",
-  "title": "Rev5.7.1 Directed Observation & Context Projection",
+  "config_schema_version": "5.7.5",
+  "revision": "rev5.7.5-canonical-boundary-hardening",
+  "released_at": "2026-08-11",
+  "title": "Rev5.7.5 Canonical Boundary Hardening",
   "compatibility": {
     "backward_compatible": false,
-    "session_schema": "5.7.1",
-    "queue_schema": "5.7.1",
-    "project_memory_schema": "5.7.1",
-    "policy": "One current contract only. Previous Eyle sessions, queue databases, project memory and configuration are rejected rather than migrated or adapted."
+    "session_schema": "5.7.5",
+    "queue_schema": "5.7.5",
+    "project_memory_schema": "5.7.5",
+    "policy": "Core contracts are exact and compatibility inside the Core is suspicious. Provider, environment and domain variability belongs behind adapters/capabilities and must normalize into one canonical Core contract.",
+    "benchmark_schema": "1",
+    "canonical_language": "English",
+    "future_structured_output": "Provider adapters may support multiple provider-native structured-output mechanisms in the future, but each adapter must normalize them into the single canonical Agent/Claim profile before Core validation; no silent Core downgrade path.",
+    "pending_continuation_schema": "1"
   },
   "architecture": {
     "main_llm": "Owns task semantics, Investigation and stopping. It chooses capabilities and decides whether an objective frontier is material; Runtime never turns frontier presence into semantic debt.",
@@ -20,18 +24,21 @@
     "investigation": "Optional persistent semantic debt declared only by the Main LLM. Runtime mechanically preserves identity, goals, Evidence binding and legal transitions.",
     "observation_map": "Derived from ObservationLedger; Runtime Facts for Claim are bounded projections of objective current-job observations, not a second factual ledger.",
     "tool_registry": "TOOLS is the sole executable registry. Every capability exposes compact/full contracts plus a domain-neutral effect class (observe|execute|mutate). Progressive capability_index/active_tools remains selector-free.",
-    "terminal_capabilities": "ExecutionContext records non-retryable tool failures for the current physical job and excludes those capabilities from later callable projections; this is physical reality, not semantic routing.",
+    "terminal_capabilities": "ExecutionContext records physically terminal capability failures for the current job. Handle-specific HANDLE_NOT_FOUND/HANDLE_STALE failures are continuation-reference failures and never retire expand_observation.",
     "structured_transport": "Agent and Claim require strict JSON Schema. Claim grounding arrays are non-empty in the canonical schema/parser contract; no downgrade, repair call or truncation retry exists.",
     "state_ownership": "ObservationLedger owns tool reality/replay/coverage; EvidenceLedger owns citable source Evidence; DecisionLedger owns decisions/rejection identity; LLMCallLedger owns logical/provider calls; WriteTransaction owns real mutations; ExecutionContext owns job resources/terminal capabilities/sandbox lifecycle.",
     "sandbox": "backend=auto prefers Docker and falls back to Bubblewrap. Docker uses one persistent disposable container per job with a writable sanitized project snapshot, network and package/toolchain freedom. The real workspace is never mounted read-write; only WriteTransaction can mutate it.",
     "writes": "One WriteTransaction owns proposal, dry-run, confirmation, apply, validation, failure and rollback. Sandbox mutations never authorize workspace writes.",
     "final": "One canonical object: answer, limitations and Main-selected evidence_ids. Claim receives only Evidence explicitly selected by Main in final or Investigation.",
-    "structural_relations": "symbol_relations keeps query=relations as the local structural view and query=reachability as the query-shaped path view. Reachability resolves local/import bindings before global-name fallback and exposes only frontiers on the root-side coverage of the requested property.",
+    "structural_relations": "symbol_relations keeps query=relations as the local structural view and query=reachability as the directed path view. Reachability exhausts the finite resolved graph mechanically, resolves local/import bindings before global fallback, and does not expose LLM-tuned depth boundaries.",
     "observation_contract": "Every executed tool result uses one canonical envelope: physical status fields plus observations, coverage, frontiers and handles. Empty optional observation fields are legal; tools are not forced to invent frontier state.",
-    "observation_handles": "Opaque handles address bounded observation snapshots, not semantic conclusions. Handles persist in ObservationLedger for the job/session, are materialized through expand_observation(handle), and become stale when workspace_epoch changes.",
-    "directed_observation": "Query-shaped observation brings the capability request closer to the objective property. Import/alias-aware reachability materializes complete paths when possible; unresolved frontier payloads are limited to the actual query coverage rather than project-global uncertainty.",
+    "observation_handles": "Opaque handle:* IDs address bounded observation snapshots. expand_observation accepts only the handle namespace; Evidence/Observation IDs are rejected before execution. Missing/stale handles invalidate one continuation reference, not the capability.",
+    "directed_observation": "Directed reachability materializes complete resolved paths automatically. Negative queries expose expandable frontiers only when unresolved sites carry target-directed corridor evidence; generic root-side dynamic dispatch is one non-expandable boundary limitation.",
     "context_projection": "Canonical world/task state remains complete in ledgers. Main prompts receive a hot projection: bounded recent/pinned Evidence and Observation indexes, only the two most recent expanded tool contracts, and bounded current-delta tool results. Older capabilities remain callable through the compact capability index.",
-    "claim_projection": "Claim grounding is projected by Main authority: final.evidence_ids plus Evidence explicitly attached to Investigation. Runtime validates IDs and freshness but does not infer semantic relevance."
+    "claim_projection": "Claim grounding is projected by Main authority: final.evidence_ids plus Evidence explicitly attached to Investigation. Runtime validates IDs and freshness but does not infer semantic relevance.",
+    "conversation_boundary": "Runtime normalizes stored/UI conversation records into one Core message shape: {role, content}. Core does not accept text/content aliases.",
+    "pending_continuation": "Pending continuation uses independent exact pending_schema_version=1 with English field names and exact kind-specific shapes; older or alternate envelopes are rejected, never migrated.",
+    "search_code": "ripgrep and Python fallback operate over the same deterministic file universe and share one canonical ranking/truncation stage; backend choice may change performance but not observable candidate semantics."
   },
   "canonical_structured_profiles": {
     "agent": [
@@ -100,44 +107,33 @@
   },
   "validation": {
     "command": "python -m pytest -q",
-    "current_result": "177 passed, 1 skipped (Flask unavailable in build environment)"
+    "current_result": "195 passed, 1 skipped (Flask unavailable in build environment)"
   },
   "added": [
-    "import/alias-aware structural call resolution before global name fallback",
-    "query-shaped frontier filtering limited to unresolved sites on the root-side reachability coverage",
-    "bounded hot context projection for Evidence index, Observation map, active tool contracts and current tool-result delta",
-    "Main-selected final.evidence_ids as the canonical Claim Evidence projection",
-    "canonical ObservationResult envelope with observations, coverage, frontiers and handles for every executed capability",
-    "domain-neutral capability effect metadata: observe, execute or mutate",
-    "symbol_relations(query=reachability) as the first query-shaped observation, with objective Python entrypoint discovery and complete shortest-path materialization",
-    "objective completion metadata: coverage.objective_complete and coverage.objective_result",
-    "optional unresolved frontiers only when an unmaterialized physical/static continuation can still prevent completion",
-    "opaque bounded observation snapshot handles plus generic expand_observation(handle)",
-    "workspace-epoch invalidation for observation snapshot handles",
-    "Main prompt guidance to stop after a discriminating complete directed observation rather than walking a proven path node by node"
+    "one deterministic search_code file universe plus shared ranking/truncation for ripgrep and Python fallback",
+    "canonical Core ConversationMessage shape {role, content} normalized at the Runtime boundary",
+    "independent exact pending_schema_version=1 with English kind-specific continuation envelopes",
+    "regressions preventing agent_info tools alias and Python-below-minimum compatibility branches"
   ],
   "preserved": [
-    "complete canonical EvidenceLedger and ObservationLedger state outside model context",
-    "all physically available tools remain callable; context projection never acts as a semantic router",
-    "Rev5.6.2 property-completion behavior and adaptive physical token budget",
-    "Main/Runtime/Claim authority boundary and optional Main-owned Investigation",
-    "strict structured transport and grounded Claim review",
-    "progressive capabilities without selector/router",
-    "98k physical job envelope, 8000 completion sub-fuse and 32768 per-call context cap",
-    "single confirmed WriteTransaction path for real workspace mutation",
-    "workspace_epoch as Eyle-owned mutation/replay coordinate rather than a global filesystem fingerprint",
-    "query=relations behavior of symbol_relations as the default local relation view",
-    "clean-break persistence policy"
+    "Rev5.7.4 exact Core compatibility boundary and benchmark schema v1",
+    "OpenAI-compatible and Ollama provider adapters normalized into one Core response contract",
+    "Docker/Bubblewrap and Windows/POSIX portability behind environment boundaries",
+    "strict Main/Runtime/Claim authority separation and clean-break persistence policy"
   ],
   "removed": [
-    "no semantic router, planner, FrontierLedger, candidate state machine, universal resource graph or universal effect transaction was introduced",
-    "no Runtime rule treats a frontier as mandatory semantic debt or decides that an Investigation must continue"
+    "search_code backend-dependent candidate ordering and early filesystem-order truncation in Python fallback",
+    "Core conversation content/text alias tolerance",
+    "agent_info observable fallback from registered_tools to tools",
+    "unversioned mixed-language pending continuation envelope",
+    "pre-Python-3.8 shlex.join and multiprocessing.Process.kill feature-detection branches"
   ],
   "publication": {
     "status": "public",
-    "public_tag": "v2.7.4-rev5.7.1",
-    "first_supported_public_release": true,
+    "public_tag": "v2.7.4-rev5.7.5",
+    "first_supported_public_release": false,
+    "public_baseline": "v2.7.4-rev5.7.1",
     "tag_format": "v<app_version>-rev<schema_version>",
-    "pre_public_history": "Earlier repository revisions/tags are engineering milestones preserved by Git history, not supported public releases."
+    "pre_public_history": "Revisions older than the public baseline remain engineering history; Rev5.7.5 is the current clean-break schema."
   }
 }

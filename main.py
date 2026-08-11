@@ -119,27 +119,27 @@ def cmd_status(args):
 
 
 def cmd_benchmark(args):
-    from eyle.devtools.benchmark import rodar_benchmark
+    from eyle.devtools.benchmark import run_benchmark
 
     output = args.output or os.path.join(BASE_DIR, "context", "benchmark_latest.json")
-    relatorio = rodar_benchmark(
+    report = run_benchmark(
         carregar_config(), baseline_model=args.baseline_model, output_path=output,
         case_ids=args.cases,
     )
-    for execucao in relatorio["runs"]:
-        metricas = execucao["metricas"]
-        gate = "APROVADO" if metricas["gate_aprovado"] else "REPROVADO"
-        total = metricas.get("total_casos", 10)
+    for run in report["runs"]:
+        metrics = run["metrics"]
+        gate = "PASSED" if metrics["gate_passed"] else "FAILED"
+        total = metrics["total_cases"]
         print(
-            f"[benchmark] {execucao['papel']} | {execucao['modelo']} | gate={gate} "
-            f"({metricas.get('gate_scope', 'full')}) | "
-            f"leitura={metricas['tarefas_com_uso_correto_de_leitura']}/{total} | "
-            f"factual={metricas['respostas_factuais_corretas']}/{total} | "
-            f"escrita={metricas['checks_escrita_aprovados']}/{metricas.get('checks_escrita_total', 0)} | "
-            f"P50={metricas['latencia_p50_ms']}ms | P95={metricas['latencia_p95_ms']}ms | "
-            f"P99={metricas['latencia_p99_ms']}ms"
+            f"[benchmark] {run['role']} | {run['model']} | gate={gate} "
+            f"({metrics['gate_scope']}) | "
+            f"read={metrics['correct_read_tasks']}/{total} | "
+            f"factual={metrics['factual_answers_correct']}/{total} | "
+            f"write={metrics['write_checks_passed']}/{metrics['write_checks_total']} | "
+            f"P50={metrics['latency_p50_ms']}ms | P95={metrics['latency_p95_ms']}ms | "
+            f"P99={metrics['latency_p99_ms']}ms"
         )
-    print(f"[benchmark] Relatorio: {output}")
+    print(f"[benchmark] Report: {output}")
 
 
 def cmd_compare_coverage(args):
@@ -148,7 +148,7 @@ def cmd_compare_coverage(args):
     result = compare_release_coverage_files(
         args.baseline, args.candidate, output_path=args.output,
     )
-    status = "APROVADO" if result.get("ok") else "REGRESSÃO"
+    status = "PASSED" if result.get("ok") else "REGRESSION"
     print(
         f"[coverage] {status} | baseline_cases={result.get('baseline_cases', 0)} | "
         f"candidate_cases={result.get('candidate_cases', 0)} | "
@@ -156,11 +156,11 @@ def cmd_compare_coverage(args):
     )
     for item in result.get("regressions") or []:
         print(
-            f"[coverage][REGRESSÃO] {item.get('role')}:{item.get('case_id')} | "
+            f"[coverage][REGRESSION] {item.get('role')}:{item.get('case_id')} | "
             f"{', '.join(item.get('reasons') or [item.get('reason') or 'unknown'])}"
         )
     if args.output:
-        print(f"[coverage] Relatório: {args.output}")
+        print(f"[coverage] Report: {args.output}")
     if not result.get("ok"):
         raise SystemExit(1)
 
@@ -171,7 +171,7 @@ def cmd_compare_efficiency(args):
     result = compare_token_efficiency_files(
         args.baseline, args.candidate, output_path=args.output, tolerance=args.tolerance,
     )
-    status = "APROVADO" if result.get("ok") else "REGRESSÃO"
+    status = "PASSED" if result.get("ok") else "REGRESSION"
     print(
         f"[efficiency] {status} | baseline_cases={result.get('baseline_cases', 0)} | "
         f"candidate_cases={result.get('candidate_cases', 0)} | "
@@ -180,11 +180,11 @@ def cmd_compare_efficiency(args):
     )
     for item in result.get("regressions") or []:
         print(
-            f"[efficiency][REGRESSÃO] {item.get('role')}:{item.get('case_id')} | "
+            f"[efficiency][REGRESSION] {item.get('role')}:{item.get('case_id')} | "
             f"{', '.join(item.get('reasons') or [item.get('reason') or 'unknown'])}"
         )
     if args.output:
-        print(f"[efficiency] Relatório: {args.output}")
+        print(f"[efficiency] Report: {args.output}")
     if not result.get("ok"):
         raise SystemExit(1)
 
@@ -254,20 +254,20 @@ def main():
     p_status.set_defaults(func=cmd_status)
 
     p_benchmark = sub.add_parser(
-        "benchmark", help="Roda a suite completa ou um smoke subset do gate de utilidade",
+        "benchmark", help="Run the full benchmark suite or a smoke subset of the utility gate",
     )
     p_benchmark.add_argument(
         "--baseline-model", default=None,
-        help="Nome exato do modelo baseline carregado no backend (opcional)",
+        help="Exact baseline model name loaded by the backend (optional)",
     )
     p_benchmark.add_argument(
         "--output", default=None,
-        help="Caminho do relatorio JSON (default: context/benchmark_latest.json)",
+        help="JSON report path (default: context/benchmark_latest.json)",
     )
     p_benchmark.add_argument(
         "--cases", default=None,
         help=(
-            "IDs separados por vírgula para smoke test, por exemplo "
+            "Comma-separated case IDs for a smoke test, for example "
             "greeting,analyze_single_file,edit_confirmed"
         ),
     )
@@ -275,24 +275,24 @@ def main():
 
     p_compare = sub.add_parser(
         "compare-coverage",
-        help="Compara preservação de informação entre dois relatórios de benchmark",
+        help="Compare behavior coverage between two benchmark reports",
     )
-    p_compare.add_argument("baseline", help="Relatório JSON da versão base")
-    p_compare.add_argument("candidate", help="Relatório JSON da versão candidata")
-    p_compare.add_argument("--output", default=None, help="Salva o relatório de comparação em JSON")
+    p_compare.add_argument("baseline", help="Baseline benchmark JSON report")
+    p_compare.add_argument("candidate", help="Candidate benchmark JSON report")
+    p_compare.add_argument("--output", default=None, help="Save the comparison report as JSON")
     p_compare.set_defaults(func=cmd_compare_coverage)
 
     p_efficiency = sub.add_parser(
         "compare-efficiency",
-        help="Compara chamadas e tokens entre dois relatórios de benchmark",
+        help="Compare calls and token usage between two benchmark reports",
     )
-    p_efficiency.add_argument("baseline", help="Relatório JSON da versão base")
-    p_efficiency.add_argument("candidate", help="Relatório JSON da versão candidata")
+    p_efficiency.add_argument("baseline", help="Baseline benchmark JSON report")
+    p_efficiency.add_argument("candidate", help="Candidate benchmark JSON report")
     p_efficiency.add_argument(
         "--tolerance", type=float, default=0.10,
-        help="Tolerância relativa para tokens (default: 0.10)",
+        help="Relative token tolerance (default: 0.10)",
     )
-    p_efficiency.add_argument("--output", default=None, help="Salva a comparação em JSON")
+    p_efficiency.add_argument("--output", default=None, help="Save the comparison as JSON")
     p_efficiency.set_defaults(func=cmd_compare_efficiency)
 
     p_serve = sub.add_parser("serve", help="Sobe o agente persistente (Worker + Flask) -- requer 'pip install flask'")

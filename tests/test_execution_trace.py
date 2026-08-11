@@ -16,7 +16,7 @@ from eyle.runtime import queue as runtime_queue
 def _config():
     return {
         "app_version": "2.7.4",
-        "revision": "rev5.7.1-directed-observation-context-projection",
+        "revision": "rev5.7.5-canonical-boundary-hardening",
         "llm": {
             "model": "auto",
             "context_window_tokens": 10000,

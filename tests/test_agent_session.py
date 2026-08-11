@@ -71,11 +71,11 @@ def test_transactional_write_requires_confirmation_and_resume_is_deterministic(m
     assert status == "needs_user"
     assert app.read_text(encoding="utf-8") == original
     assert pending["continuation_kind"] == "write_confirmation"
-    assert pending["transaction_id"] == pending["estado"]["write_transaction"]["transaction_id"]
-    assert pending["estado"]["write_transaction"]["patches"][0]["path"] == "app.py"
+    assert pending["transaction_id"] == pending["session"]["write_transaction"]["transaction_id"]
+    assert pending["session"]["write_transaction"]["patches"][0]["path"] == "app.py"
 
     status, text, pending2, details = core_agent.executar_agente(
-        pending["estado"]["request"], config(tmp_path),
+        pending["session"]["request"], config(tmp_path),
         projeto={"caminho_origem": str(tmp_path)}, retomar=pending,
         resposta_usuario="confirmar", retornar_detalhes=True,
     )
@@ -102,7 +102,7 @@ def test_pending_transaction_does_not_duplicate_full_source(monkeypatch, tmp_pat
     assert status == "needs_user"
     serialized = json.dumps(pending, ensure_ascii=False)
     assert source.strip() not in serialized
-    assert pending["estado"]["write_transaction"]["patches"][0]["content"] == "TOKEN_DO_ARQUIVO = 'novo'\n"
+    assert pending["session"]["write_transaction"]["patches"][0]["content"] == "TOKEN_DO_ARQUIVO = 'novo'\n"
 
 
 def test_identical_read_loop_is_bounded(monkeypatch, tmp_path):

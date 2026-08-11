@@ -1,6 +1,6 @@
-"""One active Rev5.7.1 Eyle agent session.
+"""One active Rev5.7.5 Eyle agent session.
 
-Rev5.7.1 is a clean break. The session stores only canonical semantic/physical
+Rev5.7.5 is a clean break. The session stores only canonical semantic/physical
 state that must survive turns or confirmation. Histories and metrics are views
 of their owning ledgers, not parallel persisted fields.
 """
@@ -13,7 +13,7 @@ from .evidence import empty_ledger as empty_evidence_ledger, index_view as evide
 from .observation import empty_ledger as empty_observation_ledger, persisted_view as persisted_observations
 from .write_transaction import empty_transaction
 
-SESSION_SCHEMA_VERSION = "5.7.1"
+SESSION_SCHEMA_VERSION = "5.7.5"
 
 
 @dataclass
@@ -51,31 +51,70 @@ class AgentSession:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AgentSession":
+        expected_top_level = {
+            "session_schema_version", "request", "task_id", "turn", "workspace_epoch",
+            "observation_ledger", "decision_ledger", "evidence_ledger", "investigation",
+            "claim_review", "conversation_background", "write_transaction",
+        }
         if not isinstance(data, dict) or data.get("session_schema_version") != SESSION_SCHEMA_VERSION:
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-        session = cls(request=str(data.get("request") or ""), task_id=data.get("task_id"))
-        session.turn = max(0, int(data.get("turn") or 0))
-        session.workspace_epoch = max(0, int(data.get("workspace_epoch") or 0))
-        obs = data.get("observation_ledger")
-        if (not isinstance(obs, dict) or not isinstance(obs.get("entries"), dict)
-                or not isinstance(obs.get("events"), list) or not isinstance(obs.get("handles"), dict)):
+        if set(data) != expected_top_level:
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        if not isinstance(data["request"], str):
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        if data["task_id"] is not None and not isinstance(data["task_id"], str):
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        if not isinstance(data["turn"], int) or isinstance(data["turn"], bool) or data["turn"] < 0:
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        if not isinstance(data["workspace_epoch"], int) or isinstance(data["workspace_epoch"], bool) or data["workspace_epoch"] < 0:
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+
+        obs = data["observation_ledger"]
+        if not isinstance(obs, dict) or set(obs) != {"entries", "events", "pending_results", "handles"}:
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        if not isinstance(obs["entries"], dict) or not all(isinstance(v, dict) for v in obs["entries"].values()):
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        if not isinstance(obs["events"], list) or not all(isinstance(item, dict) for item in obs["events"]):
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        if not isinstance(obs["pending_results"], list) or not all(isinstance(item, dict) for item in obs["pending_results"]):
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        if not isinstance(obs["handles"], dict) or not all(isinstance(v, dict) for v in obs["handles"].values()):
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+
+        decisions = data["decision_ledger"]
+        if not isinstance(decisions, dict) or set(decisions) != {"events"}:
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        if not isinstance(decisions["events"], list) or not all(isinstance(item, dict) for item in decisions["events"]):
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+
+        evidence = data["evidence_ledger"]
+        if not isinstance(evidence, dict) or set(evidence) != {"items"}:
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        if not isinstance(evidence["items"], dict) or not all(isinstance(v, dict) for v in evidence["items"].values()):
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+
+        if not isinstance(data["investigation"], list) or not all(isinstance(item, dict) for item in data["investigation"]):
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        if not isinstance(data["claim_review"], dict):
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        if not isinstance(data["conversation_background"], list) or not all(isinstance(item, dict) for item in data["conversation_background"]):
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        if not isinstance(data["write_transaction"], dict):
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+
+        session = cls(request=data["request"], task_id=data["task_id"])
+        session.turn = data["turn"]
+        session.workspace_epoch = data["workspace_epoch"]
         session.observation_ledger = {
-            "entries": {str(k): dict(v) for k, v in obs.get("entries", {}).items() if isinstance(v, dict)},
-            "events": [dict(item) for item in obs.get("events", []) if isinstance(item, dict)],
-            "pending_results": [dict(item) for item in obs.get("pending_results", []) if isinstance(item, dict)],
-            "handles": {str(k): dict(v) for k, v in obs.get("handles", {}).items() if isinstance(v, dict)},
+            "entries": {str(k): dict(v) for k, v in obs["entries"].items()},
+            "events": [dict(item) for item in obs["events"]],
+            "pending_results": [dict(item) for item in obs["pending_results"]],
+            "handles": {str(k): dict(v) for k, v in obs["handles"].items()},
         }
-        decisions = data.get("decision_ledger")
-        if not isinstance(decisions, dict) or not isinstance(decisions.get("events"), list):
-            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-        session.decision_ledger = {"events": [dict(item) for item in decisions.get("events", []) if isinstance(item, dict)]}
-        evidence = data.get("evidence_ledger")
-        if not isinstance(evidence, dict) or not isinstance(evidence.get("items"), dict):
-            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-        session.evidence_ledger = {"items": {str(k): dict(v) for k, v in evidence.get("items", {}).items() if isinstance(v, dict)}}
-        session.investigation = [dict(item) for item in data.get("investigation") or [] if isinstance(item, dict)]
-        session.claim_review = dict(data.get("claim_review") or {})
-        session.conversation_background = [dict(item) for item in data.get("conversation_background") or [] if isinstance(item, dict)]
-        session.write_transaction = dict(data.get("write_transaction") or {})
+        session.decision_ledger = {"events": [dict(item) for item in decisions["events"]]}
+        session.evidence_ledger = {"items": {str(k): dict(v) for k, v in evidence["items"].items()}}
+        session.investigation = [dict(item) for item in data["investigation"]]
+        session.claim_review = dict(data["claim_review"])
+        session.conversation_background = [dict(item) for item in data["conversation_background"]]
+        session.write_transaction = dict(data["write_transaction"])
         return session

@@ -1,4 +1,4 @@
-"""Rev5.7.1 strict configuration boundary. No legacy aliases or migration keys."""
+"""Rev5.7.5 strict configuration boundary. One canonical Core contract."""
 from __future__ import annotations
 
 import json
@@ -88,6 +88,16 @@ _CONTEXT_VIEW_POSITIVE_DEFAULTS = {
     "max_symbol_preview_chars": 2600,
 }
 
+_SANDBOX_BACKENDS = {"auto", "docker", "bwrap", "process", "trusted_local"}
+
+def _validate_sandbox_backend(container, prefix):
+    backend = container.get("backend", "auto")
+    if not isinstance(backend, str) or backend not in _SANDBOX_BACKENDS:
+        raise ConfigError(
+            f"{prefix}.backend must be one of: " + ", ".join(sorted(_SANDBOX_BACKENDS))
+        )
+
+
 
 def _validate_int(container, key, default, *, minimum, prefix):
     value = container.get(key, default)
@@ -135,7 +145,7 @@ def validar_config(config):
         _validate_positive_number(llm, key, default, "llm")
     _validate_int(llm, "context_window_tokens", 32768, minimum=1, prefix="llm")
     if int(llm.get("context_window_tokens", 32768) or 32768) > 32768:
-        raise ConfigError("llm.context_window_tokens não pode exceder 32768 na Rev5.7.1")
+        raise ConfigError("llm.context_window_tokens não pode exceder 32768 na Rev5.7.5")
 
     codar = config.get("codar") or {}
     if not isinstance(codar, dict):
@@ -149,6 +159,7 @@ def validar_config(config):
     if not isinstance(sandbox, dict):
         raise ConfigError("codar.testes.sandbox precisa ser um objeto")
     _reject_unknown(sandbox, _SANDBOX_FIELDS, "codar.testes.sandbox")
+    _validate_sandbox_backend(sandbox, "codar.testes.sandbox")
 
     worker = config.get("worker") or {}
     if not isinstance(worker, dict):
@@ -181,16 +192,17 @@ def validar_config(config):
     for key, default in _AGENT_POSITIVE_DEFAULTS.items():
         _validate_int(agent, key, default, minimum=1, prefix="agent")
     if int(agent.get("max_total_tokens", 98000) or 98000) > 98000:
-        raise ConfigError("agent.max_total_tokens não pode exceder 98000 na Rev5.7.1")
+        raise ConfigError("agent.max_total_tokens não pode exceder 98000 na Rev5.7.5")
     if int(agent.get("max_prompt_tokens", 90000) or 90000) > 90000:
-        raise ConfigError("agent.max_prompt_tokens não pode exceder 90000 na Rev5.7.1")
+        raise ConfigError("agent.max_prompt_tokens não pode exceder 90000 na Rev5.7.5")
     if int(agent.get("max_completion_tokens", 8000) or 8000) > 8000:
-        raise ConfigError("agent.max_completion_tokens não pode exceder 8000 na Rev5.7.1")
+        raise ConfigError("agent.max_completion_tokens não pode exceder 8000 na Rev5.7.5")
 
     agent_sandbox = agent.get("sandbox") or {}
     if not isinstance(agent_sandbox, dict):
         raise ConfigError("agent.sandbox precisa ser um objeto")
     _reject_unknown(agent_sandbox, _SANDBOX_FIELDS, "agent.sandbox")
+    _validate_sandbox_backend(agent_sandbox, "agent.sandbox")
 
     context_view = agent.get("context_view") or {}
     if not isinstance(context_view, dict):

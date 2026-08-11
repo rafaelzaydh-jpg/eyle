@@ -105,13 +105,6 @@ def _caminho_projeto(ctx):
 # Tools READ
 # ---------------------------------------------------------------------------
 
-_CODE_SEARCH_GLOBS = (
-    "*.py", "*.pyi", "*.js", "*.jsx", "*.ts", "*.tsx", "*.java", "*.c", "*.cpp",
-    "*.h", "*.hpp", "*.cs", "*.go", "*.rb", "*.php", "*.rs", "*.swift", "*.kt",
-    "*.sql", "*.html", "*.css", "*.sh", "*.bat",
-)
-
-
 def _parse_rg_json(stdout):
     parsed = []
     for row in str(stdout or "").splitlines():
@@ -140,87 +133,119 @@ def _parse_rg_json(stdout):
     return parsed
 
 
-def _run_rg_json(root, query, globs=()):
-    command = ["rg", "--json", "--fixed-strings", "--color", "never"]
-    for pattern in globs:
-        command.extend(["-g", pattern])
-    command.extend([query, "."])
-    completed = subprocess.run(
-        command, cwd=root, capture_output=True, text=True, timeout=20, check=False,
-    )
-    if completed.returncode not in {0, 1}:
-        raise OSError(f"ripgrep failed with exit code {completed.returncode}")
-    return _parse_rg_json(completed.stdout)
+_CODE_SEARCH_EXTENSIONS = {
+    ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".java", ".c", ".cpp",
+    ".h", ".hpp", ".cs", ".go", ".rb", ".php", ".rs", ".swift", ".kt",
+    ".sql", ".html", ".css", ".sh", ".bat",
+}
 
 
 def _search_match_priority(item):
     path = str(item.get("file") or "").replace("\\", "/").lower()
     parts = set(path.split("/"))
+    extension = os.path.splitext(path)[1]
+    is_code = extension in _CODE_SEARCH_EXTENSIONS
     if "tests" in parts or path.startswith("test_") or "/test_" in path:
         group = 3
     elif "devtools" in parts or "benchmarks" in parts or "examples" in parts:
         group = 2
+    elif not is_code:
+        group = 1
     else:
         group = 0
     return (group, path, int(item.get("linha") or 0), int(item.get("coluna") or 0))
 
 
-def _search_matches_with_rg(root, query, limit):
-    """Return structured literal matches, prioritizing product code before tests/docs.
-
-    ``rg --json`` avoids parsing ``path:line:column`` strings, which broke on
-    Windows drive letters. Running with ``cwd=root`` keeps paths project-relative.
-    A code-first pass plus deterministic path ranking prevents tests/documentation
-    mentions from consuming the bounded result budget before implementation sites.
-    """
-    selected = []
-    seen = set()
-    observed = 0
-
-    def absorb(items):
-        nonlocal observed
-        for item in items:
-            key = (item.get("file"), item.get("linha"), item.get("coluna"))
-            if key in seen:
-                continue
-            seen.add(key)
-            observed += 1
-            if len(selected) < limit:
-                selected.append(item)
-
-    code_matches = sorted(_run_rg_json(root, query, _CODE_SEARCH_GLOBS), key=_search_match_priority)
-    absorb(code_matches)
-    if len(selected) < limit:
-        remaining = sorted(_run_rg_json(root, query), key=_search_match_priority)
-        absorb(remaining)
-
-    truncated = observed > len(selected) or len(code_matches) > limit
-    return selected, observed, truncated
-
-
-def _search_matches_fallback(root, query, limit):
-    """Portable structured fallback used when ripgrep is unavailable."""
-    matches = []
-    observed = 0
-    truncated = False
-    for current, dirs, files in os.walk(root):
-        dirs[:] = [d for d in dirs if d not in {".git", "node_modules", "__pycache__", ".venv", "venv"}]
-        for name in files:
+def _searchable_files(root):
+    """Return the deterministic file universe shared by every search backend."""
+    ignored_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv"}
+    files = []
+    for current, dirs, names in os.walk(root, followlinks=False):
+        dirs[:] = sorted(name for name in dirs if name not in ignored_dirs)
+        for name in sorted(names):
             path = os.path.join(current, name)
-            try:
-                with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                    for number, line in enumerate(fh, 1):
-                        if query not in line:
-                            continue
-                        observed += 1
-                        if len(matches) >= limit:
-                            truncated = True
-                            return matches, observed, truncated
-                        rel = os.path.relpath(path, root).replace("\\", "/")
-                        matches.append({"file": rel, "linha": number, "coluna": line.find(query) + 1})
-            except OSError:
+            rel = os.path.relpath(path, root).replace("\\", "/")
+            if _caminho_parece_segredo(rel) or not os.path.isfile(path):
                 continue
-    return matches, observed, truncated
+            files.append(rel)
+    return files
+
+
+def _canonicalize_search_matches(items, limit, *, root, query):
+    """Apply one observable ordering/truncation contract to all search backends.
+
+    ripgrep reports byte offsets while Python string search reports character
+    offsets. Recompute the public column from decoded source text so backend
+    choice cannot change the observable coordinate.
+    """
+    unique = {}
+    line_cache = {}
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("file") or "").replace("\\", "/")
+        line = item.get("linha")
+        if not path or not isinstance(line, int):
+            continue
+        cache_key = path
+        if cache_key not in line_cache:
+            try:
+                with open(os.path.join(root, *path.split("/")), "r", encoding="utf-8", errors="replace") as fh:
+                    line_cache[cache_key] = fh.read().splitlines()
+            except OSError:
+                line_cache[cache_key] = []
+        source_lines = line_cache[cache_key]
+        if line < 1 or line > len(source_lines):
+            continue
+        column = source_lines[line - 1].find(query) + 1
+        if column <= 0:
+            continue
+        key = (path, line, column)
+        unique[key] = {"file": path, "linha": line, "coluna": column}
+    ordered = sorted(unique.values(), key=_search_match_priority)
+    observed = len(ordered)
+    return ordered[:limit], observed, observed > limit
+
+
+
+def _run_rg_json_files(root, query, files):
+    """Search the exact canonical file universe with ripgrep in bounded batches."""
+    matches = []
+    batch_size = 120
+    for offset in range(0, len(files), batch_size):
+        batch = files[offset:offset + batch_size]
+        if not batch:
+            continue
+        command = [
+            "rg", "--json", "--fixed-strings", "--color", "never",
+            "--text", "--no-config", "--no-ignore", "--hidden", "--", query, *batch,
+        ]
+        completed = subprocess.run(
+            command, cwd=root, capture_output=True, text=True, timeout=20, check=False,
+        )
+        if completed.returncode not in {0, 1}:
+            raise OSError(f"ripgrep failed with exit code {completed.returncode}")
+        matches.extend(_parse_rg_json(completed.stdout))
+    return matches
+
+
+def _search_matches_with_rg(root, query, files, limit):
+    return _canonicalize_search_matches(_run_rg_json_files(root, query, files), limit, root=root, query=query)
+
+
+def _search_matches_fallback(root, query, files, limit):
+    """Portable matcher with the same file universe, ranking and truncation as rg."""
+    raw = []
+    for rel in files:
+        path = os.path.join(root, *rel.split("/"))
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                for number, line in enumerate(fh, 1):
+                    if query in line:
+                        raw.append({"file": rel, "linha": number, "coluna": line.find(query) + 1})
+        except OSError:
+            continue
+    return _canonicalize_search_matches(raw, limit, root=root, query=query)
 
 
 def _group_search_ranges(raw_matches, max_lines, max_ranges):
@@ -293,17 +318,18 @@ def _tool_search_code(arguments, ctx):
     max_matches = max(1, int(agent_cfg.get("max_search_matches", 40) or 40))
     max_ranges = max(1, int(agent_cfg.get("max_search_ranges", 12) or 12))
 
+    searchable_files = _searchable_files(root)
     try:
-        raw_matches, observed, match_truncated = _search_matches_with_rg(root, query, max_matches)
+        raw_matches, observed, match_truncated = _search_matches_with_rg(
+            root, query, searchable_files, max_matches,
+        )
         backend = "ripgrep-json"
     except (FileNotFoundError, subprocess.SubprocessError, OSError):
-        raw_matches, observed, match_truncated = _search_matches_fallback(root, query, max_matches)
+        raw_matches, observed, match_truncated = _search_matches_fallback(
+            root, query, searchable_files, max_matches,
+        )
         backend = "python-fallback"
 
-    raw_matches = [
-        item for item in raw_matches
-        if not _caminho_parece_segredo(str(item.get("file") or ""))
-    ]
     grouped, range_truncated, ranges_observed = _group_search_ranges(raw_matches, max_lines, max_ranges)
     results = []
     read_failures = []
@@ -351,7 +377,9 @@ def _tool_symbol_relations(arguments, ctx):
     config = (ctx or {}).get("config") or {}
     agent_cfg = config.get("agent") or {}
     query = str(arguments.get("query") or "relations")
-    default_depth = 12 if query == "reachability" else 6
+    # Reachability depth is Runtime-owned in Rev5.7.5. The resolved graph is
+    # exhausted mechanically; only local relation queries honor max_depth.
+    default_depth = 6
     try:
         detail = analyze_symbol_relations(
             root, arguments["symbol"], path=path, roots=list(arguments.get("roots") or []),
@@ -400,11 +428,25 @@ def _tool_expand_observation(arguments, ctx):
     store = (ctx or {}).get("observation_handles")
     if not isinstance(store, dict):
         return _falha("HANDLE_STORE_UNAVAILABLE", "observation handle store unavailable", executed=False, retryable=False)
+    handle_id = str(arguments.get("handle") or "")
+    if not handle_id.startswith("handle:"):
+        return _falha(
+            "INVALID_HANDLE_FORMAT",
+            "use the exact opaque handle:* id returned by an observation frontier",
+            executed=False, retryable=True,
+        )
     materialized, error = materialize_snapshot_handle(
-        store, str(arguments.get("handle") or ""), workspace_epoch=int((ctx or {}).get("workspace_epoch") or 0),
+        store, handle_id, workspace_epoch=int((ctx or {}).get("workspace_epoch") or 0),
     )
     if error:
-        return _falha(error, "observation handle is unavailable for the current workspace epoch", executed=True, retryable=False)
+        # HANDLE_NOT_FOUND/HANDLE_STALE invalidate one continuation reference,
+        # not the expand_observation capability. A current exact handle may still
+        # be used later in the same job.
+        return _falha(
+            error,
+            "this observation handle cannot be materialized; use an exact current handle:* id returned by a frontier",
+            executed=True, retryable=True,
+        )
     payload = materialized.get("payload") if isinstance(materialized, dict) else None
     observations = []
     if isinstance(payload, dict) and isinstance(payload.get("items"), list):
@@ -915,8 +957,8 @@ TOOLS = {
             "roots": {"type": "array", "items": {"type": "string", "minLength": 1}, "description": "Optional caller/root symbols, node ids or project-relative files from which to test structural reachability."},
             "direction": {"type": "string", "enum": ["incoming", "outgoing", "both"], "description": "Project only the requested relation direction; default both."},
             "include_text_references": {"type": "boolean", "description": "Include literal text-reference rows. Default false because structural queries usually do not need them."},
-            "max_depth": {"type": "integer", "minimum": 1, "maximum": 32, "description": "Maximum structural-graph hops for root reachability. Directed reachability defaults to 12; local relations default to 6."},
-            "max_edges": {"type": "integer", "minimum": 10, "maximum": 500, "description": "Maximum relation rows returned per relation family."},
+            "max_depth": {"type": "integer", "minimum": 1, "maximum": 32, "description": "Local relations only. Directed reachability ignores/canonicalizes this hint and exhausts the finite resolved graph automatically."},
+            "max_edges": {"type": "integer", "minimum": 10, "maximum": 500, "description": "Local relation projection limit. Directed reachability canonicalizes this hint and returns only path/coverage/frontier material."},
         }, ["symbol"]),
         "fn": _tool_symbol_relations,
     },
@@ -929,7 +971,7 @@ TOOLS = {
         "returns": "A bounded snapshot continuation with objective observations, coverage, any remaining frontier and a next handle when more is available.",
         "caveats": ["Rev5.7 handles address observation snapshots, not guaranteed-live resources; handles become stale after the Runtime workspace epoch changes."],
         "input_schema": _schema_objeto({
-            "handle": {"type": "string", "minLength": 1, "description": "Opaque continuation handle previously returned by a tool observation."},
+            "handle": {"type": "string", "minLength": 8, "pattern": r"^handle:[A-Za-z0-9._:-]+$", "description": "Exact opaque handle:* continuation id previously returned by a tool observation. Evidence IDs and observation IDs are not handles."},
         }, ["handle"]),
         "fn": _tool_expand_observation,
     },
@@ -1330,6 +1372,12 @@ def validar_chamada_tool(nome, arguments):
                 "INVALID_ARGUMENT",
                 "argument 'line_end' must be >= line_start",
             )
+    if nome == "symbol_relations" and str(normalizados.get("query") or "relations").strip().lower() == "reachability":
+        # Rev5.7.5 clean contract: graph traversal depth/result-size tuning is
+        # physical Runtime work, not a semantic decision for Main. Calls that
+        # differ only by these obsolete hints collapse to one observation.
+        normalizados.pop("max_depth", None)
+        normalizados.pop("max_edges", None)
     return normalizados, None
 
 

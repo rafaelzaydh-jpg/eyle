@@ -77,9 +77,9 @@ def test_run_command_snapshot_persists_for_job_without_touching_real_workspace(m
 def test_unrestricted_run_command_refuses_weak_backend(monkeypatch):
     monkeypatch.setattr(sandbox_mod.shutil, "which", lambda name: None)
     try:
-        sandbox_mod._strong_backend({"backend": "processo"})
+        sandbox_mod._strong_backend({"backend": "process"})
     except sandbox_mod.ErroSandbox as exc:
-        assert "backends fortes" in str(exc)
+        assert "strong backends" in str(exc)
     else:
         raise AssertionError("weak backend should be rejected")
 

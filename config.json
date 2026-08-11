@@ -148,6 +148,6 @@
     "window_seconds": 3600
   },
   "app_version": "2.7.4",
-  "config_schema_version": "5.7.1",
-  "revision": "rev5.7.1-directed-observation-context-projection"
+  "config_schema_version": "5.7.5",
+  "revision": "rev5.7.5-canonical-boundary-hardening"
 }

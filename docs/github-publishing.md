@@ -1,13 +1,13 @@
-# Publishing Eyle Rev5.7.1
+# Publishing Eyle Rev5.7.5
 
-Rev5.7.1 is the **first supported public release** of Eyle. Earlier repository tags were development milestones and are not part of the supported public release line. Keep their commits in Git history; do not preserve or recreate those milestones as public release tags.
+Rev5.7.1 is the **first supported public release baseline** of Eyle; Rev5.7.5 is the current release. Earlier repository tags were development milestones and are not part of the supported public release line. Keep their commits in Git history; do not preserve or recreate those milestones as public release tags.
 
 ## Release identity
 
 Current public tag:
 
 ```text
-v2.7.4-rev5.7.1
+v2.7.4-rev5.7.5
 ```
 
 Future public tags use one format only:
@@ -76,7 +76,7 @@ Generated runtime files must be absent: SQLite runtime databases, memory/session
 
 Documentation checks before publication:
 
-- `README.md` and `README.pt-BR.md` describe current shipped behavior rather than act as release diaries;
+- `README.md` describes current shipped behavior rather than act as a release diary; public release documentation and canonical external contracts are English-only;
 - current architecture belongs in `docs/architecture.md`; future/non-shipped goals belong in `docs/architectural-direction.md`;
 - README links resolve inside the extracted artifact;
 - version/schema/revision identity agrees across README, configuration and release identity output;
@@ -87,10 +87,10 @@ Documentation checks before publication:
 For the current release:
 
 ```bash
-git tag -a v2.7.4-rev5.7.1 -m "Eyle 2.7.4 Rev5.7.1"
-git push origin v2.7.4-rev5.7.1
+git tag -a v2.7.4-rev5.7.5 -m "Eyle 2.7.4 Rev5.7.5"
+git push origin v2.7.4-rev5.7.5
 ```
 
 For future releases, substitute the verified app/schema version and keep the same naming convention.
 
-Rev5.7.1 never resumes or migrates previous Eyle persistent state. Do not add compatibility code during packaging.
+Rev5.7.5 never resumes or migrates previous Eyle persistent state. Do not add compatibility code during packaging.

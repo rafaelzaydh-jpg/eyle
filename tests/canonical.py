@@ -99,8 +99,8 @@ def review(
 def base_config(*, claims_mode="off", tests_enabled=False):
     return {
         "app_version": "2.7.4",
-        "config_schema_version": "5.7.1",
-        "revision": "rev5.7.1-directed-observation-context-projection",
+        "config_schema_version": "5.7.5",
+        "revision": "rev5.7.5-canonical-boundary-hardening",
         "llm": {
             "context_window_tokens": 32768,
             "agent_max_tokens": 3600,

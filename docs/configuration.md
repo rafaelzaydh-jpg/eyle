@@ -1,4 +1,4 @@
-# Configuration — Rev5.7.1
+# Configuration — Rev5.7.5
 
 `config.json` is the strict current-release contract.
 
@@ -7,8 +7,8 @@ Required identity:
 ```json
 {
   "app_version": "2.7.4",
-  "config_schema_version": "5.7.1",
-  "revision": "rev5.7.1-directed-observation-context-projection"
+  "config_schema_version": "5.7.5",
+  "revision": "rev5.7.5-canonical-boundary-hardening"
 }
 ```
 
@@ -64,9 +64,25 @@ processes                256
 snapshot                 writable, copied once per job
 Docker container         one persistent container per job
 real workspace writes    impossible through run_command
-trusted_local/process    rejected for unrestricted execution
+trusted_local/process    rejected for unrestricted `run_command`; available only where the supervised test sandbox explicitly permits them
 ```
 
 The sandbox may create/delete files, install packages/toolchains, compile and run arbitrary commands without confirmation. In Docker, both snapshot changes and container root-filesystem changes persist across `run_command` calls in the same job. Docker may auto-pull the configured base image when absent. Protected secret paths/content are omitted from the snapshot and the real workspace is never mounted read-write. A real workspace change still requires the canonical confirmed `WriteTransaction`.
 
 When no strong backend is available, `run_command` returns `SANDBOX_UNAVAILABLE` with `retryable=false`. ExecutionContext marks that capability terminal for the current job and removes it from later callable projections. The task itself may still finish truthfully as `blocked`; Runtime Facts are available to Claim for grounding.
+
+## Compatibility boundary
+
+Rev5.7.5 uses one canonical English contract inside the Core. Sandbox backend values are exactly:
+
+```text
+auto
+docker
+bwrap
+process
+trusted_local
+```
+
+Aliases such as `processo` and `local_confiavel` are rejected during configuration validation instead of being normalized later.
+
+Current structured Agent/Claim transport remains strict JSON Schema. Future provider adapters may support additional provider-native structured-output mechanisms, but those mechanisms must be normalized behind the adapter into the same canonical Agent/Claim objects before Core validation. The Core must not gain a silent `json_schema -> json_object -> prompt` fallback chain.

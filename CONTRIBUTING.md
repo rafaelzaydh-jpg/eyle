@@ -47,6 +47,6 @@ Document llama.cpp setup
 
 ## Language
 
-User-facing documentation may be written in Portuguese or English. Internal
+Public documentation and canonical external contracts are written in English. Internal
 agent instructions, tool contracts, state-machine messages, and structured JSON
 schemas are kept in English for model reliability.

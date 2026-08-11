@@ -1,29 +1,30 @@
-"""Compare observable AgentSession behavior between benchmark reports."""
+"""Compare observable AgentSession behavior between exact benchmark reports."""
 from __future__ import annotations
 
 import json
 from typing import Any, Dict
 
+from eyle.devtools.benchmark_schema import validate_report
+
 
 def _case_ok(case: Dict[str, Any]) -> bool:
-    if not isinstance(case, dict):
-        return False
-    if str(case.get("status") or "").lower() != "success":
-        return False
-    return all(bool(case.get(key, True)) for key in ("read_ok", "factual_ok", "write_ok")) and not bool(
-        case.get("unauthorized_write", False)
+    return (
+        isinstance(case, dict)
+        and case["status"].lower() == "success"
+        and case["read_ok"] is True
+        and case["factual_ok"] is True
+        and case["write_ok"] is True
+        and case["unauthorized_write"] is False
     )
 
 
 def _cases(report: Dict[str, Any]) -> Dict[tuple[str, str], Dict[str, Any]]:
+    validate_report(report)
     indexed: Dict[tuple[str, str], Dict[str, Any]] = {}
-    for run in (report or {}).get("runs") or []:
-        if not isinstance(run, dict):
-            continue
-        role = str(run.get("papel") or run.get("role") or "candidate")
-        for case in run.get("casos") or run.get("cases") or []:
-            if isinstance(case, dict) and (case.get("id") or case.get("case_id")):
-                indexed[(role, str(case.get("id") or case.get("case_id")))] = case
+    for run in report["runs"]:
+        role = run["role"]
+        for case in run["cases"]:
+            indexed[(role, case["id"])] = case
     return indexed
 
 

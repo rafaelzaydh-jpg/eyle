@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eyle.core.agent import executar_agente
+from eyle.core.continuation import validate_pending_continuation
 from eyle.core.workspace import discover_project
 from eyle.runtime.config import carregar_config_validada
 from eyle.runtime.lock import lock_para
@@ -267,56 +268,69 @@ def _novo_id_pendencia():
             return candidato
 
 
-def _preparar_pendencia(dados, projeto, config=None):
-    dados = dict(dados or {})
+def _preparar_pendencia(data, project, config=None):
+    data = dict(data or {})
+    validate_pending_continuation(data)
     cfg = (config or {}).get("confirmacoes") or {}
     ttl = max(60, int(cfg.get("expiracao_segundos", _TTL_PENDENCIA_DEFAULT)))
-    agora = _agora_utc()
-    expiracao = _parse_data_utc(dados.get("expira_em"))
-    projeto_hash = _hash_projeto(projeto)
-    reutilizar = (
-        re.fullmatch(r"[0-9A-F]{4}", str(dados.get("id") or "").upper()) is not None
-        and dados.get("projeto_hash") == projeto_hash
-        and expiracao is not None and agora < expiracao
-    )
-    if not reutilizar:
-        dados["id"] = _novo_id_pendencia()
-        dados["criado_em"] = _formatar_data_utc(agora)
-        dados["expira_em"] = _formatar_data_utc(agora + timedelta(seconds=ttl))
-        dados["projeto_hash"] = projeto_hash
-    return dados
+    now = _agora_utc()
+    project_hash = _hash_projeto(project)
+    data.update({
+        "id": _novo_id_pendencia(),
+        "created_at": _formatar_data_utc(now),
+        "expires_at": _formatar_data_utc(now + timedelta(seconds=ttl)),
+        "project_hash": project_hash,
+    })
+    validate_pending_continuation(data, persisted=True)
+    return data
 
 
-def _validar_pendencia(pendencia, projeto, agora=None):
-    pendencia = pendencia or {}
-    if any(not pendencia.get(campo) for campo in ("id", "expira_em", "projeto_hash")):
-        return False, "não possui metadados de segurança completos"
-    expiracao = _parse_data_utc(pendencia.get("expira_em"))
-    if expiracao is None or (agora or _agora_utc()) >= expiracao:
-        return False, "expirou"
-    if pendencia.get("projeto_hash") != _hash_projeto(projeto):
-        return False, "pertence a outro projeto"
+def _validar_pendencia(pending, project, now=None):
+    try:
+        validate_pending_continuation(pending, persisted=True)
+    except ValueError as error:
+        return False, str(error)
+    if re.fullmatch(r"[0-9A-F]{4}", str(pending.get("id") or "").upper()) is None:
+        return False, "PENDING_ID_INVALID"
+    expiration = _parse_data_utc(pending.get("expires_at"))
+    if expiration is None or (now or _agora_utc()) >= expiration:
+        return False, "PENDING_EXPIRED"
+    if pending.get("project_hash") != _hash_projeto(project):
+        return False, "PENDING_PROJECT_MISMATCH"
     return True, None
 
 
 def carregar_agent_pendente():
-    return _carregar_json(AGENT_PENDENTE_PATH, None)
+    pending = _carregar_json(AGENT_PENDENTE_PATH, None)
+    if pending is None:
+        return None
+    try:
+        validate_pending_continuation(pending, persisted=True)
+    except ValueError:
+        try:
+            os.remove(AGENT_PENDENTE_PATH)
+        except OSError:
+            pass
+        return None
+    return pending
 
 
 def salvar_agent_pendente(estado_pendente, projeto=None, config=None):
-    dados = _preparar_pendencia(estado_pendente, projeto or carregar_projeto(), config)
-    pergunta = str(dados.get("pergunta_ao_usuario") or "Como deseja continuar?").rstrip()
-    confirmavel = dados.get("continuation_kind") == "write_confirmation"
-    instrucao = (
-        f"Para confirmar: confirmar {dados['id']}"
-        if confirmavel else
-        f"Responda normalmente para retomar; para cancelar: cancelar {dados['id']}"
+    data = _preparar_pendencia(estado_pendente, projeto or carregar_projeto(), config)
+    question = str(data["question"]).rstrip()
+    confirmable = data.get("continuation_kind") == "write_confirmation"
+    instruction = (
+        f"To confirm: confirmar {data['id']}"
+        if confirmable else
+        f"Reply normally to resume; to cancel: cancelar {data['id']}"
     )
-    if f"ID da pendência: {dados['id']}" not in pergunta and f"ID da pendencia: {dados['id']}" not in pergunta:
-        pergunta = f"{pergunta}\nID da pendência: {dados['id']}. {instrucao}"
-    dados["pergunta_ao_usuario"] = pergunta
-    _salvar_json(AGENT_PENDENTE_PATH, dados)
-    return dados
+    marker = f"Pending ID: {data['id']}"
+    if marker not in question:
+        question = f"{question}\n{marker}. {instruction}"
+    data["question"] = question
+    validate_pending_continuation(data, persisted=True)
+    _salvar_json(AGENT_PENDENTE_PATH, data)
+    return data
 
 
 def limpar_agent_pendente():
@@ -456,7 +470,7 @@ def _processar_agente(pergunta, config, projeto, task_id=None, conversation_cont
         return _resultado_falha_llm(erro)
     if status == "needs_user" and estado_pendente:
         estado_pendente = salvar_agent_pendente(estado_pendente, projeto=projeto, config=config_execucao)
-        texto = estado_pendente["pergunta_ao_usuario"]
+        texto = estado_pendente["question"]
     if source_job_id is not None:
         job_progress.publicar_job(source_job_id, "finalizing", "Montando a resposta final", partial_text=texto[-16000:] if isinstance(texto, str) else None)
     registrar_mensagem("assistant", texto, metadata=_metadata_resposta_agente(status, detalhes))
@@ -468,12 +482,12 @@ def _retomar_agente_pendente(pendente, config, resposta_usuario=None, source_job
     try:
         status, texto, nova_pendencia, detalhes = _desempacotar_resultado_agente(
             executar_agente(
-                str((pendente.get("estado") or {}).get("request") or ""),
+                str((pendente.get("session") or {}).get("request") or ""),
                 dict(config),
                 projeto=projeto,
                 retomar=pendente,
                 retornar_detalhes=True,
-                task_id=task_id or (pendente.get("estado") or {}).get("task_id"),
+                task_id=task_id or (pendente.get("session") or {}).get("task_id"),
                 resposta_usuario=resposta_usuario, source_job_id=source_job_id,
             )
         )
@@ -481,7 +495,7 @@ def _retomar_agente_pendente(pendente, config, resposta_usuario=None, source_job
         return _resultado_falha_llm(erro)
     if status == "needs_user" and nova_pendencia:
         nova_pendencia = salvar_agent_pendente(nova_pendencia, projeto=projeto, config=config)
-        texto = nova_pendencia["pergunta_ao_usuario"]
+        texto = nova_pendencia["question"]
     else:
         limpar_agent_pendente()
     registrar_mensagem("assistant", texto, metadata=_metadata_resposta_agente(status, detalhes))
@@ -548,7 +562,13 @@ def processar(pergunta, registrar_pergunta=True, historico_snapshot=None,
 
     origem = carregar_conversa() if historico_snapshot is None else historico_snapshot
     historico = _historico_sem_mensagem_atual(_historico_sem_erros_llm(origem), pergunta)
-    conversation_context = {"recent_messages": historico[-12:]}
+    conversation_context = {
+        "recent_messages": [
+            {"role": str(item.get("role") or ""), "content": str(item.get("text") or "")}
+            for item in historico[-12:]
+            if isinstance(item, dict)
+        ]
+    }
     return _processar_agente(
         pergunta, config, projeto, task_id=task_id,
         conversation_context=conversation_context, source_job_id=source_job_id,

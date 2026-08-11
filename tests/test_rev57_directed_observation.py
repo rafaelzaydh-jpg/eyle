@@ -55,7 +55,7 @@ def test_reachability_query_materializes_complete_path_from_auto_entrypoint(tmp_
     assert result["detail"]["unresolved_dynamic"] == []
 
 
-def test_unresolved_negative_reachability_returns_frontier_and_expandable_handle(tmp_path):
+def test_generic_dynamic_negative_is_one_nonexpandable_boundary(tmp_path):
     (tmp_path / "main.py").write_text(
         "def main():\n"
         "    name = 'target'\n"
@@ -72,19 +72,38 @@ def test_unresolved_negative_reachability_returns_frontier_and_expandable_handle
     )
     assert result["coverage"]["objective_complete"] is False
     assert result["coverage"]["objective_result"] == "inconclusive"
+    assert result["coverage"]["depth_mode"] == "auto_exhaustive"
     assert result["observations"][0]["value"] == "not_found_in_resolved_graph"
-    frontier = next(item for item in result["frontiers"] if item["kind"] == "unresolved_dynamic")
-    assert frontier["handle"] in handles
+    frontier = next(item for item in result["frontiers"] if item["kind"] == "dynamic_resolution_boundary")
+    assert frontier["expandable"] is False
+    assert "handle" not in frontier
+    assert result["handles"] == []
 
+
+def test_target_directed_dynamic_frontier_is_expandable(tmp_path):
+    (tmp_path / "main.py").write_text(
+        "def main():\n"
+        "    getattr(mod, 'target')()\n\n"
+        "if __name__ == '__main__':\n    main()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "target.py").write_text("def target():\n    return 1\n", encoding="utf-8")
+    handles = {}
+    context = _ctx(tmp_path, handles=handles)
+    result = tools.executar_tool(
+        "symbol_relations", {"symbol": "target", "query": "reachability"}, context,
+    )
+    frontier = next(item for item in result["frontiers"] if item["kind"] == "unresolved_dynamic")
+    assert frontier["handle"].startswith("handle:")
+    assert frontier["handle"] in handles
     expanded = tools.executar_tool("expand_observation", {"handle": frontier["handle"]}, context)
     assert expanded["ok"] is True
-    assert expanded["coverage"]["total_items"] >= 1
-    assert any(item.get("reason") == "unresolved_call_expression" for item in expanded["observations"])
+    assert any("target" in str(item.get("expression") or "") for item in expanded["observations"])
 
 
 def test_snapshot_handle_is_stale_after_workspace_epoch_changes(tmp_path):
     (tmp_path / "main.py").write_text(
-        "def main():\n    globals()['x']()\n\nif __name__ == '__main__':\n    main()\n",
+        "def main():\n    getattr(mod, 'target')()\n\nif __name__ == '__main__':\n    main()\n",
         encoding="utf-8",
     )
     (tmp_path / "x.py").write_text("def target():\n    pass\n", encoding="utf-8")
@@ -99,7 +118,7 @@ def test_snapshot_handle_is_stale_after_workspace_epoch_changes(tmp_path):
     )
     assert stale["ok"] is False
     assert stale["error_code"] == "HANDLE_STALE"
-    assert stale["retryable"] is False
+    assert stale["retryable"] is True
 
 
 def test_query_is_part_of_symbol_relations_observation_identity():

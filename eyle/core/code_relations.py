@@ -316,9 +316,13 @@ def _bfs_paths(adjacency: Dict[str, List[str]], starts: List[str], targets: set[
 
 
 def _bfs_path_meta(
-    adjacency: Dict[str, List[str]], starts: List[str], targets: set[str], max_depth: int,
+    adjacency: Dict[str, List[str]], starts: List[str], targets: set[str], max_depth: Optional[int],
 ) -> Tuple[Optional[List[str]], List[str]]:
-    """Return the shortest path plus objective nodes blocked by the depth boundary."""
+    """Return the shortest path plus objective nodes blocked by an optional depth boundary.
+
+    ``max_depth=None`` exhausts the finite resolved graph. Directed reachability
+    uses this mode so the Main never has to guess a graph depth.
+    """
     queue = deque((start, [start]) for start in starts)
     seen = set(starts)
     depth_frontier: List[str] = []
@@ -327,7 +331,7 @@ def _bfs_path_meta(
         if node in targets:
             return path, depth_frontier
         depth = len(path) - 1
-        if depth >= max_depth:
+        if max_depth is not None and depth >= max_depth:
             if any(nxt not in seen for nxt in adjacency.get(node, [])):
                 depth_frontier.append(node)
             continue
@@ -450,12 +454,12 @@ def _call_candidates(call: Dict[str, Any], py: Dict[str, Any], defs_by_name: Dic
     return list(defs_by_name.get(name, []))
 
 
-def _reachable_nodes(adjacency: Dict[str, List[str]], starts: List[str], max_depth: int) -> set[str]:
+def _reachable_nodes(adjacency: Dict[str, List[str]], starts: List[str], max_depth: Optional[int]) -> set[str]:
     seen = set(starts)
     queue = deque((node, 0) for node in starts)
     while queue:
         node, depth = queue.popleft()
-        if depth >= max_depth:
+        if max_depth is not None and depth >= max_depth:
             continue
         for nxt in adjacency.get(node, []):
             if nxt in seen:
@@ -557,10 +561,14 @@ def analyze_symbol_relations(
     auto_roots = not requested_roots
     root_specs = requested_roots or _auto_entrypoint_nodes(py["references"], module_nodes)
     root_results: List[Dict[str, Any]] = []
+    # Directed reachability is mechanically exhaustive over the finite resolved
+    # graph. ``max_depth`` remains a local-relations control only; the Main must
+    # never tune 5 -> 12 -> 32 to discover a path that Runtime can traverse itself.
+    reachability_depth: Optional[int] = None if query == "reachability" else int(max_depth)
     depth_boundary_nodes: List[str] = []
     for root_spec in root_specs:
         starts = [root_spec] if auto_roots and root_spec in module_nodes else _resolve_nodes(root_spec, py["definitions"], module_nodes)
-        path_found, depth_frontier = _bfs_path_meta(adjacency, starts, target_ids, max_depth) if starts and target_ids else (None, [])
+        path_found, depth_frontier = _bfs_path_meta(adjacency, starts, target_ids, reachability_depth) if starts and target_ids else (None, [])
         depth_boundary_nodes.extend(depth_frontier)
         root_results.append({
             "root": str(root_spec), "resolved_nodes": starts,
@@ -573,14 +581,39 @@ def analyze_symbol_relations(
     resolved_root_nodes = [
         node for item in root_results for node in (item.get("resolved_nodes") or []) if str(node)
     ]
-    reachable_from_roots = _reachable_nodes(adjacency, resolved_root_nodes, max_depth) if resolved_root_nodes else set()
-    # Query-shaped uncertainty: only unresolved sites on the actually explored
-    # root-side coverage can block root -> target reachability. Global dynamic
-    # calls elsewhere in the project are not a frontier for this property.
-    material_unresolved = [
+    reachable_from_roots = _reachable_nodes(adjacency, resolved_root_nodes, reachability_depth) if resolved_root_nodes else set()
+
+    reverse_adjacency: Dict[str, List[str]] = defaultdict(list)
+    for edge in all_edges:
+        left = str(edge.get("from") or "")
+        right = str(edge.get("to") or "")
+        if left and right:
+            reverse_adjacency[right].append(left)
+    target_side_nodes = _reachable_nodes(reverse_adjacency, sorted(target_ids), None) if target_ids else set()
+    target_side_names = {
+        node.split("::", 1)[1].split(".")[-1]
+        for node in target_side_nodes if "::" in node
+    }
+    target_side_names.add(symbol)
+
+    # Query-shaped uncertainty is split in two classes. Only unresolved sites
+    # carrying a target-side name/expression become expandable corridor
+    # frontiers. Generic dynamic dispatch remains one aggregate physical
+    # limitation: it can prevent proving absolute absence, but paging every
+    # getattr/read/etc. cannot produce a directed continuation.
+    root_side_unresolved = [
         item for item in all_unresolved
         if str(item.get("scope") or "") in reachable_from_roots
     ]
+    material_unresolved = []
+    residual_dynamic = []
+    for item in root_side_unresolved:
+        name = str(item.get("name") or "").strip()
+        expression = str(item.get("expression") or "")
+        target_hint = bool(name and name in target_side_names) or any(
+            candidate and candidate in expression for candidate in target_side_names
+        )
+        (material_unresolved if target_hint else residual_dynamic).append(item)
 
     base_coverage = {
         "files_scanned": len(files), "python_files_scanned": py["python_files"], "secret_files_skipped": secret_skipped,
@@ -612,7 +645,7 @@ def analyze_symbol_relations(
             observations.append({
                 "kind": "structural_reachability", "value": "not_found_in_resolved_graph",
                 "target_nodes": sorted(target_ids), "roots_checked": [item.get("root") for item in root_results],
-                "max_depth": int(max_depth),
+                "depth_mode": "auto_exhaustive",
             })
 
         # A positive path already discriminates the objective. Unrelated dynamic
@@ -642,18 +675,8 @@ def analyze_symbol_relations(
                     "kind": "entrypoint_roots_unresolved", "at": "project",
                     "reason": "no objective Python entrypoint root was detected",
                 })
-            if depth_boundary_nodes:
-                unique_nodes = sorted(set(depth_boundary_nodes))
-                continuation_payloads.append({
-                    "frontier_kind": "depth_boundary", "items": unique_nodes,
-                    "summary": {"count": len(unique_nodes), "max_depth": int(max_depth)},
-                })
-                frontiers.append({
-                    "kind": "depth_boundary", "at": "structural_graph",
-                    "reason": f"reachability search stopped at max_depth={int(max_depth)} with unresolved continuation nodes",
-                    "continuation_index": len(continuation_payloads) - 1,
-                    "count": len(unique_nodes),
-                })
+            # Directed reachability exhausts the resolved graph mechanically,
+            # therefore an arbitrary depth boundary is never exposed to Main.
             if material_unresolved:
                 continuation_payloads.append({
                     "frontier_kind": "unresolved_dynamic", "items": material_unresolved,
@@ -661,9 +684,19 @@ def analyze_symbol_relations(
                 })
                 frontiers.append({
                     "kind": "unresolved_dynamic", "at": "structural_graph",
-                    "reason": "dynamic or ambiguous call sites remain on the root-side coverage of this reachability query",
+                    "reason": "target-directed dynamic or ambiguous call sites remain on the root-to-target structural corridor",
                     "continuation_index": len(continuation_payloads) - 1,
                     "count": len(material_unresolved),
+                })
+            if residual_dynamic:
+                frontiers.append({
+                    "kind": "dynamic_resolution_boundary", "at": "structural_graph",
+                    "reason": (
+                        "generic dynamic dispatch remains in root-reachable coverage, but static analysis has no "
+                        "target-directed continuation to materialize; this limits proofs of absolute absence"
+                    ),
+                    "count": len(residual_dynamic),
+                    "expandable": False,
                 })
             if py["parse_errors"]:
                 continuation_payloads.append({
@@ -693,6 +726,9 @@ def analyze_symbol_relations(
             "roots_resolved": sum(1 for item in root_results if item.get("resolved_nodes")),
             "target_definitions": len(definitions),
             "shortest_path_hops": (len(shortest.get("path") or []) - 1) if shortest else None,
+            "depth_mode": "auto_exhaustive",
+            "expandable_frontiers": sum(1 for item in frontiers if item.get("continuation_index") is not None),
+            "nonexpandable_frontiers": sum(1 for item in frontiers if item.get("continuation_index") is None),
             "objective_complete": bool(objective_complete),
             "objective_result": "reachable" if shortest else ("target_not_resolved" if not definitions else ("not_reachable_in_resolved_graph" if objective_complete else "inconclusive")),
         }

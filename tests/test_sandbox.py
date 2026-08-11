@@ -11,7 +11,7 @@ import eyle.core.sandbox as sandbox_mod  # noqa: E402
 
 def _cfg(**extras):
     cfg = {
-        "backend": "processo",
+        "backend": "process",
         "bloquear_rede": False,
         "comandos_permitidos": [["python", "-m", "pytest"]],
         "timeout_segundos": 5,
@@ -39,14 +39,14 @@ def test_allowlist_recusa_antes_de_criar_processo(monkeypatch, tmp_path):
     assert "allowlist" in resultado["erro"]
 
 
-def test_backend_processo_nao_finge_bloquear_rede(tmp_path):
+def test_process_backend_does_not_pretend_to_block_network(tmp_path):
     resultado = sandbox_mod.executar_no_sandbox(
         str(tmp_path), ["python", "-m", "pytest"],
         _cfg(bloquear_rede=True),
     )
 
     assert resultado["executado"] is False
-    assert "nao bloqueia rede" in resultado["erro"]
+    assert "does not block network" in resultado["erro"]
 
 
 def test_bwrap_monta_isolamento_rede_workspace_e_limites(monkeypatch, tmp_path):

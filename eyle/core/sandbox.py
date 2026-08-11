@@ -43,9 +43,7 @@ def _argv(comando):
 
 
 def _texto_comando(argv):
-    if hasattr(shlex, "join"):
-        return shlex.join(argv)
-    return " ".join(shlex.quote(item) for item in argv)
+    return shlex.join(argv)
 
 
 def _config_para_projeto(caminho_projeto, cfg_sandbox):
@@ -184,7 +182,7 @@ def _prefixo_prlimit(limites):
 def _comando_bwrap(caminho_projeto, argv, cfg, limites):
     bwrap = shutil.which("bwrap")
     if not bwrap:
-        raise ErroSandbox("Bubblewrap nao encontrado; sandbox com rede bloqueada indisponivel")
+        raise ErroSandbox("Bubblewrap was not found; sandbox com rede bloqueada indisponivel")
 
     comando = _prefixo_prlimit(limites) + [
         bwrap,
@@ -246,7 +244,7 @@ def _ensure_docker_container(caminho_projeto, cfg, limites):
     """
     docker = shutil.which("docker")
     if not docker:
-        raise ErroSandbox("Docker nao encontrado")
+        raise ErroSandbox("Docker was not found")
     execution = current_execution()
     if execution is not None and execution.sandbox_container_name:
         return docker, execution.sandbox_container_name, False
@@ -320,10 +318,10 @@ def _comando_trusted_local(caminho_projeto, argv, cfg, limites):
 def _comando_processo(caminho_projeto, argv, cfg, limites):
     if cfg.get("bloquear_rede", True):
         raise ErroSandbox(
-            "backend 'processo' nao bloqueia rede; use Bubblewrap/Docker ou autorize rede explicitamente"
+            "backend 'process' does not block network; use Bubblewrap/Docker or explicitly allow network access"
         )
     if os.name != "posix":
-        raise ErroSandbox("backend 'processo' com limites requer sistema POSIX e prlimit")
+        raise ErroSandbox("backend 'process' with resource limits requires POSIX and prlimit")
     return _prefixo_prlimit(limites) + argv, None
 
 
@@ -346,13 +344,13 @@ def _strong_backend(cfg):
             return "docker"
         if os.name == "posix" and shutil.which("bwrap"):
             return "bwrap"
-        raise ErroSandbox("run_command exige Docker ou Bubblewrap; trusted_local/processo nao sao isolamento forte")
+        raise ErroSandbox("run_command requires Docker or Bubblewrap; trusted_local/process are not strong isolation")
     if backend not in {"bwrap", "docker"}:
-        raise ErroSandbox("run_command aceita somente backends fortes: docker ou bwrap")
+        raise ErroSandbox("run_command accepts only strong backends: docker or bwrap")
     if backend == "docker" and not shutil.which("docker"):
-        raise ErroSandbox("Docker nao encontrado")
+        raise ErroSandbox("Docker was not found")
     if backend == "bwrap" and not (os.name == "posix" and shutil.which("bwrap")):
-        raise ErroSandbox("Bubblewrap nao encontrado")
+        raise ErroSandbox("Bubblewrap was not found")
     return backend
 
 
@@ -490,7 +488,7 @@ def executar_no_sandbox(caminho_projeto, comando, cfg_sandbox=None):
             elif os.name == "nt" and cfg.get("allow_trusted_local") is True:
                 backend = "trusted_local"
             elif cfg.get("bloquear_rede", True) is False:
-                backend = "processo"
+                backend = "process"
             else:
                 raise ErroSandbox(
                     "nenhum backend seguro disponivel (instale Bubblewrap/configure Docker "
@@ -501,15 +499,15 @@ def executar_no_sandbox(caminho_projeto, comando, cfg_sandbox=None):
             argv_exec, limpeza_docker = _comando_bwrap(caminho_execucao, argv, cfg, limites)
         elif backend == "docker":
             argv_exec, limpeza_docker = _comando_docker(caminho_execucao, _texto_comando(argv), ".", cfg, limites)
-        elif backend in ("process", "processo"):
+        elif backend == "process":
             argv_exec, limpeza_docker = _comando_processo(caminho_execucao, argv, cfg, limites)
-        elif backend in ("trusted_local", "local_confiavel"):
+        elif backend == "trusted_local":
             backend = "trusted_local"
             argv_exec, limpeza_docker = _comando_trusted_local(
                 caminho_execucao, argv, cfg, limites,
             )
         else:
-            raise ErroSandbox(f"backend de sandbox desconhecido: {backend}")
+            raise ErroSandbox(f"unknown sandbox backend: {backend}")
     except ErroSandbox as erro:
         if temporario_projeto is not None:
             temporario_projeto.cleanup()

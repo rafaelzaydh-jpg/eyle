@@ -193,10 +193,11 @@ def test_runtime_assigns_confirmation_metadata_once(monkeypatch, tmp_path):
     monkeypatch.setattr(service_mod.secrets, "token_hex", lambda size: "a1b2")
 
     core_pending = {
+        "pending_schema_version": "1",
         "continuation_kind": "write_confirmation",
-        "pergunta_ao_usuario": "Proposta pronta.",
-        "estado": {"request": "mude o arquivo"},
-        "write_transaction": {"patches": [{"operation": "create", "path": "x.txt", "content": "x"}]},
+        "question": "Proposal ready.",
+        "session": {"request": "change the file"},
+        "transaction_id": "tx-1",
     }
     saved = service_mod.salvar_agent_pendente(
         core_pending,
@@ -205,9 +206,9 @@ def test_runtime_assigns_confirmation_metadata_once(monkeypatch, tmp_path):
     )
 
     assert saved["id"] == "A1B2"
-    assert saved["pergunta_ao_usuario"].count("ID da pendência: A1B2") == 1
-    assert saved["pergunta_ao_usuario"].count("confirmar A1B2") == 1
-    assert saved["projeto_hash"] == service_mod._hash_projeto(
+    assert saved["question"].count("Pending ID: A1B2") == 1
+    assert saved["question"].count("confirmar A1B2") == 1
+    assert saved["project_hash"] == service_mod._hash_projeto(
         {"caminho_origem": str(project)}
     )
     assert "id" not in core_pending

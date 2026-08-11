@@ -59,7 +59,7 @@ def _serializar(valor):
     return json.dumps(valor, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
-QUEUE_SCHEMA_VERSION = "5.7.1"
+QUEUE_SCHEMA_VERSION = "5.7.5"
 
 _EXPECTED_TABLE_COLUMNS = {
     "jobs": [
@@ -92,7 +92,7 @@ def _validate_schema(conexao):
 
 
 def _inicializar_schema(conexao, caminho_banco, *, new_database):
-    """Create exactly the Rev5.7.1 queue schema or reject the existing database."""
+    """Create exactly the Rev5.7.5 queue schema or reject the existing database."""
     with _schema_lock:
         if caminho_banco in _schemas_prontos:
             return

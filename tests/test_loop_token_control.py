@@ -77,7 +77,7 @@ def test_common_multifile_write_reaches_transaction_in_three_calls(monkeypatch, 
     )
     assert status == "needs_user"
     assert pending["continuation_kind"] == "write_confirmation"
-    assert len(pending["estado"]["write_transaction"]["patches"]) == 3
+    assert len(pending["session"]["write_transaction"]["patches"]) == 3
     assert len(prompts) == 3
     assert sum((item.get("prompt") or {}).get("estimated_tokens", 0) for item in details["llm_calls"]) < 12000
 

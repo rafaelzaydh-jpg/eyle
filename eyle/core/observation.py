@@ -50,16 +50,21 @@ def observation_signature(tool: str, arguments: Dict[str, Any]) -> Optional[str]
     if tool == "search_code": return "search:" + " ".join(str(arguments.get("query") or "").lower().split())
     if tool == "find_symbol": return f"symbol:{_norm_path(arguments.get('path'))}:{str(arguments.get('symbol') or '').strip().lower()}"
     if tool == "symbol_relations":
-        return "relations:" + json.dumps({
+        query = str(arguments.get("query") or "relations").strip().lower()
+        identity = {
             "symbol": str(arguments.get("symbol") or "").strip().lower(),
             "path": _norm_path(arguments.get("path")),
             "roots": [str(x) for x in (arguments.get("roots") or [])],
-            "direction": str(arguments.get("direction") or "both").strip().lower(),
             "include_text_references": bool(arguments.get("include_text_references", False)),
-            "query": str(arguments.get("query") or "relations").strip().lower(),
-            "max_depth": int(arguments.get("max_depth") or (12 if str(arguments.get("query") or "relations").strip().lower() == "reachability" else 6)),
-            "max_edges": int(arguments.get("max_edges") or 60),
-        }, sort_keys=True, separators=(",", ":"), default=str)
+            "query": query,
+        }
+        if query != "reachability":
+            identity.update({
+                "direction": str(arguments.get("direction") or "both").strip().lower(),
+                "max_depth": int(arguments.get("max_depth") or 6),
+                "max_edges": int(arguments.get("max_edges") or 60),
+            })
+        return "relations:" + json.dumps(identity, sort_keys=True, separators=(",", ":"), default=str)
     if tool == "read_file":
         if arguments.get("line_start") is not None and arguments.get("line_end") is not None:
             return f"file:{_norm_path(arguments.get('path'))}:{arguments.get('line_start')}:{arguments.get('line_end')}"

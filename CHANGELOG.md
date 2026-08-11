@@ -2,6 +2,32 @@
 
 **Public release baseline:** `v2.7.4-rev5.7.1` is the first supported public Eyle release. Entries below Rev5.7.1 are preserved as **pre-public engineering history**; they document the path to the current architecture but are not supported public releases and should not be recreated as public Git tags. Git commit history remains the canonical record of those development milestones.
 
+## Rev5.7.5 — Canonical Boundary Hardening — 2026-08-11
+
+Focused P1/P2 compatibility cleanup on top of Rev5.7.4. `search_code` now gives ripgrep and the Python fallback one deterministic file universe and one canonical ranking/truncation stage, so environment choice changes execution backend rather than observable search semantics. Conversation history is normalized at the Runtime boundary into the sole Core shape `{role, content}`; the Core no longer accepts the `text` alias. `agent_info` projection accepts only `registered_tools`. Pending continuation now has its own exact `pending_schema_version=1`, English field names, exact kind-specific shapes and exact persisted security metadata; older mixed-language/unversioned shapes are rejected rather than adapted. Pre-Python-3.8 feature-detection branches for `shlex.join` and `multiprocessing.Process.kill` were removed because Python 3.8+ is the declared runtime floor.
+
+Compatibility that belongs behind adapters/capabilities remains intact: OpenAI-compatible/Ollama, Docker/Bubblewrap, OS-specific execution and provider normalization. No provider-protocol fallback was added to the Core.
+
+Clean break: current config/session/queue/project-memory schemas are exact 5.7.5; pending continuation schema is independently exact at version 1; benchmark schema remains independently exact at version 1.
+
+Current validation: 195 passed, 1 skipped because Flask is unavailable in the build environment.
+
+## Rev5.7.4 — Core Compatibility Boundary — 2026-08-10
+
+Focused compatibility cleanup. Core contracts now accept one exact canonical representation instead of same-version shape tolerance or language aliases. `AgentSession` requires the complete 5.7.4 persisted envelope and exact ledger envelopes; project memory requires one exact envelope, entry shape and file-reference shape. Sandbox backends use one English vocabulary (`auto`, `docker`, `bwrap`, `process`, `trusted_local`) and unknown/alias values fail during configuration validation.
+
+Benchmark artifacts now use an independent exact `benchmark_schema_version=1`. The benchmark producer and both comparators share one validator and accept only canonical English fields; historical `papel/casos/results/case_id` forms and top-level token-counter fallbacks are rejected. Coverage comparison requires explicit `read_ok`, `factual_ok`, `write_ok` and `unauthorized_write` gates, so missing fields can no longer pass by default.
+
+The compatibility doctrine is now explicit: **compatibility inside the Core is suspicious; compatibility behind adapters/capabilities is desirable.** OpenAI-compatible/Ollama and environment portability remain. Future alternate LLM structured-output mechanisms may be supported behind provider adapters, but must normalize into the same strict Agent/Claim objects; no Core-level downgrade chain is restored.
+
+Clean break: current config/session/queue/project-memory schemas are exact 5.7.4. Benchmark schema is independently exact at version 1.
+
+## Rev5.7.3 — Directed Reachability Hardening — 2026-08-10
+
+Focused correction of the negative/long-path reachability benchmark. Directed reachability now exhausts the finite resolved graph mechanically, so Main no longer escalates `max_depth`/`max_edges`. Query identity canonicalizes those obsolete tuning hints, preventing 5→12→32 variants from becoming separate physical observations. Expandable dynamic frontiers are restricted to target-directed corridor evidence; generic root-reachable dynamic dispatch is represented as one non-expandable limitation rather than paginated unrelated calls. `expand_observation` accepts only exact `handle:*` IDs, and missing/stale handle references no longer retire the capability. Main guidance now treats incomplete coverage as support for an explicitly inconclusive result, never as proof of absence.
+
+Clean break: current config/session/queue/project-memory schemas are exact 5.7.3. No compatibility bridge is introduced.
+
 ## Rev5.7.1 — Directed Observation & Context Projection — 2026-08-10
 
 - Hardens `symbol_relations(query="reachability")` with file-local/import/alias resolution before project-global name fallback.

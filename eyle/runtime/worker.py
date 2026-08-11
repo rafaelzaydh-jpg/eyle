@@ -123,7 +123,7 @@ def _terminate_process(process, grace_seconds=1.0):
         return
     process.terminate()
     process.join(timeout=max(0.0, float(grace_seconds)))
-    if process.is_alive() and hasattr(process, "kill"):
+    if process.is_alive():
         process.kill()
         process.join(timeout=1.0)
 

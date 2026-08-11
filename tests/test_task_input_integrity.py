@@ -54,7 +54,7 @@ def test_resume_clarification_is_canonical_across_tool_and_claim(monkeypatch, tm
     )
     assert status == "needs_user"
     assert pending["clarification"]["question"] == "Qual classe devo localizar?"
-    assert pending["estado"]["request"] == "Localize a classe que eu indicar e responda com o arquivo."
+    assert pending["session"]["request"] == "Localize a classe que eu indicar e responda com o arquivo."
     assert details1["turns"] == 1
 
     resumed_prompts = []
@@ -83,7 +83,7 @@ def test_resume_clarification_is_canonical_across_tool_and_claim(monkeypatch, tm
     )
 
     status, text, pending2, details2 = core_agent.executar_agente(
-        pending["estado"]["request"],
+        pending["session"]["request"],
         cfg,
         projeto={"caminho_origem": str(tmp_path)},
         retomar=pending,
@@ -119,12 +119,15 @@ def test_resume_clarification_is_canonical_across_tool_and_claim(monkeypatch, tm
 def test_expired_user_input_pending_cannot_capture_new_request(monkeypatch, tmp_path):
     calls = {"resume": 0, "new": 0}
     pending = {
+        "pending_schema_version": "1",
         "continuation_kind": "user_input",
+        "question": "Which class?",
+        "session": {"request": "old request", "task_id": "job-old"},
+        "clarification": {"question": "Which class?", "missing_information": "class name"},
         "id": "ABCD",
-        "expira_em": "2000-01-01T00:00:00+00:00",
-        "projeto_hash": "stale",
-        "clarification": {"question": "Qual classe?", "missing_information": "class name"},
-        "estado": {"request": "old request", "task_id": "job-old"},
+        "created_at": "1999-01-01T00:00:00+00:00",
+        "expires_at": "2000-01-01T00:00:00+00:00",
+        "project_hash": "stale",
     }
     monkeypatch.setattr(service_mod, "carregar_agent_pendente", lambda: pending)
     monkeypatch.setattr(service_mod, "carregar_config", lambda: base_config())
@@ -172,10 +175,15 @@ def test_execution_context_rejects_canonical_request_identity_drift():
 
 def test_user_input_pending_cancel_is_control_but_plain_sim_is_clarification(monkeypatch):
     pending = {
-        "continuation_kind": "user_input", "id": "ABCD",
-        "expira_em": "2099-01-01T00:00:00+00:00", "projeto_hash": "project",
-        "clarification": {"question": "Continuar?", "missing_information": "user choice"},
-        "estado": {"request": "task", "task_id": "job-1"},
+        "pending_schema_version": "1",
+        "continuation_kind": "user_input",
+        "question": "Continue?",
+        "session": {"request": "task", "task_id": "job-1"},
+        "clarification": {"question": "Continue?", "missing_information": "user choice"},
+        "id": "ABCD",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "expires_at": "2099-01-01T00:00:00+00:00",
+        "project_hash": "project",
     }
     monkeypatch.setattr(service_mod, "carregar_config", lambda: base_config())
     monkeypatch.setattr(service_mod, "carregar_projeto", lambda: {})

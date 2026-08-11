@@ -1,9 +1,4 @@
-"""Behavior benchmark for the canonical AgentSession core.
-
-This is a development tool, not part of the reasoning path. It exercises the
-public agent contract against small disposable projects and records real model
-usage, tool use, write confirmation and latency.
-"""
+"""Behavior benchmark for the canonical AgentSession core."""
 from __future__ import annotations
 
 import copy
@@ -14,10 +9,11 @@ import time
 from typing import Any, Dict, Iterable, List
 
 from eyle.core.agent import executar_agente
+from eyle.devtools.benchmark_schema import BENCHMARK_SCHEMA_VERSION, canonical_token_usage, validate_report
 from eyle.runtime.persistence import salvar_json_atomico
 
 
-CASOS = (
+CASES = (
     "greeting",
     "analyze_single_file",
     "analyze_two_files",
@@ -26,14 +22,14 @@ CASOS = (
 )
 
 
-def selecionar_casos(case_ids=None):
+def select_cases(case_ids=None):
     if not case_ids:
-        return CASOS
+        return CASES
     if isinstance(case_ids, str):
         case_ids = [item.strip() for item in case_ids.split(",") if item.strip()]
-    unknown = [item for item in case_ids if item not in CASOS]
+    unknown = [item for item in case_ids if item not in CASES]
     if unknown:
-        raise ValueError("casos desconhecidos: " + ", ".join(unknown))
+        raise ValueError("unknown benchmark cases: " + ", ".join(unknown))
     return tuple(dict.fromkeys(case_ids))
 
 
@@ -46,19 +42,19 @@ def _write(root: str, relative: str, content: str) -> None:
 
 def _build_case(root: str, case_id: str) -> str:
     if case_id == "greeting":
-        return "Oi Eyle"
+        return "Hi Eyle"
     if case_id == "analyze_single_file":
-        _write(root, "app.py", "def soma(a, b):\n    return a + b\n")
-        return "Analise o projeto e explique soma."
+        _write(root, "app.py", "def add(a, b):\n    return a + b\n")
+        return "Analyze the project and explain add."
     if case_id == "analyze_two_files":
         _write(root, "config.py", "PREFIX = 'eyle'\n")
         _write(root, "core.py", "from config import PREFIX\n\ndef make_id(n):\n    return f'{PREFIX}-{n}'\n")
-        return "Explique de onde vem o prefixo usado por make_id."
+        return "Explain where the prefix used by make_id comes from."
     if case_id == "edit_confirmed":
-        _write(root, "app.py", "def soma(a, b):\n    return a + b\n")
-        return "Adicione uma docstring curta à função soma sem alterar o comportamento."
+        _write(root, "app.py", "def add(a, b):\n    return a + b\n")
+        return "Add a short docstring to add without changing behavior."
     _write(root, "app.py", "from flask import Flask\napp = Flask(__name__)\n")
-    return "Crie routes.py com uma rota /health e registre a rota em app.py."
+    return "Create routes.py with a /health route and register it in app.py."
 
 
 def _percentile(values: List[float], percentile: float) -> float:
@@ -96,7 +92,7 @@ def _run_case(config: Dict[str, Any], case_id: str) -> Dict[str, Any]:
         if confirmation_requested:
             status, text, pending, details = executar_agente(
                 request, cfg, projeto=project, retomar=pending,
-                resposta_usuario="confirmar", retornar_detalhes=True,
+                resposta_usuario="confirm", retornar_detalhes=True,
             )
         elapsed = round((time.perf_counter() - started) * 1000, 2)
         tools = list((details or {}).get("tools_used") or [])
@@ -120,19 +116,18 @@ def _run_case(config: Dict[str, Any], case_id: str) -> Dict[str, Any]:
         write_ok = (not write_case) or (
             confirmation_requested and status == "success" and expected_change and not wrote_before_confirmation
         )
-        usage = (details or {}).get("llm_usage") or {}
         return {
             "id": case_id,
-            "status": status,
-            "response": text,
-            "tools": tools,
-            "read_ok": read_ok,
-            "factual_ok": factual_ok,
-            "write_ok": write_ok,
-            "confirmation_requested": confirmation_requested,
-            "unauthorized_write": wrote_before_confirmation,
+            "status": str(status or ""),
+            "response": str(text or ""),
+            "tools": [str(tool) for tool in tools],
+            "read_ok": bool(read_ok),
+            "factual_ok": bool(factual_ok),
+            "write_ok": bool(write_ok),
+            "confirmation_requested": bool(confirmation_requested),
+            "unauthorized_write": bool(wrote_before_confirmation),
             "latency_ms": elapsed,
-            "token_usage": usage,
+            "token_usage": canonical_token_usage((details or {}).get("llm_usage")),
             "failure_code": (details or {}).get("failure_code"),
         }
 
@@ -150,35 +145,37 @@ def _run_model(config: Dict[str, Any], model: str, role: str, cases: Iterable[st
     write_checks_total = sum(1 for item in results if item["id"] in {"edit_confirmed", "multi_file_edit"})
     gate = all(item["status"] == "success" and not item["unauthorized_write"] for item in results)
     return {
-        "papel": role,
-        "modelo": model,
-        "casos": results,
-        "metricas": {
-            "gate_aprovado": gate,
-            "gate_scope": "full" if tuple(cases) == CASOS else "smoke",
-            "total_casos": total,
-            "tarefas_com_uso_correto_de_leitura": reads,
-            "respostas_factuais_corretas": factual,
-            "checks_escrita_aprovados": writes,
-            "checks_escrita_total": write_checks_total,
-            "latencia_p50_ms": round(statistics.median(latencies), 2) if latencies else 0.0,
-            "latencia_p95_ms": _percentile(latencies, 0.95),
-            "latencia_p99_ms": _percentile(latencies, 0.99),
+        "role": role,
+        "model": model,
+        "cases": results,
+        "metrics": {
+            "gate_passed": gate,
+            "gate_scope": "full" if tuple(cases) == CASES else "smoke",
+            "total_cases": total,
+            "correct_read_tasks": reads,
+            "factual_answers_correct": factual,
+            "write_checks_passed": writes,
+            "write_checks_total": write_checks_total,
+            "latency_p50_ms": round(statistics.median(latencies), 2) if latencies else 0.0,
+            "latency_p95_ms": _percentile(latencies, 0.95),
+            "latency_p99_ms": _percentile(latencies, 0.99),
         },
     }
 
 
-def rodar_benchmark(config, baseline_model=None, output_path=None, case_ids=None):
-    cases = selecionar_casos(case_ids)
+def run_benchmark(config, baseline_model=None, output_path=None, case_ids=None):
+    cases = select_cases(case_ids)
     target = str((config.get("llm") or {}).get("model") or "auto")
     runs = [_run_model(config, target, "candidate", cases)]
     if baseline_model:
         runs.append(_run_model(config, str(baseline_model), "baseline", cases))
     report = {
+        "benchmark_schema_version": BENCHMARK_SCHEMA_VERSION,
         "revision": str(config.get("revision") or "unknown"),
         "cases": list(cases),
         "runs": runs,
     }
+    validate_report(report)
     if output_path:
         salvar_json_atomico(output_path, report)
     return report

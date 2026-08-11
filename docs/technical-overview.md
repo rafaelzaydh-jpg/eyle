@@ -1,4 +1,4 @@
-# Technical overview — Eyle Rev5.7.1
+# Technical overview — Eyle Rev5.7.5
 
 Eyle uses one Main-LLM execution loop with deterministic capabilities, canonical observation/evidence state, bounded model-facing projection, supervised writes and optional Claim Review.
 
@@ -154,14 +154,24 @@ Structured Agent/Claim calls require strict JSON Schema. Unsupported backend cap
 ## Persistence
 
 ```text
-session         5.7.1 exact
-queue           5.7.1 exact
-project memory  5.7.1 exact
-config          5.7.1 exact
+session         5.7.5 exact
+queue           5.7.5 exact
+project memory  5.7.5 exact
+config          5.7.5 exact
 ```
 
-Deprecated aliases, migration bridges and dual-read contracts do not exist.
+Deprecated aliases, migration bridges and dual-read contracts do not exist. Same-version persistence envelopes are exact rather than permissive, and benchmark artifacts use an independent exact schema version (`1`).
+
+Compatibility inside the Core is treated as suspicious. Compatibility behind provider/environment/domain adapters is desirable when all variants normalize into the same canonical Core contract.
 
 ## Scope
 
 This overview documents the current coding-agent runtime. Broader reuse of the observation protocol is a future design direction documented in [architectural-direction.md](architectural-direction.md), not a current non-coding product claim.
+
+## Rev5.7.5 canonical-boundary hardening
+
+- `search_code` backends share one deterministic file universe and one canonical ranking/truncation stage. `ripgrep-json` and `python-fallback` are physical execution choices, not different search contracts.
+- Conversation history enters the Core only as `{role, content}`. Runtime storage/UI formats are normalized before the AgentSession loop.
+- `agent_info` exposes and projects `registered_tools`; `tools` is not an accepted alias.
+- Pending continuations use exact `pending_schema_version=1` envelopes with English field names. Core and persisted Runtime shapes reject missing, unknown, old or alternate fields.
+- Python 3.8+ is the supported floor; code does not carry feature-detection branches for APIs guaranteed by that floor.

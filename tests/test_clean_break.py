@@ -16,7 +16,7 @@ from eyle.core import tools
 
 def test_session_schema_is_exact_and_old_state_is_not_migrated():
     current = AgentSession("x").to_dict()
-    assert current["session_schema_version"] == SESSION_SCHEMA_VERSION == "5.7.1"
+    assert current["session_schema_version"] == SESSION_SCHEMA_VERSION == "5.7.5"
     assert AgentSession.from_dict(current).request == "x"
     old = dict(current)
     old["session_schema_version"] = "5.4"

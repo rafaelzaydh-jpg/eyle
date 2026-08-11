@@ -19,6 +19,7 @@ from llm.executar import (
 )
 
 from .session import AgentSession
+from .continuation import PENDING_SCHEMA_VERSION, validate_pending_continuation
 from .execution_context import ExecutionContext, bind_execution, reset_execution, current_execution
 from .decision import (
     record as _decision_record, record_rejection as _decision_record_rejection,
@@ -68,25 +69,19 @@ def _return(status: str, text: str, pending: Any, details: Dict[str, Any], full:
 
 
 def _conversation_history(context: Any) -> Dict[str, Any]:
-    """Return current conversation background without a pre-emptive token cap.
-
-    The physical model window is the only context-size authority. ``_crop_payload``
-    may remove oldest background messages only when the compiled prompt truly
-    does not fit.
-    """
+    """Return canonical conversation background received from the Runtime boundary."""
     messages = list((context or {}).get("recent_messages") or []) if isinstance(context, dict) else []
     normalized: List[Dict[str, Any]] = []
     for item in messages:
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or set(item) != {"role", "content"}:
             continue
         role = str(item.get("role") or "")
-        if role not in {"user", "assistant"}:
-            continue
-        content = item.get("content") if isinstance(item.get("content"), str) else item.get("text")
-        if not isinstance(content, str) or not content.strip():
+        content = item.get("content")
+        if role not in {"user", "assistant"} or not isinstance(content, str) or not content.strip():
             continue
         normalized.append({"role": role, "content": content.strip()})
     return {"messages": normalized, "omitted_messages": 0}
+
 
 def _append_user_clarification(request: str, pending: Dict[str, Any], response: str) -> str:
     """Evolve the one canonical task request with a blocking user clarification.
@@ -444,7 +439,7 @@ def _observable_tool_result(tool: str, result: Dict[str, Any]) -> Dict[str, Any]
         for key in ("name", "app_version", "revision", "write_enabled", "write_confirmation_required"):
             if key in detail:
                 public[key] = detail.get(key)
-        registered = detail.get("registered_tools") if isinstance(detail.get("registered_tools"), list) else detail.get("tools")
+        registered = detail.get("registered_tools") if isinstance(detail.get("registered_tools"), list) else []
         available = detail.get("available_tools") if isinstance(detail.get("available_tools"), list) else []
         if isinstance(registered, list):
             public["registered_tools"] = [item.get("name") for item in registered[:40] if isinstance(item, dict)]
@@ -1185,7 +1180,7 @@ def _run_claim_verification(
 ) -> Tuple[bool, str, Dict[str, Any], List[Dict[str, Any]]]:
     """Run the single canonical Claim Review path.
 
-    Rev5.7.1 has one strict Claim pass. Structured transport is canonical JSON
+    Rev5.7.5 has one strict Claim pass. Structured transport is canonical JSON
     Schema; invalid structured output fails instead of entering a repair lane.
     """
     cfg = claim_config(config)
@@ -1475,9 +1470,13 @@ def _pending_patch_set(session: AgentSession):
     )
     _set_write_status(tx, "awaiting_confirmation")
     pending = {
-        "continuation_kind": "write_confirmation", "pergunta_ao_usuario": text,
-        "estado": session.to_dict(), "transaction_id": tx.get("transaction_id"),
+        "pending_schema_version": PENDING_SCHEMA_VERSION,
+        "continuation_kind": "write_confirmation",
+        "question": text,
+        "session": session.to_dict(),
+        "transaction_id": tx.get("transaction_id"),
     }
+    validate_pending_continuation(pending)
     return text, pending
 
 
@@ -2044,11 +2043,13 @@ def _run(
                 )
             _record_decision(session, "needs_user", "accepted", reason=missing)
             pending = {
+                "pending_schema_version": PENDING_SCHEMA_VERSION,
                 "continuation_kind": "user_input",
-                "pergunta_ao_usuario": question,
+                "question": question,
+                "session": session.to_dict(),
                 "clarification": {"question": question, "missing_information": missing},
-                "estado": session.to_dict(),
             }
+            validate_pending_continuation(pending)
             return _return("needs_user", question, pending, _details(session, "needs_user", config), full)
 
         if isinstance(decision.get("patches"), list):
@@ -2513,14 +2514,24 @@ def _executar_agente_bound(
     project = projeto or {}
     if retomar:
         try:
-            session = AgentSession.from_dict(retomar.get("estado") or {})
+            validate_pending_continuation(retomar, persisted=bool("id" in retomar))
+            session = AgentSession.from_dict(retomar.get("session") or {})
         except ValueError as error:
-            if str(error) == "SESSION_SCHEMA_INCOMPATIBLE":
-                text = "O estado persistido pertence a outro contrato de sessão e não pode ser retomado na Rev5.7.1."
+            code = str(error)
+            if code in {"PENDING_SCHEMA_INVALID", "PENDING_SCHEMA_INCOMPATIBLE"}:
+                text = "The persisted continuation does not match the current canonical pending schema."
+                details = {
+                    "status": "failed",
+                    "failure_code": code,
+                    "limitations": ["Rev5.7.5 does not migrate or adapt pending continuations from older shapes."],
+                }
+                return _return("failed", text, None, details, full)
+            if code == "SESSION_SCHEMA_INCOMPATIBLE":
+                text = "The persisted session belongs to a different contract and cannot be resumed in Rev5.7.5."
                 details = {
                     "status": "failed",
                     "failure_code": "SESSION_SCHEMA_INCOMPATIBLE",
-                    "limitations": ["Rev5.7.1 não migra nem adapta sessões de revisões anteriores."],
+                    "limitations": ["Rev5.7.5 does not migrate or adapt sessions from earlier revisions."],
                 }
                 return _return("failed", text, None, details, full)
             raise

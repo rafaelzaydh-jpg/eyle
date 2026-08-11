@@ -6,7 +6,7 @@
 
 **Eyle is a source-available coding agent built around explicit semantic authority, deterministic runtime controls, grounded evidence, and supervised project mutation.**
 
-**Version:** 2.7.4 · **Schema:** 5.7.1 · **Revision:** rev5.7.1-directed-observation-context-projection
+**Version:** 2.7.4 · **Schema:** 5.7.5 · **Revision:** rev5.7.5-canonical-boundary-hardening
 
 Eyle is designed for repository analysis, code investigation, command execution in an isolated sandbox, evidence-grounded answers, and confirmation-gated source changes. The Main LLM owns interpretation and strategy; the Runtime owns physical execution, state, safety and budgets; Claim Review challenges grounded delivery without becoming a second planner.
 
@@ -33,7 +33,8 @@ USER
 - **World state is not model context.** Canonical ledgers may remain complete while each model call receives only a bounded projection of the state needed for the current turn.
 - **Evidence remains grounded.** Source observations, runtime facts and write outcomes remain addressable instead of being reduced to free-form model memory.
 - **Writes have one controlled path.** Real project mutation uses a confirmation-gated `WriteTransaction` with dry-run, verification and rollback.
-- **No hidden compatibility layer.** Rev5.7.1 accepts only its current config/session/queue/project-memory schemas.
+- **One canonical Core contract.** Rev5.7.5 rejects alternate same-version persistence shapes, language aliases, and historical benchmark formats. Compatibility inside the Core is suspicious; compatibility behind adapters/capabilities is desirable.
+- **Canonical compatibility boundaries.** Search backends normalize to one observable result contract; conversation messages use `{role, content}` in Core; pending continuations use exact `pending_schema_version=1`; provider/environment diversity stays behind adapters.
 
 ## Directed code observation
 
@@ -199,7 +200,6 @@ node --check web/static/app.js
 - [Benchmark contract](docs/benchmark.md) — regression and efficiency baselines.
 - [Publishing](docs/github-publishing.md) — release packaging checks.
 - [Changelog](CHANGELOG.md) — public releases and preserved pre-public engineering history.
-- [Português](README.pt-BR.md)
 
 ## License
 

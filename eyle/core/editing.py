@@ -202,9 +202,7 @@ def _tem_testes_pytest(caminho_projeto):
 
 def _descricao_comando(comando):
     if isinstance(comando, (list, tuple)):
-        if hasattr(shlex, "join"):
-            return shlex.join(str(item) for item in comando)
-        return " ".join(shlex.quote(str(item)) for item in comando)
+        return shlex.join(str(item) for item in comando)
     return str(comando)
 
 
