@@ -1,0 +1,147 @@
+{
+  "release": "2.7.4",
+  "app_version": "2.7.4",
+  "config_schema_version": "5.8",
+  "revision": "rev5.8-objective-projection-evidence-admission",
+  "released_at": "2026-08-11",
+  "title": "Rev5.8 Objective Projection & Evidence Admission",
+  "compatibility": {
+    "backward_compatible": false,
+    "session_schema": "5.8",
+    "queue_schema": "5.8",
+    "project_memory_schema": "5.8",
+    "policy": "Core contracts are exact and compatibility inside the Core is suspicious. Provider, environment and domain variability belongs behind adapters/capabilities and must normalize into one canonical Core contract.",
+    "benchmark_schema": "1",
+    "canonical_language": "English",
+    "future_structured_output": "Provider adapters may support multiple provider-native structured-output mechanisms in the future, but each adapter must normalize them into the single canonical Agent/Claim profile before Core validation; no silent Core downgrade path.",
+    "pending_continuation_schema": "1"
+  },
+  "architecture": {
+    "main_llm": "Owns task semantics, Investigation, relevance, Evidence admission, materiality and stopping. It chooses capabilities, explicitly promotes material src-* SourceRecords through Investigation/Final grounding, and decides whether objective frontiers matter.",
+    "runtime": "Owns physical/structural authority: deterministic capability execution, SourceRecord identity/freshness, objective projection, coverage/frontiers/handles, schemas, replay, budgets, transactions and security. It never ranks semantic relevance or promotes SourceRecords by inferred usefulness.",
+    "claim": "One independent semantic review over the canonical request, literal request/answer anchors, admitted Evidence, Runtime Facts and Investigation. Runtime validates coordinate existence and protocol invariants; Claim decides semantic satisfaction.",
+    "grounded_outcomes": "material_satisfaction is satisfied|gap|blocked. Physical blockage is a valid truthful outcome when supported by Runtime Facts; semantic gaps state required_property without prescribing tools.",
+    "investigation": "Optional persistent semantic debt declared only by the Main LLM. Runtime mechanically preserves identity, goals, Evidence binding and legal transitions.",
+    "observation_map": "Derived from ObservationLedger; Runtime Facts for Claim are bounded projections of objective current-job observations, not a second factual ledger.",
+    "tool_registry": "TOOLS is the sole executable registry. Every capability exposes compact/full contracts plus a domain-neutral effect class (observe|execute|mutate). Progressive capability_index/active_tools remains selector-free.",
+    "terminal_capabilities": "ExecutionContext records physically terminal capability failures for the current job. Handle-specific HANDLE_NOT_FOUND/HANDLE_STALE failures are continuation-reference failures and never retire expand_observation.",
+    "structured_transport": "Agent and Claim require strict JSON Schema. Claim grounding arrays are non-empty in the canonical schema/parser contract; no downgrade, repair call or truncation retry exists.",
+    "state_ownership": "ObservationLedger owns physical tool reality/replay/coverage; SourceRecordLedger owns objectively materialized citable source records; EvidenceLedger owns only Main-admitted Evidence plus narrow Runtime validation facts; DecisionLedger owns decisions/rejections; LLMCallLedger owns calls; WriteTransaction owns mutations; ExecutionContext owns job resources.",
+    "sandbox": "backend=auto prefers Docker and falls back to Bubblewrap. Docker uses one persistent disposable container per job with a writable project snapshot and network/toolchain freedom. The real workspace is never mounted read-write. Only explicit protected resources and their symlink/hard-link aliases are omitted; normal source is preserved regardless of secret-like content.",
+    "writes": "One WriteTransaction owns proposal, dry-run, confirmation, apply, validation, failure and rollback. Sandbox mutations never authorize workspace writes.",
+    "final": "One canonical object: answer, limitations and grounding ids. Main may select src-* records; Runtime deterministically promotes only those explicit selections to ev-src-* before final validation/Claim.",
+    "structural_relations": "symbol_relations keeps query=relations as the local structural view and query=reachability as the directed path view. Reachability exhausts the finite resolved graph mechanically, resolves local/import bindings before global fallback, and does not expose LLM-tuned depth boundaries.",
+    "observation_contract": "Every executed tool result uses one canonical envelope: physical status fields plus observations, coverage, frontiers and handles. Empty optional observation fields are legal; tools are not forced to invent frontier state.",
+    "observation_handles": "Opaque handle:* IDs address bounded observation snapshots. expand_observation accepts only the handle namespace; Evidence/Observation IDs are rejected before execution. Missing/stale handles invalidate one continuation reference, not the capability.",
+    "directed_observation": "Directed reachability materializes complete resolved paths automatically. Negative queries expose expandable frontiers only when unresolved sites carry target-directed corridor evidence; generic root-side dynamic dispatch is one non-expandable boundary limitation.",
+    "context_projection": "Canonical world/task state remains complete in ledgers. Main prompts receive a hot projection: bounded recent/pinned Evidence and Observation indexes, only the two most recent expanded tool contracts, and bounded current-delta tool results. Older capabilities remain callable through the compact capability index.",
+    "claim_projection": "Claim grounding is projected by Main authority: final.evidence_ids plus Evidence explicitly attached to Investigation. Runtime validates IDs and freshness but does not infer semantic relevance.",
+    "conversation_boundary": "Runtime normalizes stored/UI conversation records into one Core message shape: {role, content}. Core does not accept text/content aliases.",
+    "pending_continuation": "Pending continuation uses independent exact pending_schema_version=1 with English field names and exact kind-specific shapes; older or alternate envelopes are rejected, never migrated.",
+    "search_code": "ripgrep and Python fallback operate over the same deterministic file universe and share one canonical ranking/truncation stage; backend choice may change performance but not observable candidate semantics.",
+    "workspace_security": "Rev5.8 retains the Rev5.7.7 physical protected-resource identity boundary: explicit secret-resource paths plus symlink/hard-link identity, no content-based secret classifier.",
+    "objective_projection": "Capabilities may exhaust an objectively specified property over large state and deterministically compress, group and paginate it. coverage_complete describes the capability search scope; projection_complete describes only the bounded inline materialization. No hidden relevance model selects semantically important results.",
+    "evidence_admission": "Tool success creates SourceRecords, not Evidence. Main explicitly selects material src-* records in Investigation or Final; Runtime performs identity-preserving promotion only. Navigation breadcrumbs can remain unpromoted without polluting EvidenceLedger.",
+    "search_projection": "search_code exhausts the readable literal-match universe mechanically, groups all ranges, diversifies deterministically across files before model-facing limits, and exposes omitted objective ranges through opaque continuation handles."
+  },
+  "canonical_structured_profiles": {
+    "agent": [
+      "tool_calls",
+      "patches",
+      "needs_user",
+      "final",
+      "investigation_updates"
+    ],
+    "claim_verifier": [
+      "material_satisfaction",
+      "answer_consistency",
+      "claims",
+      "semantic_gaps"
+    ]
+  },
+  "claim_grounding_refs": [
+    "request",
+    "request:<literal_anchor_id>",
+    "answer:<anchor_id>",
+    "evidence:<EvidenceID>",
+    "runtime:<runtime_fact_id>",
+    "investigation:<target_id>"
+  ],
+  "public_tools": [
+    "calculate",
+    "agent_info",
+    "project_stats",
+    "count_tokens",
+    "inspect_project",
+    "list_tree",
+    "search_code",
+    "symbol_relations",
+    "expand_observation",
+    "find_symbol",
+    "read_file",
+    "run_command",
+    "memory_search",
+    "memory_store",
+    "run_tests",
+    "execution_trace",
+    "git_status",
+    "git_diff"
+  ],
+  "physical_defaults": {
+    "max_llm_turns": 24,
+    "max_tool_calls": 64,
+    "max_llm_calls": 32,
+    "max_prompt_tokens": 90000,
+    "max_completion_tokens": 8000,
+    "max_total_tokens": 98000,
+    "task_deadline_seconds": 1800,
+    "worker_hard_kill_grace_seconds": 15,
+    "llm_context_window_tokens": 32768
+  },
+  "sandbox_defaults": {
+    "backend": "auto",
+    "preference": [
+      "docker",
+      "bubblewrap"
+    ],
+    "docker_image": "python:3.12-slim",
+    "docker_pull": "missing",
+    "network": true,
+    "persistent_per_job": true,
+    "real_workspace_read_write_mount": false
+  },
+  "validation": {
+    "command": "python -m pytest -q",
+    "current_result": "225 passed, 1 skipped (Flask unavailable); release identity, compileall, node syntax and Markdown link checks passed"
+  },
+  "added": [
+    "SourceRecordLedger separating objective materialization from semantic Evidence admission",
+    "deterministic src-* to ev-src-* promotion only when Main explicitly selects grounding",
+    "search_code objective projection with complete physical match universe, cross-file diversity before inline bounds, and continuation handles",
+    "separate coverage_complete and projection_complete semantics for bounded search materialization",
+    "literal request:rN Claim coordinates that are substrings rather than parsed requirements",
+    "Claim protocol consistency invariants and request-aware physical output budgeting",
+    "SourceRecord/Evidence-separated prompt accounting and diagnostics"
+  ],
+  "preserved": [
+    "Rev5.7.7 protected-resource physical identity boundary and resource-scoped stable denials",
+    "Rev5.7.5 canonical Core compatibility boundary, benchmark schema v1 and pending continuation schema v1",
+    "OpenAI-compatible and Ollama provider adapters normalized into one Core response contract",
+    "Docker/Bubblewrap and Windows/POSIX portability behind environment boundaries",
+    "Main/Runtime/Claim authority separation: Runtime performs no semantic relevance ranking"
+  ],
+  "removed": [
+    "automatic promotion of every successful tool materialization/source range into EvidenceLedger",
+    "search_code truncation of raw matches before cross-file grouping/diversification",
+    "stale Claim textual contract that contradicted the current strict JSON Schema",
+    "Evidence-amplification diagnostic that mixed source-range fan-out with semantic Evidence admission"
+  ],
+  "publication": {
+    "status": "public",
+    "public_tag": "v2.7.4-rev5.8",
+    "first_supported_public_release": false,
+    "public_baseline": "v2.7.4-rev5.7.1",
+    "tag_format": "v<app_version>-rev<schema_version>",
+    "pre_public_history": "Revisions older than the public baseline remain engineering history; Rev5.8 is the current clean-break schema."
+  }
+}

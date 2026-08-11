@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="420" viewBox="0 0 1400 420" role="img" aria-labelledby="title desc">
+  <title id="title">Eyle</title>
+  <desc id="desc">Local-first coding agent for local language models</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#08111f"/>
+      <stop offset="0.55" stop-color="#12233f"/>
+      <stop offset="1" stop-color="#101a31"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" x2="1">
+      <stop offset="0" stop-color="#60a5fa"/>
+      <stop offset="0.5" stop-color="#8b5cf6"/>
+      <stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="16" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <pattern id="grid" width="36" height="36" patternUnits="userSpaceOnUse">
+      <path d="M36 0H0V36" fill="none" stroke="#93c5fd" stroke-opacity="0.08" stroke-width="1"/>
+    </pattern>
+  </defs>
+  <rect width="1400" height="420" rx="36" fill="url(#bg)"/>
+  <rect width="1400" height="420" rx="36" fill="url(#grid)"/>
+  <circle cx="1130" cy="115" r="155" fill="#7c3aed" opacity="0.14" filter="url(#glow)"/>
+  <circle cx="1245" cy="320" r="120" fill="#06b6d4" opacity="0.12" filter="url(#glow)"/>
+
+  <g transform="translate(92 84)">
+    <rect x="0" y="0" width="252" height="252" rx="58" fill="#0f1c32" stroke="url(#accent)" stroke-width="4"/>
+    <path d="M58 67h136M58 126h104M58 185h136" fill="none" stroke="url(#accent)" stroke-width="18" stroke-linecap="round"/>
+    <circle cx="192" cy="126" r="18" fill="#22d3ee"/>
+  </g>
+
+  <text x="405" y="190" fill="#f8fafc" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="118" font-weight="800" letter-spacing="-4">Eyle</text>
+  <rect x="407" y="220" width="505" height="7" rx="4" fill="url(#accent)"/>
+  <text x="407" y="284" fill="#cbd5e1" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="34" font-weight="500">Local-first coding agent for local LLMs</text>
+  <text x="407" y="332" fill="#94a3b8" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="24">Live workspace · LLM-first reasoning · evidence · safe edits</text>
+</svg>
