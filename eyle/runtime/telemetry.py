@@ -46,7 +46,7 @@ def _connect():
                     name TEXT NOT NULL,
                     status TEXT NOT NULL,
                     duration_ms REAL NOT NULL,
-                    task_id TEXT,
+                    execution_id TEXT,
                     job_id INTEGER,
                     metadata TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL
@@ -74,7 +74,7 @@ def _connection():
         conn.close()
 
 
-def record(kind, name, status, duration_ms=0.0, *, task_id=None, job_id=None,
+def record(kind, name, status, duration_ms=0.0, *, execution_id=None, job_id=None,
            metadata=None, max_entries=10000):
     """Persiste uma metrica. Retorna False se a telemetria falhar."""
     try:
@@ -83,13 +83,13 @@ def record(kind, name, status, duration_ms=0.0, *, task_id=None, job_id=None,
             conn.execute(
                 """
                 INSERT INTO runtime_metrics
-                    (kind, name, status, duration_ms, task_id, job_id, metadata, created_at)
+                    (kind, name, status, duration_ms, execution_id, job_id, metadata, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(kind)[:80], str(name)[:160], str(status)[:80],
                     max(0.0, float(duration_ms or 0.0)),
-                    None if task_id is None else str(task_id)[:160],
+                    None if execution_id is None else str(execution_id)[:160],
                     None if job_id is None else int(job_id),
                     json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str),
                     _iso(),

@@ -65,7 +65,7 @@ def test_job_usa_snapshot_e_nao_historico_futuro(monkeypatch):
     recebido = {}
 
     monkeypatch.setattr(service_mod, "carregar_config", lambda: {
-        "agent": {"task_deadline_seconds": 30, "max_llm_calls": 10, "max_completion_tokens": 10000, "max_prompt_tokens": 24000, "max_total_tokens": 34000},
+        "agent": {"task_deadline_seconds": 30, "max_total_tokens": 34000},
     })
     monkeypatch.setattr(service_mod, "carregar_projeto", lambda: {})
     monkeypatch.setattr(service_mod, "carregar_conversa", lambda: conversa_futura)
@@ -138,8 +138,7 @@ def test_queue_falhar_pode_preservar_resultado_estruturado(monkeypatch, tmp_path
 
 def test_service_result_has_no_router_layer(monkeypatch):
     monkeypatch.setattr(service_mod, "carregar_config", lambda: {
-        "agent": {"task_deadline_seconds": 30, "max_llm_calls": 4,
-                  "max_prompt_tokens": 10000, "max_completion_tokens": 3000,
+        "agent": {"task_deadline_seconds": 30,
                   "max_total_tokens": 12000},
     })
     monkeypatch.setattr(service_mod, "carregar_projeto", lambda: {})
@@ -160,8 +159,7 @@ def test_service_result_has_no_router_layer(monkeypatch):
 
 def test_natural_request_with_nao_is_not_treated_as_cancel(monkeypatch):
     monkeypatch.setattr(service_mod, "carregar_config", lambda: {
-        "agent": {"task_deadline_seconds": 30, "max_llm_calls": 4,
-                  "max_prompt_tokens": 10000, "max_completion_tokens": 3000,
+        "agent": {"task_deadline_seconds": 30,
                   "max_total_tokens": 12000},
     })
     monkeypatch.setattr(service_mod, "carregar_projeto", lambda: {})

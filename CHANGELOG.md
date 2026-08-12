@@ -1,3 +1,171 @@
+## 2.7.5 Rev1.3 — Task Memory — 2026-08-12
+
+- Added a separate Main-owned recursive `Task` contract: exactly `id`, `parent_id`, `description`, `status=open|completed|dropped`, and `result`.
+- Added `AgentSession.tasks` as canonical persisted intentional state. Omitted tasks remain unchanged across turns; Runtime validates structure but never infers semantic completion.
+- Added parent existence/self-reference/cycle validation while allowing parent and child creation in the same Main update batch. Tree structure never determines execution order.
+- Closed tasks require a concise result, preserving Main's semantic account of what was accomplished or why work was dropped.
+- Main's structured envelope is now exactly `{action,investigation_updates,task_updates}`. Investigation remains epistemic; Tasks are intentional; Observation remains physical.
+- Open Tasks are deliberately **not** a Final/write gate. Runtime does not auto-close tasks from child status, tool success, observations or `exit 0`.
+- Accepted/rejected task mutations are recorded in DecisionLedger only for observability/history; DecisionLedger does not own Task semantics.
+- Renamed the old physical `task_id` carried by AgentSession/ExecutionContext/service boundaries to `execution_id`, reserving “Task” for Main's semantic state.
+- No Planner, scheduler, focus queue, priorities, generic cognitive ledger, associative memory, loop detector or automatic convergence rule was added.
+- The Rev1.2.3.2.2 Microsandbox Windows guest-filesystem staging and all 16 public capability contracts remain intact.
+- Clean-break identity advances to `2.7.5-r1.3`; older config/Session/queue/project-memory state is rejected rather than migrated.
+- Offline deterministic suite during release preparation: **295 passed, 1 Flask-dependent skip**.
+
+## 2.7.5 Rev1.2.3.2.2 — Windows Guest Filesystem Staging — 2026-08-12
+
+- Native Windows Microsandbox execution no longer bind-mounts the Eyle snapshot through virtio-fs. The disposable snapshot is staged into the microVM private rootfs via `Sandbox.fs.copy_from_host`, avoiding the Windows EACCES/ELOOP passthrough defects observed in live execution.
+- Linux/macOS keep the writable disposable bind mount for performance; the platform branch remains a Runtime-only physical choice. Main, Claim, Observation and the public capability surface remain unchanged.
+- Microsandbox results now expose `workspace_transport=guest_fs_copy|bind_mount` so the physical transport is observable without leaking provider details into semantic control.
+- The live regression covered the exact failure mode: a corrected Python program had already exited 0, but Windows bind-mount reads emitted `Permission denied` / `Too many levels of symbolic links`, provoking unnecessary semantic investigation. The fix removes the faulty physical signal rather than adding a semantic stop gate.
+- Clean-break identity advances to `2.7.5-r1.2.3.2.2`; no aliases or migration bridges were added.
+
+## 2.7.5 Rev1.2.3.2.1 — Microsandbox API Closure — 2026-08-12
+
+- Fixed the live Windows failure caused by calling the non-existent Microsandbox 0.6.8 `Network.public_only()` helper. Normal `run_command` now uses the pinned SDK's canonical `Network.from_profiles("public")`; explicitly isolated supervised execution continues to use `Network.none()`.
+- Added first-use Runtime bootstrap: when the Python SDK is present but the local `msb`/`libkrunfw` payload is not prepared, the existing Microsandbox event loop executes the official `await install()` flow and verifies `is_installed()` before VM creation.
+- Audited the complete active SDK surface against the 0.6.8 contract: `Sandbox.create/remove`, `Volume.bind`, `shell_stream`, stream event fields, `ExecHandle.wait/kill`, and CPU/AS/NPROC/NOFILE/FSIZE rlimits.
+- Added explicit SDK-shape validation so an incompatible package fails at the physical boundary with the missing method names instead of surfacing an arbitrary AttributeError halfway through sandbox creation.
+- First OCI image pull gets a 600-second physical startup allowance; command timeout remains independently bounded per execution.
+- No Main, Claim, Observation, capability or public-tool semantics changed. Public tools remain 16.
+- Clean break identity advances to `2.7.5-r1.2.3.2.1`; no compatibility aliases or migrations were added.
+
+## 2.7.5 Rev1.2.3.2 — Microsandbox Runtime — 2026-08-12
+
+- Added Microsandbox 0.6.8 as the preferred strong physical backend for `run_command`; `auto` resolves Microsandbox → Docker → Bubblewrap.
+- One embedded Microsandbox microVM persists per physical job, preserving sandbox-local package/build state while the real workspace remains outside the writable guest mount.
+- The only writable host bind is Eyle's disposable workspace snapshot at `/workspace`; supervised tests use Microsandbox only when explicitly configured with a test-capable OCI image, then use a separate one-off VM so network/snapshot policy does not leak across execution modes.
+- Runtime applies VM vCPU/memory limits plus command timeout and CPU/address-space/process/open-file/file-size limits; unrestricted command networking uses `public_only`, while supervised blocked-network execution uses `Network.none()`.
+- Clean break: `sandbox.imagem_docker` is removed and replaced by provider-neutral `sandbox.imagem_oci`; current config/Session/queue/project-memory identity advances to `2.7.5-r1.2.3.2`.
+- Docker and Bubblewrap remain explicit/automatic physical fallbacks; Main, Claim, Investigation, Observation and the 16 public capability contracts are unchanged.
+
+## 2.7.5 Rev1.2.3.1 — Claim Contract Closure — 2026-08-12
+
+- Claim remains intelligent but its **interface** is now physically bounded: at most 3 independent blockers, 4 grounding coordinates per blocker and one concise reason.
+- Removed `agent.claims.verifier.max_tokens`; Claim output reservation is derived from the maximum canonical schema size plus physical margin, eliminating the inconsistent 520-token magic ceiling.
+- A truncated or structurally invalid Claim receives exactly one canonical protocol recovery. A second failure remains fail-closed; truncation is never converted into acceptance.
+- Main interaction contract now states that a user message need not be a formal task. Ordinary/social conversation may return `final`; `needs_user` is only for genuinely blocking information or choices that must come from the user.
+- LLM transport telemetry records request start after physical preflight and preserves failure status (`read_timeout`, `model_output_truncated`, etc.) instead of inferring `preflight_blocked` from missing response metadata.
+- Fixed stream-progress eligibility and callback wiring to use the real `ExecutionContext` rather than the config dict; non-structured job streaming can now activate when configured.
+- Clean break: config/Session/queue/project-memory schema advances to `2.7.5-r1.2.3.1`; older state is rejected rather than migrated.
+
+## 2.7.5 Rev1.2.3 — Operational Self-Observation — 2026-08-12
+
+- Added bounded `operational_feedback` derived from canonical DecisionLedger, Observation, Claim and ExecutionContext facts; no new semantic agent or recovery ledger.
+- Main can see recent challenges/rejections, selected Final grounding IDs, available Material IDs, replay-only preflights, executed observations, open Frontiers, workspace epoch and physical token headroom.
+- Provisional Final decision events now retain only generic observable grounding/workspace facts needed for later self-audit.
+- Main prompt clarifies that observed physical claims should explicitly select supporting `mat-*`, while pure reasoning/conversation needs no artificial grounding.
+- Replay remains memoization rather than a fatal loop detector; Runtime reports the observable consequences and Main decides retry/change/finish.
+- Task-wide physical `max_total_tokens` default and maximum changed from the experimental 1,000,000 to **90,000**. No turn/call/tool quotas were introduced.
+- Clean break: config/Session/queue/project-memory schema advances to `2.7.5-r1.2.3`; older persisted Core state is rejected rather than migrated.
+- Added offline regression reproducing Claim challenge → repeated cached observation → Main sees zero new physical observation and can finish with already available Material.
+
+## 2.7.5 Rev1.2.2 — Physical Contract Closure — 2026-08-11
+
+- Frontier pagination no longer deep-copies the retained snapshot payload on every page; only the requested slice is detached.
+- Coverage is now a mechanically enforced universal contract (`scope`, `examined`, `complete`, `boundaries`, optional `facts`); malformed capability Coverage fails closed.
+- `find_symbol` exhausts the safe source scope, reports objective scan Coverage and exposes matches beyond the first 32 through Frontier.
+- Continuation Coverage distinguishes snapshot exhaustion from source-materialization completeness, including vanished/unreadable source pages.
+- Capability-specific public/model projections, normalization, covering lookup and resource-failure lookup moved behind registry hooks; generic dispatch has no tool-name branches.
+- Redundant `category + effects + effect` metadata collapsed to one physical `effect = observe|execute|mutate` field.
+- Claim Runtime fact compaction is domain-neutral and no longer knows code/file/symbol-specific result vocabulary.
+- Sandbox tests now cover process-tree cleanup, backend fallback, Docker initialization failure and persistent-container cleanup; Transaction hardening from Rev1.2.1 remains intact.
+- Clean break: config/Session/queue/project-memory schema advances to `2.7.5-r1.2.2`; older persisted Core state is rejected rather than migrated.
+- Deterministic suite: 259 passed, 1 skipped in the implementation environment before release packaging.
+
+# Changelog
+
+## 2.7.5 Rev1.2.1 — Physical Observation Maturity — 2026-08-11
+
+- Matured the physical observation plane around **Material + Coverage + Frontier** without adding a new semantic authority or compatibility layer.
+- Replaced file-era Material `source_hash` with opaque `source_version`; Observation now treats locator/version semantics as capability-owned physical provenance.
+- Standardized capability Coverage into one physical contract: `scope`, `examined`, `complete`, optional `boundaries` and capability-owned physical `facts`. Coverage is completeness of declared physical scope, never semantic sufficiency.
+- Made every public capability explicitly own the same registry hook surface: execution, memoization signature policy, Material observation, Coverage and Frontier projection.
+- Reworked Frontier storage so large continuation payloads live once in Runtime-private immutable snapshots; handles/frontiers are lightweight cursors referencing the snapshot, with garbage collection after the final cursor is consumed.
+- Made continuation materialization source-capability-owned: e.g. a `search_code` Frontier now materializes real file-range Material instead of exposing generic range-address blobs.
+- Removed remaining file/filesystem semantics from Observation and removed the final public-capability name from Agent. Adding a capability no longer requires catalog branches in either module.
+- Hardened Sandbox snapshots by omitting all repository symlinks from host-executed copies; added regressions for cwd escape, timeout termination and bounded output tails.
+- Hardened multi-file transactions so apply failures report whether rollback was actually confirmed; rollback failure is surfaced as `PATCH_TRANSACTION_ROLLBACK_FAILED` instead of being hidden. Added stale-state, create/delete and multi-file rollback regressions.
+- Clean break: config/Session/queue/project-memory schema advances to `2.7.5-r1.2.1`; Rev1.2 persisted state is rejected rather than migrated.
+- Deterministic suite at release preparation: **248 passed, 1 Flask-dependent skip** in the available offline environment.
+
+## 2.7.5 Rev1.2 — Capability Clean Break — 2026-08-11
+
+- Applied the ObjectiveScope ownership pattern to the capability layer: capability-specific observation identity, Material extraction, Coverage and compact model projection now live with the capability registry rather than Agent/Observation.
+- Deleted `Observation.material_candidates_from_tool`, tool-specific Observation signatures/resource-failure lookup and Agent capability-specific presentation/model branches.
+- Generalized `mat-*` Material from mandatory `file/file_hash` identity to `locator + content_hash`; file provenance is one physical locator kind rather than a Core assumption.
+- Removed Claim access to Investigation, automatic Investigation grounding injection, Investigation target coordinates/telemetry and Claim-owned filesystem freshness checks. Physical freshness is resolved before semantic review.
+- Reduced DecisionLedger to factual observability by deleting `required_properties`, rejection fingerprints and repeated-rejection counters.
+- Preserved useful bounded `find_symbol`, `symbol_relations` and project-inspection projections by moving them into capability-owned functions instead of deleting behavior.
+- Clean break: strict config/Session/queue/project-memory identity advances to `2.7.5-r1.2`; Rev1.1 state is rejected rather than migrated.
+
+## 2.7.5 Rev1.1 — Semantic Freedom Reset — 2026-08-11
+
+- Established the governing rule: **Eyle constrains effects, not thought.** Main is the sole task-semantic authority; Runtime enforces only physically decidable contracts/effects; Claim is a critic rather than a second planner.
+- Replaced the Main system prompt with a domain-neutral capability contract and removed audit/search recipes and Runtime `RESOURCE_PRESSURE` strategy advice.
+- Collapsed Claim to `{verdict: accept|challenge, issues:[...]}` with a small fixed per-call output ceiling. Removed material-satisfaction/answer-consistency/semantic-gap planning machinery from the current Claim contract.
+- Made `Investigation` an optional Main-owned notebook instead of a completion/permission state machine. Goals may be revised; established/dismissed are Main semantic choices; open targets do not block Final, patches or writes. Supplied `mat-*` IDs remain physically validated.
+- Rejected Investigation updates no longer cancel an independent valid action from the same model turn.
+- Changed repeated objective observation into memoization: cache hits reuse canonical Observation, increment replay telemetry without appending duplicate Observation events, and no longer trigger `OBSERVATION_REPLAY_LOOP`.
+- Made multi-tool validation independent: one malformed sibling does not cancel valid siblings. Recoverable physical capability failures are returned to Main instead of semantically failing the whole task.
+- Removed specialized repeated-invalid/patch-dry-run behavioral punishment and fixed LLM-turn/LLM-call/tool-call quotas. The total-token fuse and deadline contain runaway execution without dictating how many reasoning cycles a valid task may use.
+- Removed cumulative `max_prompt_tokens` and `max_completion_tokens` contracts. The current deployment has one hard llama-server context ceiling of **38,000 tokens per call**, plus a distant `max_total_tokens=1,000,000` runaway fuse and task deadline.
+- Removed the hidden secondary 32,768-token cap in token budgeting so configuration and request compilation share the same 38,000-token physical window.
+- Advanced strict config/Session/queue/project-memory identity to `2.7.5-r1.1`. Older persisted Core state is rejected; no migration or aliases are provided.
+- Current deterministic validation: **227 passed, 1 Flask-dependent skip** in the offline build environment.
+
+## 2.7.5 Rev1 — Grounded Context Hardening — 2026-08-11
+
+- Removed the zero-grounding Claim bypass: when Claim is enabled, every provisional Final is audited. Missing Observation can now become semantic debt instead of an automatic acceptance path.
+- Strengthened Claim guidance so current-workspace/current-runtime/external assertions requested for inspection or verification are insufficient when the packet contains no objective support. Pure explanation/writing can still pass without Observation.
+- Fixed a continuation privacy/ergonomics bug where a Runtime `handle:*` could leak through Frontier `at`; continued pages now receive fresh public `fr-*` coordinates only.
+- Preserved old still-open Frontiers through prompt recency compaction using one compact Frontier bundle, while keeping opaque handles Runtime-private.
+- Added progressive fresh-result projection: raw tool bodies are one-turn working material and tighten as turns/token pressure rise; canonical Observation remains complete.
+- Reduced Main prompt repetition by bounding conversation background, grounding index and recent Observation navigation more aggressively.
+- Added physical resource-pressure feedback so Main prefers retained material/narrow observations instead of opening broad new scans near budget exhaustion.
+- Changed long-string/source compaction to preserve both head and tail, protecting terminal diagnostics that Rev0 could crop away.
+- Reconciled local prompt reservations with provider-reported physical token usage and allowed conservative downward calibration with a 0.75 safety floor, preventing phantom `MAX_PROMPT_TOKENS_EXCEEDED` from overly pessimistic local estimates.
+- Added regressions for zero-grounding Claim review, provider-token reconciliation, long-job reservation accounting, Frontier retention/privacy and progressive context compaction.
+- Advanced strict config/Session/queue/project-memory identity to `2.7.5-r1`; Rev0 persisted Core state is not migrated.
+
+## 2.7.5 Rev0 — Clear Full Drive — 2026-08-11
+
+- Reset the revision counter for Eyle 2.7.5.
+- Collapsed physical grounding into Observation `mat-*` material.
+- Deleted `SourceRecordLedger`, `EvidenceLedger`, `source_record.py`, `evidence.py` and promotion protocol.
+- Kept Coverage and Frontier as physical Core concepts; opaque handles are Runtime-private.
+- Replaced `expand_observation(handle=...)` with `continue_observation(frontier=fr-*)`.
+- Removed Projection as a Core contract while preserving bounded materialization and truthful Coverage/Frontier state.
+- Simplified Investigation to direct `mat-*` grounding.
+- Claim now reports semantic debt without mutating Investigation.
+- Removed `agent_info` and Main-facing `execution_trace` from the public tool registry (18 → 16 tools).
+- Fixed completion-clamp propagation so task-budget truncation is not mislabeled as provider truncation.
+- Removed Rev5.x-specific tests that existed only to preserve deleted protocol; retained useful scope, reachability, safety, Frontier, retry and transaction regressions under neutral tests.
+- Rewrote current architecture/release documentation around Rev0 and removed the Rev5.9.1 follow-up document.
+
+## Rev5.9.1 — Scope & Investigation Contract Hardening — 2026-08-11
+
+- Fixed the Rev5.9 Objective Scope regression: `search_code(include_paths=["eyle/core"])` now resolves a literal directory recursively instead of applying raw `fnmatch` and scanning zero files. Literal files are exact, literal directories are recursive subtrees, and only wildcard-bearing selectors are explicit globs.
+- Added explicit Scope Resolution before Coverage. `search_scope` records capability-universe size, resolved file count, selector resolution, readable files scanned and protected files. Missing/unsafe literal include paths and explicit includes outside the capability boundary fail closed rather than becoming misleading empty complete searches.
+- Hardened Investigation as a discriminated structured contract. Every explicit `established` update must carry at least one canonical `src-*`/`ev-*` grounding ID and a non-empty reason; `dismissed` also requires a reason. Provider JSON Schema, local structured parser and Runtime transition validation now share this invariant.
+- Canonicalized Investigation rejection identity so free-form `reason` wording does not make the same rejected transition appear new when objective state is unchanged. Materially different grounding attempts remain distinguishable.
+- Split output truncation diagnostics: a provider `length` stop caused by Runtime task-budget clamping is now `MAX_COMPLETION_BUDGET_EXHAUSTED`; `MODEL_OUTPUT_TRUNCATED` is reserved for an unclamped backend/output ceiling. Physical token limits were not increased.
+- Preserved Rev5.9's single Agent Decision Envelope, bounded Agent/Claim protocol retry, Claim Material Satisfaction audit, Objective Projection, SourceRecord/Evidence separation and protected-resource identity boundary.
+- Clean break: config, Session, queue and project-memory schemas advance to 5.9.1. Rev5.9 state is rejected rather than migrated or dual-read.
+- Added deterministic regressions reproducing the failed Rev5.9 scoped-search path and the latent `established`-without-Evidence schema/runtime split.
+
+## Rev5.9 — Decision Integrity & Epistemic Completion — 2026-08-11
+
+- Replaced the Rev5.8 Agent shape with one clean-break discriminated Decision Envelope: `{action, investigation_updates}` with exactly one `action.kind` (`tool_calls`, `patches`, `needs_user`, or `final`). Provider JSON Schema and local parser now describe the same legal state space, eliminating the latent `AGENT_PAYLOAD_AMBIGUOUS` contract split.
+- Added one bounded fresh structured-protocol retry for Main and one for Claim. Rejected structured payloads execute zero actions, are never repaired or interpreted by Runtime, and a second violation fails closed.
+- Claim Runtime Facts now preserve bounded Coverage, Projection, Frontiers and Handles so semantic review can see objective continuation/limitations even when large tool payloads are truncated.
+- Strengthened Material Satisfaction guidance: facts present in Evidence/Runtime coordinates are not considered delivered unless the provisional answer actually communicates the material distinction. Request anchors remain literal coordinates, not Runtime-parsed requirements or quantity checklists.
+- `search_code` accepts Main-declared literal `include_paths` / `exclude_paths`, records the scope in observation identity and applies it mechanically without semantic relevance inference.
+- `list_tree` no longer erases every dot-directory. Nonignored hidden directories remain structurally visible; protected resources inside them may expose existence while content remains restricted.
+- Clean-break config, Session, queue and project-memory schemas advance to 5.9. Rev5.8 persistent state and the old nullable action envelope are rejected rather than migrated or dual-read.
+- Added Rev5.9 regressions for Decision Envelope integrity, bounded Agent/Claim protocol retries, scoped search identity, epistemic Claim projection and hidden-directory structural visibility.
+
 ## Rev5.8 — Objective Projection & Evidence Admission — 2026-08-11
 
 - Live provider benchmark rerun of the message-contract audit completed in 4 Main turns / 8 tools with 52 SourceRecords, only 2 admitted Evidence, 0 structurally unreferenced Evidence, 27,503 provider prompt tokens and 33,747 estimated physical tokens. The +3.9% physical-token delta versus Rev5.7.7 is documented as an acceptable trade when it preserves truthful objective Coverage, provenance and continuation handles.
@@ -9,7 +177,6 @@
 - Main contract explicitly preserves the authority boundary: capabilities may compute objective properties over large state; only Main decides relevance, Evidence admission, frontier materiality and semantic sufficiency. Final synthesis must not invent facts to satisfy requested quantity or erase material distinctions established by reality.
 - Prompt accounting now distinguishes SourceRecord materialization from Evidence admission instead of treating source-range fan-out as semantic Evidence amplification.
 
-# Changelog
 
 ## Rev5.7.7 — Protected Resource Identity Integrity — 2026-08-11
 

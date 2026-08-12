@@ -29,11 +29,11 @@ def available_user_prompt_tokens(
     llm = (config or {}).get("llm") or {}
     context = (config or {}).get("context_engine") or {}
     chars_per_token = max(1, int(context.get("chars_per_token_fallback", 3) or 3))
-    window = min(32768, max(1, int(llm.get("context_window_tokens", 32768) or 32768)))
+    window = min(38000, max(1, int(llm.get("context_window_tokens", 38000) or 38000)))
     margin = max(0, int(context.get("safety_margin_tokens", 500) or 0))
     system_tokens = estimate_tokens(system_prompt, chars_per_token)
     try:
-        multiplier = max(1.0, float(token_estimate_multiplier or 1.0))
+        multiplier = min(4.0, max(0.75, float(token_estimate_multiplier or 1.0)))
     except (TypeError, ValueError):
         multiplier = 1.0
     prompt_capacity_local = int(max(0, window - margin - max(0, int(output_tokens or 0))) / multiplier)

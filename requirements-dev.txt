@@ -1,2 +1,2 @@
 -r requirements.txt
-# Rev4.12.3 keeps pytest in runtime because run_tests depends on it.
+# pytest remains a runtime dependency because run_tests is a public capability.

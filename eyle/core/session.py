@@ -1,55 +1,50 @@
-"""One active Rev5.8 Eyle agent session.
+"""One active Eyle 2.7.5 Rev1.3 agent session.
 
-Rev5.8 is a clean break. The session stores only canonical semantic/physical
-state that must survive turns or confirmation. Histories and metrics are views
-of their owning ledgers, not parallel persisted fields.
+Observation owns physical history, grounding material and continuation state.
+Investigation is Main-owned epistemic state. Tasks are separate Main-owned
+intentional state. Runtime persists both contracts without semantic inference.
 """
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from .decision import empty_ledger as empty_decision_ledger, persisted_view as persisted_decisions
-from .evidence import empty_ledger as empty_evidence_ledger, index_view as evidence_index_view, persisted_view as persisted_evidence
-from .observation import empty_ledger as empty_observation_ledger, persisted_view as persisted_observations
-from .source_record import empty_ledger as empty_source_record_ledger, index_view as source_record_index_view, persisted_view as persisted_source_records
+from .observation import empty_ledger as empty_observation_ledger, material_index_view, persisted_view as persisted_observations
 from .write_transaction import empty_transaction
+from .tasks import validate_task_state
 
-SESSION_SCHEMA_VERSION = "5.8"
+SESSION_SCHEMA_VERSION = "2.7.5-r1.3"
 
 
 @dataclass
 class AgentSession:
     request: str
-    task_id: Optional[str] = None
+    execution_id: Optional[str] = None
     turn: int = 0
     workspace_epoch: int = 0
     observation_ledger: Dict[str, Any] = field(default_factory=empty_observation_ledger)
     decision_ledger: Dict[str, Any] = field(default_factory=empty_decision_ledger)
-    source_record_ledger: Dict[str, Any] = field(default_factory=empty_source_record_ledger)
-    evidence_ledger: Dict[str, Any] = field(default_factory=empty_evidence_ledger)
     investigation: List[Dict[str, Any]] = field(default_factory=list)
+    tasks: List[Dict[str, Any]] = field(default_factory=list)
     claim_review: Dict[str, Any] = field(default_factory=dict)
     conversation_background: List[Dict[str, Any]] = field(default_factory=list)
     write_transaction: Dict[str, Any] = field(default_factory=empty_transaction)
 
-    def source_record_index(self) -> List[Dict[str, Any]]:
-        return source_record_index_view(self.source_record_ledger)
-
-    def evidence_index(self) -> List[Dict[str, Any]]:
-        return evidence_index_view(self.evidence_ledger, self.investigation)
+    def grounding_index(self) -> List[Dict[str, Any]]:
+        return material_index_view(self.observation_ledger)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "session_schema_version": SESSION_SCHEMA_VERSION,
             "request": self.request,
-            "task_id": self.task_id,
+            "execution_id": self.execution_id,
             "turn": int(self.turn),
             "workspace_epoch": int(self.workspace_epoch),
             "observation_ledger": persisted_observations(self.observation_ledger),
             "decision_ledger": persisted_decisions(self.decision_ledger),
-            "source_record_ledger": persisted_source_records(self.source_record_ledger),
-            "evidence_ledger": persisted_evidence(self.evidence_ledger),
             "investigation": [dict(item) for item in self.investigation if isinstance(item, dict)],
+            "tasks": [dict(item) for item in self.tasks if isinstance(item, dict)],
             "claim_review": dict(self.claim_review or {}),
             "conversation_background": [dict(item) for item in self.conversation_background if isinstance(item, dict)],
             "write_transaction": dict(self.write_transaction or {}),
@@ -58,8 +53,8 @@ class AgentSession:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AgentSession":
         expected_top_level = {
-            "session_schema_version", "request", "task_id", "turn", "workspace_epoch",
-            "observation_ledger", "decision_ledger", "source_record_ledger", "evidence_ledger", "investigation",
+            "session_schema_version", "request", "execution_id", "turn", "workspace_epoch",
+            "observation_ledger", "decision_ledger", "investigation", "tasks",
             "claim_review", "conversation_background", "write_transaction",
         }
         if not isinstance(data, dict) or data.get("session_schema_version") != SESSION_SCHEMA_VERSION:
@@ -68,7 +63,7 @@ class AgentSession:
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
         if not isinstance(data["request"], str):
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-        if data["task_id"] is not None and not isinstance(data["task_id"], str):
+        if data["execution_id"] is not None and not isinstance(data["execution_id"], str):
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
         if not isinstance(data["turn"], int) or isinstance(data["turn"], bool) or data["turn"] < 0:
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
@@ -76,15 +71,16 @@ class AgentSession:
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
 
         obs = data["observation_ledger"]
-        if not isinstance(obs, dict) or set(obs) != {"entries", "events", "pending_results", "handles"}:
+        expected_observation = {"entries", "events", "replay_count", "pending_results", "handles", "snapshots", "frontiers", "materials"}
+        if not isinstance(obs, dict) or set(obs) != expected_observation:
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-        if not isinstance(obs["entries"], dict) or not all(isinstance(v, dict) for v in obs["entries"].values()):
-            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-        if not isinstance(obs["events"], list) or not all(isinstance(item, dict) for item in obs["events"]):
-            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-        if not isinstance(obs["pending_results"], list) or not all(isinstance(item, dict) for item in obs["pending_results"]):
-            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-        if not isinstance(obs["handles"], dict) or not all(isinstance(v, dict) for v in obs["handles"].values()):
+        for key in ("entries", "handles", "snapshots", "frontiers", "materials"):
+            if not isinstance(obs[key], dict) or not all(isinstance(v, dict) for v in obs[key].values()):
+                raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        for key in ("events", "pending_results"):
+            if not isinstance(obs[key], list) or not all(isinstance(item, dict) for item in obs[key]):
+                raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        if not isinstance(obs["replay_count"], int) or isinstance(obs["replay_count"], bool) or obs["replay_count"] < 0:
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
 
         decisions = data["decision_ledger"]
@@ -92,20 +88,9 @@ class AgentSession:
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
         if not isinstance(decisions["events"], list) or not all(isinstance(item, dict) for item in decisions["events"]):
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-
-        source_records = data["source_record_ledger"]
-        if not isinstance(source_records, dict) or set(source_records) != {"items"}:
-            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-        if not isinstance(source_records["items"], dict) or not all(isinstance(v, dict) for v in source_records["items"].values()):
-            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-
-        evidence = data["evidence_ledger"]
-        if not isinstance(evidence, dict) or set(evidence) != {"items"}:
-            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-        if not isinstance(evidence["items"], dict) or not all(isinstance(v, dict) for v in evidence["items"].values()):
-            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-
         if not isinstance(data["investigation"], list) or not all(isinstance(item, dict) for item in data["investigation"]):
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        if not isinstance(data["tasks"], list) or not all(isinstance(item, dict) for item in data["tasks"]):
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
         if not isinstance(data["claim_review"], dict):
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
@@ -114,19 +99,25 @@ class AgentSession:
         if not isinstance(data["write_transaction"], dict):
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
 
-        session = cls(request=data["request"], task_id=data["task_id"])
+        session = cls(request=data["request"], execution_id=data["execution_id"])
         session.turn = data["turn"]
         session.workspace_epoch = data["workspace_epoch"]
         session.observation_ledger = {
             "entries": {str(k): dict(v) for k, v in obs["entries"].items()},
             "events": [dict(item) for item in obs["events"]],
+            "replay_count": int(obs["replay_count"]),
             "pending_results": [dict(item) for item in obs["pending_results"]],
             "handles": {str(k): dict(v) for k, v in obs["handles"].items()},
+            "snapshots": {str(k): dict(v) for k, v in obs["snapshots"].items()},
+            "frontiers": {str(k): dict(v) for k, v in obs["frontiers"].items()},
+            "materials": {str(k): dict(v) for k, v in obs["materials"].items()},
         }
         session.decision_ledger = {"events": [dict(item) for item in decisions["events"]]}
-        session.source_record_ledger = {"items": {str(k): dict(v) for k, v in source_records["items"].items()}}
-        session.evidence_ledger = {"items": {str(k): dict(v) for k, v in evidence["items"].items()}}
         session.investigation = [dict(item) for item in data["investigation"]]
+        try:
+            session.tasks = validate_task_state(data["tasks"])
+        except ValueError as error:
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE") from error
         session.claim_review = dict(data["claim_review"])
         session.conversation_background = [dict(item) for item in data["conversation_background"]]
         session.write_transaction = dict(data["write_transaction"])

@@ -124,6 +124,22 @@ def run_compileall_for_changes(project_root: str, paths: Iterable[str], timeout_
         }
 
 
+def verify_after_write(config: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+    """Run the configured project test capability after a confirmed write.
+
+    This code-domain verification policy belongs to the post-write boundary,
+    not Agent's capability-selection logic.
+    """
+    enabled = bool((((config or {}).get("codar") or {}).get("testes") or {}).get("ativado", False))
+    if not enabled:
+        return {
+            "status": "skipped", "ok": True, "executed": False,
+            "error_code": "TESTS_DISABLED", "detail": "Execução de testes desativada explicitamente.",
+        }
+    from .tools import executar_tool
+    return executar_tool("run_tests", {}, context)
+
+
 def expected_outputs_from_patches(applied_patches: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     outputs: List[Dict[str, Any]] = []
     for patch in applied_patches or []:

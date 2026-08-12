@@ -23,7 +23,7 @@ def build_public_job_history(registro):
     token_summary = dict(trace.get("tokens") or {})
     llm_calls = list(trace.get("llm_calls") or [])
     logical_ids = {str(item.get("logical_call_id")) for item in llm_calls if item.get("logical_call_id") is not None}
-    sent_requests = sum(1 for item in llm_calls if item.get("request_status") == "sent")
+    sent_requests = sum(1 for item in llm_calls if item.get("request_status") != "preflight_blocked")
     return {
         "job_id": summary.get("job_id"),
         "status": summary.get("status"),
@@ -34,10 +34,8 @@ def build_public_job_history(registro):
         "agent": {
             "turns": summary.get("turns"),
             "tool_calls": summary.get("tool_calls"),
-            "tool_call_limit": (summary.get("tool_budget") or {}).get("limit"),
-            "tool_calls_remaining": (summary.get("tool_budget") or {}).get("remaining"),
             "workspace_epoch": details.get("workspace_epoch"),
-            "evidence_count_total": details.get("evidence_count_total"),
+            "grounding_count_total": details.get("grounding_count_total"),
             "observation_replays": details.get("observation_replays"),
             "observation_ledger_size": details.get("observation_ledger_size"),
             "repeated_rejected_decisions": summary.get("repeated_rejected_decisions"),
@@ -50,6 +48,10 @@ def build_public_job_history(registro):
             "logical_attempts": len(logical_ids),
             "requests_sent": sent_requests,
             "preflight_blocked": sum(1 for item in llm_calls if item.get("request_status") == "preflight_blocked"),
+            "failed_requests": sum(
+                1 for item in llm_calls
+                if item.get("request_status") not in {"sent", "started", "preflight_blocked"}
+            ),
         },
         "llm_calls": llm_calls,
         "decisions": list(trace.get("decisions") or []),

@@ -1,5 +1,5 @@
-# Runtime lock for Eyle (Python 3.8+).
-# Flask runtime + pytest runtime tool and their transitive dependencies.
+# Runtime lock for Eyle (Python 3.11+).
+# Flask runtime + pytest runtime tool + pinned Microsandbox microVM backend.
 Flask==3.0.3
 Werkzeug==3.0.3
 Jinja2==3.1.4
@@ -8,9 +8,8 @@ itsdangerous==2.2.0
 click==8.1.7
 blinker==1.8.2
 pytest==8.2.2
+microsandbox==0.6.8
 iniconfig==2.0.0
 packaging==24.1
 pluggy==1.5.0
-exceptiongroup==1.2.1; python_version < "3.11"
-tomli==2.0.1; python_version < "3.11"
 colorama==0.4.6; sys_platform == "win32"

@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: install dev test test-core benchmark serve clean
+.PHONY: install dev test test-core benchmark serve verify clean
 
 install:
 	$(PYTHON) -m pip install -r requirements.lock
@@ -20,6 +20,13 @@ benchmark:
 serve:
 	$(PYTHON) main.py serve
 
+verify:
+	$(PYTHON) -B -m eyle.devtools.release_identity
+	$(PYTHON) -m compileall -q eyle llm web main.py
+	$(PYTHON) -m pytest -q
+	node --check web/static/app.js
+
 clean:
 	find . -type d -name '__pycache__' -prune -exec rm -rf {} +
 	rm -rf .pytest_cache .coverage htmlcov
+	find context memory workspace -mindepth 1 -type f ! -name '.gitkeep' -delete 2>/dev/null || true

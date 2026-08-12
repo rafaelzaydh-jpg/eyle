@@ -5,6 +5,7 @@ import eyle.core.agent as core_agent
 from eyle.core.session import AgentSession
 from eyle.core.write_transaction import begin as begin_write_transaction, set_status as set_write_status
 from eyle.runtime import service
+from tests.canonical import agent_final
 
 
 def _config(tests_enabled=True):
@@ -15,8 +16,6 @@ def _config(tests_enabled=True):
         },
         "context_engine": {"safety_margin_tokens": 500, "chars_per_token_fallback": 3},
         "agent": {
-            "max_llm_turns": 4,
-            "max_tool_calls": 8,
             "max_file_read_lines": 400,
             "claims": {"mode": "off"},
             "context_view": {"max_source_preview_chars": 3500, "max_symbol_preview_chars": 2600, "max_search_source_chars": 600},
@@ -50,7 +49,7 @@ def test_failed_tests_expose_exact_output_and_structured_report(monkeypatch, tmp
         "E   NameError: name 'render_template' is not defined\n"
         "1 failed, 2 passed"
     )
-    monkeypatch.setattr(core_agent, "_run_tests_after_write", lambda *_: {
+    monkeypatch.setattr(core_agent, "_verify_after_write", lambda *_: {
         "status": "failed",
         "ok": False,
         "executed": True,
@@ -91,6 +90,39 @@ def test_service_preserves_write_failure_as_message_metadata():
     assert service._metadata_resposta_agente("success", {}) == {"agent_status": "success"}
 
 
+
+def test_service_carries_write_failure_into_agent_conversation_context(monkeypatch):
+    failure = {
+        "stage": "tests",
+        "error_code": "TESTS_FAILED",
+        "detail": "NameError: render_template is not defined",
+        "rollback_confirmed": True,
+        "paths": ["routes.py"],
+    }
+    captured = {}
+
+    monkeypatch.setattr(service, "carregar_config", lambda: {})
+    monkeypatch.setattr(service, "carregar_projeto", lambda: {"caminho_origem": "/tmp/project"})
+    monkeypatch.setattr(service, "carregar_agent_pendente", lambda: None)
+
+    def fake_process(question, config, project, **kwargs):
+        captured.update(kwargs.get("conversation_context") or {})
+        return {"status": "success", "resposta": "ok", "avisos": [], "details": {}}
+
+    monkeypatch.setattr(service, "_processar_agente", fake_process)
+    history = [
+        {"id": 1, "role": "assistant", "text": "rollback", "agent_status": "failed", "write_failure": failure},
+        {"id": 2, "role": "user", "text": "Por que falhou?"},
+    ]
+
+    service.processar("Por que falhou?", registrar_pergunta=False, historico_snapshot=history)
+
+    assert captured["recent_messages"] == [{
+        "role": "assistant",
+        "content": "rollback",
+        "write_failure": failure,
+    }]
+
 def test_follow_up_can_cite_runtime_failure_instead_of_restored_code(monkeypatch, tmp_path):
     (tmp_path / "routes.py").write_text(
         "def amor():\n    return '<h1>Amor</h1>'\n", encoding="utf-8"
@@ -109,18 +141,14 @@ def test_follow_up_can_cite_runtime_failure_instead_of_restored_code(monkeypatch
         assert runtime_sources
         assert runtime_sources[0]["error_code"] == "TESTS_FAILED"
         assert "render_template" in runtime_sources[0]["content"]
-        return {
-            "final": {
-                "answer": "Os testes falharam porque render_template não estava definido.",
-                "limitations": [],
-                "evidence_ids": ["ev-runtime-0001"],
-            },
-            "investigation_updates": [{
+        return agent_final(
+            {"answer": "Os testes falharam porque render_template não estava definido.", "grounding_ids": ["mat-0001"]},
+            investigation=[{
                 "id": "T1", "goal": "Establish why the prior project tests failed",
-                "status": "established", "evidence_ids": ["ev-runtime-0001"],
+                "status": "established", "grounding_ids": ["mat-0001"],
                 "reason": "Runtime validation Evidence records the test failure."
             }],
-        }
+        )
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
     context = {
@@ -147,5 +175,5 @@ def test_follow_up_can_cite_runtime_failure_instead_of_restored_code(monkeypatch
 
     assert status == "success"
     assert "render_template" in text
-    assert prompts[0]["evidence_index"][0]["source_type"] == "runtime_validation"
-    assert details["evidence"][0]["source_type"] == "runtime_validation"
+    assert prompts[0]["grounding_index"][0]["source_type"] == "runtime_validation"
+    assert details["grounding"][0]["source_type"] == "runtime_validation"

@@ -1,7 +1,0 @@
-# Runtime dependencies.
-# Flask powers the optional web panel; pytest is also a runtime dependency
-# because `run_tests` is an official deterministic tool exposed to the agent.
-Flask==3.0.3
-pytest==8.2.2
-
-# For development/CI, requirements-dev.txt extends this file.

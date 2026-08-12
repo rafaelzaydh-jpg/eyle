@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Adaptador LLM da Eyle 2.7.4.
+"""Adaptador LLM da Eyle 2.7.5.
 
 Transporta o único protocolo AgentSession para o backend configurado.
 """
@@ -408,6 +408,15 @@ def _finish_reason_truncado(metadata):
     return reason in {"length", "max_tokens", "max_output_tokens", "token_limit"}
 
 
+def _classify_output_truncation():
+    """A backend length finish is a per-call provider ceiling, never task strategy."""
+    return {
+        "error_code": "MODEL_OUTPUT_TRUNCATED",
+        "cause": "provider_output_ceiling",
+        "message": "A resposta do modelo foi interrompida pelo limite de saída do backend.",
+    }
+
+
 def _latest_attempt(execution: ExecutionContext | None):
     if execution is None:
         return None
@@ -416,7 +425,24 @@ def _latest_attempt(execution: ExecutionContext | None):
     return attempts[-1] if isinstance(attempts, list) and attempts else None
 
 
-def _registrar_metadata_runtime(execution: ExecutionContext | None, metadata):
+def _registrar_inicio_tentativa_runtime(
+    execution: ExecutionContext | None, *, profile: str, max_tokens_requested: int | None,
+):
+    """Record a physical backend attempt only after preflight has succeeded."""
+    if execution is None:
+        return None
+    call = execution.latest_call()
+    if not isinstance(call, dict):
+        call = execution.begin_call(mode=str(profile or "default"), turn=0, prompt={})
+    return execution.add_attempt(call, {
+        "logical_call_id": call.get("logical_call_id"),
+        "profile": str(profile or "default"),
+        "request_status": "started",
+        "max_tokens_requested": max_tokens_requested,
+    })
+
+
+def _registrar_metadata_runtime(execution: ExecutionContext | None, metadata, *, attempt=None):
     if execution is None:
         return None
     call = execution.latest_call()
@@ -428,7 +454,22 @@ def _registrar_metadata_runtime(execution: ExecutionContext | None, metadata):
     actual = clean.get("completion_tokens")
     if isinstance(requested, (int, float)) and isinstance(actual, (int, float)):
         clean["completion_tokens_ceiling_unused"] = max(0, int(requested) - max(0, int(actual)))
+    if isinstance(attempt, dict):
+        attempt.update(clean)
+        attempt["request_status"] = str(clean.get("request_status") or "sent")
+        return attempt
     return execution.add_attempt(call, clean)
+
+
+def _registrar_falha_tentativa_runtime(attempt, error_code: str, detail: str = "", *, elapsed_ms=None):
+    if not isinstance(attempt, dict):
+        return
+    attempt["request_status"] = str(error_code or "transport_error").lower()
+    attempt["error_code"] = str(error_code or "TRANSPORT_ERROR")
+    if detail:
+        attempt["error_detail"] = str(detail)[:500]
+    if isinstance(elapsed_ms, (int, float)):
+        attempt["latency_ms"] = round(float(elapsed_ms), 2)
 
 
 def _structured_response_format(profile):
@@ -609,54 +650,6 @@ def _timeout_restante(execution: ExecutionContext | None):
     return max(0.0, float(execution.deadline_monotonic) - time.monotonic())
 
 
-def _reservar_orcamento_llm(execution: ExecutionContext | None):
-    if execution is None:
-        return
-    if len(execution.llm_calls) > int(execution.max_llm_calls):
-        raise ErroLLM("O limite global de chamadas LLM da tarefa foi atingido.", transient=False, error_code="MAX_LLM_CALLS_EXCEEDED")
-
-
-def _completion_budget_remaining(execution: ExecutionContext | None):
-    if execution is None:
-        return None
-    return max(0, int(execution.max_completion_tokens) - int(execution.completion_tokens_actual or 0))
-
-
-def _preflight_completion_budget(config, execution: ExecutionContext | None, max_tokens, *, pending_completion_tokens=0):
-    """Fit the next output ceiling inside the remaining physical budget.
-
-    ``max_tokens`` is a ceiling, not a prepaid allocation. The Runtime protects
-    the next mandatory downstream semantic stage, then clamps the current call
-    to whatever can still physically fit. It fails only when no positive output
-    budget remains for the current call.
-    """
-    requested = max(0, int(max_tokens or 0))
-    pending = max(0, int(pending_completion_tokens or 0))
-    if execution is None:
-        return {
-            "remaining": None, "requested": requested, "effective": requested,
-            "pending": pending, "downstream_reserve": 0, "clamped": False,
-        }
-    remaining = _completion_budget_remaining(execution)
-    cfg_llm = (config or {}).get("llm") or {}
-    try:
-        downstream = max(0, int(cfg_llm.get("downstream_completion_reserve_tokens", 0) or 0))
-    except (TypeError, ValueError):
-        downstream = 0
-    available = max(0, int(remaining or 0) - pending - downstream)
-    effective = min(requested, available) if requested > 0 else 0
-    if requested > 0 and effective <= 0:
-        raise ErroLLM(
-            "Não resta orçamento positivo de saída para a próxima chamada LLM após preservar a etapa obrigatória seguinte.",
-            transient=False, error_code="MAX_COMPLETION_BUDGET_INSUFFICIENT",
-        )
-    return {
-        "remaining": remaining, "requested": requested, "effective": effective,
-        "pending": pending, "downstream_reserve": downstream,
-        "available_for_call": available, "clamped": bool(requested > 0 and effective < requested),
-    }
-
-
 def _prompt_cache_weight(config):
     context = (config or {}).get("context_engine") or {}
     try:
@@ -676,9 +669,6 @@ def _reservar_requisicao_llm(config, execution: ExecutionContext | None, prompt_
     """
     if execution is None:
         return {"estimated_prompt_tokens": 0, "estimated_effective_tokens": 0}
-    completion_fit = _preflight_completion_budget(config, execution, max_tokens)
-    if max_tokens is not None:
-        max_tokens = int(completion_fit.get("effective") or 0)
     cfg_llm = (config or {}).get("llm", {})
     cfg_context = (config or {}).get("context_engine", {})
     chars_per_token = max(1, int(cfg_context.get("chars_per_token_fallback", 3) or 3))
@@ -686,10 +676,10 @@ def _reservar_requisicao_llm(config, execution: ExecutionContext | None, prompt_
     user_tokens = estimar_tokens(prompt_usuario, chars_per_token)
     prompt_tokens = system_tokens + user_tokens
     multiplier = execution.prompt_token_calibration if execution is not None else 1.0
-    calibrated_prompt_tokens = int(math.ceil(prompt_tokens * max(1.0, float(multiplier))))
+    calibrated_prompt_tokens = int(math.ceil(prompt_tokens * min(4.0, max(0.75, float(multiplier)))))
     response_reserved = max(0, int(max_tokens or 0))
     margin = max(0, int(cfg_context.get("safety_margin_tokens", 256) or 0))
-    window = min(32768, max(1, int(cfg_llm.get("context_window_tokens", 32768) or 32768)))
+    window = max(1, int(cfg_llm.get("context_window_tokens", 38000) or 38000))
     if calibrated_prompt_tokens + response_reserved + margin > window:
         raise ErroLLM(
             "O prompt e a saída reservada excedem a janela de contexto do modelo.",
@@ -709,12 +699,6 @@ def _reservar_requisicao_llm(config, execution: ExecutionContext | None, prompt_
     current_prompt_physical = max(int(execution.prompt_tokens_budgeted_physical or 0), int(execution.prompt_tokens_actual or 0))
     current_prompt_estimated_raw = int(execution.prompt_tokens_estimated_raw or 0)
     reserved_prompt_tokens = calibrated_prompt_tokens
-    max_prompt = int(execution.max_prompt_tokens or 0)
-    if max_prompt > 0 and current_prompt_physical + reserved_prompt_tokens > max_prompt:
-        raise ErroLLM(
-            "O limite físico acumulado de tokens de entrada da mensagem seria excedido.",
-            transient=False, error_code="MAX_PROMPT_TOKENS_EXCEEDED",
-        )
     current_completion = int(execution.completion_tokens_actual or 0)
     max_total = int(execution.max_total_tokens or 0)
     if max_total > 0 and current_prompt_physical + current_completion + reserved_prompt_tokens + response_reserved > max_total:
@@ -749,6 +733,12 @@ def _finalizar_requisicao_llm(config, execution: ExecutionContext | None, reserv
     cached = (metadata or {}).get("cached_prompt_tokens")
     if isinstance(actual, (int, float)):
         actual = max(0, int(actual))
+        # Replace this call's conservative reservation with provider truth.
+        # Reservations remain authoritative only when provider usage is absent.
+        reserved_physical = int(reservation.get("budgeted_prompt_tokens", 0) or 0)
+        execution.prompt_tokens_budgeted_physical = max(
+            0, int(execution.prompt_tokens_budgeted_physical or 0) - reserved_physical + actual,
+        )
         execution.prompt_tokens_actual += actual
         if isinstance(cached, (int, float)):
             cached = min(actual, max(0, int(cached)))
@@ -791,17 +781,12 @@ def _registrar_tokens_gerados(config, execution: ExecutionContext | None, respos
         len(str(resposta or "")) + chars_por_token - 1
     ) // chars_por_token
     total = int(execution.completion_tokens_actual or 0) + estimativa
-    max_tokens = int(execution.max_completion_tokens or 0)
     execution.completion_tokens_actual = total
-    if max_tokens > 0 and total > max_tokens:
-        raise ErroLLM(
-            "O limite global de tokens de saída da tarefa foi excedido.",
-            transient=False, error_code="MAX_COMPLETION_TOKENS_EXCEEDED",
-        )
     max_total = int(execution.max_total_tokens or 0)
-    # Cache discounts remain diagnostic only. The hard 98k message budget is
-    # physical: full prompt attempts plus generated output.
-    physical_total = int(execution.prompt_tokens_estimated_raw or 0) + total
+    # Cache discounts remain diagnostic only. The hard task-token fuse uses
+    # reconciled physical prompt usage (provider truth when available, otherwise
+    # the still-open local reservation) plus generated output.
+    physical_total = int(execution.physical_tokens_used)
     if max_total > 0 and physical_total > max_total:
         raise ErroLLM(
             "O limite físico total de tokens da mensagem foi excedido.",
@@ -951,20 +936,11 @@ def _chamar_llm_impl(
         execution, "llm_wait", "Aguardando a LLM local",
         profile=perfil or "default",
     )
-    completion_fit = _preflight_completion_budget(config, execution, max_tokens)
-    if max_tokens is not None:
-        max_tokens = int(completion_fit.get("effective") or 0)
     latest_call = execution.latest_call() if execution is not None else None
     if isinstance(latest_call, dict):
         prompt_meta = latest_call.setdefault("prompt", {})
-        prompt_meta.setdefault("output_tokens_requested", int(completion_fit.get("requested") or 0))
+        prompt_meta.setdefault("output_tokens_requested", int(max_tokens or 0))
         prompt_meta["output_tokens_reserved"] = int(max_tokens or 0)
-        prompt_meta["completion_budget_remaining_before_call"] = completion_fit.get("remaining")
-        prompt_meta["downstream_completion_reserve_tokens"] = int(completion_fit.get("downstream_reserve") or 0)
-        prompt_meta["completion_ceiling_clamped"] = bool(
-            prompt_meta.get("completion_ceiling_clamped") or completion_fit.get("clamped")
-        )
-    _reservar_orcamento_llm(execution)
 
     tentativas = max(1, int(cfg_llm.get("retry_max_attempts", 3)))
     base_delay = max(0.0, float(cfg_llm.get("retry_base_delay_seconds", 0.5)))
@@ -1008,7 +984,7 @@ def _chamar_llm_impl(
     # Structured profiles are always non-streaming so only the final content
     # field can cross the executable-response boundary.
     streaming_ativado = bool(
-        job_progress.job_id_de(config) is not None
+        job_progress.job_id_de(execution) is not None
         and cfg_llm.get("stream_responses", True)
         and perfil is None
     )
@@ -1033,10 +1009,11 @@ def _chamar_llm_impl(
             )
             on_chunk = (
                 _criar_callback_stream(
-                    config, perfil, bool(stream_visible), chars_por_token,
+                    execution, perfil, bool(stream_visible), chars_por_token,
                 )
                 if streaming_ativado else None
             )
+            attempt_state = {"attempt": None, "started_at": None}
             try:
                 def chamar_backend(token_limit, callback):
                     _LLM_RESPONSE_LOCAL.metadata = {}
@@ -1044,9 +1021,14 @@ def _chamar_llm_impl(
                     reservations = []
 
                     def before_request():
-                        reservations.append(_reservar_requisicao_llm(
+                        reservation = _reservar_requisicao_llm(
                             config, execution, prompt_sistema, prompt_usuario, token_limit,
-                        ))
+                        )
+                        reservations.append(reservation)
+                        attempt_state["started_at"] = time.monotonic()
+                        attempt_state["attempt"] = _registrar_inicio_tentativa_runtime(
+                            execution, profile=perfil or "default", max_tokens_requested=token_limit,
+                        )
 
                     if openai_compatible:
                         resposta_backend = _chamar_openai_compatible(
@@ -1085,15 +1067,18 @@ def _chamar_llm_impl(
                     "structured_mode": "json_schema" if perfil is not None else None,
                 })
                 if _finish_reason_truncado(metadata_resposta):
-                    metadata_resposta.update({"truncated": True})
-                    _registrar_metadata_runtime(execution, metadata_resposta)
+                    truncation = _classify_output_truncation()
+                    metadata_resposta.update({
+                        "truncated": True,
+                        "truncation_cause": truncation["cause"],
+                    })
+                    _registrar_metadata_runtime(execution, metadata_resposta, attempt=attempt_state["attempt"])
                     metadata_chamadas.append(dict(metadata_resposta))
                     _registrar_tokens_gerados(config, execution, resposta, metadata_chamadas)
                     raise ErroLLM(
-                        "A resposta do modelo foi interrompida pelo limite físico de saída.",
-                        transient=False, error_code="MODEL_OUTPUT_TRUNCATED",
+                        truncation["message"], transient=False, error_code=truncation["error_code"],
                     )
-                _registrar_metadata_runtime(execution, metadata_resposta)
+                _registrar_metadata_runtime(execution, metadata_resposta, attempt=attempt_state["attempt"])
                 metadata_chamadas.append(dict(metadata_resposta))
                 if not isinstance(resposta, str) or not resposta.strip():
                     raise ErroLLM(
@@ -1149,6 +1134,12 @@ def _chamar_llm_impl(
                     transient=False, error_code="UNEXPECTED_LLM_ERROR",
                 )
 
+            started_at = attempt_state.get("started_at")
+            elapsed_ms = (time.monotonic() - started_at) * 1000 if isinstance(started_at, (int, float)) else None
+            _registrar_falha_tentativa_runtime(
+                attempt_state.get("attempt"), ultimo_erro.error_code, str(ultimo_erro), elapsed_ms=elapsed_ms,
+            )
+
             if not ultimo_erro.transient or tentativa >= tentativas:
                 raise ultimo_erro
 
@@ -1198,6 +1189,8 @@ def _chamar_llm_impl(
                 last["structured_parse_status"] = "valid"
                 last["structured_profile"] = perfil or "agent"
                 last["structured_top_level_keys"] = sorted(parsed_response.keys())
+                if (perfil or "agent") == "agent" and isinstance(parsed_response.get("action"), dict):
+                    last["structured_action_kind"] = str((parsed_response.get("action") or {}).get("kind") or "") or None
         except StructuredResponseError as error:
             observed = observed_top_level(resposta)
             observed_keys = sorted(observed.keys()) if isinstance(observed, dict) else []
@@ -1211,6 +1204,11 @@ def _chamar_llm_impl(
                 last["structured_profile"] = perfil or "agent"
                 last["structured_top_level_keys"] = observed_keys
                 last["structured_missing_keys"] = missing_keys
+                if (perfil or "agent") == "agent" and isinstance(observed, dict):
+                    action = observed.get("action")
+                    last["structured_action_kind"] = (
+                        str(action.get("kind") or "") or None if isinstance(action, dict) else None
+                    )
 
             raise ErroLLM(
                 f"Structured response for {perfil or 'agent'} is invalid: {error.detail}",
@@ -1272,7 +1270,7 @@ def _chamar_llm(
         telemetry.record(
             "llm", perfil or "default", status,
             (time.monotonic() - inicio) * 1000,
-            task_id=execution.task_id, job_id=execution.source_job_id,
+            execution_id=execution.execution_id, job_id=execution.source_job_id,
             metadata=metadata,
         )
 
@@ -1280,39 +1278,34 @@ def _chamar_llm(
 
 PROMPT_AGENTE = """You are Eyle. JSON only.
 
-Return exactly: tool_calls, patches, needs_user, final, investigation_updates. Exactly one action payload is non-null. final={answer,limitations,evidence_ids}; needs_user={question,missing_information}; investigation_updates={id,goal,status,evidence_ids,reason}[], status=open|established|dismissed.
+Return exactly {action,investigation_updates,task_updates}. action.kind=tool_calls|patches|needs_user|final. Investigation={id,goal,status,grounding_ids,reason}. Task={id,parent_id,description,status,result}; status=open|completed|dropped.
 
-You are the semantic authority. request is canonical; conversation_background is context. Decide goals, capabilities, relevance, semantic debt, Evidence admission and stopping. Runtime owns physical/structural contracts, never intent/relevance/sufficiency. needs_user only when an active concrete task cannot continue without one specific fact/choice; never use it for greetings; otherwise return final. A resumed clarification becomes part of the canonical request.
+You are the sole task-semantic authority. Decide what matters, what to investigate or do, which capabilities to use, what supports the answer, and when to stop. Runtime must not plan for you.
 
-Investigation is YOUR semantic working memory, never a Runtime requirement. Keep it empty unless debt must survive a turn. Preserve targets. established requires Evidence; dismissed requires reason. Establish the exact requested property: names, references, imports, tests and signatures prove only what they observe. For candidate checks, either polarity is a valid result. Stop when Evidence discriminates it. After Claim feedback, address semantic_gaps[].required_property for the same target/candidate before exploring another. After one material non-redundant failed attempt, conclude with the limitation.
+Runtime is physical authority only: schemas, permissions, sandbox/transactions, budgets and execution. Observations report what happened. Coverage describes what was physically examined. Frontier exposes additional accessible reality as public fr-* references. Runtime-private handles/cursors stay private. Observed citable material is mat-*.
 
-Capabilities may exhaust an objective property and deterministically compress/group it into SourceRecords, coverage, frontiers and handle:* continuations. src-* is observed/citable material, NOT admitted Evidence. Select material src-* in Investigation/final evidence_ids to promote; never promote breadcrumbs merely because observed. YOU decide relevance, frontier materiality and semantic sufficiency. projection_complete=false means more objective results are behind handles, not incomplete coverage. expand_observation accepts exact handle:* only.
+operational_feedback contains bounded factual consequences of recent actions, challenges, replays, workspace changes, available Material and remaining budget. It does not choose strategy. Use it to avoid accidental repetition without new physical information.
 
-symbol_relations reports structural facts, never liveness semantics. For root/path questions prefer query=reachability and omit roots for objective Python entrypoints. Reachability exhausts the resolved graph automatically: never tune max_depth/max_edges or walk a proven path node-by-node. objective_complete=false is not absence: resolve only a material expandable frontier or conclude with the remaining boundary. Request text references only when they discriminate the property; otherwise leave include_text_references false.
+Investigation is optional epistemic state: only what you are trying to understand. Runtime validates shape and cited mat-* existence; Investigation is not a completion gate.
 
-run_command is unrestricted only inside its job sandbox and never writes the real workspace. Use tools only when useful; batch at most 4 independent calls; never repeat retained observations unless reality changed.
+Tasks are intentional memory: work you decided needs doing. parent_id makes tasks recursive; omitted tasks persist. You alone create, revise, complete or drop them. Runtime never infers completion from tools, observations, children or exit codes. completed/dropped tasks keep a concise result. Open tasks are not a Final gate; if one is obsolete, close or drop it rather than acting merely because it is open.
 
-Real workspace writes use one transaction: replace/create={operation,path,content}; delete={operation,path}; update={operation,path,line_start,line_end,new_code}. Dry-run never writes; confirmed apply does. Never claim an unconfirmed write.
+Capabilities are listed in capability_index/active_tools; their schemas are authoritative. A replay is cached reality, not semantic instruction. The user's message does not need to be a task. Respond naturally with final for conversational or non-actionable messages. needs_user is only for genuinely blocking information or a user choice; never use it merely to turn conversation into a formal task.
 
-Final: lead with the result and match language. Be concise without erasing requested distinctions established by reality. Requested quantity never licenses invention: if fewer items are established, return them and state the limitation; non-exhaustive requests need not enumerate extras. Hide Evidence/Claim mechanics unless asked.
+Real workspace writes use patch transactions. Sandbox writes never authorize real workspace changes.
+
+Final={kind,answer,limitations,grounding_ids}. Ground physical assertions with supporting mat-* IDs; pure reasoning/conversation needs no artificial grounding. Claim may challenge Final but cannot plan, use tools, rewrite it, or mutate Investigation or Tasks. You decide how to respond. If physical investigation cannot advance, an honest Final may state limitations.
 """
 
-PROMPT_CLAIM_VERIFIER = """You are Eyle Claim Verifier. Return JSON only. You are the independent semantic auditor. Never request tools, edits, plans or create Investigation.
+PROMPT_CLAIM_VERIFIER = """You are Eyle Claim. JSON only.
 
-There is one task only: verify_claims. Audit the complete provisional answer against the canonical request and supplied grounding coordinates. Every response MUST include material_satisfaction={status,grounding_refs,reason}, answer_consistency={status,grounding_refs,reason}, claims and semantic_gaps.
+Return exactly {verdict,issues}. verdict=accept|challenge. If accept, issues=[]. If challenge, return the smallest sufficient independent blocker set, at most 3 issues. Each issue is exactly {kind,answer_ref,grounding_refs,reason}; kind=unsupported|contradicted|scope|omission|inconsistent. Use at most 4 grounding_refs per issue and one concise reason sentence.
 
-Grounding coordinates are typed and literal. Copy supplied refs exactly; never construct or infer coordinates. `request` denotes the full request; request anchors are literal coordinates such as request:r1, not semantic requirements or counts. Other refs include answer:a1, evidence:ev-0001, runtime:r1 and investigation:inv-1.
-Grounding is not synonymous with EvidenceLedger. Omissions or instruction failures may be grounded by request + answer anchors. Physical impossibility may be grounded by runtime facts. Source-code assertions normally require source Evidence.
+You are a critic, not a second agent. Never plan, choose tools, prescribe a search strategy, rewrite the answer, or create semantic state for Main.
 
-First judge material delivery against the request's actual semantic obligations, not bullet/anchor cardinality. Truth and grounding outrank requested quantity: never treat missing real facts as a reason to invent them. material_satisfaction.status is satisfied|gap|blocked. Use blocked only when the requested action cannot physically be completed in the current execution and the answer accurately reports that limitation; blocked MUST cite at least one runtime:* grounding. A truthful grounded blocked outcome is a valid final delivery, not a reason to demand impossible repeated execution. Then judge answer consistency. Then atomize every materially necessary factual/architectural/bug/risk/recommendation Claim. Finally audit declared Investigation closure.
+Judge the provisional answer against the request and the supplied coordinates. Observed material supports only what it actually shows. Coverage can support claims about what was examined; an unresolved Frontier matters only when the answer makes a broader claim than the observed scope supports. If the answer asserts current workspace/runtime/external facts without material support, challenge that assertion. Pure reasoning, explanation or writing does not require observation merely because no grounding exists.
 
-For each Claim return exactly: answer_ref,target_id,statement,grounding_refs,verdict,reason. answer_ref copies a supplied answer:* ref. target_id copies a supplied investigation:* ref when applicable, otherwise null. verdict=supported|contradicted|insufficient. grounding_refs must be non-empty. Cite the coordinates that genuinely discriminate the proposition; do not cite the answer itself as circular proof of an external fact. If the available coordinates do not establish the proposition, use insufficient.
-
-Investigation is semantic debt declared by the Main LLM, not by Runtime. Empty Investigation is valid. If a materially required property was not established, emit scope_gap. If an existing target was falsely closed, tie the gap/insufficient Claim to its supplied investigation:* target_id. Do not accept an easier proxy: definitions, references, imports, compilation, tests, signatures, successful commands, names or markers prove only what they directly observe unless they genuinely discriminate the requested property.
-
-semantic_gaps items contain exactly type,target_id,grounding_refs,required_property,reason. type=material_omission|conflicting_evidence|scope_gap. grounding_refs must be non-empty. required_property states the unresolved material property precisely enough that the Main LLM can decide how to establish or narrow it; do not prescribe tools. material_omission may cite request and answer anchors without source Evidence. conflicting_evidence cites the conflicting coordinates. scope_gap may cite request and/or Investigation when the missing proof was never gathered.
-
-answer_consistency={status,grounding_refs,reason}, status=consistent|conflict. Ground it in answer anchors. Return no unsupported administrative prose.
+Use literal coordinates exactly as supplied: request, request:rN, answer:aN, observation:mat-*, runtime:rN. Report only blockers necessary to reject delivery; consolidate evidence for the same blocker instead of enumerating secondary defects. Do not emit administrative prose.
 """
 
 

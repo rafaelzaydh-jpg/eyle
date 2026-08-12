@@ -1,18 +1,15 @@
-"""Canonical Investigation Contract.
+"""Main-owned semantic notebook for Eyle 2.7.5 Rev1.3.
 
-Investigation exists only when the Main LLM declares semantic debt. The runtime
-never decides that a target is necessary; it only preserves target identity,
-validates structural transitions/Evidence references, and applies reviewer
-feedback that explicitly names an existing target.
+Runtime validates only shape and physical grounding references. Goals, status,
+reasons and whether grounding is semantically needed belong entirely to Main.
+Claim may challenge a final answer but never mutates this notebook.
 """
 from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
-from .evidence import promote_source_record_items
-
 TARGET_STATUSES = {"open", "established", "dismissed"}
-_TARGET_FIELDS = {"id", "goal", "status", "evidence_ids", "reason"}
+_TARGET_FIELDS = {"id", "goal", "status", "grounding_ids", "reason"}
 
 
 def _ids(values: Iterable[Any]) -> List[str]:
@@ -20,10 +17,9 @@ def _ids(values: Iterable[Any]) -> List[str]:
     seen = set()
     for value in values or []:
         item = str(value or "").strip()
-        if not item or item in seen:
-            continue
-        seen.add(item)
-        result.append(item)
+        if item and item not in seen:
+            seen.add(item)
+            result.append(item)
     return result
 
 
@@ -31,25 +27,18 @@ def apply_investigation_updates(
     raw: Any,
     *,
     previous: Sequence[Dict[str, Any]] | None = None,
-    evidence: Dict[str, Any] | None = None,
-    source_records: Dict[str, Any] | None = None,
+    grounding: Dict[str, Any] | None = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Apply Main-LLM target deltas to the canonical Investigation state.
+    """Apply Main target deltas against canonical Observation grounding.
 
-    Omitted targets remain untouched. Existing goals are immutable. Evidence is
-    additive per target. The Main may cite an already-admitted ``ev-*`` id or an
-    objectively materialized ``src-*`` SourceRecord id; Runtime deterministically
-    promotes only the SourceRecords explicitly selected by Main. ``established``
-    requires at least one real Evidence ID; ``dismissed`` requires a reason. The
-    runtime does not score usefulness, necessity or semantic sufficiency.
+    Omitted targets stay unchanged. Main may revise its own goal/status/reason.
+    Runtime only rejects malformed fields or references to nonexistent material.
     """
     canonical = [dict(item) for item in (previous or []) if isinstance(item, dict)]
     if not isinstance(raw, list):
         return canonical, [], [{"id": None, "reason": "INVESTIGATION_UPDATES_LIST_REQUIRED"}]
 
-    evidence_store = evidence if isinstance(evidence, dict) else {}
-    source_store = source_records if isinstance(source_records, dict) else {}
-    known_evidence = set(evidence_store.keys())
+    ground_store = grounding if isinstance(grounding, dict) else {}
     index_by_id = {
         str(item.get("id") or ""): index
         for index, item in enumerate(canonical)
@@ -84,46 +73,31 @@ def apply_investigation_updates(
         goal = str(item.get("goal") or "").strip()
         status = str(item.get("status") or "").strip()
         reason = str(item.get("reason") or "").strip()
-        raw_evidence = item.get("evidence_ids")
+        raw_grounding = item.get("grounding_ids")
         if not goal or len(goal) > 500:
             reject(f"INVESTIGATION_TARGET_GOAL_INVALID:{target_id}")
             continue
         if status not in TARGET_STATUSES:
             reject(f"INVESTIGATION_TARGET_STATUS_INVALID:{target_id}")
             continue
-        if not isinstance(raw_evidence, list) or any(
-            not isinstance(value, str) or not value.strip() for value in raw_evidence
+        if not isinstance(raw_grounding, list) or any(
+            not isinstance(value, str) or not value.strip() for value in raw_grounding
         ):
-            reject(f"INVESTIGATION_TARGET_EVIDENCE_INVALID:{target_id}")
+            reject(f"INVESTIGATION_TARGET_GROUNDING_INVALID:{target_id}")
             continue
 
-        incoming_refs = _ids(raw_evidence)
-        incoming_evidence, missing = promote_source_record_items(
-            evidence_store, source_store, incoming_refs, admitted_by="main_investigation",
-        )
-        known_evidence.update(incoming_evidence)
+        incoming = _ids(raw_grounding)
+        missing = [ref for ref in incoming if ref not in ground_store]
         if missing:
             reject(f"INVESTIGATION_UNKNOWN_GROUNDING:{target_id}:" + ",".join(missing))
             continue
 
         current = canonical[index_by_id[target_id]] if target_id in index_by_id else None
-        if current is not None:
-            if str(current.get("goal") or "").strip() != goal:
-                reject(f"INVESTIGATION_TARGET_GOAL_MUTATED:{target_id}")
-                continue
-            evidence_ids = _ids(current.get("evidence_ids") or [])
-        else:
-            evidence_ids = []
-        for evidence_id in incoming_evidence:
-            if evidence_id not in evidence_ids:
-                evidence_ids.append(evidence_id)
+        grounding_ids = _ids(current.get("grounding_ids") or []) if current is not None else []
+        for grounding_id in incoming:
+            if grounding_id not in grounding_ids:
+                grounding_ids.append(grounding_id)
 
-        if status == "established" and not evidence_ids:
-            reject(f"INVESTIGATION_ESTABLISHED_REQUIRES_EVIDENCE:{target_id}")
-            continue
-        if status in {"established", "dismissed"} and not reason:
-            reject(f"INVESTIGATION_STATUS_REQUIRES_REASON:{target_id}:{status}")
-            continue
         if len(reason) > 500:
             reject(f"INVESTIGATION_TARGET_REASON_TOO_LONG:{target_id}")
             continue
@@ -132,7 +106,7 @@ def apply_investigation_updates(
             "id": target_id,
             "goal": goal,
             "status": status,
-            "evidence_ids": evidence_ids,
+            "grounding_ids": grounding_ids,
             "reason": reason,
         }
         changed = current != normalized
@@ -146,68 +120,21 @@ def apply_investigation_updates(
             "id": target_id,
             "changed": bool(changed),
             "status": status,
-            "evidence_ids": evidence_ids,
+            "grounding_ids": grounding_ids,
         })
 
     return canonical, accepted, rejected
 
 
-def target_evidence_ids(investigation: Sequence[Dict[str, Any]] | None) -> List[str]:
+def investigation_grounding_ids(investigation: Sequence[Dict[str, Any]] | None) -> List[str]:
     result: List[str] = []
     seen = set()
     for item in investigation or []:
         if not isinstance(item, dict):
             continue
-        for evidence_id in item.get("evidence_ids") or []:
-            value = str(evidence_id or "").strip()
+        for grounding_id in item.get("grounding_ids") or []:
+            value = str(grounding_id or "").strip()
             if value and value not in seen:
                 seen.add(value)
                 result.append(value)
     return result
-
-
-def open_target_ids(investigation: Sequence[Dict[str, Any]] | None) -> List[str]:
-    return [
-        str(item.get("id") or "")
-        for item in (investigation or [])
-        if isinstance(item, dict) and item.get("status") == "open" and str(item.get("id") or "")
-    ]
-
-
-def reopen_targets_from_review(
-    investigation: Sequence[Dict[str, Any]] | None,
-    review: Dict[str, Any] | None,
-) -> Tuple[List[Dict[str, Any]], List[str]]:
-    """Reopen only an existing target explicitly challenged by Claim Review."""
-    result = [dict(item) for item in (investigation or []) if isinstance(item, dict)]
-    by_id = {str(item.get("id") or ""): item for item in result if str(item.get("id") or "")}
-    reopened: List[str] = []
-
-    issues: List[Dict[str, Any]] = []
-    if isinstance(review, dict):
-        issues.extend(item for item in (review.get("semantic_gaps") or []) if isinstance(item, dict))
-        issues.extend(
-            item for item in (review.get("claims") or [])
-            if isinstance(item, dict) and item.get("verdict") in {"insufficient", "contradicted"}
-        )
-
-    for issue in issues:
-        target_id = issue.get("target_id")
-        if target_id is None:
-            continue
-        target_id = str(target_id or "").strip()
-        target = by_id.get(target_id)
-        if target is None:
-            continue
-        target["status"] = "open"
-        target["evidence_ids"] = _ids(
-            list(target.get("evidence_ids") or []) + list(issue.get("evidence_ids") or [])
-        )
-        required_property = str(issue.get("required_property") or "").strip()
-        reason = str(issue.get("reason") or "").strip()
-        directed = "; ".join(part for part in (required_property, reason) if part)
-        if directed:
-            target["reason"] = directed[:500]
-        if target_id not in reopened:
-            reopened.append(target_id)
-    return result, reopened

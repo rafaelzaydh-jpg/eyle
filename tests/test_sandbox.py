@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Atualizacao 28 -- sandbox fail-closed, allowlist e limites."""
+"""Sandbox fail-closed, allowlist and limit tests."""
 import os
 import sys
 
@@ -137,3 +137,132 @@ def test_metacaractere_de_shell_vira_argumento_literal(monkeypatch, tmp_path):
 
     assert resultado["ok"] is True
     assert recebido["argv"] == ["pytest", "-q", ";", "touch", "NAO_EXECUTAR"]
+
+
+def test_snapshot_omits_internal_absolute_symlink(tmp_path):
+    target = tmp_path / "inside.txt"
+    target.write_text("real", encoding="utf-8")
+    link = tmp_path / "inside-link.txt"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        import pytest
+        pytest.skip("symlinks unavailable")
+
+    workspace, tempdir = sandbox_mod._copiar_projeto(str(tmp_path), sandbox_mod._limites(_cfg(memoria_mb=512)))
+    try:
+        assert os.path.isfile(os.path.join(workspace, "inside.txt"))
+        assert not os.path.lexists(os.path.join(workspace, "inside-link.txt"))
+    finally:
+        tempdir.cleanup()
+
+
+def test_safe_sandbox_cwd_rejects_escape(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    import pytest
+    with pytest.raises(sandbox_mod.ErroSandbox, match="escapar"):
+        sandbox_mod._safe_sandbox_cwd(str(workspace), "../")
+
+
+def test_process_backend_timeout_kills_execution(tmp_path):
+    cfg = _cfg(
+        comandos_permitidos=[[sys.executable]],
+        timeout_segundos=1,
+        cpu_segundos=3,
+        memoria_mb=512,
+    )
+    result = sandbox_mod.executar_no_sandbox(
+        str(tmp_path),
+        [sys.executable, "-c", "import time; time.sleep(10)"],
+        cfg,
+    )
+    assert result["executado"] is True
+    assert result["ok"] is False
+    assert "timeout de 1s" in result["erro"]
+
+
+def test_process_backend_returns_only_bounded_output_tail(tmp_path):
+    cfg = _cfg(
+        comandos_permitidos=[[sys.executable]],
+        max_saida_kb=16,
+        memoria_mb=512,
+    )
+    result = sandbox_mod.executar_no_sandbox(
+        str(tmp_path),
+        [sys.executable, "-c", "print('A'*20000); print('TAIL-MARKER')"],
+        cfg,
+    )
+    assert result["ok"] is True
+    assert result["saida"].endswith("TAIL-MARKER\n")
+    assert len(result["saida"].encode("utf-8")) <= 16 * 1024
+
+
+def test_timeout_kills_spawned_child_process_tree(tmp_path):
+    import shutil
+    import time
+    if os.name != "posix" or not shutil.which("prlimit"):
+        import pytest
+        pytest.skip("POSIX prlimit required")
+    marker = tmp_path.parent / (tmp_path.name + "-child-marker")
+    if marker.exists():
+        marker.unlink()
+    child = (
+        "import subprocess,sys,time; "
+        f"subprocess.Popen([sys.executable,'-c',\"import time; time.sleep(2); open({str(marker)!r},'w').write('alive')\"]); "
+        "time.sleep(10)"
+    )
+    cfg = _cfg(comandos_permitidos=[[sys.executable]], timeout_segundos=1, cpu_segundos=4, memoria_mb=512)
+    result = sandbox_mod.executar_no_sandbox(str(tmp_path), [sys.executable, "-c", child], cfg)
+    assert result["executado"] is True and result["ok"] is False
+    time.sleep(2.2)
+    assert not marker.exists(), "child survived timeout process-group cleanup"
+
+
+def test_supervised_backend_auto_fallback_is_explicit(monkeypatch):
+    monkeypatch.setattr(sandbox_mod, "_microsandbox_available", lambda: False)
+    real_which = sandbox_mod.shutil.which
+    monkeypatch.setattr(sandbox_mod.shutil, "which", lambda name: None if name in {"bwrap", "docker"} else real_which(name))
+    assert sandbox_mod._supervised_backend({"backend": "auto", "bloquear_rede": False}) == "process"
+    import pytest
+    with pytest.raises(sandbox_mod.ErroSandbox, match="nenhum backend supervisionado"):
+        sandbox_mod._supervised_backend({"backend": "auto", "bloquear_rede": True})
+
+
+def test_docker_container_init_failure_is_fail_closed(monkeypatch, tmp_path):
+    class Completed:
+        returncode = 125
+        stdout = ""
+        stderr = "daemon unavailable"
+
+    monkeypatch.setattr(sandbox_mod.shutil, "which", lambda name: "/usr/bin/docker" if name == "docker" else None)
+    monkeypatch.setattr(sandbox_mod.subprocess, "run", lambda *args, **kwargs: Completed())
+    import pytest
+    with pytest.raises(sandbox_mod.ErroSandbox, match="Docker sandbox indisponivel"):
+        sandbox_mod._ensure_docker_container(str(tmp_path), {"imagem_oci": "python:3.12-slim"}, sandbox_mod._limites(_cfg(memoria_mb=512)))
+
+
+def test_execution_context_cleans_persistent_docker_and_snapshot(monkeypatch):
+    from eyle.core.execution_context import ExecutionContext
+
+    calls = []
+    class Temp:
+        cleaned = False
+        def cleanup(self):
+            self.cleaned = True
+
+    temp = Temp()
+    monkeypatch.setattr(sandbox_mod.subprocess, "run", lambda argv, **kwargs: calls.append(list(argv)))
+    ctx = ExecutionContext(
+        started_monotonic=0.0, deadline_monotonic=10.0, execution_id="t", source_job_id=1,
+        max_total_tokens=1000,
+    )
+    ctx.sandbox_tempdir = temp
+    ctx.sandbox_workspace_path = "/tmp/fake-workspace"
+    ctx.sandbox_container_name = "eyle-sandbox-test"
+    ctx.sandbox_docker_binary = "/usr/bin/docker"
+    ctx.sandbox_backend = "docker"
+    ctx.cleanup_sandbox()
+    assert calls == [["/usr/bin/docker", "rm", "-f", "eyle-sandbox-test"]]
+    assert temp.cleaned is True
+    assert ctx.sandbox_container_name is None and ctx.sandbox_workspace_path is None

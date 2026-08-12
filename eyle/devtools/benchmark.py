@@ -101,9 +101,9 @@ def _run_case(config: Dict[str, Any], case_id: str) -> Dict[str, Any]:
             tool in {"read_file", "search_code", "find_symbol", "list_tree"}
             for tool in tools
         )
-        claim_ledger = list((details or {}).get("claim_evidence") or [])
+        claim_grounding = list((details or {}).get("claim_grounding") or [])
         factual_ok = status == "success" and bool(str(text or "").strip()) and (
-            case_id == "greeting" or case_id in {"edit_confirmed", "multi_file_edit"} or bool(claim_ledger)
+            case_id == "greeting" or case_id in {"edit_confirmed", "multi_file_edit"} or bool(claim_grounding)
         )
         write_case = case_id in {"edit_confirmed", "multi_file_edit"}
         final_files = _snapshot(root)

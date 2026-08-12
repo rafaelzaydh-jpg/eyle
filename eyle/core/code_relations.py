@@ -306,11 +306,6 @@ def _resolve_nodes(spec: str, definitions: List[Dict[str, Any]], module_nodes: s
     return matched
 
 
-def _bfs_paths(adjacency: Dict[str, List[str]], starts: List[str], targets: set[str], max_depth: int) -> Optional[List[str]]:
-    path, _ = _bfs_path_meta(adjacency, starts, targets, max_depth)
-    return path
-
-
 def _bfs_path_meta(
     adjacency: Dict[str, List[str]], starts: List[str], targets: set[str], max_depth: Optional[int],
 ) -> Tuple[Optional[List[str]], List[str]]:
@@ -396,7 +391,7 @@ def _import_bindings(py: Dict[str, Any]) -> Dict[str, Dict[str, List[str]]]:
     Calls such as ``from llm.structured import parse_profile_response`` must not
     fall back to a project-wide name guess when the import itself gives an
     objective target. This is the missing edge that made directed reachability
-    collapse into manual node walking in the live Rev5.7 benchmark.
+    collapse into manual node walking in the current structural benchmark.
     """
     definitions = list(py.get("definitions") or [])
     by_file_name: Dict[Tuple[str, str], List[str]] = defaultdict(list)
@@ -424,7 +419,7 @@ def _import_bindings(py: Dict[str, Any]) -> Dict[str, Dict[str, List[str]]]:
 
 
 def _call_candidates(call: Dict[str, Any], py: Dict[str, Any], defs_by_name: Dict[str, List[str]], import_bindings: Dict[str, Dict[str, List[str]]]) -> List[str]:
-    """Resolve one call using local/import evidence before global name fallback."""
+    """Resolve one call using local/import signals before global name fallback."""
     name = str(call.get("name") or "")
     file = str(call.get("file") or "")
     expression = str(call.get("expression") or "")
@@ -472,7 +467,7 @@ def analyze_symbol_relations(
 ) -> Dict[str, Any]:
     """Return objective structural observations for one symbol.
 
-    ``query=relations`` preserves the local relation view from Rev5.7.
+    ``query=relations`` preserves the local relation view.
     ``query=reachability`` is a query-shaped observation: it materializes the
     shortest root-to-target path and only the frontiers that can block that
     objective. If roots are omitted, objective Python entrypoint signals are used.

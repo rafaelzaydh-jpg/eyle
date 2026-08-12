@@ -3,5 +3,7 @@
 # because `run_tests` is an official deterministic tool exposed to the agent.
 Flask==3.0.3
 pytest==8.2.2
+# Strong lightweight microVM backend; the platform wheel bundles msb/libkrunfw.
+microsandbox==0.6.8
 
 # For development/CI, requirements-dev.txt extends this file.

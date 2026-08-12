@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regressoes da revisao 55.7: progresso, streaming e estado web."""
+"""Live progress regression coverage: progresso, streaming e estado web."""
 import contextlib
 import json
 from pathlib import Path

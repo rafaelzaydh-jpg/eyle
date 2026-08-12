@@ -1,7 +1,7 @@
 """External project memory used only when the agent explicitly asks for it.
 
 The memory is not injected into every prompt. Facts are stored outside the
-workspace and can be searched through tools. Evidence-backed entries preserve
+workspace and can be searched through tools. Grounding-backed entries preserve
 file hashes so stale facts are filtered when they are read again.
 """
 from __future__ import annotations
@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List
 
 
-MEMORY_SCHEMA_VERSION = "5.8"
+MEMORY_SCHEMA_VERSION = "2.7.5-r1.3"
 
 
 def _utc_now() -> str:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Atualizacao 27: autenticacao, rate limit e status sem caminho absoluto."""
+"""Web authentication, rate-limit and status-safety tests."""
 import os
 import stat
 import pytest

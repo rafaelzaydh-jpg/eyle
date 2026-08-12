@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Nucleo unificado da Eyle 2.7.4.
+"""Nucleo unificado da Eyle 2.7.5.
 
 Existe somente um caminho público para tarefas de projeto: eyle.core.agent.
 Toda mensagem não operacional entra na mesma AgentSession.
@@ -94,16 +94,10 @@ def registrar_mensagem_com_snapshot(role, texto, limite_snapshot=6, metadata=Non
         return novo_id, [dict(mensagem) for mensagem in historico]
 
 def registrar_mensagem(role, texto, metadata=None):
-    """Adiciona uma mensagem em memory/conversa.json e devolve o id gerado.
+    """Adiciona uma mensagem atomicamente e devolve o id gerado.
 
-    Bug 2 do plano de correcao: registrar_mensagem e' chamada tanto pela
-    thread do Flask (web/routes.py:/enviar, na hora que o usuario manda a
-    mensagem) quanto pela thread do Worker (eyle/runtime/worker.py, quando grava
-    a resposta do assistente) -- as duas rodam no MESMO processo ao mesmo
-    tempo, por design (agente persistente). Sem lock, ler+somar+gravar
-    conversa.json nao e' atomico entre as duas threads: da pra perder uma
-    mensagem (lost update) ou gerar o mesmo id duas vezes. O lock cobre a
-    operacao inteira (ler, calcular novo_id, gravar), nao so a escrita.
+    A interface web e o Worker podem gravar no mesmo processo. O lock cobre
+    leitura, alocacao do id e escrita para evitar lost updates e ids duplicados.
     """
     novo_id, _ = registrar_mensagem_com_snapshot(role, texto, metadata=metadata)
     return novo_id
@@ -451,7 +445,7 @@ def _resultado_agente(status, texto, detalhes):
     }
 
 
-def _processar_agente(pergunta, config, projeto, task_id=None, conversation_context=None, source_job_id=None):
+def _processar_agente(pergunta, config, projeto, execution_id=None, conversation_context=None, source_job_id=None):
     config_execucao = dict(config)
     if source_job_id is not None:
         job_progress.publicar_job(source_job_id, "agent", "Eyle iniciou a tarefa")
@@ -462,7 +456,7 @@ def _processar_agente(pergunta, config, projeto, task_id=None, conversation_cont
                 config_execucao,
                 projeto=projeto,
                 retornar_detalhes=True,
-                task_id=task_id,
+                execution_id=execution_id,
                 conversation_context=conversation_context, source_job_id=source_job_id,
             )
         )
@@ -477,7 +471,7 @@ def _processar_agente(pergunta, config, projeto, task_id=None, conversation_cont
     return _resultado_agente(status, texto, detalhes)
 
 
-def _retomar_agente_pendente(pendente, config, resposta_usuario=None, source_job_id=None, task_id=None):
+def _retomar_agente_pendente(pendente, config, resposta_usuario=None, source_job_id=None, execution_id=None):
     projeto = carregar_projeto()
     try:
         status, texto, nova_pendencia, detalhes = _desempacotar_resultado_agente(
@@ -487,7 +481,7 @@ def _retomar_agente_pendente(pendente, config, resposta_usuario=None, source_job
                 projeto=projeto,
                 retomar=pendente,
                 retornar_detalhes=True,
-                task_id=task_id or (pendente.get("session") or {}).get("task_id"),
+                execution_id=execution_id or (pendente.get("session") or {}).get("execution_id"),
                 resposta_usuario=resposta_usuario, source_job_id=source_job_id,
             )
         )
@@ -511,7 +505,7 @@ def _cancelar_agente_pendente(pendente):
 
 
 def processar(pergunta, registrar_pergunta=True, historico_snapshot=None,
-              task_id=None, source_job_id=None, source_message_id=None):
+              execution_id=None, source_job_id=None, source_message_id=None):
     """Single public path: interface -> AgentSession -> LLM/tools -> response."""
     _JOB_ATUAL_ID.set(source_job_id)
     _MENSAGEM_ORIGEM_ATUAL_ID.set(source_message_id)
@@ -542,7 +536,7 @@ def processar(pergunta, registrar_pergunta=True, historico_snapshot=None,
         # Only explicit cancel above is control authority for this continuation kind.
         return _retomar_agente_pendente(
             pendente, config, resposta_usuario=pergunta,
-            source_job_id=source_job_id, task_id=task_id,
+            source_job_id=source_job_id, execution_id=execution_id,
         )
 
     if pendente and controle == "aplicar":
@@ -553,7 +547,7 @@ def processar(pergunta, registrar_pergunta=True, historico_snapshot=None,
             return _resultado_controle_pendencia("Essa pendência não é uma confirmação de escrita.")
         return _retomar_agente_pendente(
             selecionada, config, resposta_usuario=pergunta,
-            source_job_id=source_job_id, task_id=task_id,
+            source_job_id=source_job_id, execution_id=execution_id,
         )
 
     if pendente:
@@ -562,15 +556,21 @@ def processar(pergunta, registrar_pergunta=True, historico_snapshot=None,
 
     origem = carregar_conversa() if historico_snapshot is None else historico_snapshot
     historico = _historico_sem_mensagem_atual(_historico_sem_erros_llm(origem), pergunta)
-    conversation_context = {
-        "recent_messages": [
-            {"role": str(item.get("role") or ""), "content": str(item.get("text") or "")}
-            for item in historico[-12:]
-            if isinstance(item, dict)
-        ]
-    }
+    recent_messages = []
+    for item in historico[-12:]:
+        if not isinstance(item, dict):
+            continue
+        message = {
+            "role": str(item.get("role") or ""),
+            "content": str(item.get("text") or ""),
+        }
+        write_failure = item.get("write_failure")
+        if isinstance(write_failure, dict) and write_failure:
+            message["write_failure"] = dict(write_failure)
+        recent_messages.append(message)
+    conversation_context = {"recent_messages": recent_messages}
     return _processar_agente(
-        pergunta, config, projeto, task_id=task_id,
+        pergunta, config, projeto, execution_id=execution_id,
         conversation_context=conversation_context, source_job_id=source_job_id,
     )
 

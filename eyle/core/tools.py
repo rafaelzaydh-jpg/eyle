@@ -9,16 +9,13 @@ explicit user confirmation.
 
 ``ctx`` supplies the validated config and the live project root. Indexed retrieval is not required.
 """
+import copy
 import json
 import os
 import re
-import sys
 import subprocess
 
-_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-BASE_DIR = os.path.dirname(_THIS_DIR)
-if BASE_DIR not in sys.path:
-    sys.path.insert(0, BASE_DIR)
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 from eyle.core.workspace_io import (  # noqa: E402
     ErroLeituraProjeto,
@@ -38,14 +35,18 @@ from eyle.core.project_inspection import (  # noqa: E402
     project_stats as measure_project_stats,
 )
 from eyle.core.git_tools import git_status as inspect_git_status, git_diff as inspect_git_diff  # noqa: E402
-from eyle.core.execution_trace import build_execution_trace, filter_execution_trace  # noqa: E402
 from eyle.core.code_relations import analyze_symbol_relations  # noqa: E402
+from eyle.core.text_hash import hash_texto  # noqa: E402
 from eyle.core.observation_contract import (  # noqa: E402
-    materialize_snapshot_handle, normalize_effect, register_snapshot_handle, result_observation_fields,
+    CoverageContractError, materialize_snapshot_handle, normalize_coverage, normalize_effect, register_snapshot_handle, result_observation_fields,
 )
+from eyle.core.observation import resolve_frontier, consume_frontier  # noqa: E402
 from eyle.core.sandbox import executar_comando_livre_no_sandbox  # noqa: E402
 from eyle.core.workspace_policy import (  # noqa: E402
     build_protected_resource_index, is_protected_workspace_resource, protected_resource_info,
+)
+from eyle.core.objective_scope import (  # noqa: E402
+    ObjectiveScopeError, normalize_scope_selectors, resolve_objective_file_scope,
 )
 
 PROJECT_BASE_DIR = os.path.dirname(BASE_DIR)
@@ -56,7 +57,7 @@ _CAMPOS_RESULTADO = ("status", "ok", "executed", "changed", "error_code", "detai
 
 def _resultado(status, ok, executed, changed=False, error_code=None, detail=None, retryable=None,
                failure_scope=None, failure_resource=None, observations=None, coverage=None, frontiers=None, handles=None):
-    """Canonical Rev5.7 tool result envelope.
+    """Canonical current tool result envelope.
 
     The physical status fields remain mandatory. Objective observation fields are
     always present but may be empty, so every capability shares one Runtime
@@ -87,11 +88,12 @@ def _sucesso(detail=None, changed=False, *, observations=None, coverage=None, fr
     )
 
 
-def _falha(error_code, detail, executed=False, changed=False, retryable=None, *, failure_scope=None, failure_resource=None):
+def _falha(error_code, detail, executed=False, changed=False, retryable=None, *, failure_scope=None, failure_resource=None, observations=None, coverage=None, frontiers=None, handles=None):
     return _resultado(
         "failed", False, executed, changed=changed,
         error_code=error_code, detail=detail, retryable=retryable,
         failure_scope=failure_scope, failure_resource=failure_resource,
+        observations=observations, coverage=coverage, frontiers=frontiers, handles=handles,
     )
 
 
@@ -148,6 +150,8 @@ def _parse_rg_json(stdout):
     return parsed
 
 
+_SEARCH_IGNORED_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv"}
+
 _CODE_SEARCH_EXTENSIONS = {
     ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".java", ".c", ".cpp",
     ".h", ".hpp", ".cs", ".go", ".rb", ".php", ".rs", ".swift", ".kt",
@@ -171,32 +175,73 @@ def _search_match_priority(item):
     return (group, path, int(item.get("linha") or 0), int(item.get("coluna") or 0))
 
 
-def _searchable_files(root):
-    """Return the canonical readable-file universe plus protected-resource count."""
-    ignored_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv"}
+def _normalize_search_selectors(value):
+    return normalize_scope_selectors(value)
+
+
+def _search_capability_universe(root):
+    """Return the physical file universe owned by literal code search.
+
+    These exclusions are capability/operational boundaries, not semantic
+    relevance choices. Objective Scope is resolved over this universe before
+    protected-content access is applied.
+    """
+    ignored_dirs = set(_SEARCH_IGNORED_DIRS)
     files = []
-    protected = 0
-    protected_index = build_protected_resource_index(root)
+    ignored_counts = {name: 0 for name in sorted(ignored_dirs)}
     for current, dirs, names in os.walk(root, followlinks=False):
-        dirs[:] = sorted(name for name in dirs if name not in ignored_dirs)
+        kept = []
+        for name in sorted(dirs):
+            if name in ignored_dirs:
+                ignored_counts[name] += 1
+            else:
+                kept.append(name)
+        dirs[:] = kept
         for name in sorted(names):
             path = os.path.join(current, name)
-            rel = os.path.relpath(path, root).replace("\\", "/")
             if not os.path.isfile(path):
                 continue
-            if is_protected_workspace_resource(root, rel, index=protected_index):
-                protected += 1
-                continue
-            files.append(rel)
-    return files, protected
+            files.append(os.path.relpath(path, root).replace("\\", "/"))
+    return sorted(files), {key: value for key, value in ignored_counts.items() if value}
+
+
+def _searchable_files(root, *, include_paths=None, exclude_paths=None):
+    """Resolve Objective Scope first, then apply the protected-content boundary."""
+    universe, ignored = _search_capability_universe(root)
+    include = _normalize_search_selectors(include_paths)
+    for selector in include:
+        parts = [part for part in selector.replace("\\", "/").split("/") if part]
+        blocked = next((part for part in parts if part in _SEARCH_IGNORED_DIRS), None)
+        if blocked is not None:
+            raise ObjectiveScopeError(
+                "SEARCH_SCOPE_OUTSIDE_CAPABILITY_BOUNDARY",
+                f"objective search include selector targets capability-excluded directory '{blocked}': {selector}",
+                selector=selector,
+            )
+    scoped_files, scope = resolve_objective_file_scope(
+        root, universe, include_paths=include, exclude_paths=exclude_paths,
+    )
+    protected_index = build_protected_resource_index(root)
+    readable = []
+    protected = 0
+    for rel in scoped_files:
+        if is_protected_workspace_resource(root, rel, index=protected_index):
+            protected += 1
+            continue
+        readable.append(rel)
+    scope = dict(scope)
+    scope["files_scanned"] = len(readable)
+    scope["protected_files"] = int(protected)
+    scope["capability_policy_excluded_directories"] = ignored
+    return readable, protected, scope
 
 
 def _canonicalize_search_matches(items, *, root, query):
     """Return the complete canonical match universe for one literal query.
 
-    Backend differences are normalized before any model-facing projection.  No
+    Backend differences are normalized before any model-facing view.  No
     semantic relevance ranking occurs here.  The Runtime may later group and
-    bound the projection, but the physical match universe is not truncated
+    bound the materialization, but the physical match universe is not truncated
     before diversity/coverage are computed.
     """
     unique = {}
@@ -305,7 +350,7 @@ def _group_all_search_ranges(raw_matches, max_lines):
     return grouped_by_file, file_order, total_ranges
 
 
-def _diverse_search_projection(grouped_by_file, file_order, max_ranges):
+def _diverse_search_materialization(grouped_by_file, file_order, max_ranges):
     """Project ranges round-robin across files without semantic ranking."""
     selected = []
     selected_keys = set()
@@ -366,7 +411,7 @@ def _bound_projected_match_lines(ranges, max_matches):
 
 
 def _tool_search_code(arguments, ctx):
-    """Exhaust one literal search objectively, then materialize a diverse bounded projection."""
+    """Exhaust one literal search objectively, then materialize a diverse bounded materialization."""
     query = arguments["query"].strip()
     root = _caminho_projeto(ctx)
     if not root:
@@ -377,7 +422,17 @@ def _tool_search_code(arguments, ctx):
     max_matches = max(1, int(agent_cfg.get("max_search_matches", 40) or 40))
     max_ranges = max(1, int(agent_cfg.get("max_search_ranges", 12) or 12))
 
-    searchable_files, protected_resources = _searchable_files(root)
+    include_paths = _normalize_search_selectors(arguments.get("include_paths"))
+    exclude_paths = _normalize_search_selectors(arguments.get("exclude_paths"))
+    try:
+        searchable_files, protected_resources, search_scope = _searchable_files(
+            root, include_paths=include_paths, exclude_paths=exclude_paths,
+        )
+    except ObjectiveScopeError as error:
+        return _falha(
+            error.code, error.detail, executed=False, retryable=False,
+            failure_scope="request", failure_resource=error.selector,
+        )
     try:
         raw_matches = _search_matches_with_rg(root, query, searchable_files)
         backend = "ripgrep-json"
@@ -387,7 +442,7 @@ def _tool_search_code(arguments, ctx):
 
     matches_observed = len(raw_matches)
     grouped_by_file, file_order, ranges_observed = _group_all_search_ranges(raw_matches, max_lines)
-    selected_ranges, remaining_ranges = _diverse_search_projection(grouped_by_file, file_order, max_ranges)
+    selected_ranges, remaining_ranges = _diverse_search_materialization(grouped_by_file, file_order, max_ranges)
     selected_ranges = _bound_projected_match_lines(selected_ranges, max_matches)
 
     results = []
@@ -410,7 +465,8 @@ def _tool_search_code(arguments, ctx):
 
     handles = []
     frontiers = []
-    handle_store = (ctx or {}).get("observation_handles")
+    ledger = (ctx or {}).get("observation_ledger")
+    handle_store = ledger.setdefault("handles", {}) if isinstance(ledger, dict) else None
     if remaining_ranges:
         payload = {
             "query": query,
@@ -419,7 +475,7 @@ def _tool_search_code(arguments, ctx):
         }
         if isinstance(handle_store, dict):
             handle = register_snapshot_handle(
-                handle_store,
+                ledger,
                 kind="search_code.ranges",
                 payload=payload,
                 workspace_epoch=int((ctx or {}).get("workspace_epoch") or 0),
@@ -429,7 +485,7 @@ def _tool_search_code(arguments, ctx):
             )
             handles.append(handle)
             frontiers.append({
-                "kind": "projection_continuation",
+                "kind": "material_continuation",
                 "at": "workspace_search",
                 "count": len(remaining_ranges),
                 "reason": "additional objectively matched source ranges remain behind a continuation handle",
@@ -437,7 +493,7 @@ def _tool_search_code(arguments, ctx):
             })
         else:
             frontiers.append({
-                "kind": "projection_boundary",
+                "kind": "material_boundary",
                 "at": "workspace_search",
                 "count": len(remaining_ranges),
                 "reason": "additional objectively matched source ranges were not materialized",
@@ -457,10 +513,9 @@ def _tool_search_code(arguments, ctx):
         })
 
     # Search execution is complete over the declared readable file universe even
-    # when only a bounded projection is materialized to the Main LLM.
+    # when only a bounded materialization is materialized to the Main LLM.
     scope_complete = not read_failures
     coverage_complete = scope_complete and protected_resources == 0
-    projection_complete = not remaining_ranges and not read_failures
     files = sorted({item.get("file") for item in results if item.get("file")})
     match_lines_by_file = {}
     for match in raw_matches:
@@ -477,6 +532,7 @@ def _tool_search_code(arguments, ctx):
     distribution = file_match_counts[:max(12, max_ranges)]
     detail = {
         "query": query,
+        "search_scope": search_scope,
         "results": results,
         "materialized_files": files,
         "matches_observed": matches_observed,
@@ -486,10 +542,13 @@ def _tool_search_code(arguments, ctx):
         "distribution_truncated": len(distribution) < len(file_match_counts),
         "ranges_observed": ranges_observed,
         "ranges_materialized": len(results),
-        "projection_complete": projection_complete,
         "scope_complete": scope_complete,
         "coverage_complete": coverage_complete,
-        "coverage_scope": "all_workspace_files" if protected_resources == 0 else "readable_workspace_files",
+        "coverage_scope": (
+            ("declared_search_scope" if protected_resources == 0 else "readable_declared_search_scope")
+            if (include_paths or exclude_paths)
+            else ("all_workspace_files" if protected_resources == 0 else "readable_workspace_files")
+        ),
         "protected_resources_excluded": protected_resources,
         "backend": backend,
         "read_failures": read_failures,
@@ -509,7 +568,7 @@ def _tool_symbol_relations(arguments, ctx):
     config = (ctx or {}).get("config") or {}
     agent_cfg = config.get("agent") or {}
     query = str(arguments.get("query") or "relations")
-    # Reachability depth is Runtime-owned in Rev5.8. The resolved graph is
+    # Reachability depth is Runtime-owned in Eyle 2.7.5 Rev1.3. The resolved graph is
     # exhausted mechanically; only local relation queries honor max_depth.
     default_depth = 6
     try:
@@ -523,7 +582,8 @@ def _tool_symbol_relations(arguments, ctx):
             max_file_bytes=max(1024, int(agent_cfg.get("max_project_file_bytes", 4 * 1024 * 1024) or 4 * 1024 * 1024)),
             query=query,
         )
-        handle_store = (ctx or {}).get("observation_handles")
+        ledger = (ctx or {}).get("observation_ledger")
+        handle_store = ledger.setdefault("handles", {}) if isinstance(ledger, dict) else None
         handles = []
         payloads = list(detail.pop("continuation_payloads", []) or [])
         if isinstance(handle_store, dict):
@@ -532,7 +592,7 @@ def _tool_symbol_relations(arguments, ctx):
                     continue
                 summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
                 handle = register_snapshot_handle(
-                    handle_store, kind=f"symbol_relations.{payload.get('frontier_kind') or 'continuation'}",
+                    ledger, kind=f"symbol_relations.{payload.get('frontier_kind') or 'continuation'}",
                     payload=payload, workspace_epoch=int((ctx or {}).get("workspace_epoch") or 0),
                     source_tool="symbol_relations",
                     description=f"Continuation from symbol_relations for {arguments.get('symbol')}",
@@ -555,73 +615,309 @@ def _tool_symbol_relations(arguments, ctx):
         return _falha("RELATION_SCAN_FAILED", str(error), executed=True)
 
 
-def _tool_expand_observation(arguments, ctx):
-    """Materialize one bounded page behind an opaque observation handle."""
-    store = (ctx or {}).get("observation_handles")
-    if not isinstance(store, dict):
-        return _falha("HANDLE_STORE_UNAVAILABLE", "observation handle store unavailable", executed=False, retryable=False)
-    handle_id = str(arguments.get("handle") or "")
-    if not handle_id.startswith("handle:"):
-        return _falha(
-            "INVALID_HANDLE_FORMAT",
-            "use the exact opaque handle:* id returned by an observation frontier",
-            executed=False, retryable=True,
-        )
+
+def _continue_search_code_page(payload, ctx):
+    """Materialize search-range locators owned by search_code into file Material candidates."""
+    if not isinstance(payload, dict) or payload.get("kind") != "search_range_locator":
+        return {}
+    root = _caminho_projeto(ctx)
+    if not root:
+        return {}
+    query = str(payload.get("query") or "")
+    cfg = ((ctx or {}).get("config") or {}).get("agent", {})
+    max_lines = max(7, int(cfg.get("max_search_range_lines", 16) or 16))
+    material_candidates = []
+    projected = []
+    failures = []
+    for item in payload.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            reading = ler_faixa_projeto(
+                root, str(item.get("file") or ""), int(item.get("line_start") or 1),
+                int(item.get("line_end") or int(item.get("line_start") or 1)), max_linhas=max_lines,
+            )
+        except (ErroLeituraProjeto, TypeError, ValueError) as error:
+            failures.append({"file": item.get("file"), "error_code": getattr(error, "error_code", "READ_FAILED")})
+            continue
+        reading = dict(reading)
+        reading["match_lines"] = [
+            line for line in (item.get("match_lines") or [])
+            if reading.get("line_start", 1) <= line <= reading.get("line_end", 0)
+        ]
+        material = _file_material(reading, source_type="search_code")
+        if material:
+            material["query"] = query
+            material["source_capability"] = "search_code"
+            material_candidates.append(material)
+        projected.append(reading)
+    coverage = _coverage_record(
+        scope={"kind": "search_range_materialization", "query": query},
+        examined={"ranges_attempted": len(payload.get("items") or []), "ranges_materialized": len(projected)},
+        complete=not bool(failures),
+        boundaries=[{"kind": "read_failure", "count": len(failures)}] if failures else [],
+        facts={"source_materialization_complete": not bool(failures)},
+    )
+    return {
+        "observations": material_candidates, "coverage": coverage,
+        "detail": {"source_capability": "search_code", "query": query, "results": projected, "read_failures": failures},
+    }
+
+
+def _continue_find_symbol_page(payload, ctx):
+    """Materialize bounded symbol-location facts from the retained snapshot."""
+    if not isinstance(payload, dict) or payload.get("kind") != "find_symbol_locator":
+        return {}
+    items = [copy.deepcopy(item) for item in (payload.get("items") or []) if isinstance(item, dict)]
+    materials = []
+    for item in items:
+        content = json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        materials.append({
+            "locator": {
+                "kind": "symbol_location", "symbol": payload.get("symbol"),
+                "path": item.get("file"), "line_start": item.get("line_start"), "line_end": item.get("line_end"),
+            },
+            "content_hash": hash_texto(content), "content": content,
+            "source_type": "find_symbol", "source_capability": "find_symbol",
+        })
+    coverage = _coverage_record(
+        scope={"kind": "symbol_location_materialization", "symbol": payload.get("symbol")},
+        examined={"locations": len(items), "materialized": len(materials)},
+        complete=True,
+    )
+    return {
+        "observations": materials,
+        "coverage": coverage,
+        "detail": {"source_capability": "find_symbol", "symbol": payload.get("symbol"), "matches": items},
+    }
+
+
+def _continue_structured_page(payload, ctx):
+    """Materialize structured continuation items without teaching Observation their semantics."""
+    if isinstance(payload, dict) and isinstance(payload.get("items"), list):
+        items = [copy.deepcopy(item) for item in payload.get("items") or [] if isinstance(item, dict)]
+        kind = str(payload.get("frontier_kind") or payload.get("kind") or "structured_continuation")
+        materials = []
+        for index, item in enumerate(items):
+            content = json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+            materials.append({
+                "locator": {"kind": "capability", "name": "symbol_relations", "continuation_kind": kind, "index": index},
+                "content_hash": hash_texto(content), "content": content,
+                "source_type": "symbol_relations", "source_capability": "symbol_relations",
+            })
+        return {
+            "observations": materials,
+            "coverage": _coverage_record(
+                scope={"kind": "structured_materialization", "source_capability": "symbol_relations", "continuation_kind": kind},
+                examined={"items": len(items), "materialized": len(materials)}, complete=True,
+            ),
+            "detail": {"source_capability": "symbol_relations", "kind": kind, "items": items},
+        }
+    return {}
+
+
+def _continue_source_projection(source_tool, payload, ctx):
+    entry = TOOLS.get(str(source_tool or "")) or {}
+    continuation = entry.get("continue")
+    return continuation(payload, ctx or {}) if callable(continuation) else {}
+
+def _tool_continue_observation(arguments, ctx):
+    """Continue one Main-visible Frontier while keeping snapshots/handles Runtime-private."""
+    ledger = (ctx or {}).get("observation_ledger")
+    if not isinstance(ledger, dict):
+        return _falha("OBSERVATION_STATE_UNAVAILABLE", "observation state unavailable", executed=False, retryable=False)
+    frontier_id = str(arguments.get("frontier") or "")
+    handle_id, frontier_error = resolve_frontier(
+        ledger, frontier_id, workspace_epoch=int((ctx or {}).get("workspace_epoch") or 0),
+    )
+    if frontier_error:
+        return _falha(frontier_error, "use an open fr-* Frontier returned by Observation", executed=False, retryable=True)
+    if not isinstance(ledger.get("handles"), dict):
+        return _falha("HANDLE_STORE_UNAVAILABLE", "internal continuation store unavailable", executed=False, retryable=False)
     materialized, error = materialize_snapshot_handle(
-        store, handle_id, workspace_epoch=int((ctx or {}).get("workspace_epoch") or 0),
+        ledger, str(handle_id or ""), workspace_epoch=int((ctx or {}).get("workspace_epoch") or 0),
     )
     if error:
-        # HANDLE_NOT_FOUND/HANDLE_STALE invalidate one continuation reference,
-        # not the expand_observation capability. A current exact handle may still
-        # be used later in the same job.
-        return _falha(
-            error,
-            "this observation handle cannot be materialized; use an exact current handle:* id returned by a frontier",
-            executed=True, retryable=True,
-        )
+        return _falha(error, "the Runtime continuation behind this Frontier is unavailable", executed=True, retryable=True)
+
     payload = materialized.get("payload") if isinstance(materialized, dict) else None
-    observations = []
-    if isinstance(payload, dict) and isinstance(payload.get("items"), list):
-        observations = [item for item in payload.get("items") or [] if isinstance(item, dict)]
-    elif isinstance(payload, list):
-        observations = [item for item in payload if isinstance(item, dict)]
-    elif isinstance(payload, dict):
-        observations = [payload]
+    source_tool = str((materialized or {}).get("source_tool") or "")
+    projection = _continue_source_projection(source_tool, payload, ctx)
+    observations = [copy.deepcopy(item) for item in (projection.get("observations") or []) if isinstance(item, dict)] if isinstance(projection, dict) else []
+    if not observations:
+        if isinstance(payload, dict) and isinstance(payload.get("items"), list):
+            observations = [copy.deepcopy(item) for item in payload.get("items") or [] if isinstance(item, dict)]
+        elif isinstance(payload, list):
+            observations = [copy.deepcopy(item) for item in payload if isinstance(item, dict)]
+        elif isinstance(payload, dict):
+            observations = [copy.deepcopy(payload)]
+
+    consume_frontier(ledger, frontier_id)
     detail = dict(materialized or {})
+    detail.pop("handle", None)
+    detail.pop("payload", None)
+    detail["continued_frontier"] = frontier_id
+    detail["source_capability"] = source_tool
+    if isinstance(projection, dict) and isinstance(projection.get("detail"), dict):
+        detail["materialized"] = copy.deepcopy(projection.get("detail"))
+    else:
+        detail["materialized"] = copy.deepcopy(payload)
     detail["observations"] = observations
+
+    snapshot_coverage = normalize_coverage((materialized or {}).get("coverage"), allow_empty=False)
+    projection_coverage = normalize_coverage(
+        projection.get("coverage") if isinstance(projection, dict) else {}, allow_empty=True,
+    )
+    snapshot_facts = snapshot_coverage.get("facts") if isinstance(snapshot_coverage.get("facts"), dict) else {}
+    snapshot_exhausted = bool(snapshot_facts.get("snapshot_exhausted", snapshot_coverage.get("complete")))
+    source_complete = bool(projection_coverage.get("complete")) if projection_coverage else True
+    combined_boundaries = list(snapshot_coverage.get("boundaries") or [])
+    if projection_coverage:
+        combined_boundaries.extend(copy.deepcopy(projection_coverage.get("boundaries") or []))
+    combined_coverage = _coverage_record(
+        scope={"kind": "frontier_continuation", "frontier": frontier_id, "source_capability": source_tool},
+        examined={
+            **copy.deepcopy(snapshot_coverage.get("examined") or {}),
+            **({f"source_{key}": copy.deepcopy(value) for key, value in (projection_coverage.get("examined") or {}).items()} if projection_coverage else {}),
+        },
+        complete=bool(snapshot_exhausted and source_complete),
+        boundaries=combined_boundaries,
+        facts={
+            "snapshot_exhausted": snapshot_exhausted,
+            "source_materialization_complete": source_complete,
+            "snapshot": copy.deepcopy(snapshot_facts),
+            **({"source_coverage": copy.deepcopy(projection_coverage)} if projection_coverage else {}),
+        },
+    )
+    detail["coverage"] = combined_coverage
     return _sucesso(
-        detail, observations=observations, coverage=detail.get("coverage"),
+        detail, observations=observations, coverage=combined_coverage,
         frontiers=detail.get("frontiers"), handles=detail.get("handles"),
     )
 
-
 def _tool_find_symbol(arguments, ctx):
-    """Locate a symbol in a known file or across the live project."""
-    root=_caminho_projeto(ctx)
-    if not root: return _falha("WORKSPACE_NOT_AVAILABLE","nenhum workspace ativo")
-    symbol=arguments["symbol"]
-    rel=arguments.get("path")
+    """Locate a symbol while separating exhaustive scan Coverage from bounded materialization."""
+    root = _caminho_projeto(ctx)
+    if not root:
+        return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
+    symbol = arguments["symbol"]
+    rel = arguments.get("path")
     protected_index = build_protected_resource_index(root)
     if rel and is_protected_workspace_resource(root, str(rel), index=protected_index):
         return _protected_resource_failure(root, str(rel))
-    result=localizar_simbolo(root,rel,symbol) if rel else localizar_simbolo_no_projeto(root,symbol)
-    if result is None or (isinstance(result, list) and not result):
-        return _falha("SYMBOL_NOT_FOUND",f"símbolo '{symbol}' não encontrado",executed=True)
-    if isinstance(result,list): result=result[0] if len(result)==1 else {"matches":result}
-    if result.get("matches") is not None:
-        safe_matches = [
-            item for item in (result.get("matches") or [])
-            if isinstance(item, dict) and not is_protected_workspace_resource(root, str(item.get("file") or ""), index=protected_index)
-        ]
-        if not safe_matches:
-            return _falha("SYMBOL_NOT_FOUND",f"símbolo '{symbol}' não encontrado",executed=True)
-        clone = dict(result)
-        clone["matches"] = safe_matches
-        return _sucesso(clone)
-    result=dict(result); rel=result.get("file") or rel; result["file"]=rel; result["simbolo"]=symbol
+
+    if not rel:
+        scan = localizar_simbolo_no_projeto(root, symbol, limite=None, return_metadata=True)
+        all_matches = []
+        for item in scan.get("all_matches") or []:
+            if not isinstance(item, dict):
+                continue
+            # The search exhausts the workspace, but the model-facing result and
+            # continuation snapshot retain only objective locators, not duplicate
+            # source bodies. Source bytes can be read explicitly when needed.
+            all_matches.append({
+                key: copy.deepcopy(value) for key, value in item.items()
+                if key not in {"codigo_original", "content", "numbered_content"}
+            })
+        page_size = 32
+        selected = all_matches[:page_size]
+        remaining = all_matches[page_size:]
+        boundaries = []
+        protected = int(scan.get("protected_resources_excluded") or 0)
+        if protected:
+            boundaries.append({"kind": "protected_resource", "count": protected})
+        coverage = _coverage_record(
+            scope={"kind": "symbol_lookup", "symbol": symbol, "path": None},
+            examined={
+                "files": int(scan.get("files_examined") or 0),
+                "matches": int(scan.get("matches_observed") or len(all_matches)),
+                "materialized_matches": len(selected),
+            },
+            complete=bool(scan.get("complete_scan")) and protected == 0,
+            boundaries=boundaries,
+            facts={
+                "scan_complete": bool(scan.get("complete_scan")),
+                "materialization_complete": not bool(remaining),
+                "result_page_size": page_size,
+            },
+        )
+        if len(all_matches) == 1:
+            only = dict(all_matches[0])
+            try:
+                reading = ler_faixa_projeto(
+                    root, str(only.get("file") or ""), int(only.get("line_start") or 1), int(only.get("line_end") or int(only.get("line_start") or 1)),
+                    max_linhas=((ctx or {}).get("config") or {}).get("agent", {}).get("max_file_read_lines", 400),
+                )
+                only.update(reading)
+            except (ErroLeituraProjeto, TypeError, ValueError):
+                pass
+            only.update({
+                "simbolo": symbol, "matches_observed": 1, "matches_materialized": 1,
+                "files_examined": int(scan.get("files_examined") or 0),
+                "protected_resources_excluded": protected,
+            })
+            return _sucesso(only, coverage=coverage)
+
+        if not all_matches:
+            detail = {
+                "symbol": symbol, "matches": [],
+                "matches_observed": 0, "files_examined": int(scan.get("files_examined") or 0),
+                "protected_resources_excluded": protected,
+            }
+            return _falha(
+                "SYMBOL_NOT_FOUND", f"símbolo '{symbol}' não encontrado", executed=True,
+                coverage=coverage, detail=detail,
+            )
+
+        handles = []
+        frontiers = []
+        ledger = (ctx or {}).get("observation_ledger")
+        if remaining and isinstance(ledger, dict):
+            handle = register_snapshot_handle(
+                ledger, kind="find_symbol.matches",
+                payload={"kind": "find_symbol_locator", "symbol": symbol, "items": remaining},
+                workspace_epoch=int((ctx or {}).get("workspace_epoch") or 0),
+                source_tool="find_symbol",
+                description=f"Remaining objective locations for symbol {symbol!r}",
+                page_size=page_size,
+            )
+            handles.append(handle)
+            frontiers.append({
+                "kind": "material_continuation", "at": "symbol_lookup",
+                "count": len(remaining),
+                "reason": "additional objectively located symbol definitions remain behind a continuation handle",
+                "handle": handle["id"],
+            })
+        elif remaining:
+            frontiers.append({
+                "kind": "material_boundary", "at": "symbol_lookup",
+                "count": len(remaining),
+                "reason": "additional objectively located symbol definitions were not materialized",
+            })
+        detail = {
+            "symbol": symbol, "matches": selected,
+            "matches_observed": int(scan.get("matches_observed") or len(all_matches)),
+            "matches_materialized": len(selected),
+            "files_examined": int(scan.get("files_examined") or 0),
+            "protected_resources_excluded": protected,
+            "frontiers": frontiers, "handles": handles,
+        }
+        return _sucesso(detail, coverage=coverage, frontiers=frontiers, handles=handles)
+
+    result = localizar_simbolo(root, rel, symbol)
+    if result is None:
+        coverage = _coverage_record(
+            scope={"kind": "file_symbol_lookup", "path": rel, "symbol": symbol},
+            examined={"files": 1}, complete=True,
+        )
+        return _falha("SYMBOL_NOT_FOUND", f"símbolo '{symbol}' não encontrado", executed=True, coverage=coverage)
+    result = dict(result); result["file"] = result.get("file") or rel; result["simbolo"] = symbol
     try:
-        reading=ler_faixa_projeto(root,rel,int(result["line_start"]),int(result["line_end"]),max_linhas=((ctx or {}).get("config") or {}).get("agent",{}).get("max_file_read_lines",400))
-        result.update(reading); result["simbolo"]=symbol
+        reading = ler_faixa_projeto(
+            root, rel, int(result["line_start"]), int(result["line_end"]),
+            max_linhas=((ctx or {}).get("config") or {}).get("agent", {}).get("max_file_read_lines", 400),
+        )
+        result.update(reading); result["simbolo"] = symbol
     except ErroLeituraProjeto as erro:
         if erro.error_code == "PROTECTED_RESOURCE_READ_BLOCKED":
             return _protected_resource_failure(root, str(rel or ""))
@@ -747,31 +1043,6 @@ def _tool_inspect_project(arguments, ctx):
         return _falha(erro.error_code, erro.detail, executed=True)
 
 
-def _tool_agent_info(arguments, ctx):
-    """Expose full registered capability separately from current-call availability."""
-    config = (ctx or {}).get("config") or {}
-    available_names = {str(name) for name in ((ctx or {}).get("available_tools") or [])}
-    registered = []
-    for name, item in sorted(TOOLS.items()):
-        registered.append({
-            "name": name,
-            "category": item.get("category", "READ_ONLY"),
-            "effects": list(item.get("effects") or ["NONE"]),
-            "description": item.get("description", ""),
-        })
-    available = [item for item in registered if item.get("name") in available_names]
-    return _sucesso({
-        "app_version": config.get("app_version"),
-        "revision": config.get("revision"),
-        "registered_tools": registered,
-        "available_tools": available,
-        "write_enabled": bool(((config.get("codar") or {}).get("ativado", True))),
-        "write_confirmation_required": True,
-        "note": (
-            "registered_tools is the complete executable registry; available_tools "
-            "is only the subset callable in the current Main-LLM call. Workspace writes are supervised."
-        ),
-    })
 
 
 def _pytest_summary(output):
@@ -819,53 +1090,6 @@ def _tool_run_tests(arguments, ctx):
     )
 
 
-def _tool_execution_trace(arguments, ctx):
-    """Inspect sanitized factual execution history for the current or one persisted job."""
-    section = str(arguments.get("section") or "all").strip().lower()
-    turn = arguments.get("turn")
-    limit = int(arguments.get("limit") or 100)
-    requested_job_id = arguments.get("job_id")
-
-    current = (ctx or {}).get("execution_trace")
-    current_job_id = None
-    if isinstance(current, dict):
-        current_job_id = ((current.get("summary") or {}).get("job_id")
-                          if isinstance(current.get("summary"), dict) else None)
-
-    if requested_job_id is None or (current_job_id is not None and int(requested_job_id) == int(current_job_id)):
-        if not isinstance(current, dict):
-            return _falha("EXECUTION_TRACE_UNAVAILABLE", "o trace da sessão atual não está disponível neste contexto")
-        trace = current
-    else:
-        try:
-            from eyle.runtime import queue as runtime_queue
-        except Exception as error:
-            return _falha("EXECUTION_TRACE_UNAVAILABLE", f"não foi possível acessar o histórico persistido: {error}")
-        registro = runtime_queue.obter(int(requested_job_id))
-        if not isinstance(registro, dict):
-            return _falha("JOB_NOT_FOUND", f"job #{int(requested_job_id)} não foi encontrado")
-        resultado = registro.get("resultado") if isinstance(registro.get("resultado"), dict) else {}
-        details = resultado.get("details") if isinstance(resultado.get("details"), dict) else {}
-        if not details:
-            return _falha(
-                "EXECUTION_TRACE_NOT_READY",
-                f"job #{int(requested_job_id)} ainda não possui detalhes de execução persistidos",
-            )
-        progresso = registro.get("progresso") if isinstance(registro.get("progresso"), dict) else {}
-        trace = build_execution_trace(
-            details,
-            job_id=int(requested_job_id),
-            status=registro.get("status"),
-            created_at=registro.get("criado_em"),
-            started_at=registro.get("iniciado_em"),
-            completed_at=registro.get("concluido_em"),
-            duration_seconds=progresso.get("elapsed_seconds"),
-            limit=max(100, limit),
-        )
-    try:
-        return _sucesso(filter_execution_trace(trace, section=section, turn=turn, limit=limit))
-    except (TypeError, ValueError) as error:
-        return _falha("INVALID_ARGUMENT", str(error))
 
 
 def _tool_git_status(arguments, ctx):
@@ -940,22 +1164,23 @@ def _tool_memory_search(arguments, ctx):
 
 
 def _tool_memory_store(arguments, ctx):
-    """Store one evidence-backed fact outside the source workspace."""
+    """Store one observation-grounded fact outside the source workspace."""
     root = _caminho_projeto(ctx)
     if not root:
         return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
-    evidence = (ctx or {}).get("evidence") or {}
-    evidence_ids = [str(item) for item in arguments.get("evidence_ids") or []]
-    if not evidence_ids:
-        return _falha("MEMORY_REQUIRES_EVIDENCE", "informe evidence_ids da tarefa atual")
-    missing = [item for item in evidence_ids if item not in evidence]
+    grounding = (ctx or {}).get("grounding") or {}
+    grounding_ids = [str(item) for item in arguments.get("grounding_ids") or []]
+    if not grounding_ids:
+        return _falha("MEMORY_REQUIRES_GROUNDING", "informe grounding_ids da tarefa atual")
+    missing = [item for item in grounding_ids if item not in grounding]
     if missing:
-        return _falha("MEMORY_UNKNOWN_EVIDENCE", ", ".join(missing))
+        return _falha("MEMORY_UNKNOWN_GROUNDING", ", ".join(missing))
     files = []
-    for evidence_id in evidence_ids:
-        item = evidence.get(evidence_id) or {}
-        if item.get("file") and item.get("file_hash"):
-            files.append({"path": item["file"], "file_hash": item["file_hash"]})
+    for grounding_id in grounding_ids:
+        item = grounding.get(grounding_id) or {}
+        locator = item.get("locator") if isinstance(item.get("locator"), dict) else {}
+        if locator.get("kind") == "file" and locator.get("path") and item.get("source_version"):
+            files.append({"path": locator["path"], "file_hash": item["source_version"]})
     try:
         entry = store_memory(
             MEMORY_DIR, root, str(arguments.get("text") or ""),
@@ -973,6 +1198,848 @@ def _tool_memory_store(arguments, ctx):
 # ---------------------------------------------------------------------------
 # Registry consumed by eyle.core.agent. Tool names are the public protocol.
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Capability-owned observation mechanics.
+#
+# Observation/Agent never interpret individual tool names. Tool-specific
+# identity, materialization and presentation live next to the capability
+# registry that defines those tools.
+# ---------------------------------------------------------------------------
+
+def _norm_capability_path(value):
+    return str(value or "").replace("\\", "/").strip().lstrip("./").lower()
+
+
+def _sig_list_tree(arguments):
+    return "tree:" + json.dumps({
+        "filter": str(arguments.get("filter") or "").strip().lower(),
+        "depth": arguments.get("depth"), "limit": arguments.get("limit"),
+    }, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _sig_search_code(arguments):
+    return "search:" + json.dumps({
+        "query": " ".join(str(arguments.get("query") or "").lower().split()),
+        "include_paths": sorted(normalize_scope_selectors(arguments.get("include_paths"))),
+        "exclude_paths": sorted(normalize_scope_selectors(arguments.get("exclude_paths"))),
+    }, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _sig_find_symbol(arguments):
+    return f"symbol:{_norm_capability_path(arguments.get('path'))}:{str(arguments.get('symbol') or '').strip().lower()}"
+
+
+def _sig_symbol_relations(arguments):
+    query = str(arguments.get("query") or "relations").strip().lower()
+    identity = {
+        "symbol": str(arguments.get("symbol") or "").strip().lower(),
+        "path": _norm_capability_path(arguments.get("path")),
+        "roots": [str(x) for x in (arguments.get("roots") or [])],
+        "include_text_references": bool(arguments.get("include_text_references", False)),
+        "query": query,
+    }
+    if query != "reachability":
+        identity.update({
+            "direction": str(arguments.get("direction") or "both").strip().lower(),
+            "max_depth": int(arguments.get("max_depth") or 6),
+            "max_edges": int(arguments.get("max_edges") or 60),
+        })
+    return "relations:" + json.dumps(identity, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _sig_read_file(arguments):
+    path = _norm_capability_path(arguments.get("path"))
+    if arguments.get("line_start") is not None and arguments.get("line_end") is not None:
+        return f"file:{path}:{arguments.get('line_start')}:{arguments.get('line_end')}"
+    return f"file:{path}:default"
+
+
+def _sig_count_tokens(arguments):
+    return "count_tokens:" + json.dumps({
+        "path": _norm_capability_path(arguments.get("path") or "."),
+        "tokenizer": str(arguments.get("tokenizer") or "").strip().lower(),
+    }, sort_keys=True, separators=(",", ":"))
+
+
+def _sig_run_tests(arguments):
+    return "run_tests:" + json.dumps({"scope": _norm_capability_path(arguments.get("scope") or ".")}, sort_keys=True, separators=(",", ":"))
+
+
+def _sig_git_diff(arguments):
+    return "git_diff:" + json.dumps(arguments, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def capability_observation_signature(name, arguments):
+    entry = TOOLS.get(str(name or "")) or {}
+    fn = entry.get("signature")
+    return fn(arguments or {}) if callable(fn) else None
+
+
+def _file_material(detail, *, source_type):
+    if not isinstance(detail, dict):
+        return None
+    path = str(detail.get("file") or "").replace("\\", "/").strip()
+    source_version = str(detail.get("file_hash") or "").strip()
+    content = detail.get("content")
+    numbered_content = detail.get("numbered_content")
+    content_hash = str(detail.get("content_hash") or "").strip()
+    if not path or not source_version or content is None:
+        return None
+    if not content_hash:
+        content_hash = hash_texto(str(content))
+    locator = {"kind": "file", "path": path}
+    for key in ("line_start", "line_end", "total_lines"):
+        if detail.get(key) is not None:
+            locator[key] = detail.get(key)
+    metadata = {
+        key: copy.deepcopy(detail.get(key)) for key in (
+            "simbolo", "match_lines", "truncated", "query", "scope_complete", "coverage_complete"
+        ) if detail.get(key) is not None
+    }
+    material = {
+        "locator": locator, "source_version": source_version,
+        "content_hash": content_hash, "content": str(content),
+        "source_type": source_type,
+    }
+    if isinstance(numbered_content, str) and numbered_content:
+        material["numbered_content"] = numbered_content
+    if metadata:
+        material["metadata"] = metadata
+    return material
+
+
+def _json_material(source_type, locator_name, detail):
+    if not isinstance(detail, dict):
+        return []
+    content = json.dumps(detail, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return [{
+        "locator": {"kind": "capability", "name": str(locator_name)},
+        "content_hash": hash_texto(content), "content": content,
+        "source_type": str(source_type),
+    }]
+
+
+def _observe_search(arguments, result):
+    detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+    materials = []
+    for item in detail.get("results") or []:
+        material = _file_material(item, source_type="search_code")
+        if material:
+            material["query"] = detail.get("query")
+            materials.append(material)
+    if not materials and detail.get("scope_complete") is True:
+        summary = {
+            key: copy.deepcopy(detail.get(key)) for key in (
+                "query", "matches_observed", "matches_materialized", "ranges_observed",
+                "ranges_materialized", "files_with_matches", "scope_complete", "coverage_complete",
+                "coverage_scope", "search_scope", "protected_resources_excluded", "read_failures",
+                "backend",
+            ) if detail.get(key) is not None
+        }
+        materials.extend(_json_material("search_observation", "search_code", summary))
+    return materials
+
+
+def _observe_file(source_type):
+    def observe(arguments, result):
+        detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+        material = _file_material(detail, source_type=source_type)
+        return [material] if material else []
+    return observe
+
+
+def _observe_find_symbol(arguments, result):
+    detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+    material = _file_material(detail, source_type="find_symbol")
+    if material:
+        return [material]
+    if result.get("ok") is True and detail:
+        # Ambiguous/multi-match symbol lookup is still objective observed material;
+        # keep it capability-owned instead of teaching Observation about symbols.
+        return _json_material("symbol_observation", "find_symbol", detail)
+    if result.get("error_code") == "SYMBOL_NOT_FOUND" and result.get("executed") is True:
+        payload = {
+            "symbol": str(arguments.get("symbol") or ""),
+            "path": arguments.get("path"),
+            "error_code": "SYMBOL_NOT_FOUND", "executed": True,
+        }
+        return _json_material("symbol_observation", "find_symbol", payload)
+    return []
+
+
+def _observe_tree(arguments, result):
+    detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+    if not detail:
+        return []
+    inventory = {
+        "entries": detail.get("entries") or [],
+        "truncated": bool(detail.get("truncated")),
+        "complete_scan": bool(detail.get("varredura_completa")),
+        "filter": detail.get("filter"),
+    }
+    return _json_material("workspace_tree", "list_tree", inventory)
+
+
+def _observe_json(name):
+    def observe(arguments, result):
+        detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+        return _json_material(name, name, detail) if detail else []
+    return observe
+
+
+
+
+def _observe_none(arguments, result):
+    """Explicit capability-owned declaration that no Material is produced."""
+    return []
+
+
+def _coverage_memory_search(arguments, result):
+    detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+    if result.get("executed") is not True:
+        return {}
+    limit = max(1, min(int(arguments.get("limit") or 8), 20))
+    returned = int(detail.get("count") or 0)
+    return _coverage_record(
+        scope={"kind": "project_memory_search", "query": str(arguments.get("query") or "")},
+        examined={"entries_returned": returned, "limit": limit},
+        # search_memory stops when limit is reached; equality therefore cannot
+        # prove exhaustion of the physical memory set. Fail conservative.
+        complete=bool(result.get("ok") is True and returned < limit),
+        boundaries=[{"kind": "result_limit", "limit": limit}] if returned >= limit else [],
+    )
+
+
+def _coverage_memory_store(arguments, result):
+    detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+    entry = detail.get("entry") if isinstance(detail.get("entry"), dict) else {}
+    if result.get("executed") is not True:
+        return {}
+    return _coverage_record(
+        scope={"kind": "project_memory_write"},
+        examined={"entries_written": 1 if entry else 0},
+        complete=bool(result.get("ok") is True),
+    )
+
+def _observe_passthrough(arguments, result):
+    values = result.get("observations") if isinstance(result, dict) else []
+    return [copy.deepcopy(item) for item in (values or []) if isinstance(item, dict)]
+
+
+def _observe_continue(arguments, result):
+    # continue_observation may already contain source-capability Material
+    # candidates. Preserve those instead of wrapping the whole page as one
+    # synthetic blob.
+    values = _observe_passthrough(arguments, result)
+    if values:
+        return values
+    detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+    return _json_material("continue_observation", "continue_observation", detail) if detail else []
+
+
+def _capability_observations(name, arguments, result):
+    entry = TOOLS.get(str(name or "")) or {}
+    observer = entry.get("observe")
+    values = observer(arguments or {}, result or {}) if callable(observer) else []
+    out = []
+    for raw in values or []:
+        if not isinstance(raw, dict):
+            continue
+        item = copy.deepcopy(raw)
+        item.setdefault("source_capability", str(name or ""))
+        item.setdefault("source_type", str(name or "capability"))
+        out.append(item)
+    return out
+
+
+def _coverage_record(*, scope, examined=None, complete=False, boundaries=None, facts=None):
+    """Canonical capability-owned Coverage shape.
+
+    Coverage is physical, never a relevance score. ``complete`` means the
+    declared physical scope was exhausted under the capability's own boundary.
+    """
+    value = {
+        "scope": copy.deepcopy(scope) if isinstance(scope, dict) else {"kind": str(scope or "capability")},
+        "examined": copy.deepcopy(examined) if isinstance(examined, dict) else {},
+        "complete": bool(complete),
+        "boundaries": [copy.deepcopy(item) for item in (boundaries or []) if isinstance(item, dict)],
+    }
+    if isinstance(facts, dict) and facts:
+        value["facts"] = copy.deepcopy(facts)
+    return value
+
+
+def _capability_coverage(name, arguments, result):
+    entry = TOOLS.get(str(name or "")) or {}
+    coverage = entry.get("coverage")
+    if callable(coverage):
+        value = coverage(arguments or {}, result or {})
+    else:
+        value = result.get("coverage") if isinstance(result, dict) else None
+    return normalize_coverage(value, allow_empty=True)
+
+
+def _capability_frontiers(name, arguments, result):
+    entry = TOOLS.get(str(name or "")) or {}
+    projector = entry.get("frontier")
+    if callable(projector):
+        value = projector(arguments or {}, result or {})
+        return [copy.deepcopy(item) for item in (value or []) if isinstance(item, dict)]
+    return [copy.deepcopy(item) for item in (result.get("frontiers") or []) if isinstance(item, dict)] if isinstance(result, dict) else []
+
+
+def _frontier_passthrough(arguments, result):
+    return [copy.deepcopy(item) for item in (result.get("frontiers") or []) if isinstance(item, dict)] if isinstance(result, dict) else []
+
+
+def _coverage_atomic(kind, scope_builder=None, examined_builder=None):
+    def coverage(arguments, result):
+        if result.get("executed") is not True:
+            return {}
+        detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+        scope = scope_builder(arguments, detail) if callable(scope_builder) else {"kind": kind}
+        examined = examined_builder(arguments, detail) if callable(examined_builder) else {}
+        return _coverage_record(scope=scope, examined=examined, complete=result.get("ok") is True)
+    return coverage
+
+
+def _coverage_file(arguments, result):
+    detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+    path = str(detail.get("file") or arguments.get("path") or "").replace("\\", "/")
+    if not path:
+        return _coverage_record(scope={"kind": "file"}, complete=False)
+    scope = {"kind": "file", "path": path}
+    if arguments.get("line_start") is not None and arguments.get("line_end") is not None:
+        scope["requested_lines"] = [int(arguments["line_start"]), int(arguments["line_end"])]
+    examined = {
+        key: detail.get(key) for key in ("line_start", "line_end", "total_lines")
+        if detail.get(key) is not None
+    }
+    complete = bool(result.get("ok") is True and not detail.get("truncated"))
+    return _coverage_record(
+        scope=scope, examined=examined, complete=complete,
+        facts={"truncated": bool(detail.get("truncated"))},
+    )
+
+
+def _coverage_find_symbol(arguments, result):
+    if arguments.get("path"):
+        # Explicit single-file lookup retains the file-window Coverage contract.
+        value = result.get("coverage") if isinstance(result, dict) else None
+        if isinstance(value, dict) and value:
+            return value
+        return _coverage_file(arguments, result)
+    value = result.get("coverage") if isinstance(result, dict) else None
+    return value if isinstance(value, dict) else {}
+
+
+def _coverage_search(arguments, result):
+    detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+    boundaries = []
+    if int(detail.get("protected_resources_excluded") or 0):
+        boundaries.append({"kind": "protected_resource", "count": int(detail.get("protected_resources_excluded") or 0)})
+    if detail.get("read_failures"):
+        boundaries.append({"kind": "read_failure", "count": len(detail.get("read_failures") or [])})
+    scope = {
+        "kind": "literal_search",
+        "query": str(arguments.get("query") or ""),
+        "resolved": copy.deepcopy(detail.get("search_scope") or {}),
+    }
+    examined = {
+        "files_with_matches": int(detail.get("files_with_matches") or 0),
+        "matches": int(detail.get("matches_observed") or 0),
+        "ranges": int(detail.get("ranges_observed") or 0),
+        "materialized_ranges": int(detail.get("ranges_materialized") or 0),
+    }
+    facts = {
+        "materialization_complete": not any(
+            isinstance(item, dict) and item.get("handle")
+            for item in (result.get("frontiers") or [])
+        ),
+        "coverage_scope": detail.get("coverage_scope"),
+    }
+    return _coverage_record(
+        scope=scope, examined=examined, complete=bool(detail.get("coverage_complete")),
+        boundaries=boundaries, facts={k: v for k, v in facts.items() if v is not None},
+    )
+
+
+def _coverage_tree(arguments, result):
+    detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+    scope = {
+        "kind": "workspace_tree",
+        "depth": arguments.get("depth"), "filter": arguments.get("filter"),
+    }
+    scope = {k: v for k, v in scope.items() if v is not None}
+    complete = bool(detail.get("varredura_completa")) and not bool(detail.get("truncated"))
+    return _coverage_record(
+        scope=scope,
+        examined={"entries": len(detail.get("entries") or [])},
+        complete=complete,
+        facts={"truncated": bool(detail.get("truncated"))},
+    )
+
+
+def _coverage_project_stats(arguments, result):
+    detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+    skipped = detail.get("skipped") if isinstance(detail.get("skipped"), dict) else {}
+    boundaries = [{"kind": key, "count": int(value or 0)} for key, value in skipped.items() if int(value or 0)]
+    return _coverage_record(
+        scope={"kind": "workspace_text"},
+        examined={"files": int(detail.get("measured_files") or 0), "directories": int(detail.get("directories") or 0)},
+        complete=bool(detail.get("scan_complete")), boundaries=boundaries,
+        facts={"coverage_scope": detail.get("coverage_scope")},
+    )
+
+
+def _coverage_count_tokens(arguments, result):
+    detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+    skipped = detail.get("skipped") if isinstance(detail.get("skipped"), dict) else {}
+    boundaries = [{"kind": key, "count": int(value or 0)} for key, value in skipped.items() if int(value or 0)]
+    considered = int(detail.get("files_considered") or 0)
+    measured = int(detail.get("files_measured") or 0)
+    return _coverage_record(
+        scope={"kind": "token_measurement", "path": detail.get("path") or arguments.get("path") or "."},
+        examined={"files_considered": considered, "files_measured": measured, "characters": int(detail.get("characters") or 0)},
+        complete=bool(result.get("ok") is True and not boundaries and measured == considered),
+        boundaries=boundaries,
+    )
+
+
+def _coverage_inspect_project(arguments, result):
+    detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+    return _coverage_record(
+        scope={"kind": "project_structure"},
+        examined={"files": int(detail.get("file_count") or 0), "directories": int(detail.get("directory_count") or 0)},
+        complete=bool(detail.get("scan_complete")),
+    )
+
+
+def _coverage_relations(arguments, result):
+    detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+    raw = detail.get("coverage") if isinstance(detail.get("coverage"), dict) else {}
+    complete = bool(raw.get("objective_complete", raw.get("complete", not bool(result.get("frontiers")))))
+    return _coverage_record(
+        scope={"kind": "symbol_relations", "symbol": arguments.get("symbol"), "query": arguments.get("query") or "relations"},
+        examined={k: copy.deepcopy(v) for k, v in raw.items() if k.endswith("_count") or k in {"files_scanned", "nodes", "edges"}},
+        complete=complete,
+        boundaries=[{k: copy.deepcopy(v) for k, v in item.items() if k != "handle"} for item in (result.get("frontiers") or []) if isinstance(item, dict)],
+        facts=raw,
+    )
+
+
+def _coverage_git_status(arguments, result):
+    detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+    return _coverage_record(
+        scope={"kind": "git_status"}, examined={"returned_entries": int(detail.get("returned_count") or 0)},
+        complete=bool(result.get("ok") is True and not detail.get("truncated")),
+        facts={"changed_count": detail.get("changed_count"), "truncated": bool(detail.get("truncated"))},
+    )
+
+
+def _coverage_git_diff(arguments, result):
+    detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+    return _coverage_record(
+        scope={"kind": "git_diff", "path": arguments.get("path"), "staged": bool(arguments.get("staged", False))},
+        examined={"files": int(detail.get("file_count") or 0), "characters": int(detail.get("diff_characters") or 0)},
+        complete=bool(result.get("ok") is True and not detail.get("truncated")),
+        facts={"truncated": bool(detail.get("truncated"))},
+    )
+
+
+def _coverage_continue(arguments, result):
+    value = result.get("coverage") if isinstance(result, dict) else None
+    if isinstance(value, dict) and {"scope", "examined", "complete"}.issubset(value):
+        return copy.deepcopy(value)
+    return _coverage_record(scope={"kind": "frontier_continuation", "frontier": arguments.get("frontier")}, complete=result.get("ok") is True)
+
+
+
+def _validate_file_material_freshness(material, project_root):
+    locator = material.get("locator") if isinstance(material.get("locator"), dict) else {}
+    if locator.get("kind") != "file" or not locator.get("path") or not material.get("source_version"):
+        return True, "ok"
+    try:
+        start = int(locator.get("line_start") or 1)
+        end = int(locator.get("line_end") or start)
+        reading = ler_faixa_projeto(
+            project_root, str(locator.get("path") or ""), start, end,
+            max_linhas=max(1, end - start + 1),
+        )
+    except (ErroLeituraProjeto, TypeError, ValueError):
+        return False, "stale"
+    return (str(reading.get("file_hash") or "") == str(material.get("source_version") or ""), "ok")
+
+
+def _rehydrate_file_material(material, project_root, max_lines):
+    locator = material.get("locator") if isinstance(material.get("locator"), dict) else {}
+    if locator.get("kind") != "file":
+        return False, "OBSERVATION_REEXECUTION_REQUIRED"
+    path = str(locator.get("path") or "").strip()
+    start, end = locator.get("line_start"), locator.get("line_end")
+    if not path or not isinstance(start, int) or not isinstance(end, int) or start < 1 or end < start:
+        return False, "OBSERVATION_REEXECUTION_REQUIRED"
+    try:
+        reading = ler_faixa_projeto(project_root, path, start, end, max_linhas=max(max_lines, end - start + 1))
+    except ErroLeituraProjeto as error:
+        return False, error.error_code
+    if (
+        (material.get("source_version") and str(material.get("source_version")) != str(reading.get("file_hash") or ""))
+        or (material.get("content_hash") and str(material.get("content_hash")) != str(reading.get("content_hash") or ""))
+    ):
+        material["stale"] = True
+        return False, "OBSERVATION_STALE"
+    material["content"] = reading.get("content")
+    material["numbered_content"] = reading.get("numbered_content")
+    material.pop("rehydration_error", None)
+    material.pop("stale", None)
+    return True, "ok"
+
+
+def capability_validate_material_freshness(materials, material_ids, project_root):
+    """Dispatch physical freshness to the capability that produced each Material."""
+    if not project_root or not os.path.isdir(os.fspath(project_root)):
+        return True, "ok"
+    store = materials if isinstance(materials, dict) else {}
+    for material_id in [str(value) for value in (material_ids or []) if str(value)]:
+        material = store.get(material_id)
+        if not isinstance(material, dict):
+            continue
+        owner = str(material.get("source_capability") or "")
+        checker = (TOOLS.get(owner) or {}).get("freshness")
+        if not callable(checker):
+            continue
+        ok, reason = checker(material, project_root)
+        if not ok:
+            return False, f"GROUNDING_STALE:{material_id}:{reason}"
+    return True, "ok"
+
+
+def capability_rehydrate_materials(materials, project_root, *, max_lines):
+    """Rehydrate persisted Materials through their producing capability only."""
+    if not project_root or not os.path.isdir(project_root):
+        return
+    store = materials if isinstance(materials, dict) else {}
+    for material in list(store.values()):
+        if not isinstance(material, dict) or material.get("content") or material.get("numbered_content"):
+            continue
+        owner = str(material.get("source_capability") or "")
+        rehydrator = (TOOLS.get(owner) or {}).get("rehydrate")
+        if not callable(rehydrator):
+            material["rehydration_error"] = "OBSERVATION_REEXECUTION_REQUIRED"
+            continue
+        ok, reason = rehydrator(material, project_root, int(max_lines or 1))
+        if not ok:
+            material["rehydration_error"] = str(reason or "OBSERVATION_REEXECUTION_REQUIRED")
+
+
+def _public_arguments_default(arguments):
+    arguments = arguments if isinstance(arguments, dict) else {}
+    return {
+        str(key): (str(value)[:240] if not isinstance(value, (int, float, bool)) else value)
+        for key, value in list(arguments.items())[:12]
+        if key not in {"content", "new_code", "file_hash_expected", "range_hash_expected"}
+    }
+
+
+def _public_arguments_keys(*keys):
+    return lambda arguments: {key: arguments.get(key) for key in keys if arguments.get(key) is not None}
+
+
+def _public_arguments_read_file(arguments):
+    out = {"path": arguments.get("path")}
+    if arguments.get("line_start") is not None:
+        out.update({"line_start": arguments.get("line_start"), "line_end": arguments.get("line_end")})
+    return {key: value for key, value in out.items() if value is not None}
+
+
+def _public_arguments_search(arguments):
+    out = {"query": str(arguments.get("query") or "")[:240]}
+    for key in ("include_paths", "exclude_paths"):
+        if isinstance(arguments.get(key), list):
+            out[key] = [str(item)[:240] for item in arguments.get(key)[:20]]
+    return out
+
+
+def _public_arguments_command(arguments):
+    out = {"command": str(arguments.get("command") or "")[:500]}
+    for key in ("cwd", "timeout_seconds"):
+        if arguments.get(key) is not None:
+            out[key] = arguments.get(key)
+    return out
+
+
+def _public_arguments_memory(arguments):
+    return {
+        key: str(arguments.get(key))[:160]
+        for key in ("query", "key", "chave", "namespace")
+        if arguments.get(key) is not None
+    }
+
+
+def capability_public_arguments(name, arguments):
+    """User-visible bounded arguments projected by the capability registry."""
+    entry = TOOLS.get(str(name or "")) or {}
+    projector = entry.get("public_arguments")
+    return projector(arguments or {}) if callable(projector) else _public_arguments_default(arguments or {})
+
+
+def _public_result_base(result):
+    result = result if isinstance(result, dict) else {}
+    public = {
+        "status": result.get("status"), "ok": bool(result.get("ok")),
+        "executed": bool(result.get("executed")), "changed": bool(result.get("changed")),
+    }
+    for key, limit in (("error_code", 120), ("failure_scope", 40), ("failure_resource", 240)):
+        if result.get(key):
+            public[key] = str(result.get(key))[:limit]
+    if result.get("retryable") is not None:
+        public["retryable"] = bool(result.get("retryable"))
+    if result.get("coverage"):
+        public["coverage"] = copy.deepcopy(result.get("coverage"))
+    if result.get("frontiers"):
+        public["frontiers"] = [
+            {key: value for key, value in item.items() if key != "handle"}
+            for item in list(result.get("frontiers") or [])[:12] if isinstance(item, dict)
+        ]
+    return public
+
+
+def _public_result_fields(*keys):
+    def projector(result):
+        detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+        return {key: detail.get(key) for key in keys if detail.get(key) is not None}
+    return projector
+
+
+def _public_result_file(result):
+    detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+    return {key: value for key, value in {
+        "file": detail.get("file"),
+        "lines": [detail.get("line_start"), detail.get("line_end")] if detail.get("line_start") is not None else None,
+        "total_lines": detail.get("total_lines"), "truncated": bool(detail.get("truncated")),
+    }.items() if value is not None}
+
+
+def _public_result_tree(result):
+    detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+    return {"entries": len(detail.get("entries") or []), "truncated": bool(detail.get("truncated")), "complete_scan": bool(detail.get("varredura_completa"))}
+
+
+def _public_result_search(result):
+    detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+    out = {key: int(detail.get(key) or 0) for key in ("matches_observed", "matches_materialized", "ranges_observed", "ranges_materialized", "files_with_matches")}
+    out.update({"materialized_files": list(detail.get("materialized_files") or [])[:20], "coverage_complete": bool(detail.get("coverage_complete")), "search_scope": dict(detail.get("search_scope") or {})})
+    return out
+
+
+def _public_result_find_symbol(result):
+    detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+    if isinstance(detail.get("matches"), list):
+        return {"matches": len(detail.get("matches") or []), "matches_observed": int(detail.get("matches_observed") or len(detail.get("matches") or [])), "files_examined": int(detail.get("files_examined") or 0)}
+    return _public_result_file(result)
+
+
+def _public_result_relations(result):
+    detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+    return {"symbol": detail.get("symbol"), "definitions": len(detail.get("definitions") or []), "incoming": len(detail.get("incoming") or []), "outgoing": len(detail.get("outgoing") or []), "text_references": len(detail.get("text_references") or []), "root_reachability": detail.get("root_reachability") or []}
+
+
+def _public_result_command(result):
+    detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+    out = {key: detail.get(key) for key in ("command", "cwd", "returncode", "backend", "network_enabled", "workspace_isolated", "snapshot_persists_for_job", "real_workspace_changed") if key in detail}
+    if detail.get("output"):
+        out["output_tail"] = str(detail.get("output"))[-1200:]
+    return out
+
+
+def _public_result_inspect(result):
+    detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+    out = {key: detail.get(key) for key in ("file_count", "directory_count", "languages", "scan_complete") if key in detail}
+    if isinstance(detail.get("entrypoint_signals"), list): out["entrypoint_signals"] = [dict(item) for item in detail.get("entrypoint_signals")[:20] if isinstance(item, dict)]
+    for key in ("test_signals", "ci_signals", "relation_signals"):
+        if isinstance(detail.get(key), dict): out[key] = copy.deepcopy(detail.get(key))
+    if isinstance(detail.get("framework_signals"), list): out["framework_signals"] = [dict(item) for item in detail.get("framework_signals")[:20] if isinstance(item, dict)]
+    return out
+
+
+def _public_result_git_status(result):
+    detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+    out = {key: detail.get(key) for key in ("branch", "clean", "changed_count", "returned_count", "truncated", "counts") if key in detail}
+    if isinstance(detail.get("entries"), list): out["files"] = [item.get("path") for item in detail.get("entries")[:40] if isinstance(item, dict)]
+    return out
+
+
+def _public_result_git_diff(result):
+    detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+    out = {key: detail.get(key) for key in ("staged", "path", "file_count", "added_lines", "removed_lines", "truncated", "diff_characters") if key in detail}
+    if isinstance(detail.get("files"), list): out["files"] = [item.get("path") for item in detail.get("files")[:40] if isinstance(item, dict)]
+    return out
+
+
+def capability_public_result(name, result):
+    """User-visible result summary projected by the capability registry."""
+    result = result if isinstance(result, dict) else {}
+    public = _public_result_base(result)
+    detail = result.get("detail")
+    if isinstance(detail, str):
+        public["detail"] = detail[:500]
+        return public
+    entry = TOOLS.get(str(name or "")) or {}
+    projector = entry.get("public_result")
+    if callable(projector):
+        extra = projector(result)
+        if isinstance(extra, dict):
+            public.update(extra)
+    return {key: value for key, value in public.items() if value is not None}
+
+
+def _model_projection_default(detail, grounding_ids, config):
+    if not isinstance(detail, dict):
+        return detail
+    clone = copy.deepcopy(detail)
+    ids = list(grounding_ids or [])
+    if ids:
+        clone["grounding_id"] = ids[0]
+    return clone
+
+
+def _model_projection_search(detail, grounding_ids, config):
+    clone = copy.deepcopy(detail) if isinstance(detail, dict) else {}
+    ids = list(grounding_ids or [])
+    copied = {key: value for key, value in clone.items() if key != "results"}
+    rows = []
+    for index, item in enumerate(clone.get("results") or []):
+        row = dict(item)
+        if index < len(ids): row["grounding_id"] = ids[index]
+        text = str(row.get("numbered_content") or row.get("content") or "")
+        if text:
+            row["numbered_content"] = text[:1200]; row.pop("content", None)
+        rows.append(row)
+    copied["results"] = rows
+    return copied
+
+
+def _model_projection_read_file(detail, grounding_ids, config):
+    clone = _model_projection_default(detail, grounding_ids, config)
+    if not isinstance(clone, dict): return clone
+    text = str(clone.get("numbered_content") or clone.get("content") or "")
+    if text:
+        clone["numbered_content"] = text[:6000]; clone.pop("content", None)
+    return clone
+
+
+def _model_projection_find_symbol(detail, grounding_ids, config):
+    clone = _model_projection_default(detail, grounding_ids, config)
+    if not isinstance(clone, dict): return clone
+    for key in ("content", "numbered_content", "codigo_original"): clone.pop(key, None)
+    if isinstance(clone.get("matches"), list): clone["matches"] = [dict(item) for item in clone.get("matches")[:20] if isinstance(item, dict)]
+    return clone
+
+
+def _model_projection_inspect(detail, grounding_ids, config):
+    clone = detail if isinstance(detail, dict) else {}
+    ids = list(grounding_ids or [])
+    view = {key: copy.deepcopy(clone.get(key)) for key in ("file_count", "directory_count", "languages", "scan_complete") if clone.get(key) is not None}
+    if ids: view["grounding_id"] = ids[0]
+    if isinstance(clone.get("entrypoint_signals"), list): view["entrypoint_signals"] = [dict(item) for item in clone.get("entrypoint_signals")[:12] if isinstance(item, dict)]
+    if isinstance(clone.get("framework_signals"), list): view["framework_signals"] = [dict(item) for item in clone.get("framework_signals")[:12] if isinstance(item, dict)]
+    tests = clone.get("test_signals") if isinstance(clone.get("test_signals"), dict) else {}
+    if tests: view["test_signals"] = {key: tests.get(key) for key in ("has_tests", "count") if key in tests}
+    ci = clone.get("ci_signals") if isinstance(clone.get("ci_signals"), dict) else {}
+    if ci: view["ci_signals"] = {"has_ci": ci.get("has_ci"), "files": list(ci.get("files") or [])[:8]}
+    rel = clone.get("relation_signals") if isinstance(clone.get("relation_signals"), dict) else {}
+    if rel:
+        view["relation_signals"] = {key: copy.deepcopy(rel.get(key)) for key in ("local_import_edge_count", "local_import_edges_truncated", "route_file_count", "syntax_error_file_count") if key in rel}
+        if isinstance(rel.get("most_imported_files"), list): view["relation_signals"]["most_imported_files"] = [dict(item) for item in rel.get("most_imported_files")[:12] if isinstance(item, dict)]
+    return view
+
+
+def _model_projection_relations(detail, grounding_ids, config):
+    clone = detail if isinstance(detail, dict) else {}
+    ids = list(grounding_ids or [])
+    sequence_keys = ("definitions", "incoming", "outgoing", "structural_references", "imports", "text_references", "unresolved_dynamic")
+    view = {key: copy.deepcopy(clone.get(key)) for key in ("symbol", "path_filter", "query", "direction", "include_text_references", "backend", "coverage") if key in clone}
+    if ids: view["grounding_id"] = ids[0]
+    view["counts"] = {key: len(clone.get(key) or []) for key in sequence_keys}
+    limits = {"definitions": 8, "incoming": 12, "outgoing": 12, "structural_references": 8, "imports": 8, "text_references": 8, "unresolved_dynamic": 8}
+    for key, limit in limits.items():
+        if isinstance(clone.get(key), list): view[key] = copy.deepcopy(clone.get(key)[:limit])
+    if isinstance(clone.get("root_reachability"), list): view["root_reachability"] = copy.deepcopy(clone.get("root_reachability")[:12])
+    view["semantics"] = "structural_facts_only"
+    return view
+
+
+def _model_projection_command(detail, grounding_ids, config):
+    clone = _model_projection_default(detail, grounding_ids, config)
+    if isinstance(clone, dict) and clone.get("output") is not None:
+        clone["output"] = str(clone.get("output") or "")[-5000:]
+    return clone
+
+
+def capability_model_detail(name, detail, grounding_ids, config):
+    """Compact model projection dispatched only through capability-owned hooks."""
+    entry = TOOLS.get(str(name or "")) or {}
+    projector = entry.get("model_projection")
+    return projector(detail, grounding_ids, config or {}) if callable(projector) else _model_projection_default(detail, grounding_ids, config or {})
+
+
+def _covering_read_file(arguments, entries, workspace_epoch):
+    if arguments.get("line_start") is None or arguments.get("line_end") is None:
+        return None
+    path = _norm_capability_path(arguments.get("path"))
+    try:
+        requested_start = int(arguments.get("line_start")); requested_end = int(arguments.get("line_end"))
+    except (TypeError, ValueError):
+        return None
+    candidates = []
+    for item in (entries or {}).values():
+        if not isinstance(item, dict) or int(item.get("workspace_epoch", -1)) != int(workspace_epoch or 0): continue
+        if str(item.get("tool") or "") != "read_file": continue
+        if _norm_capability_path((item.get("arguments") or {}).get("path")) != path: continue
+        coverage = item.get("coverage") if isinstance(item.get("coverage"), dict) else {}
+        examined = coverage.get("examined") if isinstance(coverage.get("examined"), dict) else {}
+        try: start = int(examined.get("line_start")); end = int(examined.get("line_end"))
+        except (TypeError, ValueError): continue
+        if start <= requested_start and end >= requested_end: candidates.append((end - start, -int(item.get("turn") or 0), item))
+    return copy.deepcopy(min(candidates, key=lambda value: (value[0], value[1]))[2]) if candidates else None
+
+
+def _resource_failure_by_path(owner):
+    def find(arguments, entries, workspace_epoch):
+        path = _norm_capability_path(arguments.get("path"))
+        if not path: return None
+        candidates = []
+        for item in (entries or {}).values():
+            if not isinstance(item, dict) or int(item.get("workspace_epoch", -1)) != int(workspace_epoch or 0): continue
+            if str(item.get("tool") or "") != str(owner or ""): continue
+            if item.get("failure_scope") != "resource": continue
+            resource = _norm_capability_path(item.get("failure_resource") or (item.get("arguments") or {}).get("path"))
+            if resource == path: candidates.append((int(item.get("turn") or 0), item))
+        return copy.deepcopy(max(candidates, key=lambda value: value[0])[1]) if candidates else None
+    return find
+
+
+def capability_find_covering(name, arguments, entries, workspace_epoch):
+    entry = TOOLS.get(str(name or "")) or {}
+    hook = entry.get("covers")
+    return hook(arguments or {}, entries or {}, workspace_epoch) if callable(hook) else None
+
+
+def capability_find_resource_failure(name, arguments, entries, workspace_epoch):
+    entry = TOOLS.get(str(name or "")) or {}
+    hook = entry.get("resource_failure")
+    return hook(arguments or {}, entries or {}, workspace_epoch) if callable(hook) else None
+
+def _normalize_symbol_relations_arguments(arguments):
+    normalized = dict(arguments or {})
+    if str(normalized.get("query") or "relations").strip().lower() == "reachability":
+        normalized.pop("max_depth", None)
+        normalized.pop("max_edges", None)
+    return normalized
+
 
 def _schema_objeto(properties=None, required=None):
     return {
@@ -993,32 +2060,19 @@ TOOLS = {
     "calculate": {
         "description": "Evaluate one arithmetic expression deterministically with decimal-safe math.",
         "availability": "global",
-        "produces_source_records": True,
-        "category": "READ_ONLY",
-        "effects": ["NONE"],
+        "produces_grounding": True,
+        "effect": "observe",
         "returns": "Decimal result with exact/approximate and precision metadata.",
         "input_schema": _schema_objeto({
             "expression": {"type": "string", "minLength": 1, "maxLength": 500, "description": "Arithmetic expression containing numeric values and supported operators."},
         }, ["expression"]),
         "fn": _tool_calculate,
     },
-    "agent_info": {
-        "description": "Return Eyle runtime identity, release metadata, executable tool registry and write policy.",
-        "availability": "global",
-        "produces_source_records": True,
-        "category": "READ_ONLY",
-        "effects": ["NONE"],
-        "returns": "Runtime identity, complete registered_tools, current-call available_tools and write policy.",
-        "caveats": ["registered_tools is the full registry; available_tools is only the current-call subset. Runtime metadata does not prove source-level implementation behavior."],
-        "input_schema": _schema_objeto(),
-        "fn": _tool_agent_info,
-    },
     "project_stats": {
         "description": "Measure safe project text: files, directories, lines, characters, bytes, extensions, and languages.",
         "availability": "workspace",
-        "produces_source_records": True,
-        "category": "READ_ONLY",
-        "effects": ["NONE"],
+        "produces_grounding": True,
+        "effect": "observe",
         "returns": "Counts for files, directories, lines, characters, bytes, extensions and languages.",
         "caveats": ["Measurements only; no importance ranking or code-behavior diagnosis."],
         "input_schema": _schema_objeto(),
@@ -1027,9 +2081,8 @@ TOOLS = {
     "count_tokens": {
         "description": "Measure token count or a truthful token estimate for safe project text.",
         "availability": "workspace",
-        "produces_source_records": True,
-        "category": "READ_ONLY",
-        "effects": ["NONE"],
+        "produces_grounding": True,
+        "effect": "observe",
         "returns": "Token count/estimate, method, exactness, measured characters and scan completeness.",
         "caveats": ["Measures project text, not actual LLM request usage or token waste."],
         "input_schema": _schema_objeto({
@@ -1041,9 +2094,8 @@ TOOLS = {
     "inspect_project": {
         "description": "Inspect objective project structure and relation signals such as languages, entrypoints, imports, tests, CI, frameworks and manifests.",
         "availability": "workspace",
-        "produces_source_records": True,
-        "category": "READ_ONLY",
-        "effects": ["NONE"],
+        "produces_grounding": True,
+        "effect": "observe",
         "returns": "Languages, entrypoints, imports, tests, CI, frameworks, manifests and relation signals.",
         "caveats": ["Objective static signals only; no importance ranking, runtime confirmation or bug proof."],
         "input_schema": _schema_objeto(),
@@ -1052,9 +2104,8 @@ TOOLS = {
     "list_tree": {
         "description": "List the fresh project tree with limit, depth, filter, and ignored-item counts.",
         "availability": "workspace",
-        "produces_source_records": True,
-        "category": "READ_ONLY",
-        "effects": ["NONE"],
+        "produces_grounding": True,
+        "effect": "observe",
         "returns": "Project-relative tree entries plus depth, truncation, ignored-item metadata and protected-resource visibility markers.",
         "input_schema": _schema_objeto({
             "limit": {"type": "integer", "minimum": 1, "description": "Maximum number of tree entries to return before marking the result truncated."},
@@ -1066,23 +2117,25 @@ TOOLS = {
     "search_code": {
         "description": "Find exact literal text/code matches in live project files and return fresh verifiable ranges.",
         "availability": "workspace",
-        "produces_source_records": True,
-        "category": "READ_ONLY",
-        "effects": ["NONE"],
-        "returns": "Complete literal-match coverage metadata plus a deterministic diverse inline projection of fresh source ranges and continuation handles when more objective ranges exist.",
-        "caveats": ["Literal text/code search only; never semantic relevance ranking. Search exhausts the readable scope mechanically; projection_complete describes only the bounded inline projection, while coverage_complete describes the searched scope. Protected credential/private-key resources and their physical aliases are excluded and reported as a coverage boundary."],
+        "produces_grounding": True,
+        "effect": "observe",
+        "returns": "Complete literal-match Coverage plus deterministic bounded fresh material and Frontiers when more objective ranges exist.",
+        "caveats": ["Literal text/code search only; never semantic relevance ranking. Objective Scope is resolved before Coverage: literal files are exact, literal directories are recursive, wildcard-bearing selectors are explicit globs, and missing/unsafe literal include paths fail closed. Search exhausts the readable resolved scope mechanically; bounded materialization is represented by the returned material plus any unresolved Frontier. Protected credential/private-key resources and their physical aliases are counted in resolved scope but excluded from content access and reported as a coverage boundary."],
         "input_schema": _schema_objeto(
-            {"query": {"type": "string", "minLength": 1, "description": "Literal text or code fragment to match exactly in project files."}}, ["query"],
+            {
+                "query": {"type": "string", "minLength": 1, "description": "Literal text or code fragment to match exactly in project files."},
+                "include_paths": {"type": "array", "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 300}, "description": "Optional Main-declared project-relative paths. A literal file selects that file; a literal directory selects its recursive subtree; selectors containing *, ? or [ are explicit full-path glob patterns."},
+                "exclude_paths": {"type": "array", "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 300}, "description": "Optional Main-declared project-relative exclusions with the same canonical file/directory/explicit-glob semantics as include_paths."},
+            }, ["query"],
         ),
         "fn": _tool_search_code,
     },
     "symbol_relations": {
         "description": "Inspect structural relationships around a code symbol: calls, registrations/bindings, imports, references and optional root-to-symbol paths.",
         "availability": "workspace",
-        "produces_source_records": True,
-        "category": "READ_ONLY",
-        "effects": ["NONE"],
-        "returns": "AST-aware Python call/binding/registration relations, optional directed projections/root paths, optional literal text references, unresolved dynamic sites and coverage metadata.",
+        "produces_grounding": True,
+        "effect": "observe",
+        "returns": "AST-aware Python call/binding/registration relations, optional directed root paths, optional literal text references, unresolved dynamic sites and coverage metadata.",
         "caveats": ["Reports structural facts only; it never labels code live/dead/legacy or proves runtime behavior. Static resolution can be incomplete for dynamic dispatch, reflection, plugins or ambiguous names."],
         "input_schema": _schema_objeto({
             "symbol": {"type": "string", "minLength": 1, "description": "Code symbol name to inspect."},
@@ -1092,29 +2145,27 @@ TOOLS = {
             "direction": {"type": "string", "enum": ["incoming", "outgoing", "both"], "description": "Project only the requested relation direction; default both."},
             "include_text_references": {"type": "boolean", "description": "Include literal text-reference rows. Default false because structural queries usually do not need them."},
             "max_depth": {"type": "integer", "minimum": 1, "maximum": 32, "description": "Local relations only. Directed reachability ignores/canonicalizes this hint and exhausts the finite resolved graph automatically."},
-            "max_edges": {"type": "integer", "minimum": 10, "maximum": 500, "description": "Local relation projection limit. Directed reachability canonicalizes this hint and returns only path/coverage/frontier material."},
+            "max_edges": {"type": "integer", "minimum": 10, "maximum": 500, "description": "Local relation output limit. Directed reachability canonicalizes this hint and returns only path/coverage/frontier material."},
         }, ["symbol"]),
         "fn": _tool_symbol_relations,
     },
-    "expand_observation": {
-        "description": "Materialize one bounded continuation page from an opaque handle returned by a prior objective observation.",
+    "continue_observation": {
+        "description": "Continue one open Observation Frontier without exposing Runtime continuation handles.",
         "availability": "workspace",
-        "produces_source_records": True,
-        "category": "READ_ONLY",
-        "effects": ["NONE"],
-        "returns": "A bounded snapshot continuation with objective observations, coverage, any remaining frontier and a next handle when more is available.",
-        "caveats": ["Rev5.7 handles address observation snapshots, not guaranteed-live resources; handles become stale after the Runtime workspace epoch changes."],
+        "produces_grounding": True,
+        "effect": "observe",
+        "returns": "A bounded continuation with objective observations, coverage and a new Frontier when more reality remains accessible.",
+        "caveats": ["Frontiers address observation snapshots and become stale after the Runtime workspace epoch changes."],
         "input_schema": _schema_objeto({
-            "handle": {"type": "string", "minLength": 8, "pattern": r"^handle:[A-Za-z0-9._:-]+$", "description": "Exact opaque handle:* continuation id previously returned by a tool observation. Evidence IDs and observation IDs are not handles."},
-        }, ["handle"]),
-        "fn": _tool_expand_observation,
+            "frontier": {"type": "string", "minLength": 4, "pattern": r"^fr-[0-9]+$", "description": "Open Frontier id previously returned by Observation."},
+        }, ["frontier"]),
+        "fn": _tool_continue_observation,
     },
     "find_symbol": {
         "description": "Locate a symbol in a known file or across the live project.",
         "availability": "workspace",
-        "produces_source_records": True,
-        "category": "READ_ONLY",
-        "effects": ["NONE"],
+        "produces_grounding": True,
+        "effect": "observe",
         "returns": "Fresh symbol definition/location and verifiable source range metadata.",
         "caveats": ["Locates definitions/locations; does not guarantee every runtime reference or call site."],
         "input_schema": _schema_objeto({
@@ -1126,9 +2177,8 @@ TOOLS = {
     "read_file": {
         "description": "Read a bounded beginning portion of one project file with verifiable hashes and line metadata.",
         "availability": "workspace",
-        "produces_source_records": True,
-        "category": "READ_ONLY",
-        "effects": ["NONE"],
+        "produces_grounding": True,
+        "effect": "observe",
         "returns": "Bounded file content, truncation state, line metadata and hashes.",
         "caveats": ["The returned content may be truncated by configured read limits. Protected credential/private-key resources and their physical aliases deny content access; normal files are never blocked by content heuristics."],
         "input_schema": _schema_objeto({
@@ -1141,9 +2191,8 @@ TOOLS = {
     "run_command": {
         "description": "Run an arbitrary shell command in a writable isolated project snapshot that persists for this job and may access the network.",
         "availability": "workspace",
-        "produces_source_records": True,
-        "category": "READ_ONLY",
-        "effects": ["SANDBOX_EXEC", "SANDBOX_WRITE", "NETWORK"],
+        "produces_grounding": True,
+        "effect": "execute",
         "returns": "Exit code, bounded combined output, sandbox backend and isolation facts. Sandbox mutations never alter the real workspace.",
         "caveats": ["No command allowlist inside the sandbox. Docker is the recommended backend and may auto-pull the configured/default image; Bubblewrap remains supported. Protected credential/private-key resources and their physical aliases are omitted from the snapshot; normal source is preserved regardless of secret-like content. Docker container state and the writable project snapshot persist for the job. Real workspace writes still require WriteTransaction confirmation."],
         "input_schema": _schema_objeto({
@@ -1156,9 +2205,8 @@ TOOLS = {
     "memory_search": {
         "description": "Search hash-validated external memory entries associated with the active project.",
         "availability": "workspace",
-        "produces_source_records": False,
-        "category": "READ_ONLY",
-        "effects": ["NONE"],
+        "produces_grounding": False,
+        "effect": "observe",
         "returns": "Bounded hash-validated prior project-memory entries.",
         "caveats": ["Prior memory is context, not proof of current live source state."],
         "input_schema": _schema_objeto({
@@ -1168,26 +2216,24 @@ TOOLS = {
         "fn": _tool_memory_search,
     },
     "memory_store": {
-        "description": "Store one useful evidence-backed project fact in external memory.",
+        "description": "Store one useful observation-grounded project fact in external memory.",
         "availability": "workspace",
-        "produces_source_records": False,
-        "category": "EDIT",
-        "effects": ["MEMORY_WRITE"],
+        "produces_grounding": False,
+        "effect": "mutate",
         "returns": "The external project-memory entry that was stored.",
-        "caveats": ["Persists project memory only and requires current-task evidence references."],
+        "caveats": ["Persists project memory only and requires current-task Observation grounding references."],
         "input_schema": _schema_objeto({
             "text": {"type": "string", "minLength": 1, "description": "Compact project fact to persist in external project memory."},
             "kind": {"type": "string", "description": "Optional memory category; defaults to fact when omitted."},
-            "evidence_ids": {"type": "array", "items": {"type": "string", "minLength": 1}, "description": "Current-task evidence IDs that substantiate the stored fact."},
-        }, ["text", "evidence_ids"]),
+            "grounding_ids": {"type": "array", "items": {"type": "string", "pattern": r"^mat-[0-9]+$"}, "description": "Current-task Observation material IDs that substantiate the stored fact."},
+        }, ["text", "grounding_ids"]),
         "fn": _tool_memory_store,
     },
     "run_tests": {
         "description": "Run the detected test suite in the sandbox; optionally focus pytest on one safe relative file or directory.",
         "availability": "tests",
-        "produces_source_records": True,
-        "category": "READ_ONLY",
-        "effects": ["EXEC"],
+        "produces_grounding": True,
+        "effect": "execute",
         "returns": "Runner command, status, return code, concise summary, bounded output and runner diagnostics.",
         "caveats": ["Does not install a missing runner or prove untested behavior; tests may create incidental temporary/cache artifacts."],
         "input_schema": _schema_objeto({
@@ -1195,28 +2241,11 @@ TOOLS = {
         }),
         "fn": _tool_run_tests,
     },
-    "execution_trace": {
-        "description": "Read sanitized facts from current or past executions.",
-        "availability": "global",
-        "produces_source_records": True,
-        "category": "READ_ONLY",
-        "effects": ["NONE"],
-        "returns": "Bounded sanitized execution trace.",
-        "caveats": ["Observable facts only: no diagnosis, chain-of-thought, raw prompts, source/patch/memory bodies or secrets."],
-        "input_schema": _schema_objeto({
-            "job_id": {"type": "integer", "minimum": 1, "description": "Past job id; omit=current."},
-            "turn": {"type": "integer", "minimum": 1, "description": "Turn filter."},
-            "section": {"type": "string", "minLength": 1, "maxLength": 20, "description": "Trace section."},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "Event limit."},
-        }),
-        "fn": _tool_execution_trace,
-    },
     "git_status": {
         "description": "Inspect current Git working-tree state without changing files; returns branch and compact modified/added/deleted/untracked entries.",
         "availability": "workspace",
-        "produces_source_records": True,
-        "category": "READ_ONLY",
-        "effects": ["NONE"],
+        "produces_grounding": True,
+        "effect": "observe",
         "returns": "Branch, clean flag, category counts and bounded changed-path entries.",
         "caveats": ["Status metadata only; it does not include patch contents."],
         "input_schema": _schema_objeto({
@@ -1227,9 +2256,8 @@ TOOLS = {
     "git_diff": {
         "description": "Inspect a bounded read-only Git diff for the workspace or one relative path, optionally staged.",
         "availability": "workspace",
-        "produces_source_records": True,
-        "category": "READ_ONLY",
-        "effects": ["NONE"],
+        "produces_grounding": True,
+        "effect": "observe",
         "returns": "Changed files, added/removed line counts, bounded diff text and truncation state.",
         "caveats": ["Bounded output may omit truncated hunks."],
         "input_schema": _schema_objeto({
@@ -1241,17 +2269,102 @@ TOOLS = {
     },
 }
 
+# Capability-owned physical observation hooks. Agent/Observation consume only
+# this registry contract; adding a new observational capability must not require
+# capability-name branches in either core module.
+TOOLS["list_tree"].update(signature=_sig_list_tree, observe=_observe_tree, coverage=_coverage_tree)
+TOOLS["search_code"].update(signature=_sig_search_code, observe=_observe_search, coverage=_coverage_search)
+TOOLS["search_code"]["continue"] = _continue_search_code_page
+TOOLS["find_symbol"].update(signature=_sig_find_symbol, observe=_observe_find_symbol, coverage=_coverage_find_symbol)
+TOOLS["find_symbol"]["continue"] = _continue_find_symbol_page
+TOOLS["symbol_relations"].update(signature=_sig_symbol_relations, observe=_observe_json("symbol_relations"), coverage=_coverage_relations)
+TOOLS["symbol_relations"]["continue"] = _continue_structured_page
+TOOLS["read_file"].update(signature=_sig_read_file, observe=_observe_file("read_file"), coverage=_coverage_file)
+TOOLS["project_stats"].update(signature=lambda arguments: "project_stats:root", observe=_observe_json("project_stats"), coverage=_coverage_project_stats)
+TOOLS["inspect_project"].update(signature=lambda arguments: "inspect_project:root", observe=_observe_json("inspect_project"), coverage=_coverage_inspect_project)
+TOOLS["count_tokens"].update(signature=_sig_count_tokens, observe=_observe_json("count_tokens"), coverage=_coverage_count_tokens)
+TOOLS["run_tests"].update(signature=_sig_run_tests, observe=_observe_json("run_tests"), coverage=_coverage_atomic("test_execution", lambda a, d: {"kind":"test_execution", "scope": d.get("scope") or a.get("scope") or "."}, lambda a, d: {"returncode": d.get("returncode")}))
+TOOLS["git_status"].update(signature=lambda arguments: "git_status:root", observe=_observe_json("git_status"), coverage=_coverage_git_status)
+TOOLS["git_diff"].update(signature=_sig_git_diff, observe=_observe_json("git_diff"), coverage=_coverage_git_diff)
+TOOLS["continue_observation"].update(observe=_observe_continue, coverage=_coverage_continue)
+TOOLS["calculate"].update(observe=_observe_json("calculate"), coverage=_coverage_atomic("calculation", lambda a, d: {"kind":"calculation", "expression": a.get("expression")}))
+TOOLS["run_command"].update(observe=_observe_json("run_command"), coverage=_coverage_atomic("sandbox_command", lambda a, d: {"kind":"sandbox_command", "cwd": a.get("cwd") or "."}, lambda a, d: {"returncode": d.get("returncode")}))
+TOOLS["memory_search"].update(observe=_observe_none, coverage=_coverage_memory_search)
+TOOLS["memory_store"].update(observe=_observe_none, coverage=_coverage_memory_store)
+
+# Capability-owned presentation, normalization and memoization hooks. Generic
+# dispatch functions above never branch on capability names.
+TOOLS["read_file"].update(
+    public_arguments=_public_arguments_read_file, public_result=_public_result_file,
+    model_projection=_model_projection_read_file, covers=_covering_read_file,
+    resource_failure=_resource_failure_by_path("read_file"),
+)
+TOOLS["list_tree"].update(
+    public_arguments=_public_arguments_keys("limit", "depth", "filter"), public_result=_public_result_tree,
+)
+TOOLS["search_code"].update(
+    public_arguments=_public_arguments_search, public_result=_public_result_search,
+    model_projection=_model_projection_search,
+)
+TOOLS["find_symbol"].update(
+    public_arguments=_public_arguments_keys("symbol", "path"), public_result=_public_result_find_symbol,
+    model_projection=_model_projection_find_symbol, resource_failure=_resource_failure_by_path("find_symbol"),
+)
+TOOLS["symbol_relations"].update(
+    public_arguments=_public_arguments_keys("symbol", "query", "path", "roots", "direction", "include_text_references", "max_depth", "max_edges"),
+    public_result=_public_result_relations, model_projection=_model_projection_relations,
+    normalize=_normalize_symbol_relations_arguments, resource_failure=_resource_failure_by_path("symbol_relations"),
+)
+TOOLS["continue_observation"].update(public_arguments=lambda arguments: {"frontier": str(arguments.get("frontier") or "")[:80]})
+TOOLS["calculate"].update(
+    public_arguments=lambda arguments: {"expression": str(arguments.get("expression") or "")[:240]},
+    public_result=_public_result_fields("result", "resultado", "exact", "expression"),
+)
+TOOLS["count_tokens"].update(
+    public_arguments=_public_arguments_keys("path", "tokenizer"),
+    public_result=_public_result_fields("file_count", "files", "directories", "lines", "characters", "bytes", "estimated_tokens", "tokens", "exact", "method", "characters_per_token", "languages"),
+)
+TOOLS["project_stats"].update(
+    public_arguments=lambda arguments: {},
+    public_result=_public_result_fields("file_count", "files", "directories", "lines", "characters", "bytes", "estimated_tokens", "tokens", "exact", "method", "characters_per_token", "languages"),
+)
+TOOLS["inspect_project"].update(public_arguments=lambda arguments: {}, public_result=_public_result_inspect, model_projection=_model_projection_inspect)
+TOOLS["run_tests"].update(
+    public_arguments=lambda arguments: {"scope": arguments.get("scope")} if arguments.get("scope") else {},
+    public_result=_public_result_fields("command", "returncode", "scope", "backend", "tests_detected", "summary"),
+)
+TOOLS["run_command"].update(public_arguments=_public_arguments_command, public_result=_public_result_command, model_projection=_model_projection_command)
+TOOLS["git_status"].update(
+    public_arguments=lambda arguments: {"max_entries": arguments.get("max_entries")} if arguments.get("max_entries") is not None else {},
+    public_result=_public_result_git_status,
+)
+TOOLS["git_diff"].update(public_arguments=_public_arguments_keys("path", "staged", "context_lines"), public_result=_public_result_git_diff, resource_failure=_resource_failure_by_path("git_diff"))
+TOOLS["memory_search"].update(public_arguments=_public_arguments_memory)
+TOOLS["memory_store"].update(public_arguments=_public_arguments_memory)
+
+for _capability_entry in TOOLS.values():
+    # Every capability owns the same physical hook surface. Generic Runtime
+    # dispatch never grows capability-name branches; unsupported hooks are
+    # explicit ``None`` rather than implicit central behavior.
+    _capability_entry.setdefault("signature", None)
+    _capability_entry.setdefault("observe", _observe_none)
+    _capability_entry.setdefault("coverage", lambda arguments, result: {})
+    _capability_entry.setdefault("frontier", _frontier_passthrough)
+    for _hook_name in (
+        "freshness", "rehydrate", "public_arguments", "public_result",
+        "model_projection", "covers", "resource_failure", "normalize", "continue",
+    ):
+        _capability_entry.setdefault(_hook_name, None)
+
+for _file_capability in ("read_file", "search_code", "find_symbol"):
+    TOOLS[_file_capability]["freshness"] = _validate_file_material_freshness
+    TOOLS[_file_capability]["rehydrate"] = _rehydrate_file_material
+
 # Limites ficam no proprio registro. O catalogo resolve as chaves de
 # configuracao para valores numericos antes de chegar ao modelo.
 for _entrada_tool in TOOLS.values():
     _entrada_tool.setdefault("limits", {})
-    _effects = set(_entrada_tool.get("effects") or [])
-    if _entrada_tool.get("category") == "EDIT":
-        _entrada_tool["effect"] = "mutate"
-    elif any(str(item) not in {"NONE"} for item in _effects):
-        _entrada_tool["effect"] = "execute"
-    else:
-        _entrada_tool["effect"] = "observe"
+    _entrada_tool["effect"] = normalize_effect(_entrada_tool.get("effect"))
 TOOLS["list_tree"]["limits"] = {
     "max_entradas": {"config_key": "agent.max_tree_entries", "default": 200},
     "max_profundidade": {"config_key": "agent.max_tree_depth", "default": 6},
@@ -1396,9 +2509,7 @@ def gerar_catalogo_tools(config=None, allowed_names=None, compact=False):
             item = {
                 "name": public_name,
                 "description": entrada.get("description", ""),
-                "category": entrada.get("category", "READ_ONLY"),
                 "effect": normalize_effect(entrada.get("effect")),
-                "effects": list(entrada.get("effects") or ["NONE"]),
                 "input_schema": schema,
                 "returns": entrada.get("returns", ""),
                 "limits": limites,
@@ -1506,12 +2617,12 @@ def validar_chamada_tool(nome, arguments):
                 "INVALID_ARGUMENT",
                 "argument 'line_end' must be >= line_start",
             )
-    if nome == "symbol_relations" and str(normalizados.get("query") or "relations").strip().lower() == "reachability":
-        # Rev5.8 clean contract: graph traversal depth/result-size tuning is
-        # physical Runtime work, not a semantic decision for Main. Calls that
-        # differ only by these obsolete hints collapse to one observation.
-        normalizados.pop("max_depth", None)
-        normalizados.pop("max_edges", None)
+    normalizer = (TOOLS.get(nome) or {}).get("normalize")
+    if callable(normalizer):
+        normalized_by_capability = normalizer(normalizados)
+        if not isinstance(normalized_by_capability, dict):
+            return None, _falha("INVALID_CAPABILITY_NORMALIZATION", f"capability '{nome}' returned invalid normalized arguments")
+        normalizados = normalized_by_capability
     return normalizados, None
 
 
@@ -1533,6 +2644,20 @@ def executar_tool(nome, arguments, ctx):
                 f"tool '{nome}' devolveu um resultado fora do contrato padrao",
                 executed=True,
             )
+        observations = _capability_observations(nome, arguments, resultado)
+        if observations:
+            resultado["observations"] = observations
+        try:
+            coverage = _capability_coverage(nome, arguments, resultado)
+        except CoverageContractError as error:
+            return _falha(
+                "CAPABILITY_COVERAGE_INVALID",
+                f"capability '{nome}' violated Coverage contract: {error}",
+                executed=bool(resultado.get("executed")), changed=bool(resultado.get("changed")),
+                retryable=False,
+            )
+        resultado["coverage"] = coverage
+        resultado["frontiers"] = _capability_frontiers(nome, arguments, resultado)
         return resultado
     except Exception as e:
         return _falha("TOOL_EXECUTION_ERROR", f"tool '{nome}' falhou ao executar: {e}", executed=True)

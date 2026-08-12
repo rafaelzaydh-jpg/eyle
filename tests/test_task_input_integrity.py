@@ -4,26 +4,22 @@ from pathlib import Path
 import eyle.core.agent as core_agent
 import eyle.runtime.service as service_mod
 from llm.structured import parse_agent_response, StructuredResponseError
-from tests.canonical import agent_final, agent_needs_user, agent_tools, base_config, claim, review, tool_call
+from tests.canonical import agent_final, agent_needs_user, agent_tools, base_config, issue, review, tool_call
 
 
 def test_needs_user_contract_is_blocking_object_and_rejects_legacy_string():
     parsed = parse_agent_response({
-        "tool_calls": None,
-        "patches": None,
-        "needs_user": {"question": "Qual porta?", "missing_information": "The server port"},
-        "final": None,
+        "action": {"kind": "needs_user", "question": "Qual porta?", "missing_information": "The server port"},
         "investigation_updates": [],
+        "task_updates": [],
     })
-    assert parsed["needs_user"] == {"question": "Qual porta?", "missing_information": "The server port"}
+    assert parsed["action"] == {"kind": "needs_user", "question": "Qual porta?", "missing_information": "The server port"}
 
     try:
         parse_agent_response({
-            "tool_calls": None,
-            "patches": None,
-            "needs_user": "Qual porta?",
-            "final": None,
+            "action": {"kind": "needs_user", "question": "Qual porta?"},
             "investigation_updates": [],
+            "task_updates": [],
         })
     except StructuredResponseError as error:
         assert "AGENT_NEEDS_USER_INVALID" in str(error.code)
@@ -49,7 +45,7 @@ def test_resume_clarification_is_canonical_across_tool_and_claim(monkeypatch, tm
         cfg,
         projeto={"caminho_origem": str(tmp_path)},
         retornar_detalhes=True,
-        task_id="job-1",
+        execution_id="job-1",
         source_job_id=1,
     )
     assert status == "needs_user"
@@ -60,7 +56,7 @@ def test_resume_clarification_is_canonical_across_tool_and_claim(monkeypatch, tm
     resumed_prompts = []
     outputs = iter([
         agent_tools(tool_call("find_symbol", {"symbol": "AgentSession"})),
-        agent_final({"answer": "session.py:1", "evidence_ids": ["src-0001"]}),
+        agent_final({"answer": "session.py:1", "grounding_ids": ["mat-0001"]}),
     ])
     monkeypatch.setattr(
         core_agent,
@@ -71,15 +67,7 @@ def test_resume_clarification_is_canonical_across_tool_and_claim(monkeypatch, tm
     monkeypatch.setattr(
         core_agent,
         "executar_verificador_claims",
-        lambda prompt, _cfg: claim_prompts.append(json.loads(prompt)) or review(
-            claims=[claim(
-                answer_ref="answer:a1",
-                statement="AgentSession is defined in session.py at line 1",
-                evidence_ids=["ev-src-0001"],
-                verdict="supported",
-                reason="The symbol locator evidence identifies the definition.",
-            )]
-        ),
+        lambda prompt, _cfg: claim_prompts.append(json.loads(prompt)) or review(verdict="accept"),
     )
 
     status, text, pending2, details2 = core_agent.executar_agente(
@@ -89,7 +77,7 @@ def test_resume_clarification_is_canonical_across_tool_and_claim(monkeypatch, tm
         retomar=pending,
         resposta_usuario="AgentSession",
         retornar_detalhes=True,
-        task_id="job-2",
+        execution_id="job-2",
         source_job_id=2,
     )
     assert status == "success"
@@ -122,7 +110,7 @@ def test_expired_user_input_pending_cannot_capture_new_request(monkeypatch, tmp_
         "pending_schema_version": "1",
         "continuation_kind": "user_input",
         "question": "Which class?",
-        "session": {"request": "old request", "task_id": "job-old"},
+        "session": {"request": "old request", "execution_id": "job-old"},
         "clarification": {"question": "Which class?", "missing_information": "class name"},
         "id": "ABCD",
         "created_at": "1999-01-01T00:00:00+00:00",
@@ -143,25 +131,23 @@ def test_expired_user_input_pending_cannot_capture_new_request(monkeypatch, tmp_
         return {"status": "success", "resposta": question, "avisos": [], "details": {"status": "success"}}
     monkeypatch.setattr(service_mod, "_processar_agente", fake_process)
 
-    result = service_mod.processar("novo pedido real", registrar_pergunta=False, task_id="job-2", source_job_id=2)
+    result = service_mod.processar("novo pedido real", registrar_pergunta=False, execution_id="job-2", source_job_id=2)
     assert result["resposta"] == "novo pedido real"
     assert calls == {"resume": 0, "new": 1}
     assert cleared == [True]
 
 
-def test_agent_prompt_defines_needs_user_as_blocking_not_conversation():
+def test_agent_prompt_treats_conversation_as_valid_user_intent_and_needs_user_as_blocking_only():
     from llm.executar import PROMPT_AGENTE
-    lower = PROMPT_AGENTE.lower()
-    assert "needs_user only when an active concrete task cannot continue" in lower
-    assert "never use it for greetings" in lower
-    assert "otherwise return final" in lower
-    assert "resumed clarification becomes part of the canonical request" in lower
-
-
+    lower=PROMPT_AGENTE.lower()
+    assert "the user's message does not need to be a task" in lower
+    assert "respond naturally with final" in lower
+    assert "genuinely blocking information" in lower
+    assert "never use it merely to turn conversation into a formal task" in lower
 
 def test_execution_context_rejects_canonical_request_identity_drift():
     from eyle.core.execution_context import ExecutionContext
-    execution = ExecutionContext.from_config(base_config(), task_id="job-1", source_job_id=1)
+    execution = ExecutionContext.from_config(base_config(), execution_id="job-1", source_job_id=1)
     execution.bind_canonical_request("task A")
     execution.assert_canonical_request("task A")
     try:
@@ -178,7 +164,7 @@ def test_user_input_pending_cancel_is_control_but_plain_sim_is_clarification(mon
         "pending_schema_version": "1",
         "continuation_kind": "user_input",
         "question": "Continue?",
-        "session": {"request": "task", "task_id": "job-1"},
+        "session": {"request": "task", "execution_id": "job-1"},
         "clarification": {"question": "Continue?", "missing_information": "user choice"},
         "id": "ABCD",
         "created_at": "2026-01-01T00:00:00+00:00",

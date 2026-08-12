@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Atualizacao 41: arvore atual e leitura fresca por faixa."""
+"""Fresh workspace tree and range-reading tests."""
 import hashlib
 import os
 import sys

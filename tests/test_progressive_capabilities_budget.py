@@ -7,7 +7,7 @@ import llm.executar as llm_mod
 from eyle.core.execution_context import ExecutionContext
 from eyle.core.token_budget import available_user_prompt_tokens, estimate_tokens
 from eyle.runtime.config import ConfigError, validar_config
-from tests.canonical import agent_final, agent_tools, base_config, tool_call
+from tests.canonical import agent_final, agent_tools, agent_needs_user, base_config, review, issue, tool_call
 
 
 def test_capability_index_is_small_and_first_use_expands_only_requested_tool(monkeypatch, tmp_path):
@@ -44,64 +44,51 @@ def test_capability_index_is_small_and_first_use_expands_only_requested_tool(mon
     assert details["tool_calls"] == 1
 
 
-def test_ungrounded_final_skips_claim_without_semantic_router(monkeypatch):
-    called = {"claim": 0}
-    monkeypatch.setattr(core_agent, "executar_agente_llm", lambda prompt, cfg: agent_final("Oi! Como posso ajudar?"))
+def test_ungrounded_final_is_claim_audited_instead_of_auto_accepted(monkeypatch):
+    agent_calls=[]; claim_calls=[]
+    def fake_agent(prompt,cfg):
+        payload=json.loads(prompt); agent_calls.append(payload)
+        if len(agent_calls)==1:
+            return agent_final("O workspace atual possui exatamente 16 tools públicas.")
+        assert "CLAIM_CHALLENGE" in payload["runtime_feedback"]
+        return agent_needs_user("Preciso de uma informação do usuário para continuar.")
+    def fake_claim(prompt,cfg):
+        payload=json.loads(prompt); claim_calls.append(payload); assert payload["observed_material"]==[]
+        return review(issues=[issue(kind="scope", grounding_refs=["request:r1","answer:a1"], reason="Current workspace state was not observed.")])
+    monkeypatch.setattr(core_agent,"executar_agente_llm",fake_agent); monkeypatch.setattr(core_agent,"executar_verificador_claims",fake_claim)
+    status,_,_,details=core_agent.executar_agente("Audite as tools públicas atuais.",base_config(claims_mode="self_check"),projeto={},retornar_detalhes=True)
+    assert status=="needs_user" and len(claim_calls)==1
+    assert any(x.get("decision")=="claim_review" and x.get("outcome")=="challenge" for x in details["decision_history"])
 
-    def claim_should_not_run(*args, **kwargs):
-        called["claim"] += 1
-        raise AssertionError("Claim must not run without grounded runtime state")
+def test_pure_ungrounded_answer_can_still_pass_claim(monkeypatch):
+    calls=[]
+    monkeypatch.setattr(core_agent,"executar_agente_llm",lambda prompt,cfg:agent_final("Oi! Como posso ajudar?"))
+    def fake_claim(prompt,cfg):
+        payload=json.loads(prompt); calls.append(payload); assert payload["observed_material"]==[]; return review(verdict="accept")
+    monkeypatch.setattr(core_agent,"executar_verificador_claims",fake_claim)
+    status,text,_,details=core_agent.executar_agente("oi",base_config(claims_mode="self_check"),projeto={},retornar_detalhes=True)
+    assert status=="success" and text.startswith("Oi") and len(calls)==1
+    assert any(x.get("decision")=="claim_review" and x.get("outcome")=="accepted" for x in details["decision_history"])
 
-    monkeypatch.setattr(core_agent, "executar_verificador_claims", claim_should_not_run)
-    status, text, _, details = core_agent.executar_agente(
-        "oi", base_config(claims_mode="self_check"), projeto={}, retornar_detalhes=True,
-    )
-    assert status == "success"
-    assert text.startswith("Oi")
-    assert called["claim"] == 0
-    assert any(
-        item.get("decision") == "claim_review" and item.get("outcome") == "skipped"
-        and item.get("reason") == "NO_GROUNDED_STATE"
-        for item in details["decision_history"]
-    )
-
-
-def test_release_training_budget_is_98k_and_context_is_capped_at_32k():
-    cfg = base_config()
-    validar_config(cfg)
-    execution = ExecutionContext.from_config(cfg)
-    assert execution.max_prompt_tokens == 90000
-    assert execution.max_completion_tokens == 8000
-    assert execution.max_total_tokens == 98000
-    assert cfg["llm"]["context_window_tokens"] == 32768
-
-    too_large = base_config()
-    too_large["agent"]["max_total_tokens"] = 98001
-    with pytest.raises(ConfigError, match="max_total_tokens"):
-        validar_config(too_large)
-
-    too_wide = base_config()
-    too_wide["llm"]["context_window_tokens"] = 32769
-    with pytest.raises(ConfigError, match="context_window_tokens"):
+def test_rev123_uses_38k_physical_context_and_90k_task_fuse_without_cumulative_prompt_completion_fuses():
+    cfg=base_config(); validar_config(cfg); execution=ExecutionContext.from_config(cfg)
+    assert not hasattr(execution,"max_prompt_tokens")
+    assert not hasattr(execution,"max_completion_tokens")
+    assert execution.max_total_tokens==90000
+    assert cfg["llm"]["context_window_tokens"]==38000
+    assert available_user_prompt_tokens(cfg, "", output_tokens=0) == 37500
+    assert "max_prompt_tokens" not in cfg["agent"] and "max_completion_tokens" not in cfg["agent"]
+    assert all(key not in cfg["agent"] for key in ("max_llm_turns","max_llm_calls","max_tool_calls"))
+    too_wide=base_config(); too_wide["llm"]["context_window_tokens"]=38001
+    with pytest.raises(ConfigError,match="context_window_tokens"):
         validar_config(too_wide)
 
-    # The physical compiler also clamps defensively if validation is bypassed.
-    bypassed = base_config()
-    bypassed["llm"]["context_window_tokens"] = 100000
-    canonical = base_config()
-    assert available_user_prompt_tokens(bypassed, "system", output_tokens=3600) == available_user_prompt_tokens(canonical, "system", output_tokens=3600)
-
-
-def test_98k_budget_counts_full_prompt_attempts_not_cache_discount():
+def test_task_token_fuse_counts_physical_usage_not_cache_discount():
     cfg = base_config()
     execution = ExecutionContext.from_config(cfg)
-    # Keep prompt below its 90k cap, but leave too little room under the 98k
-    # physical message envelope for another Agent response reservation.
-    execution.max_prompt_tokens = 98000
-    execution.max_completion_tokens = 98000
-    execution.prompt_tokens_estimated_raw = 95000
-    execution.prompt_tokens_budgeted_physical = 95000
-    execution.prompt_tokens_effective = 1000  # cache discount must not bypass the hard cap
+    execution.max_total_tokens = 90000
+    execution.prompt_tokens_budgeted_physical = 87000
+    execution.prompt_tokens_effective = 1000
     execution.completion_tokens_actual = 1000
     with pytest.raises(llm_mod.ErroLLM) as exc:
         llm_mod._reservar_requisicao_llm(cfg, execution, "sys", "user", 3600)
@@ -122,39 +109,52 @@ def test_provider_token_counts_calibrate_future_context_and_budget():
     assert calibrated < uncalibrated
 
 
-def test_completion_ceiling_clamps_current_call_and_preserves_claim_reserve():
-    from eyle.core.execution_context import bind_execution, reset_execution
+
+def test_provider_usage_can_calibrate_conservative_estimate_downward():
+    cfg = base_config()
+    execution = ExecutionContext.from_config(cfg)
+    execution.prompt_tokens_estimated_raw = 10000
+    execution.prompt_tokens_actual = 7000
+    assert execution.prompt_token_calibration == pytest.approx(0.75)
+    calibrated = available_user_prompt_tokens(
+        cfg, "system", output_tokens=3600, token_estimate_multiplier=execution.prompt_token_calibration,
+    )
+    uncalibrated = available_user_prompt_tokens(cfg, "system", output_tokens=3600)
+    assert calibrated > uncalibrated
+
+
+def test_provider_usage_reconciles_prompt_reservation_to_physical_truth():
+    cfg = base_config()
+    execution = ExecutionContext.from_config(cfg)
+    execution.begin_call(mode="agent", turn=1, prompt={})
+    reservation = llm_mod._reservar_requisicao_llm(cfg, execution, "system", "x" * 9000, 100)
+    reserved = execution.prompt_tokens_budgeted_physical
+    assert reserved > 0
+    llm_mod._finalizar_requisicao_llm(
+        cfg, execution, reservation, {"prompt_tokens": max(1, reserved // 2), "cached_prompt_tokens": 0},
+    )
+    assert execution.prompt_tokens_budgeted_physical == execution.prompt_tokens_actual
+    assert execution.physical_tokens_used == execution.prompt_tokens_actual
+
+
+def test_repeated_provider_truth_reconciles_conservative_estimates_without_cumulative_prompt_fuse():
+    cfg=base_config(); execution=ExecutionContext.from_config(cfg)
+    for turn in range(1,15):
+        execution.begin_call(mode="agent",turn=turn,prompt={})
+        reservation=llm_mod._reservar_requisicao_llm(cfg,execution,"system","x"*18000,10)
+        local_reserved=int(reservation["budgeted_prompt_tokens"]); actual=max(1,int(local_reserved*0.70))
+        llm_mod._finalizar_requisicao_llm(cfg,execution,reservation,{"prompt_tokens":actual,"cached_prompt_tokens":0})
+    assert execution.prompt_tokens_actual>0
+    assert execution.prompt_tokens_budgeted_physical==execution.prompt_tokens_actual
+    assert execution.physical_tokens_remaining>0
+
+def test_agent_config_has_only_per_call_output_ceiling_no_claim_reserve():
+    cfg=base_config(claims_mode="self_check")
     from eyle.core.session import AgentSession
+    agent_cfg=core_agent._agent_config(cfg,AgentSession("x"),{})
+    assert agent_cfg["llm"]["agent_max_tokens"]==3600
+    assert "downstream_completion_reserve_tokens" not in agent_cfg["llm"]
 
-    cfg = base_config(claims_mode="self_check")
-    execution = ExecutionContext.from_config(cfg)
-    execution.completion_tokens_actual = 3680
-    session = AgentSession("investigue")
-    session.observation_ledger.setdefault("events", []).append({"tool": "project_stats", "executed": True})
-
-    token = bind_execution(execution)
-    try:
-        call_cfg = core_agent._agent_config(cfg, session, {})
-        assert call_cfg["llm"]["agent_max_tokens_configured"] == 3600
-        assert call_cfg["llm"]["downstream_completion_reserve_tokens"] == 900
-        assert call_cfg["llm"]["agent_max_tokens"] == 3420
-
-        fit = llm_mod._preflight_completion_budget(call_cfg, execution, 3600)
-        assert fit["requested"] == 3600
-        assert fit["effective"] == 3420
-        assert fit["downstream_reserve"] == 900
-        assert fit["clamped"] is True
-    finally:
-        reset_execution(token)
-
-
-def test_completion_ceiling_still_fails_when_only_downstream_reserve_remains():
-    cfg = base_config(claims_mode="self_check")
-    cfg = dict(cfg)
-    cfg["llm"] = dict(cfg["llm"])
-    cfg["llm"]["downstream_completion_reserve_tokens"] = 900
-    execution = ExecutionContext.from_config(cfg)
-    execution.completion_tokens_actual = 7100
-    with pytest.raises(llm_mod.ErroLLM) as exc:
-        llm_mod._preflight_completion_budget(cfg, execution, 3600)
-    assert exc.value.error_code == "MAX_COMPLETION_BUDGET_INSUFFICIENT"
+def test_cumulative_completion_budget_api_is_removed():
+    assert not hasattr(llm_mod,"_completion_budget_remaining")
+    assert not hasattr(llm_mod,"_preflight_completion_budget")

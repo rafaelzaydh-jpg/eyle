@@ -60,9 +60,9 @@ def _benchmark_report():
     }
 
 
-def test_session_57_4_requires_exact_top_level_shape():
+def test_session_requires_exact_top_level_shape():
     state = AgentSession("x").to_dict()
-    assert state["session_schema_version"] == SESSION_SCHEMA_VERSION == "5.8"
+    assert state["session_schema_version"] == SESSION_SCHEMA_VERSION == "2.7.5-r1.3"
 
     with_extra = copy.deepcopy(state)
     with_extra["mystery_compat_field"] = True
@@ -80,7 +80,7 @@ def test_session_57_4_requires_exact_top_level_shape():
         AgentSession.from_dict(missing_turn)
 
 
-def test_session_57_4_requires_exact_ledger_envelopes():
+def test_session_requires_exact_ledger_envelopes():
     state = AgentSession("x").to_dict()
     state["observation_ledger"]["unknown"] = []
     with pytest.raises(ValueError, match="SESSION_SCHEMA_INCOMPATIBLE"):
@@ -134,10 +134,21 @@ def test_sandbox_backend_has_one_english_vocabulary_and_is_validated_early():
         with pytest.raises(ConfigError, match="backend must be one of"):
             validar_config(cfg)
 
-    for backend in ("auto", "docker", "bwrap", "process", "trusted_local"):
+    for backend in ("auto", "microsandbox", "docker", "bwrap", "process", "trusted_local"):
         cfg = base_config()
         cfg["agent"]["sandbox"] = {"backend": backend}
         assert validar_config(cfg)["agent"]["sandbox"]["backend"] == backend
+
+
+def test_sandbox_oci_image_is_current_and_docker_name_has_no_alias():
+    cfg = base_config()
+    cfg["agent"]["sandbox"] = {"backend": "microsandbox", "imagem_oci": "python:3.12-slim"}
+    assert validar_config(cfg)["agent"]["sandbox"]["imagem_oci"] == "python:3.12-slim"
+
+    legacy = base_config()
+    legacy["agent"]["sandbox"] = {"backend": "docker", "imagem_docker": "python:3.12-slim"}
+    with pytest.raises(ConfigError, match="UNKNOWN_CONFIG_FIELD:agent.sandbox:imagem_docker"):
+        validar_config(legacy)
 
 
 def test_benchmark_schema_rejects_language_aliases_and_missing_gates():
@@ -178,8 +189,9 @@ def test_search_code_backends_share_one_canonical_order_and_truncation(monkeypat
     (tmp_path / "docs.md").write_text("needle\n", encoding="utf-8")
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "test_app.py").write_text("needle\n", encoding="utf-8")
-    files, protected = tools._searchable_files(str(tmp_path))
+    files, protected, scope = tools._searchable_files(str(tmp_path))
     assert protected == 0
+    assert scope["resolution_complete"] is True
 
     fallback = tools._search_matches_fallback(str(tmp_path), "needle", files)
     raw = [
@@ -192,8 +204,7 @@ def test_search_code_backends_share_one_canonical_order_and_truncation(monkeypat
 
     assert ripgrep == fallback
     assert [item["file"] for item in ripgrep] == ["app.py", "docs.md", "tests/test_app.py"]
-    # Rev5.8 keeps the complete physical match universe here; model-facing
-    # projection limits are applied only after grouping/diversification.
+    # Runtime keeps the complete physical match universe before bounded materialization.
 
 
 def test_conversation_message_has_one_core_shape():
@@ -210,16 +221,10 @@ def test_conversation_message_has_one_core_shape():
     assert legacy["messages"] == []
 
 
-def test_agent_info_observable_projection_has_no_tools_alias():
-    import eyle.core.agent as core_agent
-
-    result = {
-        "status": "success", "ok": True, "executed": True, "changed": False,
-        "detail": {"tools": [{"name": "legacy"}], "available_tools": []},
-    }
-    projected = core_agent._observable_tool_result("agent_info", result)
-    assert projected.get("registered_tools") == []
-
+def test_diagnostic_helpers_are_not_public_main_tools():
+    from eyle.core import tools
+    assert "agent_info" not in tools.TOOLS
+    assert "execution_trace" not in tools.TOOLS
 
 def test_pending_continuation_is_exact_versioned_english_contract():
     from eyle.core.continuation import PENDING_SCHEMA_VERSION, validate_pending_continuation

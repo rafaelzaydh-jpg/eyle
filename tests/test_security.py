@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Testes da Atualizacao 18 -- caminho seguro compartilhado."""
+"""Shared safe-path boundary tests."""
 import os
 
 from eyle.core.tools import executar_tool

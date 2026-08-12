@@ -1,291 +1,224 @@
-# Eyle Rev5.8 architecture
+# Architecture — Eyle 2.7.5 Rev1.3
 
-This document describes the **current runtime architecture**. Future design goals are kept separately in [architectural-direction.md](architectural-direction.md) so planned abstractions are not confused with shipped behavior.
+### Rev1.3 Task Memory
 
-## Authority boundary
 
-```text
-Main LLM = semantic authority
-Runtime  = physical/structural authority
-Claim    = semantic challenge
-```
-
-The Main LLM decides request meaning, tool choice, semantic debt, Evidence sufficiency, stopping, writes and Final content. Runtime never classifies intent or creates semantic debt. Claim Review challenges provisional delivery but cannot call tools, mutate state or become a second planner.
-
-## Epistemic cost policy
-
-Eyle treats token efficiency as subordinate to epistemic integrity. Runtime may compact, group and page objective state, but it must not improve a token metric by deciding that unseen facts are semantically irrelevant.
-
-The invariant is:
+Rev1.3 introduces a separate Main-owned intentional state:
 
 ```text
-truthful reality > grounding > material satisfaction > presentation > raw token minimization
+Request
+  ↓
+Main
+  ├─ Investigation  "what do I need to understand?"
+  └─ Tasks          "what did I decide I need to do?"
+       ↓
+Runtime persists/validates structure
+       ↓
+Effects → Observation → Main
 ```
 
-For objective capability results:
+A Task is exactly `{id,parent_id,description,status,result}` with `status=open|completed|dropped`. `parent_id` forms a recursive acyclic tree but never imposes execution order. Main owns creation, revision and closure. Runtime does not infer semantic completion from tools, observations, child status or exit codes, and open Tasks do not gate Final. Closed Tasks require a concise result so Main's own conclusion survives the next turn.
 
-- `coverage_complete` describes whether the declared physical/objective scope was examined;
-- `projection_complete` describes whether every objective result is currently materialized inline;
-- `projection_complete=false` must remain visible and, when continuation is possible, expose a Handle;
-- Main alone decides whether the current projection is semantically sufficient or whether a Handle should be expanded.
+Investigation and Tasks deliberately remain separate contracts. Similar persistence mechanics are not evidence that epistemic and intentional state are the same semantic object. No generic semantic-state framework is introduced in Rev1.3.
 
-A few additional prompt tokens are acceptable when they preserve provenance, Coverage boundaries or an explicit continuation path. Runtime optimization should preferentially remove **duplication, repeated model calls and redundant hot-state retransmission**, not objective facts or uncertainty.
+Coverage is now a mechanically enforced Runtime contract. Every non-empty Coverage value has exactly the universal physical fields `scope`, `examined`, `complete`, `boundaries`, with optional domain-owned `facts`; invalid dialects fail the capability contract instead of silently entering Observation.
 
-## Canonical state ownership
+Frontier snapshots are retained once and pagination detaches only the requested item slice. Continuation Coverage distinguishes `snapshot_exhausted` from `source_materialization_complete`, so an exhausted cursor cannot falsely claim that vanished/unreadable source reality was materialized.
+
+Capability-specific normalization, public/model projections, containment lookup, resource-failure lookup, continuation and freshness are registry hooks. Generic dispatch does not branch on capability names. Registry effect metadata is singular: `observe`, `execute` or `mutate`.
+
+## The whole system
+
+> **Eyle constrains effects, not thought.**
 
 ```text
-physical tool reality       → ObservationLedger
-objective citable material  → SourceRecordLedger
-semantically admitted proof → EvidenceLedger
-semantic debt               → Investigation
-runtime decisions/rejects   → DecisionLedger
-LLM calls/provider attempts → LLMCallLedger (ExecutionContext)
-workspace mutation          → WriteTransaction
-semantic audit              → ClaimReview
+User
+  ↓
+Main
+  ↕
+Runtime
+  ↓
+Claim?
+  ↓
+User
 ```
 
-A history, counter, summary, prompt view or diagnostic is a **projection** of its canonical owner, not a second persisted source of truth.
+Everything else is an internal responsibility, not another reasoning authority.
 
-`workspace_epoch` is an Eyle-owned mutation/replay coordinate. It is not a global filesystem fingerprint and does not own a persistent project graph cache. External filesystem freshness still requires live observation/hash checks.
+## Authority
 
-### ObservationLedger
+### Main
 
-Owns physical tool events, reusable observation identity, coverage metadata, replay identity, continuation snapshots and the pending model-facing observation batch. `observation_map`, public tool history, physical tool count and replay count are derived views.
+Main is the sole task-semantic authority. It decides interpretation, relevance, capability choice, `Investigation`, `Tasks`, grounding use, recovery and stopping.
 
-### SourceRecordLedger
+Core does not prescribe domain strategies such as which code-search tool to prefer, how many files to inspect, when a Frontier is relevant, or when Main should stop investigating.
 
-Owns objectively materialized `src-*` records produced by capabilities. SourceRecords preserve physical/citable facts without asserting semantic relevance.
+### Runtime
 
-### EvidenceLedger
+Runtime is physical authority. It owns capability execution, strict schemas, permissions, sandboxing, transactions, workspace state and physical containment. Capability-specific observation identity belongs to the capability registry; Observation owns only generic physical registration.
 
-Owns only Evidence explicitly admitted by Main from SourceRecords plus narrow Runtime validation facts. A tool result is not automatically Evidence.
+Runtime may reject an impossible or unsafe effect. It does not turn a poor semantic choice into a task-level punishment when the effect itself can be safely rejected or cached.
 
-Owns Evidence identity, admission metadata, persistence, rehydration, freshness lookup and compact navigation. One Observation may materialize multiple SourceRecords, while only SourceRecords explicitly selected by Main are promoted into semantic Evidence.
+### Claim
 
-### DecisionLedger
+Claim is a small adversarial critic over a provisional Final when enabled. It returns only:
 
-Owns runtime decision events plus deterministic rejection fingerprints. Public decision history and repeated-rejection counts are derived. Repeated rejection on unchanged objective state can be recognized without creating a parallel loop-state owner.
+```text
+{verdict: accept|challenge, issues: [...]}
+```
 
-### LLMCallLedger / ExecutionContext
-
-A logical LLM call owns its prompt metadata and accumulates physical provider attempts in the same record. `ExecutionContext` owns run-scoped deadline, physical token/call budgets, terminal capabilities and LLMCallLedger. Configuration remains immutable configuration.
-
-### WriteTransaction
-
-One transaction owns patches, attempts, dry-run, confirmation identity, apply, compile/tests/full verification, failure and rollback. Pending confirmation carries the transaction identity plus serialized Session; patch payloads are not duplicated in a second pending state.
-
-### ClaimReview
-
-Stores the semantic review itself. Follow-up debt is derived from that review when needed rather than persisted as a parallel Findings/Gaps state machine.
+Claim may challenge unsupported, contradicted, over-broad, omitted or internally inconsistent conclusions. It does not plan, select capabilities, prescribe a recovery strategy, rewrite the answer or mutate `Investigation` or `Tasks`. Its canonical output contains at most 3 independent blockers, at most 4 coordinates per blocker and a concise reason. These bounds constrain the protocol artifact, not the model's internal reasoning. Runtime derives enough output reservation from the bounded schema and permits only one protocol recovery after truncation/invalid structured output; repeated failure stays fail-closed.
 
 ## Investigation
 
-Investigation is optional persistent semantic debt created only by the Main LLM.
+`Investigation` is an optional Main-owned semantic notebook:
 
 ```text
-[]        → no persistent semantic debt declared
-[T1,...]  → debt declared by Main LLM
+{id, goal, status, grounding_ids, reason}
 ```
 
-Once declared, Runtime enforces structural invariants only: durable identity/goal, valid Evidence IDs, Evidence for `established`, reason for closure, and no accepted Final while a target remains open.
+States remain `open`, `established`, or `dismissed`, but they are Main semantics rather than Runtime completion gates.
 
-Current statuses:
+Runtime validates only physical/structural facts it can know without interpreting the task:
+
+- IDs/shapes are legal;
+- referenced `mat-*` material exists when supplied;
+- grounding identity remains physically valid.
+
+An open Investigation does not block Final or a valid write. A rejected Investigation update does not cancel an otherwise valid action in the same turn.
+
+## Capability ownership
+
+`ObjectiveScope` is the reference implementation style: mechanically resolve physical scope, report truthful coverage, and never infer semantic relevance. Rev1.2.2 applies that pattern to the full physical output contract.
+
+Every public capability explicitly owns:
+
+- execution;
+- memoization identity policy (`signature` callable or explicit `None`);
+- Material observation;
+- Coverage projection;
+- Frontier projection;
+- source-specific continuation/freshness/rehydration when that physical domain needs it.
+
+Agent and Observation do not branch on the public capability catalog. Adding a future network/device/database capability should not require teaching Core what that domain means.
+
+## Observation
+
+Observation is the canonical physical memory boundary between Runtime and Main.
 
 ```text
-open
-established
-dismissed
+Observation
+├─ material: mat-*
+├─ Coverage
+├─ Frontier: fr-*
+└─ Runtime-private continuation state
 ```
 
-## Final and grounded Claim outcomes
+### Material
 
-Final has one canonical shape:
-
-```json
-{
-  "answer": "...",
-  "limitations": [],
-  "evidence_ids": ["ev-..."]
-}
-```
-
-The Main LLM selects the Evidence that supports its delivered answer. Runtime validates identity/freshness; it does not select relevant Evidence on the model's behalf.
-
-Claim receives one canonical task plus bounded grounding coordinates:
-
-```text
-request
-request:<literal_anchor_id>
-answer:<anchor_id>
-evidence:<EvidenceID>
-runtime:<runtime_fact_id>
-investigation:<target_id>
-```
-
-This avoids the false equivalence `grounding == EvidenceLedger`. Runtime mechanically validates coordinate existence. Claim decides what those coordinates establish. `material_satisfaction.status` is `satisfied`, `gap`, or `blocked`. Semantic gaps carry `required_property`, describing what remains unresolved without prescribing a tool.
-
-Non-retryable physical tool failures are retained in `ExecutionContext.terminal_capabilities`; callable projections exclude those capabilities for the rest of the job.
-
-## Progressive capability view
-
-`TOOLS` is the sole executable registry. A model call does not receive every expanded tool contract.
-
-```text
-callable tool not in hot set → capability_index: compact signature + purpose
-most recent requested tools  → active_tools: full contract
-```
-
-Only the **two most recently requested distinct tools** remain expanded in the hot model view. Older tools return to `capability_index` and remain callable. Expanded membership is derived from DecisionLedger request events; there is no Tool Selector call and no persisted activation state.
-
-## Context projection
-
-Canonical world/task state may be larger than the current model view.
-
-The Main prompt uses a bounded deterministic projection containing:
-
-- the active request;
-- current Investigation state;
-- recent SourceRecord navigation plus Investigation-pinned/recent Evidence navigation;
-- pinned plus recent Observation navigation;
-- bounded current-delta tool results;
-- the two hot expanded tool contracts;
-- compact capability navigation for the rest.
-
-The ledgers themselves remain complete. Projection limits model materialization; it does not delete canonical state and does not introduce semantic ranking by Runtime.
-
-Claim receives only Evidence explicitly selected by Final plus Evidence already attached by Main to Investigation. This prevents exploratory Evidence from automatically becoming verifier payload.
-
-## Canonical capability / observation boundary
-
-Every executable tool uses one physical result envelope with mandatory execution state plus optional observation state:
-
-```text
-Capability.execute(args)
-→ status / ok / executed / changed / error_code / retryable
-→ observations[]
-→ coverage
-→ frontiers[]
-→ handles[]
-→ detail
-```
-
-Registry entries expose `effect=observe|execute|mutate` as a small domain-neutral physical class. Specific `effects` metadata may still carry concrete safety detail.
+`mat-*` entries preserve citable physical material and provenance through generic `locator + content_hash` identity plus an optional opaque `source_version`. Observation never interprets locator kinds or version semantics. A file hash, HTTP ETag, database row version or device generation can all be capability-owned `source_version` values. There is no SourceRecord/Evidence promotion layer.
 
 ### Coverage
 
-In Rev5.8, `coverage` is capability-defined objective metadata describing what the returned observation established or examined. The Core transports and records it; domain-specific meaning remains with the originating capability.
+Coverage answers only: **what did this capability physically examine or establish?**
 
-For current Python reachability this includes fields such as `objective_complete`, `objective_result`, roots tested, scan completeness and shortest path length. These are **current tool fields**, not a claim that all future Coverage must use code/reachability semantics.
+The canonical shape is:
+
+```text
+scope       declared physical scope
+examined    objective measured portion
+complete    whether that scope was exhausted
+boundaries  optional physical exclusions/limits
+facts       optional capability-owned physical facts
+```
+
+Coverage never decides whether the user request is semantically satisfied. Scan completeness and model materialization completeness are separate facts.
 
 ### Frontier
 
-A `frontier` is an objective continuation boundary not materialized by the current observation. It may be a hard physical/static boundary or a deliberate soft materialization boundary. A frontier is not semantic debt and does not instruct Main to continue.
+Frontier means more objective reality remains physically accessible. Main receives stable `fr-*` coordinates and freely decides whether continuation matters.
 
-### Handle
+Opaque handles/cursors remain Runtime-private. Large continuation payloads are stored once in immutable Runtime-private snapshots; each Frontier cursor references the shared snapshot instead of duplicating its payload. The snapshot is garbage-collected after its final handle is consumed.
 
-A `handle` addresses an observation continuation without injecting its complete payload into the prompt. Rev5.8 snapshot handles are opaque, bounded, persisted with ObservationLedger and invalidated when the workspace epoch no longer matches. `expand_observation` materializes the addressed snapshot page without code-domain semantic interpretation.
+`continue_observation(frontier=...)` resolves the cursor mechanically and delegates page materialization back to the source capability, so Observation never needs domain-specific continuation logic.
 
-```text
-WORLD STATE != MODEL CONTEXT
-```
+## Replay is memoization
 
-Handles are a concrete selective-materialization mechanism for this boundary.
+If Main requests an observation already covered at the current workspace epoch, Runtime may return the canonical cached Observation instead of executing the same physical work again.
 
-## SourceRecords, Objective Projection and Evidence Admission
+Replay is telemetry, not semantic debt. It does not create a duplicate Observation and does not trigger a specialized `OBSERVATION_REPLAY_LOOP` task failure. Ordinary physical fuses still contain pathological repetition.
 
-Rev5.8 separates objective materialization from semantic proof. `SourceRecordLedger` owns stable `src-*` records produced by capabilities. A SourceRecord says **what was physically materialized and where it came from**; it does not say that the material is relevant or sufficient for the user's objective.
+## Operational self-observation
 
-Main may explicitly place a `src-*` ID in an Investigation update or Final grounding set. Runtime then performs a deterministic identity-preserving promotion into Evidence (`src-0001 → ev-src-0001`). Runtime never chooses which SourceRecords to promote. Narrow Runtime validation facts remain the only non-Main Evidence admission path.
+Runtime derives a bounded `operational_feedback` projection from canonical DecisionLedger, Observation, Claim outcome and ExecutionContext facts. It can expose recent accepted/rejected actions, the last challenge, Main-selected grounding IDs, available Material IDs, replay-only preflights, executed observations, open Frontiers, workspace epoch and remaining physical token budget.
 
-This keeps the authority boundary exact:
+This projection is factual only. Runtime does not label a sequence as a semantic loop, choose a recovery strategy, or force stopping. Main decides whether already-observed Material is sufficient, whether another capability is useful, or whether to return a Final with honest limitations.
 
-```text
-Main formulates objective property
-→ capability exhausts/queries physical state
-→ deterministic grouping / projection / handles
-→ SourceRecords + Coverage + Frontiers
-→ Main decides relevance/materiality
-→ explicit Evidence admission
-→ Claim audits grounding and material satisfaction
-```
+## Capability failures
 
-A capability may compute over all files, AST nodes or graph edges needed for its objective query. It may sort, group, deduplicate, count, paginate and expose handles using objective rules. It must not select results because they are "more relevant" to the user's semantic intent. If the same objective capability call is issued for two different user intentions, its physical result must not change because of those intentions.
+Capability validation/execution failures are physical results returned to Main whenever the task can safely continue. One invalid sibling in a multi-call batch does not cancel valid independent siblings.
 
-For `search_code`, Rev5.8 distinguishes physical coverage from model projection. The literal search exhausts the readable scope, groups the complete match universe, then applies deterministic cross-file diversity before bounding inline ranges. `coverage_complete` describes the searched scope; `projection_complete=false` means additional objective ranges are available behind a continuation handle. It is not a semantic incompleteness signal by itself.
+Runtime blocks the unsafe/impossible effect; Main decides the next semantic action.
 
-## Property-directed Evidence
+## Context and physical containment
 
-Eyle is a coding agent, not a dead-code auditor or a semantic liveness oracle. The Main LLM identifies the **material property** requested and gathers Evidence that discriminates that property. A convenient proxy is not proof of a stronger proposition: references do not by themselves prove productive reachability; compilation does not prove behavior; passing tests do not prove untested compatibility; matching signatures do not prove semantic equivalence.
-
-Runtime supplies observations. Main owns interpretation.
-
-## Structural relations
-
-`symbol_relations` is a structural coding capability.
-
-- `query="relations"` returns the local relation view.
-- `query="reachability"` resolves explicit roots or objective Python entrypoint signals, searches the structural graph and can materialize a shortest root-to-target path with edge coordinates.
-
-A positive path returns `coverage.objective_complete=true` for the structural reachability query and suppresses unrelated unresolved-dynamic frontiers. When a path is not established, depth boundaries, relevant dynamic/ambiguous resolution, parse errors or scan limits may remain objective frontiers behind continuation handles.
-
-The tool does not label code `live`, `dead`, `legacy`, safe or removable.
-
-## Physical inference envelope
-
-Semantic freedom operates inside fixed physical containment:
+The deployment llama-server has one hard per-call context ceiling:
 
 ```text
-backend context window          <= 32768 tokens
-message/job prompt attempts     <= 90000 tokens
-message/job completion          <= 8000 tokens
-message/job physical total      <= 98000 tokens
+context_window_tokens = 38000
 ```
 
-Every backend attempt charges its full locally estimated prompt to the hard envelope regardless of cache. Turns, tools, LLM calls and deadline remain independent fuses.
+Runtime reserves room for model output and safety overhead before compiling each request. There is no separate cumulative prompt-token or completion-token budget in Core.
 
-In `self_check`, Claim runs only when grounded runtime state exists (Observation, Evidence, Investigation or WriteTransaction). A no-state Final can be accepted without verifier work. Explicit `verified` mode always runs Claim.
+Task-wide containment is deliberately limited to:
 
-## Structured transport
+```text
+max_total_tokens       90000
+task_deadline_seconds 1800
+```
 
-Agent and Claim require strict JSON Schema. There is no capability downgrade, JSON-object fallback, prompt fallback, structural repair call or truncation replay.
+Rev1.3 has no fixed LLM-turn, LLM-call or tool-call quota. Each additional semantic turn is allowed until the physical token/deadline envelope is exhausted. The 90k task fuse is deliberately much closer than the experimental 1M Rev1.2.x value.
+
+Canonical state may outlive one model call. Main-facing views are bounded physical projections; open Frontiers and referenced grounding remain addressable without exposing private handles.
 
 ## Writes
 
+Real workspace mutation has one supervised physical path:
+
 ```text
-Main LLM patches
-→ deterministic dry-run
-→ explicit confirmation
-→ WriteTransaction apply
-→ compile/tests/full output verification
-→ success or rollback
+Main patches
+  ↓
+Runtime dry-run
+  ↓
+WriteTransaction
+  ↓
+user confirmation
+  ↓
+apply
+  ↓
+validation
+  ↓
+commit result or rollback
 ```
 
-Writes are the only route to real workspace mutation controlled by the agent.
+`run_command` operates on a sandbox copy and cannot authorize real workspace mutation.
 
-## Sandbox
 
-`run_command` executes arbitrary shell/network/package/build/test work only inside a strong writable project snapshot. `backend=auto` prefers Docker, then Bubblewrap. The real workspace is never mounted read-write into the unrestricted command environment.
+## Sandbox execution
 
-If no strong backend exists, `run_command` returns `SANDBOX_UNAVAILABLE` with `retryable=false`. That becomes a Runtime Fact and terminal capability fact for the job; it does not authorize weak local execution.
+`run_command` keeps the semantic contract unchanged while Runtime selects a strong physical backend. `backend=auto` prefers Microsandbox, then Docker, then Bubblewrap. Microsandbox is a per-job embedded microVM laboratory: Eyle creates one disposable writable workspace snapshot and keeps the VM/rootfs alive across commands in the same physical job. Linux/macOS bind-mount the disposable snapshot at `/workspace` for speed. Native Windows deliberately avoids the 0.6.8 virtio-fs bind path and stages the snapshot into VM-private `/workspace` using `Sandbox.fs.copy_from_host`. The real workspace is never a writable guest mount.
 
-A network-enabled sandbox protects host/workspace integrity, **not confidentiality of non-secret source copied into the sandbox**. Code visible to a process with network access can in principle be transmitted externally.
+Unrestricted Microsandbox commands use the canonical `public` network profile via `Network.from_profiles("public")`. Supervised tests use Microsandbox only when explicitly configured with a test-capable OCI image; that path creates a separate one-off microVM and uses `Network.none()` when `bloquear_rede=true`. Runtime applies VM vCPU/memory settings and command timeout/resource rlimits. A runtime/virtualization failure after Microsandbox is selected is reported as that physical failure rather than silently switching execution environment mid-attempt.
 
-## Persistence
+## Service infrastructure
 
-Rev5.8 is a clean break. Config, Session, queue and project-memory schemas are exact 5.8. Session and project-memory loaders reject missing or unknown same-version envelope fields instead of defaulting/filtering them. Earlier state is rejected, never migrated or adapted.
+Queue, worker, persistence, history, progress and telemetry host the agent. They are infrastructure, not reasoning authorities.
 
-Core contracts use one canonical English representation. Provider/environment variability belongs behind adapters or capabilities; it must not create aliases or dual-read contracts inside AgentSession/Runtime state.
+## Clean break
 
-## Future architectural direction
+2.7.5 Rev1.3 uses strict current Session, queue and project-memory schemas. It does not migrate removed Core contracts or preserve semantic gates from previous revisions. Git and `CHANGELOG.md` retain history.
 
-The current product remains a coding agent. The broader design direction is to make `Observation`, `Coverage`, `Frontier` and `Handle` increasingly domain-neutral so future capabilities can reuse the same Core observation protocol without embedding their domain into `AgentSession`.
 
-That direction is documented separately in [architectural-direction.md](architectural-direction.md) and must not be read as a claim that non-coding toolpacks are currently implemented.
+### Microsandbox 0.6.8 API closure
 
-## Protected resource read boundary retained in Rev5.8
-
-Rev5.8 retains the physical protected-resource identity boundary established in Rev5.7.7 and uses one explicit protected-resource policy. Normal source code always remains observable regardless of identifiers or literal content. Credential/private-key stores are identified by official resource-path semantics, then resolved to physical file identity so symlink and hard-link aliases inherit the same boundary. No content-based secret scanner exists.
-
-`list_tree` may expose that a protected resource exists and marks its content access as protected. `read_file`, source search, symbol parsing, transaction dry-run and direct diff content do not expose that physical resource through either its official path or an alias. `git_status` may expose paths/status without content. Sandbox snapshots omit every protected physical alias and report the omissions. Generic PEM/public-key/certificate files and `.env` templates such as `.env.example` remain readable.
-
-Coverage is scope-aware. A search may be complete for `readable_workspace_files` while remaining incomplete for the whole workspace because protected resources were deliberately excluded; the exclusion is represented as a `protected_resource_boundary` and preserved in negative Evidence. Stable protected-resource denials are resource-scoped observations reusable within the current workspace epoch, so a different line range does not trigger the same impossible read again. Security therefore cannot silently delete ordinary source or turn a restricted region into a false global absence.
+The Runtime targets the pinned Python SDK contract directly: it bootstraps the local runtime with `is_installed()`/`await install()`, uses `Network.from_profiles("public")` for ordinary `run_command`, and `Network.none()` only for explicitly network-isolated supervised execution. The removed/historical `Network.public_only()` helper is not part of the active integration.

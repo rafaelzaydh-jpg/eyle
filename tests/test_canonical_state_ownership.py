@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 
-from eyle.core.decision import empty_ledger as empty_decisions, record_rejection, repeated_rejection_count, history_view
+from eyle.core.decision import empty_ledger as empty_decisions, record_rejection, history_view
 from eyle.core.execution_context import ExecutionContext
 from eyle.core.observation import record as record_observation, set_pending_results, persisted_view as persisted_observations
 from eyle.core.session import AgentSession, SESSION_SCHEMA_VERSION
@@ -12,10 +12,10 @@ from tests.canonical import base_config
 
 def test_session_persists_only_canonical_state_owners():
     state = AgentSession("x").to_dict()
-    assert state["session_schema_version"] == SESSION_SCHEMA_VERSION == "5.8"
+    assert state["session_schema_version"] == SESSION_SCHEMA_VERSION == "2.7.5-r1.3"
     assert set(state) == {
-        "session_schema_version", "request", "task_id", "turn", "workspace_epoch",
-        "observation_ledger", "decision_ledger", "source_record_ledger", "evidence_ledger", "investigation",
+        "session_schema_version", "request", "execution_id", "turn", "workspace_epoch",
+        "observation_ledger", "decision_ledger", "investigation", "tasks",
         "claim_review", "conversation_background", "write_transaction",
     }
     for removed in (
@@ -37,15 +37,14 @@ def test_llm_call_ledger_owns_prompt_and_all_provider_attempts_together():
     assert execution.llm_request_count == 2
 
 
-def test_decision_ledger_is_history_and_rejection_identity_at_once():
+def test_decision_ledger_is_observability_not_semantic_repetition_policy():
     ledger = empty_decisions()
-    state = {"workspace_epoch": 0}
-    first = record_rejection(ledger, turn=1, code="X", payload={"a": 1}, objective_state=state, decision="final", repeated_outcome="stalled")
-    second = record_rejection(ledger, turn=2, code="X", payload={"a": 1}, objective_state=state, decision="final", repeated_outcome="stalled")
-    assert (first, second) == (1, 2)
+    record_rejection(ledger, turn=1, code="X", decision="final")
+    record_rejection(ledger, turn=2, code="X", decision="final")
     history = history_view(ledger)
-    assert [item["outcome"] for item in history] == ["rejected", "stalled"]
-    assert repeated_rejection_count(ledger) == 1
+    assert [item["outcome"] for item in history] == ["rejected", "rejected"]
+    assert all("rejection_fingerprint" not in item for item in history)
+    assert all("required_properties" not in item for item in history)
 
 
 def test_observation_persistence_keeps_identity_not_hot_source_or_pending_batch():
@@ -53,7 +52,7 @@ def test_observation_persistence_keeps_identity_not_hot_source_or_pending_batch(
     model_result = {
         "tool":"read_file", "status":"success", "ok":True, "executed":True,
         "detail":{"file":"app.py", "numbered_content":"1: SECRET_SOURCE", "content":"SECRET_SOURCE"},
-        "evidence_ids":["ev-0001"],
+        "grounding_ids":["mat-0001"],
     }
     runtime_result = {
         "status":"success", "ok":True, "executed":True, "changed":False,
@@ -71,13 +70,13 @@ def test_observation_persistence_keeps_identity_not_hot_source_or_pending_batch(
     assert "SECRET_SOURCE" not in serialized
     assert persisted["pending_results"] == []
     assert persisted["entries"]
-    assert persisted["events"][0]["evidence_ids"] == ["ev-0001"]
+    assert persisted["events"][0]["grounding_ids"] == ["mat-0001"]
 
 
 def test_execution_context_does_not_mutate_configuration_into_runtime_state():
     cfg = base_config()
     before = copy.deepcopy(cfg)
-    ExecutionContext.from_config(cfg, task_id="t1", source_job_id=9)
+    ExecutionContext.from_config(cfg, execution_id="t1", source_job_id=9)
     assert cfg == before
     assert "_runtime_agent_budget" not in cfg
 

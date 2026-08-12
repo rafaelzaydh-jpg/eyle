@@ -1,154 +1,138 @@
-<p align="center">
-  <img src="assets/eyle-banner.svg" alt="Eyle" width="760">
-</p>
-
 # Eyle
 
-**Eyle is a source-available coding agent for repository investigation, evidence-grounded answers, sandboxed execution, and supervised source changes.**
+**Version:** 2.7.5 · **Schema:** 2.7.5-r1.3 · **Revision:** rev1.3-task-memory
 
-**Version:** 2.7.4 · **Schema:** 5.8 · **Revision:** rev5.8-objective-projection-evidence-admission
+Eyle is a supervised agent runtime built around one Main LLM, deterministic capabilities, canonical physical Observation, Main-owned Investigation/Tasks and optional Claim review.
 
-Eyle is useful when the answer is not in one file or one grep result. It can trace execution across modules, inspect contracts and data flow, determine whether a symbol is structurally reachable from real entrypoints, distinguish established absence from unresolved static uncertainty, run commands/tests in an isolated project snapshot, and apply confirmed patches through a rollback-capable write transaction.
+## Rev1.3: Task Memory
 
-## What Eyle is for
+> **Eyle constrains effects, not thought.**
 
-Typical tasks include:
+Rev1.3 adds the smallest intentional-memory contract needed for longitudinal work inside one AgentSession. The physical architecture from Rev1.2.3.2.2 remains intact; this revision addresses the separate problem that knowing what happened does not by itself preserve what Main has decided is still left to do.
 
-- **Repository investigation** — find where behavior is implemented and reconstruct the path that reaches it.
-- **Execution-path analysis** — establish whether a function, parser, handler, policy or verifier is structurally reachable from a productive entrypoint.
-- **Contract and compatibility audits** — locate normalization boundaries, duplicate accepted shapes, aliases, fallback routes and compatibility code.
-- **Change-impact analysis** — follow imports, calls, callbacks and structural relationships before changing code.
-- **Grounded technical answers** — keep observations and supporting Evidence addressable instead of relying only on model memory.
-- **Sandboxed engineering work** — run tests, builds, package installation and arbitrary commands against a disposable writable snapshot rather than the real workspace.
-- **Supervised code changes** — dry-run patches, require confirmation, apply through one canonical transaction, verify, and roll back on failure.
+### Tasks
 
-Eyle is not intended to replace source control, a test suite, or static analysis with an LLM guess. Its architecture is built so deterministic capabilities do mechanical work over the repository while the Main LLM owns semantic interpretation.
-
-## Why this architecture exists
-
-Large repositories contain much more state than should be copied into every model prompt. Eyle keeps canonical runtime state separate from the model-facing working set:
+`Task` is Main-owned semantic state with exactly five fields:
 
 ```text
-repository / runtime reality
-        ↓
-deterministic capabilities
-        ↓
-Observation → SourceRecords / Coverage / Frontier / Handle
-        ↓
-bounded objective projection
-        ↓
-Main LLM
-        ↓
-explicit Evidence admission → grounded Final
-        ↓
-Claim Review
+id
+parent_id
+description
+status: open | completed | dropped
+result
 ```
 
-The Main LLM decides what the request means, what must be established, which capability to use, and when the evidence is semantically sufficient. The Runtime owns execution, schemas, state, replay, safety and physical budgets. Claim Review challenges the grounded delivery without becoming a second planner.
+Tasks are recursive through `parent_id`, so one task may expand into thousands of subtasks without introducing Epic/Milestone/Step taxonomies. Tree position is composition, not execution order. Main may revisit any branch, revise a task, or work across branches by issuing the updates it considers necessary.
 
-## Measured repository investigation
+Main alone decides whether a task is created, completed or dropped. Runtime validates only structure and persistence: exact shape, stable IDs, existing parents and an acyclic parent graph. Runtime never closes a parent because its children are closed, never maps `exit 0` to semantic completion, and never blocks Final because an open task exists. Closed tasks retain a concise `result`, preserving what Main says was accomplished or why work was abandoned.
 
-A repeated message-contract investigation provides a concrete example of why these boundaries matter. An earlier run became trapped around an incorrectly hidden central source file and failed after **20 turns, 29 physical tools and 92,448 estimated physical tokens**. With the corrected Rev5.7.7 boundary, the same class of investigation completed in **4 turns, 8 tools and 32,479 estimated physical tokens**, with one successful Claim Review.
+`Investigation` remains separate and epistemic: **what am I trying to understand?** `Task` is intentional: **what did I decide I need to do?** Observation remains physical: **what did reality show?** Claim remains a lateral critic and cannot mutate either Investigation or Tasks.
 
-Rev5.8 then reran the same request after introducing Objective Projection and explicit Evidence admission. It still completed in **4 turns and 8 tools**, but the epistemic state changed materially: **52 SourceRecords were objectively materialized, only 2 were promoted to Evidence, both were cited by Claim, and structurally unreferenced Evidence fell from 41 to 0**. The run used **33,747 estimated physical tokens** — about 3.9% more than Rev5.7.7 — while preserving complete declared search coverage, bounded projections and continuation handles.
-
-That small token increase is not treated as a regression by itself. Eyle optimizes for **truthful, grounded, navigable information first**. A few additional model tokens are acceptable when they preserve objective coverage/provenance and give Main an explicit path to materialize more reality if the current projection is insufficient. Token optimization should remove duplicated state, unnecessary inference cycles and irrelevant retransmission; it must not hide uncertainty or discard objective continuation merely to improve a counter.
-
-See [docs/benchmark.md](docs/benchmark.md) for the measured runs, limitations and regression contract. Benchmark numbers are observations, not semantic quotas: Eyle does not impose arbitrary “N tools per task” or “minimum token” rules.
-
-## Directed code observation
-
-For Python structural questions, Main can ask the repository a property-shaped query instead of reconstructing the graph one neighbor at a time:
+The structured Main envelope is now:
 
 ```text
-symbol_relations(
-  symbol="_conversation_history",
-  query="reachability"
-)
+{action, investigation_updates, task_updates}
 ```
 
-A positive result can materialize the complete path from a detected entrypoint to the target with edge coordinates. A negative result can expose unresolved physical/static boundaries rather than pretending that “not found” means impossible.
+`AgentSession.tasks` is canonical persisted state. Omitted task IDs remain unchanged across turns. Accepted/rejected task mutations are recorded in DecisionLedger for observability, but DecisionLedger does not own task meaning.
 
-Capability results can carry:
+Rev1.3 also renames the old operational `AgentSession.task_id` to `execution_id`; that identifier always meant the physical run/job reference and is no longer allowed to collide conceptually with semantic Tasks. This is a clean break: Rev1.2.x sessions/config/queue/project-memory state are rejected rather than migrated.
+
+The release intentionally does **not** add a Planner, scheduler, focus queue, task priority system, generic cognitive ledger, Memory Kernel, embeddings, tags or automatic convergence gate. Task Memory is the minimum experiment.
+
+The Rev1.2.3.2.2 Microsandbox closure remains active: `backend=auto` resolves Microsandbox → Docker → Bubblewrap; native Windows stages the disposable workspace through guest filesystem copy, while Linux/macOS may use the disposable bind-mounted snapshot. The real workspace is never authorized by sandbox mutation.
+
+The architecture remains deliberately small:
 
 ```text
-observations[]
-coverage
-frontiers[]
-handles[]
+User
+  ↓
+Main
+  ↕
+Runtime / capabilities
+  ↓
+Observation
+  ↓
+Claim?
+  ↓
+User
 ```
 
-`Coverage` describes what the capability objectively examined or established. A `Frontier` describes an unresolved continuation boundary. A `Handle` allows later materialization without keeping the entire observed space hot in model context. These concepts do not tell the Main LLM what is semantically relevant; they make the physical limits of an observation explicit.
-
-## Objective projection and Evidence admission
-
-Rev5.8 separates **what a capability objectively materialized** from **what Main decided is proof**. A capability may exhaust a literal search, AST relation or graph property over a large repository, then deterministically group/page that result. It may not rank which facts are semantically relevant. Materialized `src-*` SourceRecords become `ev-src-*` Evidence only when Main explicitly selects them in Investigation or Final grounding.
-
-For bounded searches, `coverage_complete` describes the searched scope while `projection_complete` describes whether every objective result is inline. Omitted objective ranges remain addressable through opaque handles; they are not silently discarded or semantically filtered.
+### Material + Coverage + Frontier
 
 ```text
-ObservationLedger   → physical tool reality, replay and coverage
-SourceRecordLedger  → objectively materialized citable source records
-EvidenceLedger      → Main-admitted Evidence lifecycle and freshness
-DecisionLedger     → runtime decisions and deterministic rejections
-LLMCallLedger      → logical model calls and provider attempts
-WriteTransaction   → mutation, verification and rollback
-Investigation      → semantic debt declared by Main
-ClaimReview        → grounded semantic audit
+Capability
+├─ observations → Material candidates
+├─ coverage     → what physical scope was examined
+└─ frontiers    → what objective reality remains accessible
+        ↓
+Observation
+├─ mat-*  generic physical material
+├─ Coverage canonical physical map
+└─ fr-*   public continuation refs
+          ↓
+   Runtime-private snapshot + cursor
 ```
 
-Canonical ledgers can remain complete while each model call receives only a bounded hot projection: the active request, current Investigation, recent/pinned navigation, current tool deltas and full contracts for only the two most recently requested tools. Older tools remain callable through a compact capability index.
+A file is only one locator kind. Future network, database, device, HTTP or sensor capabilities can emit their own locator/version semantics without changing Observation.
 
-This is how repository size is pushed toward deterministic machine work instead of repeated LLM context materialization.
+A Frontier does not duplicate its source payload. One immutable private snapshot may back many lightweight continuation cursors and is garbage-collected when no cursor remains.
 
-## One Core contract, flexible adapters
+Coverage and Frontier are intentionally orthogonal: a capability can completely examine its declared search scope while still exposing a Frontier because only part of the resulting material has been projected to Main.
 
-> **Compatibility inside the Core is suspicious. Compatibility behind adapters/capabilities is desirable.**
+### Capability independence
 
-Core persistence and runtime contracts use one exact current representation. External variability belongs behind boundaries that normalize into that representation. Current examples include OpenAI-compatible/Ollama provider transport and Docker/Bubblewrap environment portability.
+Adding a new observational capability should require its registry/implementation and its own tests — not branches in Agent, Observation, Claim, Investigation or DecisionLedger. The registry is the domain owner; Core consumes the canonical physical envelope generically.
 
-Conversation messages entering Core use the canonical shape:
+### Investigation and Claim
 
-```json
-{"role": "user", "content": "..."}
-```
+`Investigation` remains an optional Main-owned notebook. Claim receives only Request, provisional Final, Main-selected physical grounding and compact Runtime facts. It does not inspect Investigation or the filesystem.
 
-Provider/environment diversity must not turn into aliases, dual-read contracts or historical payload tolerance inside AgentSession.
+## Core rules
 
-## Protected resources
+- Main owns semantics.
+- Runtime owns physical effects.
+- Claim challenges conclusions; it does not plan.
+- Observation owns physical material once.
+- Coverage is physical completeness, never semantic sufficiency.
+- Frontier is available continuation, never an instruction.
+- Invalid/unsafe effects are blocked; safe independent work may continue.
+- Git/`CHANGELOG.md` retain history instead of compatibility bridges in current Core.
 
-Eyle does not guess that ordinary source code is secret because it contains names such as `token`, `password` or `api_key`. Normal source remains readable, searchable, structurally analyzable and available to sandbox snapshots.
+## Public capabilities
 
-Only explicit credential/private-key resources are content-restricted. Physical aliases are resolved so symlink/hard-link paths cannot bypass the same boundary. The existence of a protected resource may remain observable while its content is excluded. Public keys, certificates, generic public PEM material and `.env` templates remain readable.
+Rev1.3 exposes **16** deterministic capabilities:
 
-See [SECURITY.md](SECURITY.md) for the exact boundary.
+`calculate`, `project_stats`, `count_tokens`, `inspect_project`, `list_tree`, `search_code`, `symbol_relations`, `continue_observation`, `find_symbol`, `read_file`, `run_command`, `memory_search`, `memory_store`, `run_tests`, `git_status`, `git_diff`.
 
-## Tools
+Execution trace remains internal diagnostics. Real workspace writes are not a public tool; Main emits patches and Runtime owns dry-run, confirmation, apply, verification and rollback.
 
-Eyle exposes 18 deterministic public tools:
+## Sandboxed execution
 
-`calculate`, `agent_info`, `project_stats`, `count_tokens`, `inspect_project`, `list_tree`, `search_code`, `symbol_relations`, `expand_observation`, `find_symbol`, `read_file`, `run_command`, `memory_search`, `memory_store`, `run_tests`, `execution_trace`, `git_status`, `git_diff`.
+`run_command` executes only inside a disposable copied workspace under a strong sandbox backend. `auto` prefers Microsandbox, then Docker, then Bubblewrap. The Microsandbox backend is an embedded per-job microVM laboratory; sandbox mutation never modifies or authorizes the real workspace. On Windows, Microsandbox currently depends on Windows Hypervisor Platform (WHP).
 
-Real project writes are not public tools. Main emits canonical patches and Runtime owns dry-run, confirmation, application, verification and rollback.
+See [SECURITY.md](SECURITY.md).
 
 ## Physical containment
 
-Default job-level fuses:
+The only tight model-window constraint of this deployment is the llama-server ceiling:
 
 ```text
-max_llm_turns          24
-max_tool_calls         64
-max_llm_calls          32
-max_prompt_tokens      90000
-max_completion_tokens  8000
-max_total_tokens       98000
-task_deadline_seconds  1800
-backend context window <= 32768
+context_window_tokens = 38000   # hard per model call
 ```
 
-These are containment limits, not semantic stopping rules.
+The remaining task-wide containment is deliberately minimal:
+
+```text
+max_total_tokens         90000
+task_deadline_seconds 1800
+```
+
+There are no cumulative prompt/completion budgets and no fixed LLM-turn, LLM-call or tool-call quota. The 90k total-token fuse and deadline are physical runaway containment, not semantic stopping rules. Main sees remaining physical headroom in its factual operational view and still decides whether to continue, change approach or finish.
 
 ## Run
+
+**Runtime:** Python 3.11+
 
 ```bash
 python -m pip install -r requirements.lock
@@ -157,26 +141,22 @@ python main.py perguntar "Analyze the project"
 python main.py serve
 ```
 
-Development and release verification:
+Development verification:
 
 ```bash
 python -m pip install -r requirements-dev.lock
-python -m pytest -q
-python -m eyle.devtools.release_identity
-python -m compileall -q eyle llm main.py
+python -B -m pytest -q
+python -B -m compileall -q eyle llm web main.py
+python -B -m eyle.devtools.release_identity
 node --check web/static/app.js
 ```
 
 ## Documentation
 
-- [Benchmark](docs/benchmark.md) — measured behavior, regression cases and known efficiency headroom.
-- [Architecture](docs/architecture.md) — current authority, state and execution contracts.
-- [Technical overview](docs/technical-overview.md) — the runtime pipeline and why it scales better than repeated full-context reconstruction.
-- [Configuration](docs/configuration.md) — current exact configuration and physical fuses.
-- [Architectural direction](docs/architectural-direction.md) — future design goals, not current product claims.
-- [Publishing](docs/github-publishing.md) — release packaging and verification.
-- [Changelog](CHANGELOG.md) — public releases and pre-public engineering history.
-
-## License
-
-Eyle is **source-available, not open-source software**. See [LICENSE.md](LICENSE.md).
+- [Architecture](docs/architecture.md)
+- [Technical overview](docs/technical-overview.md)
+- [Architectural direction](docs/architectural-direction.md)
+- [Configuration](docs/configuration.md)
+- [Benchmark/regression contract](docs/benchmark.md)
+- [Publishing](docs/github-publishing.md)
+- [Changelog](CHANGELOG.md)

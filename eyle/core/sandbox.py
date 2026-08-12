@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Project command execution with explicit isolation contracts.
 
-``run_command`` accepts only strong disposable backends (Docker or Bubblewrap).
+``run_command`` accepts only strong disposable backends (Microsandbox, Docker or Bubblewrap).
 The supervised ``run_tests`` path has its own narrower allowlisted policy and may
 use an explicitly configured local process backend when its network/resource
 contract permits it. Neither path silently upgrades local execution into strong
@@ -16,7 +16,7 @@ import subprocess
 import tempfile
 import uuid
 
-DEFAULT_DOCKER_IMAGE = "python:3.12-slim"
+DEFAULT_OCI_IMAGE = "python:3.12-slim"
 
 from .execution_context import current_execution
 from .workspace_policy import build_protected_resource_index, is_protected_workspace_resource
@@ -148,10 +148,13 @@ def _copiar_projeto(caminho_projeto, limites):
                 protected_omitted.add(relative)
                 continue
             try:
+                # Never preserve repository symlinks into a host-executed snapshot.
+                # Even an apparently internal absolute symlink could point back to
+                # the real workspace when the supervised process backend runs on
+                # the host. Capabilities can observe symlinks separately; command
+                # execution gets a closed physical snapshot instead.
                 if os.path.islink(absolute):
-                    link_target = os.path.realpath(absolute)
-                    if link_target != raiz_real and not link_target.startswith(raiz_real + os.sep):
-                        ignored.append(name)
+                    ignored.append(name)
             except OSError:
                 continue
         return ignored
@@ -231,11 +234,35 @@ def _comando_bwrap(caminho_projeto, argv, cfg, limites):
     return comando, None
 
 
-def _docker_image(cfg):
-    image = cfg.get("imagem_docker") or DEFAULT_DOCKER_IMAGE
+def _oci_image(cfg):
+    image = cfg.get("imagem_oci") or DEFAULT_OCI_IMAGE
     if not isinstance(image, str) or not image.strip():
-        raise ErroSandbox("sandbox.imagem_docker precisa ser string nao vazia")
+        raise ErroSandbox("sandbox.imagem_oci precisa ser string nao vazia")
     return image.strip()
+
+
+def _microsandbox_available():
+    from .microsandbox_backend import sdk_available
+    return sdk_available()
+
+
+def _ensure_microsandbox_session(caminho_projeto, cfg, limites, *, bloquear_rede):
+    from .microsandbox_backend import MicrosandboxBackendError, MicrosandboxSession
+
+    execution = current_execution()
+    if execution is not None and execution.sandbox_microsandbox_session is not None:
+        return execution.sandbox_microsandbox_session, False
+    try:
+        session = MicrosandboxSession(
+            caminho_projeto, cfg, limites, block_network=bloquear_rede,
+        )
+    except MicrosandboxBackendError as exc:
+        raise ErroSandbox(str(exc)) from exc
+    if execution is not None:
+        execution.sandbox_microsandbox_session = session
+        execution.sandbox_backend = "microsandbox"
+        return session, False
+    return session, True
 
 
 def _ensure_docker_container(caminho_projeto, cfg, limites):
@@ -253,7 +280,7 @@ def _ensure_docker_container(caminho_projeto, cfg, limites):
     if execution is not None and execution.sandbox_container_name:
         return docker, execution.sandbox_container_name, False
 
-    image = _docker_image(cfg)
+    image = _oci_image(cfg)
     name = f"eyle-sandbox-{uuid.uuid4().hex[:12]}"
     command = [
         docker, "run", "-d", "--pull", "missing", "--name", name,
@@ -322,7 +349,7 @@ def _comando_trusted_local(caminho_projeto, argv, cfg, limites):
 def _comando_processo(caminho_projeto, argv, cfg, limites):
     if cfg.get("bloquear_rede", True):
         raise ErroSandbox(
-            "backend 'process' does not block network; use Bubblewrap/Docker or explicitly allow network access"
+            "backend 'process' does not block network; use Microsandbox/Bubblewrap/Docker or explicitly allow network access"
         )
     if os.name != "posix":
         raise ErroSandbox("backend 'process' with resource limits requires POSIX and prlimit")
@@ -344,13 +371,22 @@ def _strong_backend(cfg):
     """Resolve a backend satisfying the unrestricted sandbox isolation contract."""
     backend = str(cfg.get("backend", "auto")).lower()
     if backend == "auto":
+        if _microsandbox_available():
+            return "microsandbox"
         if shutil.which("docker"):
             return "docker"
         if os.name == "posix" and shutil.which("bwrap"):
             return "bwrap"
-        raise ErroSandbox("run_command requires Docker or Bubblewrap; trusted_local/process are not strong isolation")
-    if backend not in {"bwrap", "docker"}:
-        raise ErroSandbox("run_command accepts only strong backends: docker or bwrap")
+        raise ErroSandbox(
+            "run_command requires Microsandbox, Docker or Bubblewrap; "
+            "trusted_local/process are not strong isolation"
+        )
+    if backend not in {"microsandbox", "bwrap", "docker"}:
+        raise ErroSandbox(
+            "run_command accepts only strong backends: microsandbox, docker or bwrap"
+        )
+    if backend == "microsandbox" and not _microsandbox_available():
+        raise ErroSandbox("Microsandbox SDK was not found")
     if backend == "docker" and not shutil.which("docker"):
         raise ErroSandbox("Docker was not found")
     if backend == "bwrap" and not (os.name == "posix" and shutil.which("bwrap")):
@@ -414,6 +450,54 @@ def executar_comando_livre_no_sandbox(caminho_projeto, comando, cfg_sandbox=None
         if not shell_command or "\x00" in shell_command:
             raise ErroSandbox("command vazio ou invalido")
         argv = ["/bin/sh", "-lc", shell_command]
+        execution = current_execution()
+        if execution is not None:
+            execution.sandbox_backend = backend
+
+        if backend == "microsandbox":
+            from .microsandbox_backend import MicrosandboxBackendError
+            session, cleanup_session = _ensure_microsandbox_session(
+                workspace, cfg, limites, bloquear_rede=False,
+            )
+            max_return = min(limites["saida_kb"] * 1024, 128 * 1024)
+            try:
+                try:
+                    result = session.execute(
+                        shell_command, rel_cwd=rel_cwd, timeout=limites["timeout"],
+                        max_output_bytes=max_return,
+                    )
+                except MicrosandboxBackendError as exc:
+                    raise ErroSandbox(str(exc)) from exc
+            finally:
+                if cleanup_session:
+                    session.close()
+                    if tempdir is not None:
+                        tempdir.cleanup()
+            if not result.executed:
+                return {
+                    "executado": False, "ok": False, "codigo": result.code,
+                    "saida": result.output, "erro": result.error,
+                }
+            return {
+                "executado": True,
+                "ok": (result.code == 0 and not result.timed_out and not result.error),
+                "codigo": result.code,
+                "saida": result.output,
+                "erro": result.error,
+                "backend": backend,
+                "network_enabled": True,
+                "workspace_isolated": True,
+                "workspace_transport": getattr(session, "workspace_transport", "unknown"),
+                "snapshot_persists_for_job": execution is not None,
+                "protected_resources_omitted": int(
+                    getattr(execution, "sandbox_protected_resources_omitted", 0) or 0
+                ) if execution is not None else len(
+                    getattr(tempdir, "protected_resources_omitted", []) or []
+                ),
+                "real_workspace_changed": False,
+                "cwd": rel_cwd,
+            }
+
         if backend == "bwrap":
             argv_exec, cleanup_docker = _comando_bwrap(workspace, argv, cfg, limites)
             # _comando_bwrap always enters /workspace; override to requested relative cwd.
@@ -422,9 +506,6 @@ def executar_comando_livre_no_sandbox(caminho_projeto, comando, cfg_sandbox=None
                 argv_exec[idx + 1] = "/workspace" if rel_cwd == "." else "/workspace/" + rel_cwd
         else:
             argv_exec, cleanup_docker = _comando_docker(workspace, shell_command, rel_cwd, cfg, limites)
-        execution = current_execution()
-        if execution is not None:
-            execution.sandbox_backend = backend
     except (ErroSandbox, ValueError) as erro:
         return {"executado": False, "ok": False, "codigo": None, "saida": "", "erro": str(erro)}
 
@@ -465,6 +546,32 @@ def executar_comando_livre_no_sandbox(caminho_projeto, comando, cfg_sandbox=None
         "real_workspace_changed": False, "cwd": rel_cwd,
     }
 
+def _supervised_backend(cfg):
+    """Resolve the supervised-test backend mechanically and fail closed."""
+    backend = str((cfg or {}).get("backend", "auto")).lower()
+    if backend != "auto":
+        if backend not in {"microsandbox", "bwrap", "docker", "process", "trusted_local"}:
+            raise ErroSandbox(f"unknown sandbox backend: {backend}")
+        if backend == "microsandbox" and not _microsandbox_available():
+            raise ErroSandbox("Microsandbox SDK was not found")
+        return backend
+    # Supervised run_tests keeps its existing auto policy. A generic OCI image
+    # does not guarantee pytest/npm/tooling, so Microsandbox is explicit here
+    # until a test-capable image is deliberately configured.
+    if os.name == "posix" and shutil.which("bwrap"):
+        return "bwrap"
+    if shutil.which("docker"):
+        return "docker"
+    if os.name == "nt" and (cfg or {}).get("allow_trusted_local") is True:
+        return "trusted_local"
+    if (cfg or {}).get("bloquear_rede", True) is False:
+        return "process"
+    raise ErroSandbox(
+        "nenhum backend supervisionado disponivel (instale Bubblewrap/configure Docker, "
+        "autorize trusted_local no Windows ou configure microsandbox explicitamente com imagem de testes)"
+    )
+
+
 def executar_no_sandbox(caminho_projeto, comando, cfg_sandbox=None):
     """Executa ``comando`` e devolve contrato pequeno, sem levantar excecao.
 
@@ -484,23 +591,41 @@ def executar_no_sandbox(caminho_projeto, comando, cfg_sandbox=None):
         caminho_execucao = os.path.realpath(caminho_projeto)
         if cfg.get("copiar_projeto", True):
             caminho_execucao, temporario_projeto = _copiar_projeto(caminho_execucao, limites)
-        backend = str(cfg.get("backend", "auto")).lower()
+        backend = _supervised_backend(cfg)
 
-        if backend == "auto":
-            if os.name == "posix" and shutil.which("bwrap"):
-                backend = "bwrap"
-            elif shutil.which("docker"):
-                backend = "docker"
-            elif os.name == "nt" and cfg.get("allow_trusted_local") is True:
-                backend = "trusted_local"
-            elif cfg.get("bloquear_rede", True) is False:
-                backend = "process"
-            else:
-                raise ErroSandbox(
-                    "nenhum backend seguro disponivel (instale Bubblewrap/configure Docker "
-                    "ou autorize trusted_local no Windows)"
+        if backend == "microsandbox":
+            from .microsandbox_backend import MicrosandboxBackendError, MicrosandboxSession
+            session = None
+            try:
+                session = MicrosandboxSession(
+                    caminho_execucao, cfg, limites,
+                    block_network=bool(cfg.get("bloquear_rede", True)),
                 )
-
+                result = session.execute(
+                    _texto_comando(argv), rel_cwd=".", timeout=limites["timeout"],
+                    max_output_bytes=min(limites["saida_kb"] * 1024, 64 * 1024),
+                )
+            except MicrosandboxBackendError as exc:
+                raise ErroSandbox(str(exc)) from exc
+            finally:
+                if session is not None:
+                    session.close()
+            protected_resources_omitted = len(
+                getattr(temporario_projeto, "protected_resources_omitted", []) or []
+            ) if temporario_projeto is not None else 0
+            if temporario_projeto is not None:
+                temporario_projeto.cleanup()
+                temporario_projeto = None
+            return {
+                "executado": bool(result.executed),
+                "ok": bool(result.executed and result.code == 0 and not result.timed_out and not result.error),
+                "codigo": result.code,
+                "saida": result.output,
+                "erro": result.error,
+                "backend": "microsandbox",
+                "protected_resources_omitted": protected_resources_omitted,
+                "network_isolated": bool(cfg.get("bloquear_rede", True)),
+            }
         if backend == "bwrap":
             argv_exec, limpeza_docker = _comando_bwrap(caminho_execucao, argv, cfg, limites)
         elif backend == "docker":
@@ -574,8 +699,8 @@ def executar_no_sandbox(caminho_projeto, comando, cfg_sandbox=None):
                 "saida": saida, "erro": f"timeout de {timeout}s excedido",
                 "backend": backend,
                 "protected_resources_omitted": protected_resources_omitted,
-                "network_isolated": backend in {"bwrap", "docker"}}
+                "network_isolated": backend in {"microsandbox", "bwrap", "docker"}}
     return {"executado": True, "ok": codigo == 0, "codigo": codigo,
             "saida": saida, "erro": None, "backend": backend,
             "protected_resources_omitted": protected_resources_omitted,
-            "network_isolated": backend in {"bwrap", "docker"}}
+            "network_isolated": backend in {"microsandbox", "bwrap", "docker"}}

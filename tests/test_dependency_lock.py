@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Atualizacao 35: dependencias diretas e transitivas ficam fixadas."""
+"""Pinned dependency contract tests."""
 import os
 from pathlib import Path
 

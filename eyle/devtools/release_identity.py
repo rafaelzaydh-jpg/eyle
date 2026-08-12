@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
-"""Fonte de verificação da identidade de release da Eyle.
-
-O arquivo de configuração continua sendo a fonte primária. O manifesto e o
-README precisam declarar os mesmos valores antes de um pacote ser publicado.
-"""
+"""Verify release identity and artifact cleanliness for Eyle."""
 from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
+
+
+MIN_PYTHON = (3, 11)
+_RUNTIME_DIRS = ("context", "memory", "workspace")
+_FORBIDDEN_DIR_NAMES = {".git", ".pytest_cache", "__pycache__", "htmlcov"}
+_FORBIDDEN_FILE_NAMES = {".coverage"}
+_REMOVED_CORE_FILES = (
+    "eyle/core/source_record.py",
+    "eyle/core/evidence.py",
+)
 
 
 class ReleaseIdentityError(ValueError):
-    """A identidade declarada nos artefatos de release divergiu."""
+    """The declared release identity or artifact shape is invalid."""
 
 
 def _carregar_json(caminho: Path) -> Dict[str, Any]:
@@ -49,8 +56,91 @@ def identidade_config(base_dir: os.PathLike[str] | str) -> Dict[str, str]:
     return {chave: valor.strip() for chave, valor in identidade.items()}
 
 
+def _runtime_state_violations(base: Path) -> List[str]:
+    violations: List[str] = []
+    for dirname in _RUNTIME_DIRS:
+        root = base / dirname
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if path.is_file() and path.name != ".gitkeep":
+                violations.append(str(path.relative_to(base)).replace("\\", "/"))
+    return violations
+
+
+def _generated_artifact_violations(base: Path) -> List[str]:
+    violations: List[str] = []
+    for path in base.rglob("*"):
+        rel = str(path.relative_to(base)).replace("\\", "/")
+        if path.is_dir() and path.name in _FORBIDDEN_DIR_NAMES:
+            violations.append(rel + "/")
+            continue
+        if not path.is_file():
+            continue
+        if path.name in _FORBIDDEN_FILE_NAMES or path.suffix in {".pyc", ".pyo"}:
+            violations.append(rel)
+    return violations
+
+
+def _removed_contract_violations(base: Path) -> List[str]:
+    return [rel for rel in _REMOVED_CORE_FILES if (base / rel).exists()]
+
+
+def _public_tool_violations(base: Path, manifesto: Dict[str, Any]) -> List[str]:
+    # Import only after the Python floor has been checked. The registry itself is
+    # the source of truth; the manifest must match it exactly and in order.
+    base_text = str(base.resolve())
+    inserted = False
+    if base_text not in sys.path:
+        sys.path.insert(0, base_text)
+        inserted = True
+    try:
+        from eyle.core.tools import TOOLS
+        registry = list(TOOLS.keys())
+    finally:
+        if inserted:
+            try:
+                sys.path.remove(base_text)
+            except ValueError:
+                pass
+    declared = manifesto.get("public_tools")
+    if declared != registry:
+        return [
+            "release_manifest.json:public_tools diverge do registry real "
+            f"(manifest={declared!r}, registry={registry!r})"
+        ]
+    return []
+
+
+def validar_artefato_release(base_dir: os.PathLike[str] | str, manifesto: Dict[str, Any] | None = None) -> None:
+    base = Path(base_dir)
+    manifest = manifesto if isinstance(manifesto, dict) else _carregar_json(base / "release_manifest.json")
+    violations: List[str] = []
+    violations.extend(f"estado Runtime proibido: {item}" for item in _runtime_state_violations(base))
+    violations.extend(f"artefato gerado proibido: {item}" for item in _generated_artifact_violations(base))
+    violations.extend(f"contrato removido reapareceu: {item}" for item in _removed_contract_violations(base))
+    violations.extend(_public_tool_violations(base, manifest))
+
+    publication = manifest.get("publication") if isinstance(manifest.get("publication"), dict) else {}
+    if publication.get("requires_extracted_artifact_verification") is not True:
+        violations.append(
+            "release_manifest.json:publication.requires_extracted_artifact_verification precisa ser true"
+        )
+
+    if violations:
+        raise ReleaseIdentityError(
+            "artefato de release invalido:\n- " + "\n- ".join(sorted(set(violations)))
+        )
+
+
 def validar_identidade_release(base_dir: os.PathLike[str] | str) -> Dict[str, str]:
-    """Valida config.json, release_manifest.json e marcador do README."""
+    """Validate identity, public registry and release-artifact cleanliness."""
+    if sys.version_info < MIN_PYTHON:
+        raise ReleaseIdentityError(
+            f"Eyle 2.7.5 requer Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+; "
+            f"runtime atual={sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        )
+
     base = Path(base_dir)
     identidade = identidade_config(base)
     manifesto = _carregar_json(base / "release_manifest.json")
@@ -85,6 +175,8 @@ def validar_identidade_release(base_dir: os.PathLike[str] | str) -> Dict[str, st
         raise ReleaseIdentityError(
             "identidade de release divergente:\n- " + "\n- ".join(divergencias)
         )
+
+    validar_artefato_release(base, manifesto)
     return identidade
 
 
@@ -92,10 +184,11 @@ def main() -> int:
     base = Path(__file__).resolve().parent.parent.parent
     identidade = validar_identidade_release(base)
     print(
-        "release identity ok: "
+        "release artifact ok: "
         f"app={identidade['app_version']} "
         f"schema={identidade['config_schema_version']} "
-        f"revision={identidade['revision']}"
+        f"revision={identidade['revision']} "
+        f"python>={MIN_PYTHON[0]}.{MIN_PYTHON[1]}"
     )
     return 0
 

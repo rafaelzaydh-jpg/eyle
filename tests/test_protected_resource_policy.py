@@ -106,9 +106,10 @@ def test_symbol_relations_does_not_drop_normal_source_for_sensitive_words(tmp_pa
     )
     coverage = result["coverage"]
     assert result["ok"] is True
-    assert coverage["objective_complete"] is True
-    assert coverage["objective_result"] == "reachable"
-    assert coverage["protected_resources_skipped"] == 0
+    assert coverage["complete"] is True
+    assert coverage["facts"]["objective_complete"] is True
+    assert coverage["facts"]["objective_result"] == "reachable"
+    assert coverage["facts"]["protected_resources_skipped"] == 0
 
 
 def test_git_status_shows_protected_path_but_git_diff_omits_its_content(tmp_path):
@@ -166,20 +167,18 @@ def test_symlink_and_hardlink_aliases_share_protected_physical_identity(tmp_path
         assert name not in result["detail"]["materialized_files"]
 
 
-def test_search_negative_evidence_preserves_protected_coverage_boundary(tmp_path):
-    from eyle.core.source_record import candidates_from_tool
+def test_search_negative_observation_preserves_protected_coverage_boundary(tmp_path):
     (tmp_path / ".env").write_text("needle=secret\n", encoding="utf-8")
     result = tools.executar_tool("search_code", {"query": "needle"}, _ctx(tmp_path))
     detail = result["detail"]
     assert detail["scope_complete"] is True
     assert detail["coverage_complete"] is False
-    assert detail["coverage_scope"] == "readable_workspace_files"
-    assert detail["protected_resources_excluded"] == 1
-    source_records = candidates_from_tool("search_code", detail)
-    assert len(source_records) == 1
-    assert source_records[0]["coverage_complete"] is False
-    assert source_records[0]["coverage_scope"] == "readable_workspace_files"
-    assert source_records[0]["protected_resources_excluded"] == 1
+    assert result["coverage"]["complete"] is False
+    assert any(item.get("kind") == "protected_resource" for item in result["coverage"]["boundaries"])
+    assert result["coverage"]["facts"]["coverage_scope"] == "readable_workspace_files"
+    assert any(item.get("kind") == "protected_resource" and item.get("count") == 1 for item in result["coverage"]["boundaries"])
+    assert len(result["observations"]) == 1
+    assert result["observations"][0]["locator"] == {"kind": "capability", "name": "search_code"}
 
 
 def test_sandbox_omits_symlink_and_hardlink_aliases_of_protected_resource(tmp_path):
@@ -243,7 +242,7 @@ def test_patch_dry_run_does_not_read_protected_resource_or_alias(tmp_path):
 
 def test_resource_scoped_block_is_reusable_across_read_ranges(tmp_path):
     from eyle.core.session import AgentSession
-    from eyle.core.observation import observation_signature, record, lookup_resource_failure
+    from eyle.core.observation import record
 
     (tmp_path / ".env").write_text("TOKEN=TOP_SECRET\n", encoding="utf-8")
     session = AgentSession(request="test")
@@ -251,11 +250,13 @@ def test_resource_scoped_block_is_reusable_across_read_ranges(tmp_path):
     result = tools.executar_tool("read_file", arguments, _ctx(tmp_path))
     assert result["retryable"] is False
     assert result["failure_scope"] == "resource"
-    model_result = {"tool": "read_file", **result, "evidence_ids": []}
-    record(session, observation_signature("read_file", arguments), "read_file", arguments, result, model_result)
+    model_result = {"tool": "read_file", **result, "grounding_ids": []}
+    signature = tools.capability_observation_signature("read_file", arguments)
+    record(session, signature, "read_file", arguments, result, model_result)
 
-    replayable = lookup_resource_failure(
-        session, "read_file", {"path": ".env", "line_start": 100, "line_end": 120}
+    replayable = tools.capability_find_resource_failure(
+        "read_file", {"path": ".env", "line_start": 100, "line_end": 120},
+        session.observation_ledger["entries"], session.workspace_epoch,
     )
     assert replayable is not None
     assert replayable["failure_scope"] == "resource"
@@ -264,18 +265,22 @@ def test_resource_scoped_block_is_reusable_across_read_ranges(tmp_path):
 
 def test_resource_scoped_block_survives_session_serialization(tmp_path):
     from eyle.core.session import AgentSession
-    from eyle.core.observation import observation_signature, record, lookup_resource_failure
+    from eyle.core.observation import record
     from eyle.core.agent import _rehydrate_observation
 
     (tmp_path / ".env").write_text("TOKEN=TOP_SECRET\n", encoding="utf-8")
     session = AgentSession(request="test")
     arguments = {"path": ".env", "line_start": 1, "line_end": 1}
     result = tools.executar_tool("read_file", arguments, _ctx(tmp_path))
-    model_result = {"tool": "read_file", **result, "evidence_ids": []}
-    record(session, observation_signature("read_file", arguments), "read_file", arguments, result, model_result)
+    model_result = {"tool": "read_file", **result, "grounding_ids": []}
+    signature = tools.capability_observation_signature("read_file", arguments)
+    record(session, signature, "read_file", arguments, result, model_result)
 
     restored = AgentSession.from_dict(session.to_dict())
-    entry = lookup_resource_failure(restored, "read_file", {"path": ".env", "line_start": 20, "line_end": 30})
+    entry = tools.capability_find_resource_failure(
+        "read_file", {"path": ".env", "line_start": 20, "line_end": 30},
+        restored.observation_ledger["entries"], restored.workspace_epoch,
+    )
     assert entry is not None
     replay = _rehydrate_observation(restored, entry, _ctx(tmp_path)["config"])
     assert replay["ok"] is False

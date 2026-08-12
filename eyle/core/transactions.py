@@ -115,7 +115,7 @@ def dry_run_patch_set(project_root: str, raw_patches: List[Dict[str, Any]]) -> D
             current_hash = hash_texto(original)
             expected_file = patch.get("file_hash_expected")
             if expected_file and current_hash != expected_file:
-                return {"ok": False, "error_code": "STALE_PATCH", "message": f"file changed since evidence: {path}"}
+                return {"ok": False, "error_code": "STALE_PATCH", "message": f"file changed since observation: {path}"}
             if operation == "delete":
                 prepared.append({**patch, "absolute": absolute, "original_content": original, "result_content": None, "file_hash_expected": current_hash})
                 continue
@@ -132,7 +132,7 @@ def dry_run_patch_set(project_root: str, raw_patches: List[Dict[str, Any]]) -> D
                 return {"ok": False, "error_code": "INVALID_RANGE", "message": f"invalid range for {path}"}
             current_range = hash_faixa(original, start, end)
             if patch.get("range_hash_expected") and current_range != patch["range_hash_expected"]:
-                return {"ok": False, "error_code": "STALE_PATCH", "message": f"range changed since evidence: {path}:{start}-{end}"}
+                return {"ok": False, "error_code": "STALE_PATCH", "message": f"range changed since observation: {path}:{start}-{end}"}
             result = _substituir_linhas(original, start, end, patch["new_code"])
             if result is None:
                 return {"ok": False, "error_code": "INVALID_RANGE", "message": f"invalid range for {path}:{start}-{end}"}
@@ -175,8 +175,15 @@ def apply_patch_set(project_root: str, confirmed_patches: List[Dict[str, Any]]) 
                 _escrever_arquivo_atomico(absolute, patch["result_content"])
             applied.append(patch)
     except Exception as error:
-        rollback_patch_set(applied)
-        return {"ok": False, "error_code": "PATCH_TRANSACTION_FAILED", "message": str(error)}
+        rollback = rollback_patch_set(applied)
+        return {
+            "ok": False,
+            "error_code": "PATCH_TRANSACTION_FAILED" if rollback.get("ok") else "PATCH_TRANSACTION_ROLLBACK_FAILED",
+            "message": str(error),
+            "rollback_confirmed": bool(rollback.get("ok")),
+            "rollback": rollback,
+            "applied_before_failure": [str(item.get("path") or "") for item in applied],
+        }
     return {
         "ok": True,
         "message": f"transaction applied to {len(applied)} file(s)",

@@ -1,2 +1,0 @@
--r requirements.lock
-# No additional pinned Python packages are required for the current dev suite.

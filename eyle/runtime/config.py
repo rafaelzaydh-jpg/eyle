@@ -1,4 +1,4 @@
-"""Rev5.8 strict configuration boundary. One canonical Core contract."""
+"""Eyle 2.7.5 Rev1.3 strict physical configuration boundary."""
 from __future__ import annotations
 
 import json
@@ -26,10 +26,7 @@ _LLM_FIELDS = {
 }
 _AGENT_FIELDS = {
     "max_tree_entries", "max_tree_depth", "max_file_read_lines",
-    "task_deadline_seconds", "max_llm_calls",
-    "max_prompt_tokens", "max_completion_tokens", "max_total_tokens",
-    "max_llm_turns",
-    "max_tool_calls", "max_patch_dry_run_failures",
+    "task_deadline_seconds", "max_total_tokens",
     "context_view", "max_project_scan_entries",
     "max_project_scan_depth", "max_project_file_bytes", "max_inspect_relation_edges",
     "max_git_diff_chars", "max_search_matches", "max_search_ranges", "claims",
@@ -58,12 +55,9 @@ _SANDBOX_FIELDS = {
     "backend", "bloquear_rede", "comandos_permitidos", "cpu_segundos", "memoria_mb",
     "max_processos", "max_arquivos_abertos", "max_saida_kb", "max_arquivo_mb",
     "copiar_projeto", "max_arquivos_projeto", "max_tamanho_projeto_mb", "cpus",
-    "allow_trusted_local", "timeout_segundos", "imagem_docker",
+    "allow_trusted_local", "timeout_segundos", "imagem_oci",
 }
 _AGENT_POSITIVE_DEFAULTS = {
-    "max_llm_turns": 24,
-    "max_tool_calls": 64,
-    "max_patch_dry_run_failures": 2,
     "max_project_scan_entries": 20000,
     "max_project_scan_depth": 32,
     "max_project_file_bytes": 4194304,
@@ -76,10 +70,7 @@ _AGENT_POSITIVE_DEFAULTS = {
     "max_search_matches": 40,
     "max_search_ranges": 12,
     "task_deadline_seconds": 1800,
-    "max_llm_calls": 32,
-    "max_prompt_tokens": 90000,
-    "max_completion_tokens": 8000,
-    "max_total_tokens": 98000,
+    "max_total_tokens": 90000,
 }
 _CONTEXT_VIEW_POSITIVE_DEFAULTS = {
     "max_source_preview_chars": 3500,
@@ -87,7 +78,7 @@ _CONTEXT_VIEW_POSITIVE_DEFAULTS = {
     "max_symbol_preview_chars": 2600,
 }
 
-_SANDBOX_BACKENDS = {"auto", "docker", "bwrap", "process", "trusted_local"}
+_SANDBOX_BACKENDS = {"auto", "microsandbox", "docker", "bwrap", "process", "trusted_local"}
 
 def _validate_sandbox_backend(container, prefix):
     backend = container.get("backend", "auto")
@@ -142,9 +133,9 @@ def validar_config(config):
         ("model_discovery_timeout_seconds", 3),
     ):
         _validate_positive_number(llm, key, default, "llm")
-    _validate_int(llm, "context_window_tokens", 32768, minimum=1, prefix="llm")
-    if int(llm.get("context_window_tokens", 32768) or 32768) > 32768:
-        raise ConfigError("llm.context_window_tokens não pode exceder 32768 na Rev5.8")
+    _validate_int(llm, "context_window_tokens", 38000, minimum=1, prefix="llm")
+    if int(llm.get("context_window_tokens", 38000) or 38000) > 38000:
+        raise ConfigError("llm.context_window_tokens não pode exceder 38000 nesta instalação; o llama-server é iniciado com janela física de 38k")
 
     codar = config.get("codar") or {}
     if not isinstance(codar, dict):
@@ -189,13 +180,10 @@ def validar_config(config):
         raise ConfigError("agent precisa ser um objeto")
     _reject_unknown(agent, _AGENT_FIELDS, "agent")
     for key, default in _AGENT_POSITIVE_DEFAULTS.items():
-        _validate_int(agent, key, default, minimum=1, prefix="agent")
-    if int(agent.get("max_total_tokens", 98000) or 98000) > 98000:
-        raise ConfigError("agent.max_total_tokens não pode exceder 98000 na Rev5.8")
-    if int(agent.get("max_prompt_tokens", 90000) or 90000) > 90000:
-        raise ConfigError("agent.max_prompt_tokens não pode exceder 90000 na Rev5.8")
-    if int(agent.get("max_completion_tokens", 8000) or 8000) > 8000:
-        raise ConfigError("agent.max_completion_tokens não pode exceder 8000 na Rev5.8")
+        minimum = 1
+        _validate_int(agent, key, default, minimum=minimum, prefix="agent")
+    if int(agent.get("max_total_tokens", 90000) or 90000) > 90000:
+        raise ConfigError("agent.max_total_tokens não pode exceder 90000")
 
     agent_sandbox = agent.get("sandbox") or {}
     if not isinstance(agent_sandbox, dict):

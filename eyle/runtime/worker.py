@@ -71,7 +71,7 @@ def processar_evento(evento):
             evento["texto"],
             registrar_pergunta=False,
             historico_snapshot=evento.get("historico_snapshot"),
-            task_id=(
+            execution_id=(
                 f"job-{evento.get('_job_id')}"
                 if evento.get("_job_id") is not None else None
             ),
@@ -232,7 +232,7 @@ def _finalizar_cancelamento(evento, job_id, motivo, worker_id=None, started=None
     duracao_ms = 0.0 if started is None else (time.monotonic() - started) * 1000
     telemetry.record(
         "job", str(evento.get("type") or "unknown"), "cancelled", duracao_ms,
-        task_id=f"job-{job_id}" if job_id is not None else None,
+        execution_id=f"job-{job_id}" if job_id is not None else None,
         job_id=job_id,
         metadata={"error_code": "JOB_CANCELLED", "detail": motivo[:500]},
     )
@@ -327,7 +327,7 @@ def processar_proximo(
         telemetry.record(
             "job", str(evento.get("type") or "unknown"), "timeout" if isinstance(error, JobDeadlineExceeded) else "failed",
             (time.monotonic() - started) * 1000,
-            task_id=f"job-{job_id}" if job_id is not None else None,
+            execution_id=f"job-{job_id}" if job_id is not None else None,
             job_id=job_id,
             metadata={
                 "error_code": getattr(error, "error_code", None),
@@ -371,7 +371,7 @@ def processar_proximo(
         telemetry.record(
             "job", str(evento.get("type") or "unknown"), "failed",
             (time.monotonic() - started) * 1000,
-            task_id=f"job-{job_id}" if job_id is not None else None,
+            execution_id=f"job-{job_id}" if job_id is not None else None,
             job_id=job_id,
             metadata={
                 "isolated": bool(usar_isolamento),
@@ -402,7 +402,7 @@ def processar_proximo(
     telemetry.record(
         "job", str(evento.get("type") or "unknown"), "ok",
         (time.monotonic() - started) * 1000,
-        task_id=f"job-{job_id}" if job_id is not None else None,
+        execution_id=f"job-{job_id}" if job_id is not None else None,
         job_id=job_id,
         metadata={"isolated": bool(usar_isolamento)},
     )

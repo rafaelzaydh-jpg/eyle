@@ -25,8 +25,8 @@ def test_greeting_is_written_by_same_agent(monkeypatch, tmp_path):
     assert len(prompts) == 1
     index = prompts[0]["capability_index"]
     assert any(item.startswith("calculate(") for item in index)
-    assert any(item.startswith("agent_info(") for item in index)
-    assert any(item.startswith("execution_trace(") for item in index)
+    assert not any(item.startswith("agent_info(") for item in index)
+    assert not any(item.startswith("execution_trace(") for item in index)
     assert prompts[0]["active_tools"] == []
     assert details["tool_calls"] == 0
 
@@ -36,8 +36,8 @@ def test_analysis_uses_one_agent_loop_and_retained_evidence(monkeypatch, tmp_pat
     outputs = iter([
         agent_tools(tool_call("read_file", {"path": "app.py"}), investigation=[investigation_target(goal="Establish what app.py does")]),
         agent_final(
-            {"answer": "A função soma retorna a adição dos argumentos.", "evidence_ids": ["src-0001"]},
-            investigation=[investigation_target(goal="Establish what app.py does", status="established", evidence_ids=["src-0001"], reason="app.py was read")],
+            {"answer": "A função soma retorna a adição dos argumentos.", "grounding_ids": ["mat-0001"]},
+            investigation=[investigation_target(goal="Establish what app.py does", status="established", grounding_ids=["mat-0001"], reason="app.py was read")],
         ),
     ])
     prompts = []
@@ -105,26 +105,28 @@ def test_pending_transaction_does_not_duplicate_full_source(monkeypatch, tmp_pat
     assert pending["session"]["write_transaction"]["patches"][0]["content"] == "TOKEN_DO_ARQUIVO = 'novo'\n"
 
 
-def test_identical_read_loop_is_bounded(monkeypatch, tmp_path):
+def test_identical_reads_are_memoized_without_duplicate_observations_or_semantic_fatal(monkeypatch, tmp_path):
     (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")
-    monkeypatch.setattr(
-        core_agent, "executar_agente_llm",
-        lambda p, c: agent_tools(tool_call("read_file", {"path": "app.py"})),
-    )
-    cfg = config(tmp_path)
-    status, _, _, details = core_agent.executar_agente(
-        "analise", cfg, projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True,
-    )
-    assert status == "failed"
-    assert details["failure_code"] == "OBSERVATION_REPLAY_LOOP"
-
+    calls=[]
+    def fake(prompt,cfg):
+        calls.append(json.loads(prompt))
+        if len(calls) <= 5:
+            return agent_tools(tool_call("read_file", {"path":"app.py"}))
+        return agent_final({"answer":"app.py foi observado.","grounding_ids":["mat-0001"]})
+    monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
+    status,_,_,details=core_agent.executar_agente("analise",config(tmp_path),projeto={"caminho_origem":str(tmp_path)},retornar_detalhes=True)
+    assert status=="success"
+    assert len(calls)==6
+    assert details["observation_replays"] >= 4
+    assert details["observation_ledger_size"] == 1
+    assert details["failure_code"] is None
 
 def test_disabled_tests_are_not_advertised(monkeypatch, tmp_path):
     (tmp_path / "app.py").write_text("x=1\n", encoding="utf-8")
     prompts = []
     outputs = iter([
         agent_tools(tool_call("read_file", {"path": "app.py"})),
-        agent_final({"answer": "app.py foi lido.", "evidence_ids": ["src-0001"]}),
+        agent_final({"answer": "app.py foi lido.", "grounding_ids": ["mat-0001"]}),
     ])
     monkeypatch.setattr(core_agent, "executar_agente_llm", lambda prompt, cfg: prompts.append(json.loads(prompt)) or next(outputs))
     status, *_ = core_agent.executar_agente(
@@ -139,10 +141,10 @@ def test_external_memory_only_moves_through_tools(monkeypatch, tmp_path):
     app.write_text("VALUE = 1\n", encoding="utf-8")
     import hashlib
     file_hash = hashlib.sha256(app.read_bytes()).hexdigest()
-    evidence = {"ev-0001": {"file": "app.py", "file_hash": file_hash}}
-    context = {"config": config(tmp_path), "projeto": {"caminho_origem": str(tmp_path)}, "evidence": evidence}
+    grounding = {"mat-0001": {"file": "app.py", "file_hash": file_hash}}
+    context = {"config": config(tmp_path), "projeto": {"caminho_origem": str(tmp_path)}, "grounding": grounding}
     monkeypatch.setattr(tools, "MEMORY_DIR", str(tmp_path / "memory"))
-    stored = tools.executar_tool("memory_store", {"text": "app.py define VALUE", "kind": "fact", "evidence_ids": ["ev-0001"]}, context)
+    stored = tools.executar_tool("memory_store", {"text": "app.py define VALUE", "kind": "fact", "grounding_ids": ["mat-0001"]}, context)
     assert stored["ok"] is True
     found = tools.executar_tool("memory_search", {"query": "VALUE"}, context)
     assert found["detail"]["count"] == 1

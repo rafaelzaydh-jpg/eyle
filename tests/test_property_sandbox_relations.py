@@ -7,9 +7,9 @@ import eyle.core.agent as core_agent
 import eyle.core.sandbox as sandbox_mod
 import eyle.core.tools as tools
 from eyle.core.execution_context import ExecutionContext, bind_execution, reset_execution
-from eyle.core.observation import observation_signature
+from eyle.core.tools import capability_observation_signature as observation_signature
 from eyle.core.session import AgentSession
-from tests.canonical import agent_tools, base_config, investigation_target, tool_call
+from tests.canonical import agent_tools, agent_final, base_config, investigation_target, tool_call
 
 
 def _ctx(root, config=None):
@@ -100,32 +100,17 @@ def test_find_symbol_model_view_is_location_only(tmp_path):
     assert "numbered_content" not in detail and "content" not in detail and "codigo_original" not in detail
 
 
-def test_repeated_identical_investigation_transition_fails_on_second_repetition(monkeypatch, tmp_path):
-    decisions = []
-    goal = "Establish arithmetic fact"
-
-    def fake(prompt, cfg):
-        payload = json.loads(prompt)
-        decisions.append(payload)
-        if len(decisions) == 1:
-            return agent_tools(
-                tool_call("calculate", {"expression": "1+1"}),
-                investigation=[investigation_target("T1", goal=goal, status="open")],
-            )
-        # Deliberately repeat the same invalid established transition with no evidence IDs.
-        return {
-            "final": {"answer": "2", "limitations": [], "evidence_ids": []},
-            "investigation_updates": [investigation_target("T1", goal=goal, status="established", evidence_ids=[], reason="Known")],
-        }
-
-    monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
-    status, text, _, details = core_agent.executar_agente(
-        "Compute", base_config(claims_mode="off"),
-        projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True,
-    )
-    assert status == "failed"
-    assert details["failure_code"] == "INVESTIGATION_UPDATE_DECISION_LOOP"
-    assert len(decisions) == 3
+def test_repeated_identical_investigation_transition_does_not_create_semantic_fatal(monkeypatch, tmp_path):
+    calls=0
+    def fake(prompt,cfg):
+        nonlocal calls; calls+=1
+        if calls<3:
+            return agent_tools(tool_call("count_tokens",{}),investigation=[{"id":"T1","goal":"x","status":"open","grounding_ids":[],"reason":""}])
+        return agent_final("done",investigation=[{"id":"T1","goal":"x","status":"open","grounding_ids":[],"reason":""}])
+    monkeypatch.setattr(core_agent,"executar_agente_llm",fake)
+    status,text,_,details=core_agent.executar_agente("x",base_config(claims_mode="off"),projeto={"caminho_origem":str(tmp_path)},retornar_detalhes=True)
+    assert status=="success" and text=="done"
+    assert details["failure_code"] is None
 
 def test_agent_sandbox_snapshot_omits_only_path_identified_protected_resources(tmp_path):
     (tmp_path / ".env").write_text("TOKEN=supersecretvalue\n", encoding="utf-8")

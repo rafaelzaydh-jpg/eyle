@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 import eyle.core.agent as core_agent
-from tests.canonical import base_config
+from tests.canonical import base_config, agent_tools, agent_final, tool_call
 
 
 def test_workspace_fact_needs_no_investigation(monkeypatch, tmp_path):
@@ -14,21 +14,15 @@ def test_workspace_fact_needs_no_investigation(monkeypatch, tmp_path):
         payload = json.loads(prompt)
         prompts.append(payload)
         if len(prompts) == 1:
-            return {
-                "tool_calls": [{"tool": "count_tokens", "arguments": {}}],
-                "investigation_updates": [],
-            }
+            return agent_tools(tool_call("count_tokens", {}))
         result = payload["latest_tool_results"][0]
         assert result["tool"] == "count_tokens"
         count = result["detail"]["estimated_tokens"]
-        return {
-            "final": {
-                "answer": f"O projeto tem aproximadamente {count} tokens.",
-                "limitations": ["A contagem é estimada."],
-                "evidence_ids": list(result.get("evidence_ids") or []),
-            },
-            "investigation_updates": [],
-        }
+        return agent_final({
+            "answer": f"O projeto tem aproximadamente {count} tokens.",
+            "limitations": ["A contagem é estimada."],
+            "grounding_ids": list(result.get("grounding_ids") or []),
+        })
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
     (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")
@@ -47,37 +41,12 @@ def test_workspace_fact_needs_no_investigation(monkeypatch, tmp_path):
     assert all(item.get("reason") != "INVESTIGATION_REQUIRED" for item in details["decision_history"])
 
 
-def test_declared_open_debt_blocks_final(monkeypatch, tmp_path):
-    calls = 0
-
-    def fake(_prompt, _config):
-        nonlocal calls
-        calls += 1
-        return {
-            "final": {"answer": "Prematuro.", "limitations": [], "evidence_ids": []},
-            "investigation_updates": [{
-                "id": "T1",
-                "goal": "Establish whether the module participates in active runtime flow",
-                "status": "open",
-                "evidence_ids": [],
-                "reason": "",
-            }],
-        }
-
-    monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
-    cfg = base_config(claims_mode="off")
-    cfg["agent"]["max_llm_turns"] = 2
-    status, text, _, details = core_agent.executar_agente(
-        "Isso é legado?", cfg,
-        projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True,
-    )
-    assert status == "failed"
-    assert calls == 2
-    assert any(
-        item.get("decision") == "final" and "FINAL_INVESTIGATION_TARGET_OPEN:T1" in str(item.get("reason"))
-        for item in details["decision_history"]
-    )
-
+def test_declared_open_debt_does_not_block_main_final(monkeypatch, tmp_path):
+    monkeypatch.setattr(core_agent,"executar_agente_llm",lambda _p,_c:agent_final("Prematuro.",investigation=[{"id":"T1","goal":"Maybe inspect runtime flow","status":"open","grounding_ids":[],"reason":""}]))
+    cfg=base_config(claims_mode="off")
+    status,text,_,details=core_agent.executar_agente("Isso é legado?",cfg,projeto={"caminho_origem":str(tmp_path)},retornar_detalhes=True)
+    assert status=="success" and text=="Prematuro."
+    assert details["investigation"][0]["status"]=="open"
 
 def test_runtime_has_no_semantic_task_router_symbols():
     source = Path(core_agent.__file__).read_text(encoding="utf-8")

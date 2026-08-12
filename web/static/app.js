@@ -222,9 +222,7 @@
     [
       historyLine("turnos", agent.turns),
       historyLine("tools executadas", agent.tool_calls),
-      historyLine("limite físico de tools", agent.tool_call_limit),
-      historyLine("tools restantes", agent.tool_calls_remaining),
-      historyLine("evidências", agent.evidence_count_total),
+      historyLine("groundings", agent.grounding_count_total),
       historyLine("observation ledger", agent.observation_ledger_size),
       historyLine("replays/rehydrations", agent.observation_replays),
       historyLine("rejeições repetidas", agent.repeated_rejected_decisions),
@@ -237,13 +235,13 @@
     const taskTotals = agent.task_totals || {};
     if (Object.keys(taskTotals).length && (
       taskTotals.turns !== agent.turns || taskTotals.tool_calls !== agent.tool_calls ||
-      taskTotals.evidence_count !== agent.evidence_count_total || taskTotals.observation_replays !== agent.observation_replays
+      taskTotals.grounding_count !== agent.grounding_count_total || taskTotals.observation_replays !== agent.observation_replays
     )) {
       const taskSection = historySection("Tarefa acumulada");
       [
         historyLine("turnos acumulados", taskTotals.turns),
         historyLine("tools acumuladas", taskTotals.tool_calls),
-        historyLine("evidências acumuladas", taskTotals.evidence_count),
+        historyLine("groundings acumulados", taskTotals.grounding_count),
         historyLine("observações acumuladas", taskTotals.observation_events),
         historyLine("replays acumulados", taskTotals.observation_replays),
         historyLine("decisões acumuladas", taskTotals.decision_events),
@@ -285,10 +283,11 @@
         historyLine("imposto fixo repetido", summaryData.fixed_repeat_tax_estimated_tokens),
         historyLine("resultados frescos", summaryData.fresh_observation_estimated_tokens),
         historyLine("contexto retido", summaryData.retained_context_estimated_tokens),
-        historyLine("estado Evidence/Investigation", summaryData.evidence_state_estimated_tokens),
-        historyLine("amplificação Evidence", diagnostics.evidence_amplification_ratio),
+        historyLine("estado de observação", summaryData.observation_state_estimated_tokens),
+        historyLine("estado semântico", summaryData.semantic_state_estimated_tokens),
+        historyLine("grounding por observação", diagnostics.grounding_per_observation),
         historyLine("taxa de replay", diagnostics.replay_request_rate),
-        historyLine("Evidence sem referência estrutural", diagnostics.structurally_unreferenced_evidence_count),
+        historyLine("grounding sem referência estrutural", diagnostics.unreferenced_grounding_count),
         historyLine("tools sem referência estrutural", diagnostics.structurally_unreferenced_tool_actions),
       ].filter(Boolean).forEach((line) => costSection.appendChild(line));
 

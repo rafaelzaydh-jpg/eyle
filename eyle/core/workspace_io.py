@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Leituras frescas e seguras do projeto usadas pelas tools do Agente.
 
-Atualizacao 41: concentra a arvore atual do projeto e a leitura numerada
+Concentra a arvore atual do projeto e a leitura numerada.
 por faixa. Nenhuma funcao usa o indice como fonte do conteudo: o indice
 serve apenas para localizar candidatos; os bytes sao relidos do disco.
 """
@@ -188,7 +188,7 @@ def listar_arvore_projeto(caminho_projeto, limite=200, profundidade=6, filtro=No
                 continue
 
             if e_diretorio:
-                if entrada.name in PASTAS_IGNORADAS or entrada.name.startswith("."):
+                if entrada.name in PASTAS_IGNORADAS:
                     ignorados["padrao_interno"] += 1
                     continue
                 if _ignorado_por_gitignore(caminho_rel, True, regras):

@@ -60,9 +60,9 @@ def _capture(monkeypatch, response):
 
 def _agent_json(answer="ok"):
     return json.dumps({
-        "tool_calls": None, "patches": None,
-        "needs_user": None, "final": {"answer": answer, "limitations": [], "evidence_ids": []},
+        "action": {"kind": "final", "answer": answer, "limitations": [], "grounding_ids": []},
         "investigation_updates": [],
+        "task_updates": [],
     })
 
 
@@ -82,13 +82,13 @@ def test_structured_openai_uses_strict_profile_schema(monkeypatch):
     body = _agent_json()
     calls = _capture(monkeypatch, {"choices": [{"message": {"content": body}}]})
     parsed = llm_mod._chamar_llm("s", "u", _config(), perfil="agent")
-    assert parsed["final"]["answer"] == "ok"
+    assert parsed["action"]["kind"] == "final"
+    assert parsed["action"]["answer"] == "ok"
     fmt = calls[0][1]["response_format"]
     assert fmt["type"] == "json_schema"
     assert fmt["json_schema"]["strict"] is True
-    assert set(fmt["json_schema"]["schema"]["required"]) == {
-        "tool_calls", "patches", "needs_user", "final", "investigation_updates",
-    }
+    assert set(fmt["json_schema"]["schema"]["required"]) == {"action", "investigation_updates", "task_updates"}
+    assert "anyOf" in fmt["json_schema"]["schema"]["properties"]["action"]
 
 
 def test_structured_json_schema_is_required_and_fails_closed(monkeypatch):
@@ -216,7 +216,7 @@ def test_connect_timeout_does_not_replace_read_timeout():
 
 
 def test_claim_verifier_missing_claims_is_rejected_at_structured_boundary(monkeypatch):
-    content = json.dumps({"semantic_gaps": []})
+    content = json.dumps({"issues": []})
     _capture(monkeypatch, {"choices": [{"message": {"content": content}}]})
     with pytest.raises(llm_mod.ErroLLM) as exc:
         llm_mod._chamar_llm("s", "u", _config(), perfil="claim_verifier")
@@ -224,13 +224,108 @@ def test_claim_verifier_missing_claims_is_rejected_at_structured_boundary(monkey
 
 
 def test_claim_verifier_never_selects_an_earlier_partial_json_object(monkeypatch):
-    complete = json.dumps({
-        "material_satisfaction": {"status": "satisfied", "reason": "Fixture delivers the requested material result."},
-        "answer_consistency": {"status": "consistent", "reason": "Fixture answer is internally consistent."},
-        "claims": [], "semantic_gaps": [],
-    })
-    content = json.dumps({"semantic_gaps": []}) + "\n" + complete
+    complete = json.dumps({"verdict": "accept", "issues": []})
+    content = json.dumps({"issues": []}) + "\n" + complete
     _capture(monkeypatch, {"choices": [{"message": {"content": content}}]})
     with pytest.raises(llm_mod.ErroLLM) as exc:
         llm_mod._chamar_llm("s", "u", _config(), perfil="claim_verifier")
     assert str(exc.value.error_code).startswith("STRUCTURED_RESPONSE_INVALID:claim_verifier:")
+
+
+def test_transport_timeout_is_recorded_as_started_physical_attempt_not_preflight(monkeypatch):
+    import socket
+    from eyle.core.execution_context import ExecutionContext
+    from eyle.core.execution_trace import build_execution_trace
+    from tests.canonical import base_config
+
+    cfg = base_config()
+    cfg["llm"].update({
+        "base_url": "http://localhost:8080",
+        "model": "modelo-teste",
+        "openai_compatible": True,
+        "connect_timeout_seconds": 1,
+        "read_timeout_seconds": 1,
+        "retry_max_attempts": 1,
+        "retry_read_timeouts": False,
+        "max_concurrent_requests": 1,
+    })
+    execution = ExecutionContext.from_config(cfg)
+
+    def timeout_urlopen(req, timeout=None):
+        raise socket.timeout("timed out")
+
+    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", timeout_urlopen)
+    with pytest.raises(llm_mod.ErroLLM) as exc:
+        llm_mod._chamar_llm("s", "u", cfg, execution, perfil="agent")
+    assert exc.value.error_code == "READ_TIMEOUT"
+    attempt = execution.llm_calls[-1]["attempts"][0]
+    assert attempt["request_status"] == "read_timeout"
+    assert attempt["error_code"] == "READ_TIMEOUT"
+    trace = build_execution_trace({"llm_calls": execution.llm_calls})
+    assert trace["llm_calls"][0]["request_status"] == "read_timeout"
+
+
+def test_true_preflight_rejection_has_no_physical_attempt(monkeypatch):
+    from eyle.core.execution_context import ExecutionContext
+    from eyle.core.execution_trace import build_execution_trace
+    from tests.canonical import base_config
+
+    cfg = base_config()
+    cfg["llm"].update({
+        "base_url": "http://localhost:8080",
+        "model": "modelo-teste",
+        "openai_compatible": True,
+        "context_window_tokens": 8,
+        "retry_max_attempts": 1,
+        "max_concurrent_requests": 1,
+    })
+    execution = ExecutionContext.from_config(cfg)
+    calls = []
+
+    def should_not_send(req, timeout=None):
+        calls.append(req)
+        return _FakeResponse({"choices": [{"message": {"content": _agent_json()}}]})
+
+    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", should_not_send)
+    with pytest.raises(llm_mod.ErroLLM) as exc:
+        llm_mod._chamar_llm("system contract", "user request", cfg, execution, perfil="agent")
+    assert exc.value.error_code == "PROMPT_CONTEXT_BUDGET_EXCEEDED"
+    assert calls == []
+    assert execution.llm_calls[-1]["attempts"] == []
+    trace = build_execution_trace({"llm_calls": execution.llm_calls})
+    assert trace["llm_calls"][0]["request_status"] == "preflight_blocked"
+
+
+def test_unstructured_job_streaming_uses_execution_context_not_config_dict(monkeypatch):
+    from eyle.core.execution_context import ExecutionContext
+    from tests.canonical import base_config
+
+    cfg = base_config()
+    cfg["llm"].update({
+        "base_url": "http://localhost:8080",
+        "model": "modelo-teste",
+        "openai_compatible": True,
+        "stream_responses": True,
+        "retry_max_attempts": 1,
+        "max_concurrent_requests": 1,
+    })
+    execution = ExecutionContext.from_config(cfg, execution_id="stream-test", source_job_id=77)
+    observed = {}
+
+    def fake_backend(base_url, model, prompt_sistema, prompt_usuario, temperature, timeout, **kwargs):
+        observed["on_chunk"] = kwargs.get("on_chunk")
+        on_request = kwargs.get("on_request")
+        if on_request is not None:
+            on_request()
+        llm_mod._LLM_RESPONSE_LOCAL.metadata = {
+            "provider_model": model,
+            "prompt_tokens": 2,
+            "completion_tokens": 1,
+            "finish_reason": "stop",
+            "streaming": bool(kwargs.get("on_chunk")),
+        }
+        return "ok"
+
+    monkeypatch.setattr(llm_mod, "_chamar_openai_compatible", fake_backend)
+    assert llm_mod._chamar_llm("s", "u", cfg, execution) == "ok"
+    assert callable(observed["on_chunk"])

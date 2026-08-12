@@ -73,7 +73,7 @@ def test_failed_tests_roll_back_whole_transaction(monkeypatch, tmp_path):
     app = tmp_path / "app.py"
     app.write_text("VALUE = 1\n", encoding="utf-8")
     session, pending = _session_pending_replace_and_create(tmp_path)
-    monkeypatch.setattr(core_agent, "_run_tests_after_write", lambda *_: {
+    monkeypatch.setattr(core_agent, "_verify_after_write", lambda *_: {
         "status": "failed", "ok": False, "executed": True,
         "error_code": "TESTS_FAILED", "detail": "1 failed",
     })

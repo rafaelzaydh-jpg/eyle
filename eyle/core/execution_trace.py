@@ -1,28 +1,18 @@
-"""Safe observable execution traces for the canonical Rev5.7 runtime.
+"""Safe observable execution traces for the canonical Rev1.3 runtime.
 
 Trace is factual telemetry only: no semantic scheduler, no earned-authority
 history, no chain-of-thought, raw prompts, raw model responses or source bodies.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .prompt_accounting import build_prompt_cost_accounting
-
-_TRACE_LIST_KEYS = ("context", "llm_calls", "decisions", "tools")
-_TRACE_SECTIONS = {"all", "summary", "context", "llm", "tools", "decisions", "validation"}
 
 
 def _bounded_list(value: Any, limit: int) -> List[Dict[str, Any]]:
     items = [dict(item) for item in (value or []) if isinstance(item, dict)]
     return items[-max(1, int(limit)):]
-
-
-def _filter_turn(items: Iterable[Dict[str, Any]], turn: Optional[int]) -> List[Dict[str, Any]]:
-    values = [dict(item) for item in items if isinstance(item, dict)]
-    if turn is None:
-        return values
-    return [item for item in values if item.get("turn") == int(turn)]
 
 
 def _safe_llm_calls(details: Dict[str, Any], limit: int) -> List[Dict[str, Any]]:
@@ -45,7 +35,8 @@ def _safe_llm_calls(details: Dict[str, Any], limit: int) -> List[Dict[str, Any]]
             item = {
                 "call": ordinal, "logical_call_id": logical.get("logical_call_id"),
                 "physical_attempt": attempt.get("physical_attempt"), "turn": logical.get("turn"),
-                "mode": logical.get("mode"), "request_status": "sent" if attempt else "preflight_blocked",
+                "mode": logical.get("mode"),
+                "request_status": (str(attempt.get("request_status")) if attempt else "preflight_blocked"),
                 "prompt_estimated_tokens": prompt.get("estimated_tokens"), "prompt_characters": prompt.get("characters"),
                 "prompt_budget_tokens": prompt.get("prompt_budget_tokens"), "output_tokens_reserved": prompt.get("output_tokens_reserved"),
                 "tool_count_available": prompt.get("tool_count"), "prompt_tokens": prompt_tokens,
@@ -57,9 +48,10 @@ def _safe_llm_calls(details: Dict[str, Any], limit: int) -> List[Dict[str, Any]]
                 "structured_mode": attempt.get("structured_mode"), "structured_parse_status": attempt.get("structured_parse_status"),
                 "structured_parse_error": attempt.get("structured_parse_error"), "structured_parse_detail": attempt.get("structured_parse_detail"),
                 "structured_top_level_keys": attempt.get("structured_top_level_keys"), "structured_missing_keys": attempt.get("structured_missing_keys"),
-                "selected_evidence_count": prompt.get("selected_evidence_count"),
-                "evidence_excerpt_chars_per_item": prompt.get("evidence_excerpt_chars_per_item"),
-                "answer_anchor_count": prompt.get("answer_anchor_count"), "investigation_target_count": prompt.get("investigation_target_count"),
+                "error_code": attempt.get("error_code"),
+                "selected_grounding_count": prompt.get("selected_grounding_count"),
+                "grounding_excerpt_chars_per_item": prompt.get("grounding_excerpt_chars_per_item"),
+                "answer_anchor_count": prompt.get("answer_anchor_count"),
                 "prompt_components": prompt.get("components_after") if isinstance(prompt.get("components_after"), dict) else None,
             }
             calls.append({key:value for key,value in item.items() if value is not None})
@@ -82,8 +74,8 @@ def build_execution_trace(
             "prompt_budget_tokens", "output_tokens_reserved", "system_prompt_characters",
             "system_prompt_estimated_tokens", "pre_crop_characters", "pre_crop_estimated_tokens",
             "crop_applied", "components_before", "components_after",
-            "selected_evidence_count", "evidence_excerpt_chars_per_item",
-            "answer_anchor_count", "investigation_target_count",
+            "selected_grounding_count", "grounding_excerpt_chars_per_item",
+            "answer_anchor_count",
         )
         if item.get(key) is not None
     } for item in snapshots]
@@ -135,7 +127,6 @@ def build_execution_trace(
             "duration_seconds": duration_seconds,
             "turns": details.get("turns"),
             "tool_calls": details.get("tool_calls"),
-            "tool_budget": details.get("tool_budget") if isinstance(details.get("tool_budget"), dict) else {},
             "failure_code": details.get("failure_code"),
             "repeated_rejected_decisions": details.get("repeated_rejected_decisions"),
             "task_totals": details.get("task_totals") if isinstance(details.get("task_totals"), dict) else {},
@@ -162,35 +153,3 @@ def build_execution_trace(
     }
     trace["summary"] = {key: value for key, value in trace["summary"].items() if value is not None}
     return trace
-
-
-def filter_execution_trace(
-    trace: Dict[str, Any], *, section: str = "all", turn: Optional[int] = None, limit: int = 100,
-) -> Dict[str, Any]:
-    if not isinstance(trace, dict):
-        return {}
-    section = str(section or "all").strip().lower()
-    if section not in _TRACE_SECTIONS:
-        raise ValueError("section must be one of: " + ", ".join(sorted(_TRACE_SECTIONS)))
-    limit = max(1, min(int(limit or 100), 200))
-    base = {"summary": dict(trace.get("summary") or {}), "privacy": dict(trace.get("privacy") or {})}
-    mapping = {
-        "summary": [],
-        "context": ["context", "prompt_accounting"],
-        "llm": ["tokens", "llm_calls", "prompt_accounting"],
-        "tools": ["tools"],
-        "decisions": ["decisions"],
-        "validation": ["validation"],
-        "all": ["tokens", "prompt_accounting", "context", "llm_calls", "decisions", "tools", "validation"],
-    }
-    for key in mapping[section]:
-        value = trace.get(key)
-        if key in _TRACE_LIST_KEYS and isinstance(value, list):
-            base[key] = _filter_turn(value, turn)[-limit:]
-        else:
-            base[key] = value
-    if turn is not None:
-        base["query"] = {"turn": int(turn), "section": section}
-    elif section != "all":
-        base["query"] = {"section": section}
-    return base

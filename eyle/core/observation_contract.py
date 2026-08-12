@@ -1,21 +1,68 @@
-"""Universal observation/result contract for Runtime capabilities.
+"""Universal physical observation/result contract for Eyle 2.7.5 Rev1.3.
 
-Rev5.7 introduces a small domain-neutral boundary between tools and AgentSession.
-Tools may expose objective observations, coverage, unresolved frontiers and
-opaque continuation handles without teaching the Runtime domain semantics.
-
-Handles in Rev5.7 address *observation snapshots*. They are stable within the
-workspace epoch that produced them. A later revision may add live resource
-handles, but the core deliberately does not pretend snapshot data is live state.
+Capabilities own how reality is executed, identified and projected into Material,
+Coverage and Frontier. Observation stores those physical facts generically.
+Runtime-private snapshots retain large continuation payloads once; lightweight
+handles only point at a snapshot plus a cursor.
 """
 from __future__ import annotations
 
 import copy
 import hashlib
 import json
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 _EFFECT_CLASSES = {"observe", "execute", "mutate"}
+
+
+class CoverageContractError(ValueError):
+    """Capability returned non-canonical physical Coverage."""
+
+
+def normalize_coverage(value: Any, *, allow_empty: bool = True) -> Dict[str, Any]:
+    """Validate and canonicalize the universal physical Coverage contract.
+
+    Coverage describes only mechanically observed scope. Non-empty Coverage must
+    contain ``scope``, ``examined``, ``complete`` and ``boundaries`` with stable
+    physical types. Unknown top-level fields are rejected so capabilities cannot
+    silently invent parallel Coverage dialects. Domain-specific facts belong in
+    ``facts``.
+    """
+    if value in (None, {}):
+        if allow_empty:
+            return {}
+        raise CoverageContractError("coverage is required")
+    if not isinstance(value, dict):
+        raise CoverageContractError("coverage must be an object")
+    required = {"scope", "examined", "complete", "boundaries"}
+    missing = sorted(required - set(value))
+    if missing:
+        raise CoverageContractError("coverage missing field(s): " + ", ".join(missing))
+    allowed = required | {"facts"}
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise CoverageContractError("coverage has unknown field(s): " + ", ".join(unknown))
+    if not isinstance(value.get("scope"), dict):
+        raise CoverageContractError("coverage.scope must be an object")
+    if not isinstance(value.get("examined"), dict):
+        raise CoverageContractError("coverage.examined must be an object")
+    if not isinstance(value.get("complete"), bool):
+        raise CoverageContractError("coverage.complete must be boolean")
+    boundaries = value.get("boundaries")
+    if not isinstance(boundaries, list) or any(not isinstance(item, dict) for item in boundaries):
+        raise CoverageContractError("coverage.boundaries must be an array of objects")
+    facts = value.get("facts")
+    if facts is not None and not isinstance(facts, dict):
+        raise CoverageContractError("coverage.facts must be an object when present")
+    result = {
+        "scope": copy.deepcopy(value["scope"]),
+        "examined": copy.deepcopy(value["examined"]),
+        "complete": value["complete"],
+        "boundaries": [copy.deepcopy(item) for item in boundaries],
+    }
+    if facts:
+        result["facts"] = copy.deepcopy(facts)
+    return result
 
 
 def normalize_effect(value: Any) -> str:
@@ -33,87 +80,161 @@ def handle_store(ledger: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     return value if isinstance(value, dict) else {}
 
 
-def register_snapshot_handle(
-    store: Dict[str, Dict[str, Any]], *, kind: str, payload: Any,
-    workspace_epoch: int, source_tool: str, description: str = "",
-    page_size: int = 12, offset: int = 0,
+def snapshot_store(ledger: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    value = ledger.setdefault("snapshots", {}) if isinstance(ledger, dict) else {}
+    return value if isinstance(value, dict) else {}
+
+
+def _register_handle_for_snapshot(
+    ledger: Dict[str, Any], *, snapshot_id: str, kind: str, workspace_epoch: int,
+    source_tool: str, description: str, page_size: int, offset: int,
 ) -> Dict[str, Any]:
-    """Register one deterministic opaque handle for an observation snapshot."""
-    kind = str(kind or "continuation").strip() or "continuation"
-    page_size = max(1, min(100, int(page_size or 12)))
-    offset = max(0, int(offset or 0))
+    handles = handle_store(ledger)
     identity = {
-        "kind": kind, "payload": payload, "workspace_epoch": int(workspace_epoch or 0),
-        "source_tool": str(source_tool or ""), "offset": offset, "page_size": page_size,
+        "snapshot_id": str(snapshot_id), "workspace_epoch": int(workspace_epoch or 0),
+        "offset": int(offset), "page_size": int(page_size),
     }
     handle_id = f"handle:{kind}:{_json_hash(identity)[:16]}"
-    store[handle_id] = {
-        "id": handle_id, "kind": kind, "payload": copy.deepcopy(payload),
+    handles[handle_id] = {
+        "id": handle_id, "kind": str(kind), "snapshot_id": str(snapshot_id),
         "workspace_epoch": int(workspace_epoch or 0), "source_tool": str(source_tool or ""),
-        "description": str(description or "")[:240], "page_size": page_size, "offset": offset,
+        "description": str(description or "")[:240], "page_size": int(page_size), "offset": int(offset),
     }
     return {
-        "id": handle_id, "kind": kind, "source_tool": str(source_tool or ""),
+        "id": handle_id, "kind": str(kind), "source_tool": str(source_tool or ""),
         **({"description": str(description)[:240]} if description else {}),
     }
 
 
-def _paged_payload(entry: Dict[str, Any]) -> Tuple[Any, int, int, int]:
-    payload = copy.deepcopy(entry.get("payload"))
-    offset = max(0, int(entry.get("offset") or 0))
-    page_size = max(1, int(entry.get("page_size") or 12))
+def register_snapshot_handle(
+    ledger: Dict[str, Any], *, kind: str, payload: Any,
+    workspace_epoch: int, source_tool: str, description: str = "",
+    page_size: int = 12, offset: int = 0,
+) -> Dict[str, Any]:
+    """Store one immutable snapshot payload and return a lightweight cursor handle."""
+    kind = str(kind or "continuation").strip() or "continuation"
+    page_size = max(1, min(100, int(page_size or 12)))
+    offset = max(0, int(offset or 0))
+    snapshot_identity = {
+        "kind": kind, "payload": payload, "workspace_epoch": int(workspace_epoch or 0),
+        "source_tool": str(source_tool or ""),
+    }
+    snapshot_id = f"snap:{kind}:{_json_hash(snapshot_identity)[:16]}"
+    snapshots = snapshot_store(ledger)
+    if snapshot_id not in snapshots:
+        snapshots[snapshot_id] = {
+            "id": snapshot_id, "kind": kind, "payload": copy.deepcopy(payload),
+            "workspace_epoch": int(workspace_epoch or 0), "source_tool": str(source_tool or ""),
+            "description": str(description or "")[:240],
+        }
+    return _register_handle_for_snapshot(
+        ledger, snapshot_id=snapshot_id, kind=kind, workspace_epoch=workspace_epoch,
+        source_tool=source_tool, description=description, page_size=page_size, offset=offset,
+    )
+
+
+def _paged_payload(payload: Any, *, offset: int, page_size: int) -> Tuple[Any, int, int, int]:
+    """Copy only the requested page, never the retained snapshot payload."""
+    offset = max(0, int(offset or 0))
+    page_size = max(1, int(page_size or 12))
     if isinstance(payload, dict) and isinstance(payload.get("items"), list):
-        items = list(payload.get("items") or [])
+        items = payload.get("items") or []
         start = min(offset, len(items)); end = min(len(items), start + page_size)
-        materialized = dict(payload)
+        # Metadata is immutable snapshot state and can be shared shallowly. Only
+        # the materialized item slice is detached for downstream capability use.
+        materialized = {key: value for key, value in payload.items() if key != "items"}
         materialized["items"] = copy.deepcopy(items[start:end])
         return materialized, start, end, len(items)
     if isinstance(payload, list):
         start = min(offset, len(payload)); end = min(len(payload), start + page_size)
         return copy.deepcopy(payload[start:end]), start, end, len(payload)
-    return payload, 0, 1 if payload is not None else 0, 1 if payload is not None else 0
+    return copy.deepcopy(payload), 0, 1 if payload is not None else 0, 1 if payload is not None else 0
 
 
 def materialize_snapshot_handle(
-    store: Dict[str, Dict[str, Any]], handle_id: str, *, workspace_epoch: int,
+    ledger: Dict[str, Any], handle_id: str, *, workspace_epoch: int,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """Materialize one bounded page from a handle without domain interpretation."""
-    entry = store.get(str(handle_id or "")) if isinstance(store, dict) else None
-    if not isinstance(entry, dict):
+    """Materialize one bounded page without copying the retained snapshot into the next handle."""
+    handle = handle_store(ledger).get(str(handle_id or ""))
+    if not isinstance(handle, dict):
         return None, "HANDLE_NOT_FOUND"
-    if int(entry.get("workspace_epoch") or 0) != int(workspace_epoch or 0):
+    if int(handle.get("workspace_epoch") or 0) != int(workspace_epoch or 0):
         return None, "HANDLE_STALE"
-    payload, start, end, total = _paged_payload(entry)
-    result: Dict[str, Any] = {
-        "handle": str(handle_id), "kind": entry.get("kind"), "source_tool": entry.get("source_tool"),
-        "payload": payload,
-        "coverage": {"materialized_start": start, "materialized_end": end, "total_items": total},
-        "frontiers": [], "handles": [],
+    snapshot = snapshot_store(ledger).get(str(handle.get("snapshot_id") or ""))
+    if not isinstance(snapshot, dict):
+        return None, "SNAPSHOT_NOT_FOUND"
+    if int(snapshot.get("workspace_epoch") or 0) != int(workspace_epoch or 0):
+        return None, "HANDLE_STALE"
+
+    page_size = max(1, int(handle.get("page_size") or 12))
+    offset = max(0, int(handle.get("offset") or 0))
+    payload, start, end, total = _paged_payload(snapshot.get("payload"), offset=offset, page_size=page_size)
+    complete = end >= total
+    coverage = {
+        "scope": {"kind": "snapshot_continuation", "source_capability": handle.get("source_tool")},
+        "examined": {"item_start": start, "item_end": end, "items": max(0, end - start)},
+        "complete": bool(complete),
+        "boundaries": [],
+        "facts": {
+            "snapshot_exhausted": bool(complete),
+            "total_items": total,
+            "remaining_items": max(0, total - end),
+        },
     }
-    if end < total:
-        next_handle = register_snapshot_handle(
-            store, kind=str(entry.get("kind") or "continuation"), payload=entry.get("payload"),
-            workspace_epoch=int(workspace_epoch or 0), source_tool=str(entry.get("source_tool") or ""),
-            description=str(entry.get("description") or ""), page_size=int(entry.get("page_size") or 12), offset=end,
+    result: Dict[str, Any] = {
+        "handle": str(handle_id), "kind": handle.get("kind"), "source_tool": handle.get("source_tool"),
+        "payload": payload, "coverage": coverage, "frontiers": [], "handles": [],
+    }
+    if not complete:
+        next_handle = _register_handle_for_snapshot(
+            ledger, snapshot_id=str(handle.get("snapshot_id") or ""),
+            kind=str(handle.get("kind") or "continuation"), workspace_epoch=int(workspace_epoch or 0),
+            source_tool=str(handle.get("source_tool") or ""), description=str(handle.get("description") or ""),
+            page_size=page_size, offset=end,
         )
         result["handles"] = [next_handle]
         result["frontiers"] = [{
-            "kind": "continuation_not_materialized", "at": str(handle_id),
-            "reason": f"{total - end} item(s) remain behind a continuation handle",
+            "kind": "continuation_not_materialized", "at": str(handle.get("source_tool") or "continuation"),
+            "count": max(0, total - end),
+            "reason": f"{max(0, total - end)} item(s) remain behind a continuation handle",
             "handle": next_handle["id"],
         }]
     return result, None
 
 
+def release_snapshot_handle(ledger: Dict[str, Any], handle_id: str) -> None:
+    """Release a consumed cursor and garbage-collect an unreferenced snapshot."""
+    handles = handle_store(ledger)
+    handle = handles.pop(str(handle_id or ""), None)
+    if not isinstance(handle, dict):
+        return
+    snapshot_id = str(handle.get("snapshot_id") or "")
+    if snapshot_id and not any(
+        isinstance(item, dict) and str(item.get("snapshot_id") or "") == snapshot_id
+        for item in handles.values()
+    ):
+        snapshot_store(ledger).pop(snapshot_id, None)
+
+
 def persisted_handles(ledger: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    store = handle_store(ledger)
     return {
         str(key): {
             field: copy.deepcopy(value.get(field))
-            for field in ("id", "kind", "payload", "workspace_epoch", "source_tool", "description", "page_size", "offset")
+            for field in ("id", "kind", "snapshot_id", "workspace_epoch", "source_tool", "description", "page_size", "offset")
             if value.get(field) is not None
         }
-        for key, value in store.items() if isinstance(value, dict)
+        for key, value in handle_store(ledger).items() if isinstance(value, dict)
+    }
+
+
+def persisted_snapshots(ledger: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    return {
+        str(key): {
+            field: copy.deepcopy(value.get(field))
+            for field in ("id", "kind", "payload", "workspace_epoch", "source_tool", "description")
+            if value.get(field) is not None
+        }
+        for key, value in snapshot_store(ledger).items() if isinstance(value, dict)
     }
 
 
@@ -123,7 +244,7 @@ def result_observation_fields(
     frontiers: Optional[Iterable[Dict[str, Any]]] = None,
     handles: Optional[Iterable[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Return canonical optional observation fields for the tool result envelope."""
+    """Canonical physical observation fields shared by every capability result."""
     return {
         "observations": [copy.deepcopy(item) for item in (observations or []) if isinstance(item, dict)],
         "coverage": copy.deepcopy(coverage) if isinstance(coverage, dict) else {},

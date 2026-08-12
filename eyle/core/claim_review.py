@@ -1,60 +1,60 @@
-"""Semantic verification over runtime-owned EvidenceRecords.
+"""Small adversarial semantic review for Eyle 2.7.5 Rev1.3.
 
-Semantic interpretation stays in LLM calls while every boundary that can be
-proven deterministically stays in the runtime:
-- omitted Claims config resolves to self_check; off is explicit;
-- verifier citations are confined to the EvidenceRecords actually shown;
-- file Evidence is checked for freshness before and after verification;
-- reviewer debt is preserved in the canonical Claim Review and rendered back to the Main LLM;
-- the runtime never rewrites a semantic conclusion on behalf of the Main LLM.
+Claim is deliberately narrow: it can accept a provisional answer or return a
+small list of material blockers. It never plans, selects tools, mutates
+Investigation, rewrites the answer, or expands into a second reasoning loop.
+Runtime validates only physical coordinates and freshness.
 """
 from __future__ import annotations
 
+import copy
 import json
-import os
 import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from .security import _resolver_caminho_seguro
-from .text_hash import hash_texto, normalizar_quebras
 from .execution_context import current_execution
+from llm.structured import (
+    CLAIM_MAX_GROUNDING_REFS, CLAIM_MAX_GROUNDING_REF_CHARS,
+    CLAIM_MAX_ISSUES, CLAIM_MAX_REASON_CHARS,
+)
 
 CLAIM_MODES = {"off", "self_check", "verified"}
-_CLAIMS_FIELDS = {"mode", "verifier", "evidence"}
-_VERIFIER_COMMON_FIELDS = {"max_tokens", "temperature"}
+CLAIM_ISSUE_KINDS = {"unsupported", "contradicted", "scope", "omission", "inconsistent"}
+GROUNDING_PREFIXES = {"observation", "runtime", "answer", "request"}
+
+_CLAIMS_FIELDS = {"mode", "verifier", "grounding"}
+_VERIFIER_COMMON_FIELDS = {"temperature"}
 _VERIFIER_VERIFIED_FIELDS = _VERIFIER_COMMON_FIELDS | {"base_url", "model", "openai_compatible"}
-_EVIDENCE_FIELDS = {"max_chars_per_item"}
-
-SEMANTIC_GAP_TYPES = {"material_omission", "conflicting_evidence", "scope_gap"}
-GROUNDING_PREFIXES = {"evidence", "runtime", "answer", "investigation", "request"}
-
+_GROUNDING_FIELDS = {"max_chars_per_item"}
 
 ANSWER_ANCHOR_MAX_CHARS = 700
 REQUEST_ANCHOR_MAX_CHARS = 700
 
 
+class ClaimConfigError(ValueError):
+    """Invalid Claim configuration; never silently reinterpret it."""
+
+
 def _build_literal_anchors(text: str, *, namespace: str, prefix: str, max_chars: int) -> List[Dict[str, Any]]:
-    """Create deterministic literal coordinates without semantic interpretation."""
     value = str(text or "")
     cap = max(120, int(max_chars or 700))
     anchors: List[Dict[str, Any]] = []
     cursor = 0
-    length = len(value)
     boundary = re.compile(r"(?:[.!?;:](?=\s|$)|\n)")
-    while cursor < length:
-        while cursor < length and value[cursor].isspace():
+    while cursor < len(value):
+        while cursor < len(value) and value[cursor].isspace():
             cursor += 1
-        if cursor >= length:
+        if cursor >= len(value):
             break
-        hard_end = min(length, cursor + cap)
+        hard_end = min(len(value), cursor + cap)
         match = boundary.search(value, cursor, hard_end)
         if match is not None:
             end = match.end()
-        elif hard_end < length:
+        elif hard_end < len(value):
             whitespace = max(value.rfind(" ", cursor, hard_end), value.rfind("\t", cursor, hard_end))
             end = whitespace if whitespace > cursor else hard_end
         else:
-            end = length
+            end = len(value)
         start = cursor
         while end > start and value[end - 1].isspace():
             end -= 1
@@ -63,38 +63,22 @@ def _build_literal_anchors(text: str, *, namespace: str, prefix: str, max_chars:
             continue
         anchor_id = f"{prefix}{len(anchors) + 1}"
         anchors.append({
-            "id": anchor_id, "ref": f"{namespace}:{anchor_id}",
-            "text": value[start:end], "start": start, "end": end,
+            "id": anchor_id,
+            "ref": f"{namespace}:{anchor_id}",
+            "text": value[start:end],
+            "start": start,
+            "end": end,
         })
         cursor = max(end, cursor + 1)
     return anchors
 
 
 def build_request_anchors(request: Any, *, max_chars: int = REQUEST_ANCHOR_MAX_CHARS) -> List[Dict[str, Any]]:
-    """Literal request coordinates. Anchors are not requirements or semantic items."""
     return _build_literal_anchors(str(request or ""), namespace="request", prefix="r", max_chars=max_chars)
 
 
 def build_answer_anchors(answer: str, *, max_chars: int = ANSWER_ANCHOR_MAX_CHARS) -> List[Dict[str, Any]]:
-    """Literal provisional-answer coordinates; never semantic claims."""
     return _build_literal_anchors(str(answer or ""), namespace="answer", prefix="a", max_chars=max_chars)
-
-
-def answer_anchor_map(answer_anchors: Optional[Sequence[Dict[str, Any]]]) -> Dict[str, str]:
-    """Return the deterministic ``answer_ref -> literal text`` map."""
-    result: Dict[str, str] = {}
-    for item in answer_anchors or []:
-        if not isinstance(item, dict):
-            continue
-        anchor_id = str(item.get("id") or "").strip()
-        text = str(item.get("text") or "")
-        if anchor_id and anchor_id not in result:
-            result[anchor_id] = text
-    return result
-
-
-class ClaimConfigError(ValueError):
-    """Invalid Claims configuration; never silently reinterpreted semantically."""
 
 
 def _object_field(parent: Dict[str, Any], key: str) -> Dict[str, Any]:
@@ -106,15 +90,12 @@ def _object_field(parent: Dict[str, Any], key: str) -> Dict[str, Any]:
     return value
 
 
-def _int_field(
-    parent: Dict[str, Any], key: str, default: int, minimum: int, prefix: str,
-) -> int:
+def _int_field(parent: Dict[str, Any], key: str, default: int, minimum: int, prefix: str) -> int:
     if key not in parent:
         return default
     value = parent.get(key)
     if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
-        comparator = "não negativo" if minimum == 0 else f">= {minimum}"
-        raise ClaimConfigError(f"{prefix}.{key} precisa ser inteiro {comparator}")
+        raise ClaimConfigError(f"{prefix}.{key} precisa ser inteiro >= {minimum}")
     return value
 
 
@@ -128,21 +109,15 @@ def _float_field(parent: Dict[str, Any], key: str, default: float, prefix: str) 
 
 
 def claim_config(config: Dict[str, Any]) -> Dict[str, Any]:
-    """Resolve and validate the single active Claims configuration.
-
-    Syntactic normalization is intentionally small and deterministic (for
-    example ``SELF_CHECK`` -> ``self_check``). Invalid semantics are rejected
-    instead of being silently converted to defaults.
-    """
     agent = ((config or {}).get("agent") or {})
     if not isinstance(agent, dict):
         raise ClaimConfigError("agent precisa ser um objeto")
-    if "claims" in agent and not isinstance(agent.get("claims"), dict):
+    raw = agent.get("claims") or {}
+    if not isinstance(raw, dict):
         raise ClaimConfigError("agent.claims precisa ser um objeto")
-    raw = dict(agent.get("claims") or {})
-    unknown_claims = sorted(set(raw) - _CLAIMS_FIELDS)
-    if unknown_claims:
-        raise ClaimConfigError("UNKNOWN_CONFIG_FIELD:agent.claims:" + ",".join(unknown_claims))
+    unknown = sorted(set(raw) - _CLAIMS_FIELDS)
+    if unknown:
+        raise ClaimConfigError("UNKNOWN_CONFIG_FIELD:agent.claims:" + ",".join(unknown))
 
     mode_raw = raw.get("mode", "self_check")
     if not isinstance(mode_raw, str):
@@ -152,67 +127,55 @@ def claim_config(config: Dict[str, Any]) -> Dict[str, Any]:
         raise ClaimConfigError(f"agent.claims.mode inválido: {mode_raw}")
 
     verifier = _object_field(raw, "verifier")
-    evidence = _object_field(raw, "evidence")
-    unknown_evidence = sorted(set(evidence) - _EVIDENCE_FIELDS)
-    if unknown_evidence:
-        raise ClaimConfigError("UNKNOWN_CONFIG_FIELD:agent.claims.evidence:" + ",".join(unknown_evidence))
+    grounding_cfg = _object_field(raw, "grounding")
+    unknown_grounding = sorted(set(grounding_cfg) - _GROUNDING_FIELDS)
+    if unknown_grounding:
+        raise ClaimConfigError("UNKNOWN_CONFIG_FIELD:agent.claims.grounding:" + ",".join(unknown_grounding))
+
     transport_keys = {"base_url", "model", "openai_compatible"}
-    present_transport = sorted(set(verifier) & transport_keys)
     allowed_verifier = _VERIFIER_VERIFIED_FIELDS if mode == "verified" else _VERIFIER_COMMON_FIELDS
     unknown_verifier = sorted(set(verifier) - allowed_verifier)
     if unknown_verifier:
         raise ClaimConfigError("UNKNOWN_CONFIG_FIELD:agent.claims.verifier:" + ",".join(unknown_verifier))
-    if mode == "self_check" and present_transport:
-        raise ClaimConfigError(
-            "agent.claims.verifier em self_check herda diretamente a LLM principal; remova: "
-            + ", ".join(present_transport)
-        )
-    verified_transport = {}
+    if mode == "self_check" and set(verifier).intersection(transport_keys):
+        raise ClaimConfigError("agent.claims.verifier em self_check herda a LLM principal")
+
+    transport: Dict[str, Any] = {}
     if mode == "verified":
         missing = sorted(transport_keys - set(verifier))
         if missing:
-            raise ClaimConfigError(
-                "agent.claims.verifier em verified exige configuração explícita: " + ", ".join(missing)
-            )
-        base_url = verifier.get("base_url")
-        model = verifier.get("model")
-        openai_compatible = verifier.get("openai_compatible")
-        for key, value in (("base_url", base_url), ("model", model)):
-            if not isinstance(value, str) or not value.strip():
-                raise ClaimConfigError(f"agent.claims.verifier.{key} precisa ser string não vazia")
-        if not isinstance(openai_compatible, bool):
+            raise ClaimConfigError("agent.claims.verifier em verified exige: " + ", ".join(missing))
+        if not isinstance(verifier.get("base_url"), str) or not verifier["base_url"].strip():
+            raise ClaimConfigError("agent.claims.verifier.base_url precisa ser string não vazia")
+        if not isinstance(verifier.get("model"), str) or not verifier["model"].strip():
+            raise ClaimConfigError("agent.claims.verifier.model precisa ser string não vazia")
+        if not isinstance(verifier.get("openai_compatible"), bool):
             raise ClaimConfigError("agent.claims.verifier.openai_compatible precisa ser booleano")
-        verified_transport = {
-            "base_url": base_url.strip(),
-            "model": model.strip(),
-            "openai_compatible": openai_compatible,
+        transport = {
+            "base_url": verifier["base_url"].strip(),
+            "model": verifier["model"].strip(),
+            "openai_compatible": verifier["openai_compatible"],
         }
 
     resolved = {
         "mode": mode,
         "verifier": {
-            **verified_transport,
-            "max_tokens": _int_field(verifier, "max_tokens", 900, 128, "agent.claims.verifier"),
+            **transport,
             "temperature": _float_field(verifier, "temperature", 0.0, "agent.claims.verifier"),
         },
-        "evidence": {
+        "grounding": {
             "max_chars_per_item": _int_field(
-                evidence, "max_chars_per_item", 2200, 200, "agent.claims.evidence"
+                grounding_cfg, "max_chars_per_item", 1400, 120, "agent.claims.grounding"
             ),
         },
     }
 
     if mode == "verified":
         llm = ((config or {}).get("llm") or {})
-        if not isinstance(llm, dict):
-            raise ClaimConfigError("llm precisa ser um objeto")
-        main_base = str(llm.get("base_url") or "http://localhost:11434").rstrip("/")
-        main_model = str(llm.get("model") or "").strip()
-        verifier_base = str(verified_transport["base_url"]).rstrip("/")
-        verifier_model = str(verified_transport["model"]).strip()
-        if (verifier_base, verifier_model) == (main_base, main_model):
+        main = (str(llm.get("base_url") or "http://localhost:11434").rstrip("/"), str(llm.get("model") or "").strip())
+        verifier_id = (str(transport["base_url"]).rstrip("/"), str(transport["model"]).strip())
+        if main == verifier_id:
             raise ClaimConfigError("VERIFIED_REQUIRES_DISTINCT_VERIFIER")
-
     return resolved
 
 
@@ -220,89 +183,95 @@ def _excerpt(item: Dict[str, Any], max_chars: int) -> str:
     text = str(item.get("numbered_content") or item.get("content") or "")
     if len(text) <= max_chars:
         return text
-    return text[:max_chars].rstrip() + "\n...[evidence excerpt cropped]"
+    head = max(1, max_chars * 2 // 3)
+    tail = max(1, max_chars - head)
+    return text[:head].rstrip() + "\n...[cropped]...\n" + text[-tail:].lstrip()
 
 
-def compact_evidence(
-    evidence: Dict[str, Any], evidence_ids: Optional[Iterable[str]], *,
-    max_chars_per_item: int,
+def compact_grounding(
+    grounding: Dict[str, Any], grounding_ids: Optional[Iterable[str]], *, max_chars_per_item: int,
 ) -> List[Dict[str, Any]]:
-    """Build only the explicitly selected bounded verifier view.
-
-    An empty selection stays empty. The canonical contract removes the old
-    semantic fallback that exposed the last N runtime EvidenceRecords.
-    """
-    wanted = [str(item) for item in (evidence_ids or []) if str(item)]
-    if not wanted:
-        return []
-    result: List[Dict[str, Any]] = []
-    for evidence_id in wanted:
-        item = evidence.get(evidence_id)
+    wanted = [str(item) for item in (grounding_ids or []) if str(item)]
+    out: List[Dict[str, Any]] = []
+    for grounding_id in wanted:
+        item = grounding.get(grounding_id)
         if not isinstance(item, dict):
             continue
         entry = {
-            "ref": f"evidence:{evidence_id}",
-            "file": item.get("file"),
-            "lines": [item.get("line_start"), item.get("line_end")],
+            "ref": f"observation:{grounding_id}",
+            "locator": dict(item.get("locator") or {}) if isinstance(item.get("locator"), dict) else {},
+            "source_type": item.get("source_type"),
             "cropped": bool(
                 item.get("truncated") or item.get("context_truncated")
                 or len(str(item.get("numbered_content") or item.get("content") or "")) > max_chars_per_item
             ),
             "excerpt": _excerpt(item, max_chars_per_item),
         }
-        result.append({key: value for key, value in entry.items() if value not in (None, "", [], [None, None])})
-    return result
-
-
-def _ids(value: Any) -> List[str]:
-    if not isinstance(value, list):
-        return []
-    seen = set()
-    result = []
-    for item in value:
-        value_str = str(item or "").strip()
-        if value_str and value_str not in seen:
-            seen.add(value_str)
-            result.append(value_str)
-    return result
-
-
-def _grounding_refs(value: Any) -> List[str]:
-    """Normalize ordered verifier grounding coordinates without interpreting them."""
-    return _ids(value)
-
-
-def evidence_ids_from_grounding(refs: Iterable[str]) -> List[str]:
-    out: List[str] = []
-    for ref in refs or []:
-        text = str(ref or "").strip()
-        if text.startswith("evidence:"):
-            evidence_id = text.split(":", 1)[1].strip()
-            if evidence_id and evidence_id not in out:
-                out.append(evidence_id)
+        out.append({k: v for k, v in entry.items() if v not in (None, "", [], {})})
     return out
 
 
-def _bounded_runtime_result(value: Any, max_chars: int = 700) -> Any:
+def _ids(values: Iterable[Any]) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for value in values or []:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            out.append(text)
+    return out
+
+
+def grounding_ids_from_refs(refs: Iterable[str]) -> List[str]:
+    return _ids(str(ref).split(":", 1)[1] for ref in refs or [] if str(ref).startswith("observation:"))
+
+
+def _bounded_runtime_result(value: Any, max_chars: int = 500) -> Any:
+    """Compact Runtime facts without knowing any capability/domain vocabulary."""
     try:
         raw = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
     except (TypeError, ValueError):
         raw = str(value)
     if len(raw) <= max_chars:
         return value
-    return {"truncated": True, "preview": raw[:max_chars]}
+    if not isinstance(value, dict):
+        return {"truncated": True, "preview": raw[:max_chars]}
+
+    summary = {}
+    for key in (
+        "status", "ok", "executed", "changed", "error_code", "retryable",
+        "failure_scope", "failure_resource",
+    ):
+        if value.get(key) is not None:
+            summary[key] = copy.deepcopy(value.get(key))
+    if isinstance(value.get("coverage"), dict):
+        summary["coverage"] = copy.deepcopy(value.get("coverage"))
+    if isinstance(value.get("frontiers"), list):
+        summary["frontiers"] = [
+            {key: copy.deepcopy(item.get(key)) for key in ("id", "kind", "at", "count", "reason") if item.get(key) is not None}
+            for item in value.get("frontiers")[:8] if isinstance(item, dict)
+        ]
+    detail = value.get("detail")
+    if detail is not None:
+        try:
+            detail_raw = json.dumps(detail, ensure_ascii=False, separators=(",", ":"), default=str)
+        except (TypeError, ValueError):
+            detail_raw = str(detail)
+        if isinstance(detail, dict):
+            summary["detail_keys"] = [str(key)[:80] for key in list(detail)[:24]]
+        summary["detail_preview"] = detail_raw[:max(80, max_chars // 2)]
+    if not summary:
+        return {"truncated": True, "preview": raw[:max_chars]}
+    summary["payload_truncated"] = True
+    return summary
 
 
-def compact_runtime_facts(observation_ledger: Dict[str, Any], *, max_items: int = 64) -> List[Dict[str, Any]]:
-    """Expose physical outcomes from the current job as bounded Claim coordinates.
-
-    This is objective projection only: no event is selected for semantic relevance.
-    """
+def compact_runtime_facts(observation_ledger: Dict[str, Any], *, max_items: int = 24) -> List[Dict[str, Any]]:
     events = list((observation_ledger or {}).get("events") or [])
     execution = current_execution()
     start = int(execution.observation_event_start or 0) if execution is not None else 0
-    selected = events[start:start + max(1, int(max_items))]
-    result: List[Dict[str, Any]] = []
+    selected = events[start:][-max(1, int(max_items)):]
+    out: List[Dict[str, Any]] = []
     for index, event in enumerate(selected, start=1):
         if not isinstance(event, dict):
             continue
@@ -317,15 +286,14 @@ def compact_runtime_facts(observation_ledger: Dict[str, Any], *, max_items: int 
             "error_code": event.get("error_code"),
             "result": _bounded_runtime_result(event.get("result") or {}),
         }
-        result.append({k: v for k, v in item.items() if v is not None})
-    return result
+        out.append({k: v for k, v in item.items() if v is not None})
+    return out
 
 
 def _validate_grounding_refs(
-    refs: Iterable[str], *, visible_evidence_ids: set[str], runtime_fact_ids: set[str],
-    answer_ids: set[str], investigation_ids: set[str], request_ids: set[str],
+    refs: Iterable[str], *, visible_grounding_ids: set[str], runtime_fact_ids: set[str],
+    answer_ids: set[str], request_ids: set[str],
 ) -> Tuple[bool, str]:
-    """Validate coordinates only; never decide whether a coordinate is sufficient."""
     for raw in refs or []:
         ref = str(raw or "").strip()
         if ref == "request":
@@ -335,367 +303,156 @@ def _validate_grounding_refs(
         prefix, value = ref.split(":", 1)
         if prefix not in GROUNDING_PREFIXES or not value:
             return False, f"CLAIM_REVIEW_GROUNDING_REF_INVALID:{ref}"
-        if prefix == "evidence" and value not in visible_evidence_ids:
-            return False, f"CLAIM_REVIEW_GROUNDING_EVIDENCE_NOT_VISIBLE:{value}"
-        if prefix == "runtime" and value not in runtime_fact_ids:
+        if prefix == "observation" and value not in visible_grounding_ids:
+            return False, f"CLAIM_REVIEW_GROUNDING_OBSERVATION_NOT_VISIBLE:{value}"
+        if prefix == "runtime" and ref not in runtime_fact_ids:
             return False, f"CLAIM_REVIEW_GROUNDING_RUNTIME_UNKNOWN:{value}"
-        if prefix == "answer" and value not in answer_ids:
+        if prefix == "answer" and ref not in answer_ids:
             return False, f"CLAIM_REVIEW_GROUNDING_ANSWER_UNKNOWN:{value}"
-        if prefix == "investigation" and value not in investigation_ids:
-            return False, f"CLAIM_REVIEW_GROUNDING_INVESTIGATION_UNKNOWN:{value}"
-        if prefix == "request" and value not in request_ids:
+        if prefix == "request" and ref not in request_ids:
             return False, f"CLAIM_REVIEW_GROUNDING_REQUEST_UNKNOWN:{value}"
     return True, "ok"
 
 
-def validate_file_evidence_freshness(
-    evidence: Dict[str, Any], evidence_ids: Iterable[str], project_root: Any,
-) -> Tuple[bool, str]:
-    """Recheck live file hashes for the EvidenceRecords selected for review."""
-    if not project_root:
-        return True, "ok"
-    root = os.path.realpath(os.fspath(project_root))
-    for evidence_id in _ids(list(evidence_ids or [])):
-        item = evidence.get(evidence_id)
-        if not isinstance(item, dict):
-            continue
-        relative = str(item.get("file") or "")
-        expected = str(item.get("file_hash") or "")
-        if not relative or not expected or relative.startswith("<"):
-            continue
-        absolute = _resolver_caminho_seguro(root, relative)
-        if absolute is None or not os.path.isfile(absolute):
-            return False, f"EVIDENCE_STALE:{evidence_id}"
-        try:
-            with open(absolute, "r", encoding="utf-8", errors="replace") as handle:
-                current = hash_texto(normalizar_quebras(handle.read()))
-        except OSError:
-            return False, f"EVIDENCE_STALE:{evidence_id}"
-        if current != expected:
-            return False, f"EVIDENCE_STALE:{evidence_id}"
-    return True, "ok"
-
-
-def problematic_semantic_gaps(review: Dict[str, Any]) -> List[Dict[str, Any]]:
-    return [
-        item for item in (review or {}).get("semantic_gaps") or []
-        if isinstance(item, dict) and str(item.get("type") or "") in SEMANTIC_GAP_TYPES
-    ]
-
-
-def _review_summary(
-    claims: Sequence[Dict[str, Any]],
-    semantic_gaps: Optional[Sequence[Dict[str, Any]]] = None,
-    material_satisfaction: Optional[Dict[str, Any]] = None,
-    answer_consistency: Optional[Dict[str, Any]] = None,
-) -> Dict[str, int]:
-    semantic = [
-        item for item in (semantic_gaps or [])
-        if isinstance(item, dict) and str(item.get("type") or "") in SEMANTIC_GAP_TYPES
-    ]
-    summary = {
-        "supported": sum(1 for claim in claims if claim.get("verdict") == "supported"),
-        "contradicted": sum(1 for claim in claims if claim.get("verdict") == "contradicted"),
-        "insufficient": sum(1 for claim in claims if claim.get("verdict") == "insufficient"),
-        "material_satisfaction_gap": 1 if str((material_satisfaction or {}).get("status") or "") == "gap" else 0,
-        "material_satisfaction_blocked": 1 if str((material_satisfaction or {}).get("status") or "") == "blocked" else 0,
-        "answer_consistency_conflict": 1 if str((answer_consistency or {}).get("status") or "") == "conflict" else 0,
-    }
-    if semantic:
-        summary.update({
-            "semantic_gaps": len(semantic),
-            "material_omission": sum(1 for item in semantic if item.get("type") == "material_omission"),
-            "conflicting_evidence": sum(1 for item in semantic if item.get("type") == "conflicting_evidence"),
-            "scope_gap": sum(1 for item in semantic if item.get("type") == "scope_gap"),
-        })
-    return summary
-
-
 def normalize_claim_review(
-    raw: Dict[str, Any],
-    evidence: Dict[str, Any],
+    raw: Any,
+    grounding: Dict[str, Any],
     *,
-    answer: Optional[str] = None,
+    answer: str = "",
     answer_anchors: Optional[Sequence[Dict[str, Any]]] = None,
     request_anchors: Optional[Sequence[Dict[str, Any]]] = None,
-    visible_evidence_ids: Optional[Iterable[str]] = None,
-    investigation: Optional[Sequence[Dict[str, Any]]] = None,
+    visible_grounding_ids: Optional[Iterable[str]] = None,
     runtime_facts: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> Tuple[bool, str, Dict[str, Any]]:
-    """Validate deterministic Claim coordinates after strict structured parsing."""
-    visible_evidence = set(_ids(list(visible_evidence_ids or []))) if visible_evidence_ids is not None else set(evidence)
-    investigation_ids = {
-        str(item.get("id") or "") for item in (investigation or [])
-        if isinstance(item, dict) and str(item.get("id") or "")
-    }
-    investigation_refs = {f"investigation:{target_id}" for target_id in investigation_ids}
-    answer_text = None if answer is None else str(answer)
-    resolved_anchors = answer_anchors
-    if resolved_anchors is None and answer_text is not None:
-        resolved_anchors = build_answer_anchors(answer_text)
-    anchor_text_by_ref = {
-        str(item.get("ref") or f"answer:{item.get('id')}"): str(item.get("text") or "")
-        for item in (resolved_anchors or []) if isinstance(item, dict) and (item.get("ref") or item.get("id"))
-    }
-    anchors = answer_anchor_map(resolved_anchors)
-    answer_ids = {ref.split(":", 1)[1] for ref in anchor_text_by_ref if ref.startswith("answer:")}
-    request_ids = {
-        str(item.get("ref") or "").split(":", 1)[1]
-        for item in (request_anchors or [])
-        if isinstance(item, dict) and str(item.get("ref") or "").startswith("request:")
-    }
-    runtime_ids = {
-        str(item.get("ref") or "").split(":", 1)[1] for item in (runtime_facts or [])
-        if isinstance(item, dict) and str(item.get("ref") or "").startswith("runtime:")
-    }
+    if not isinstance(raw, dict) or set(raw) != {"verdict", "issues"}:
+        return False, "CLAIM_REVIEW_SHAPE_INVALID", {}
+    verdict = str(raw.get("verdict") or "").strip()
+    issues_raw = raw.get("issues")
+    if verdict not in {"accept", "challenge"} or not isinstance(issues_raw, list):
+        return False, "CLAIM_REVIEW_SHAPE_INVALID", {}
+    if verdict == "accept" and issues_raw:
+        return False, "CLAIM_REVIEW_ACCEPT_WITH_ISSUES", {}
+    if verdict == "challenge" and not issues_raw:
+        return False, "CLAIM_REVIEW_CHALLENGE_REQUIRES_ISSUE", {}
+    if len(issues_raw) > CLAIM_MAX_ISSUES:
+        return False, "CLAIM_REVIEW_ISSUES_TOO_MANY", {}
 
-    def normalize_grounding(value: Any, *, label: str) -> Tuple[Optional[List[str]], Optional[str]]:
-        refs = _grounding_refs(value)
+    anchors = list(answer_anchors or build_answer_anchors(answer))
+    answer_refs = {str(item.get("ref") or "") for item in anchors if isinstance(item, dict) and item.get("ref")}
+    request_refs = {str(item.get("ref") or "") for item in (request_anchors or []) if isinstance(item, dict) and item.get("ref")}
+    runtime_refs = {
+        str(item.get("ref") or "") for item in (runtime_facts or [])
+        if isinstance(item, dict) and item.get("ref")
+    }
+    visible = set(_ids(visible_grounding_ids if visible_grounding_ids is not None else grounding.keys()))
+
+    issues: List[Dict[str, Any]] = []
+    for index, item in enumerate(issues_raw, start=1):
+        if not isinstance(item, dict) or set(item) != {"kind", "answer_ref", "grounding_refs", "reason"}:
+            return False, f"CLAIM_REVIEW_ISSUE_SHAPE_INVALID:{index}", {}
+        kind = str(item.get("kind") or "").strip()
+        if kind not in CLAIM_ISSUE_KINDS:
+            return False, f"CLAIM_REVIEW_ISSUE_KIND_INVALID:{index}", {}
+        answer_ref = item.get("answer_ref")
+        if answer_ref is not None:
+            answer_ref = str(answer_ref).strip()
+            if answer_ref not in answer_refs:
+                return False, f"CLAIM_REVIEW_ANSWER_REF_INVALID:{index}:{answer_ref}", {}
+        refs = _ids(item.get("grounding_refs") or [])
+        if len(refs) > CLAIM_MAX_GROUNDING_REFS:
+            return False, f"CLAIM_REVIEW_GROUNDING_REFS_TOO_MANY:{index}", {}
+        if any(len(ref) > CLAIM_MAX_GROUNDING_REF_CHARS for ref in refs):
+            return False, f"CLAIM_REVIEW_GROUNDING_REF_TOO_LONG:{index}", {}
         ok, reason = _validate_grounding_refs(
-            refs, visible_evidence_ids=visible_evidence, runtime_fact_ids=runtime_ids,
-            answer_ids=answer_ids, investigation_ids=investigation_ids, request_ids=request_ids,
+            refs,
+            visible_grounding_ids=visible,
+            runtime_fact_ids=runtime_refs,
+            answer_ids=answer_refs,
+            request_ids=request_refs,
         )
         if not ok:
-            return None, f"{reason}:{label}"
-        return refs, None
-
-    satisfaction_raw = raw.get("material_satisfaction") or {}
-    satisfaction_refs, error = normalize_grounding(satisfaction_raw.get("grounding_refs"), label="material_satisfaction")
-    if error:
-        return False, error, {}
-    material_satisfaction = {
-        "status": str(satisfaction_raw.get("status") or "").strip(),
-        "grounding_refs": satisfaction_refs or [],
-        "reason": str(satisfaction_raw.get("reason") or "").strip()[:240],
-    }
-    consistency_raw = raw.get("answer_consistency") or {}
-    consistency_refs, error = normalize_grounding(consistency_raw.get("grounding_refs"), label="answer_consistency")
-    if error:
-        return False, error, {}
-    answer_consistency = {
-        "status": str(consistency_raw.get("status") or "").strip(),
-        "grounding_refs": consistency_refs or [],
-        "reason": str(consistency_raw.get("reason") or "").strip()[:240],
-    }
-
-    claims: List[Dict[str, Any]] = []
-    for index, item in enumerate(raw["claims"], start=1):
-        answer_ref = item["answer_ref"].strip()
-        target_id = item.get("target_id")
-        if target_id is not None:
-            target_ref = str(target_id).strip()
-            if target_ref not in investigation_refs:
-                return False, f"CLAIM_REVIEW_UNKNOWN_TARGET:{index}:{target_ref}", {}
-            target_id = target_ref.split(":", 1)[1]
-        statement = item["statement"].strip()
-        verdict = item["verdict"]
-        refs, error = normalize_grounding(item.get("grounding_refs"), label=f"claim:{index}")
-        if error:
-            return False, error, {}
-        reason = item["reason"].strip()[:160]
-        if answer_ref not in anchor_text_by_ref:
-            return False, f"CLAIM_REVIEW_ANSWER_REF_INVALID:{index}:{answer_ref}", {}
-        claims.append({
-            "answer_ref": answer_ref, "answer_quote": anchor_text_by_ref[answer_ref],
-            "target_id": target_id, "statement": statement,
-            "grounding_refs": refs or [],
-            "evidence_ids": evidence_ids_from_grounding(refs or []),
-            "verdict": verdict, "reason": reason,
+            return False, f"{reason}:issue:{index}", {}
+        why = str(item.get("reason") or "").strip()
+        if len(why) > CLAIM_MAX_REASON_CHARS:
+            return False, f"CLAIM_REVIEW_REASON_TOO_LONG:{index}", {}
+        if not refs or not why:
+            return False, f"CLAIM_REVIEW_ISSUE_INCOMPLETE:{index}", {}
+        issues.append({
+            "kind": kind,
+            "answer_ref": answer_ref,
+            "grounding_refs": refs,
+            "grounding_ids": grounding_ids_from_refs(refs),
+            "reason": why,
         })
 
-    semantic_gaps: List[Dict[str, Any]] = []
-    for index, item in enumerate(raw["semantic_gaps"], start=1):
-        gap_type = item["type"]
-        gap_target_id = item.get("target_id")
-        if gap_target_id is not None:
-            gap_target_ref = str(gap_target_id).strip()
-            if gap_target_ref not in investigation_refs:
-                return False, f"CLAIM_REVIEW_UNKNOWN_TARGET:{index}:{gap_target_ref}", {}
-            gap_target_id = gap_target_ref.split(":", 1)[1]
-        refs, error = normalize_grounding(item.get("grounding_refs"), label=f"semantic_gap:{index}")
-        if error:
-            return False, error, {}
-        semantic_gaps.append({
-            "type": gap_type, "target_id": gap_target_id,
-            "grounding_refs": refs or [],
-            "evidence_ids": evidence_ids_from_grounding(refs or []),
-            "required_property": item["required_property"].strip()[:300],
-            "reason": item["reason"].strip()[:240],
-        })
-
-    # Rev5.8 protocol invariants. These validate internal consistency only;
-    # they do not decide what the request semantically requires.
-    sat_status = material_satisfaction.get("status")
-    gap_types = {str(item.get("type") or "") for item in semantic_gaps}
-    if sat_status == "blocked" and not any(str(ref).startswith("runtime:") for ref in material_satisfaction.get("grounding_refs") or []):
-        return False, "CLAIM_REVIEW_BLOCKED_REQUIRES_RUNTIME_GROUNDING", {}
-    if sat_status == "gap" and not semantic_gaps:
-        return False, "CLAIM_REVIEW_GAP_REQUIRES_SEMANTIC_DEBT", {}
-    if sat_status == "satisfied" and gap_types.intersection(SEMANTIC_GAP_TYPES):
-        return False, "CLAIM_REVIEW_SATISFIED_WITH_SEMANTIC_GAP", {}
-    if answer_consistency.get("status") == "conflict" and not any(str(ref).startswith("answer:") for ref in answer_consistency.get("grounding_refs") or []):
-        return False, "CLAIM_REVIEW_CONFLICT_REQUIRES_ANSWER_GROUNDING", {}
-
-    return True, "ok", {
-        "material_satisfaction": material_satisfaction,
-        "answer_consistency": answer_consistency,
-        "claims": claims, "semantic_gaps": semantic_gaps,
-        "summary": _review_summary(claims, semantic_gaps, material_satisfaction, answer_consistency),
-    }
+    summary = {"issues": len(issues)}
+    for kind in CLAIM_ISSUE_KINDS:
+        count = sum(1 for item in issues if item.get("kind") == kind)
+        if count:
+            summary[kind] = count
+    return True, "ok", {"verdict": verdict, "issues": issues, "summary": summary}
 
 
-def problematic_claims(review: Dict[str, Any], verdict: Optional[str] = None) -> List[Dict[str, Any]]:
-    claims = [item for item in (review or {}).get("claims") or [] if isinstance(item, dict)]
-    if verdict:
-        return [item for item in claims if item.get("verdict") == verdict]
-    return [item for item in claims if item.get("verdict") in {"contradicted", "insufficient"}]
-
-
-def claim_evidence_ledger(review: Dict[str, Any], evidence: Dict[str, Any]) -> List[Dict[str, Any]]:
-    ledger = []
-    for claim in (review or {}).get("claims") or []:
-        if not isinstance(claim, dict):
+def claim_grounding_ledger(review: Dict[str, Any], grounding: Dict[str, Any]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for issue in (review or {}).get("issues") or []:
+        if not isinstance(issue, dict):
             continue
         sources = []
-        for evidence_id in claim.get("evidence_ids") or []:
-            item = evidence.get(evidence_id) or {}
+        for grounding_id in issue.get("grounding_ids") or []:
+            item = grounding.get(grounding_id) or {}
             sources.append({
-                "evidence_id": evidence_id,
-                "file": item.get("file"),
-                "lines": [item.get("line_start"), item.get("line_end")],
+                "grounding_id": grounding_id,
+                "locator": dict(item.get("locator") or {}) if isinstance(item.get("locator"), dict) else {},
                 "source_type": item.get("source_type"),
             })
-        ledger.append({
-            "answer_ref": claim.get("answer_ref"),
-            "target_id": claim.get("target_id"),
-            "answer_quote": claim.get("answer_quote"),
-            "statement": claim.get("statement"),
-            "verdict": claim.get("verdict"),
-            "reason": claim.get("reason"),
+        out.append({
+            "kind": issue.get("kind"),
+            "answer_ref": issue.get("answer_ref"),
+            "reason": issue.get("reason"),
             "sources": sources,
         })
-    return ledger
-
-
-def claim_review_output_budget(
-    answer: str,
-    *,
-    request: Any = "",
-    base_tokens: int = 900,
-    available_tokens: Optional[int] = None,
-    answer_anchor_count: Optional[int] = None,
-    request_anchor_count: Optional[int] = None,
-    investigation_target_count: int = 0,
-) -> int:
-    """Physical Claim ceiling based on packet complexity, never semantic item counts."""
-    base = max(128, int(base_tokens or 900))
-    answer_chars = len(str(answer or ""))
-    request_chars = len(str(request or ""))
-    answer_units = max(1, (answer_chars + 159) // 160, int(answer_anchor_count or 0))
-    request_units = max(1, (request_chars + 199) // 200, int(request_anchor_count or 0))
-    investigation_units = max(0, int(investigation_target_count or 0))
-    desired = max(base, 640 + answer_units * 150 + request_units * 110 + investigation_units * 70)
-    if available_tokens is None:
-        return int(desired)
-    return min(int(desired), max(1, int(available_tokens)))
+    return out
 
 
 def review_prompt(
     answer: str,
-    evidence_view: List[Dict[str, Any]],
+    grounding_view: List[Dict[str, Any]],
     request: Any,
     *,
     answer_anchors: Optional[List[Dict[str, Any]]] = None,
     request_anchors: Optional[List[Dict[str, Any]]] = None,
-    investigation: Optional[List[Dict[str, Any]]] = None,
     runtime_facts: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
-    """Build the sole canonical semantic-review packet.
-
-    There are no scope-only, Claim-only, Findings-only or semantic-gap repair
-    tasks in Rev5.8. Claim always audits the complete provisional answer.
-    """
     anchors = answer_anchors if answer_anchors is not None else build_answer_anchors(answer)
     req_anchors = request_anchors if request_anchors is not None else build_request_anchors(request)
-    public_anchors = [
-        {"ref": str(item.get("ref") or f"answer:{item.get('id')}"), "text": str(item.get("text") or "")}
-        for item in anchors
-        if isinstance(item, dict) and (item.get("ref") or item.get("id"))
-    ]
-    public_request_anchors = [
-        {"ref": str(item.get("ref") or f"request:{item.get('id')}"), "text": str(item.get("text") or "")}
-        for item in req_anchors
-        if isinstance(item, dict) and (item.get("ref") or item.get("id"))
-    ]
     payload: Dict[str, Any] = {
-        "task": "verify_claims",
+        "task": "challenge_or_accept",
         "request": str(request or ""),
-        "request_anchors": public_request_anchors,
-        "answer_anchors": public_anchors,
-        "evidence": evidence_view,
-        "runtime_facts": [dict(item) for item in (runtime_facts or []) if isinstance(item, dict)],
-        "investigation": [
-            {
-                "ref": f"investigation:{item.get('id')}",
-                "goal": item.get("goal"), "status": item.get("status"),
-                "evidence_refs": [f"evidence:{eid}" for eid in (item.get("evidence_ids") or [])],
-                "reason": item.get("reason"),
-            }
-            for item in (investigation or []) if isinstance(item, dict) and item.get("id")
+        "request_anchors": [
+            {"ref": str(item.get("ref") or f"request:{item.get('id')}"), "text": str(item.get("text") or "")}
+            for item in req_anchors if isinstance(item, dict) and (item.get("ref") or item.get("id"))
         ],
+        "answer_anchors": [
+            {"ref": str(item.get("ref") or f"answer:{item.get('id')}"), "text": str(item.get("text") or "")}
+            for item in anchors if isinstance(item, dict) and (item.get("ref") or item.get("id"))
+        ],
+        "observed_material": grounding_view,
+        "runtime_facts": [dict(item) for item in (runtime_facts or []) if isinstance(item, dict)],
     }
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
 def review_followup_feedback(review: Dict[str, Any]) -> str:
-    """Serialize reviewer debt without adding runtime semantics.
-
-    The Claim Verifier already decided which material statements are
-    contradicted/insufficient and which semantic gaps exist. The runtime only
-    preserves those coordinates (Claim id, answer_ref, target_id, Evidence ids
-    and reason) so the Main LLM can choose the correction. The serialized text is
-    derived from the stored Claim Review; it is not a second persisted state.
-    """
-    claims = []
-    for claim in problematic_claims(review):
-        verdict = str(claim.get("verdict") or "")
-        if verdict not in {"contradicted", "insufficient"}:
+    """Return only Claim's blockers. Main chooses every semantic next step."""
+    issues = []
+    for item in (review or {}).get("issues") or []:
+        if not isinstance(item, dict):
             continue
-        claims.append({
-            "answer_ref": claim.get("answer_ref"),
-            "target_id": claim.get("target_id"),
-            "statement": claim.get("statement"),
-            "verdict": verdict,
-            "grounding_refs": list(claim.get("grounding_refs") or []),
-            "evidence_ids": list(claim.get("evidence_ids") or []),
-            "reason": claim.get("reason", ""),
+        issues.append({
+            "kind": item.get("kind"),
+            "answer_ref": item.get("answer_ref"),
+            "grounding_refs": list(item.get("grounding_refs") or []),
+            "reason": item.get("reason"),
         })
-    gaps = []
-    for gap in problematic_semantic_gaps(review):
-        gaps.append({
-            "type": gap.get("type"),
-            "target_id": gap.get("target_id"),
-            "grounding_refs": list(gap.get("grounding_refs") or []),
-            "evidence_ids": list(gap.get("evidence_ids") or []),
-            "required_property": gap.get("required_property", ""),
-            "reason": gap.get("reason", ""),
-        })
-    material_satisfaction = dict((review or {}).get("material_satisfaction") or {})
-    answer_consistency = dict((review or {}).get("answer_consistency") or {})
-    payload = {
-        "code": "CLAIM_REVIEW_FOLLOWUP",
-        "material_satisfaction": material_satisfaction,
-        "answer_consistency": answer_consistency,
-        "claims": claims,
-        "semantic_gaps": gaps,
-        "instruction": (
-            "The semantic reviewer rejected factual support, material delivery, or visible answer consistency. You remain the only producer of task semantics. "
-            "You decide the next action. Decide whether the debt is answer-only or requires new investigation. If answer_consistency=conflict and retained Evidence already "
-            "decides the issue, correct the final directly and reconcile the visible verdicts without new tools; otherwise continue/create the material target and investigate "
-            "the missing proof. You may also narrow/remove unsupported statements or state a real limitation. "
-            "Use semantic_gaps[].required_property as the precise unresolved property when present. Preserve the requested property; "
-            "do not replace it with an easier proxy. The reviewer does not choose tools or rewrite your answer."
-        ),
-    }
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
-
+    return json.dumps({"code": "CLAIM_CHALLENGE", "issues": issues}, ensure_ascii=False, separators=(",", ":"), default=str)

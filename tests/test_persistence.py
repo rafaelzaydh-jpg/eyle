@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Atualizacao 32: memoria JSON sempre publicada atomicamente."""
+"""Atomic JSON persistence tests."""
 import json
 import os
 import stat

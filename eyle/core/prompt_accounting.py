@@ -14,8 +14,8 @@ _COMPONENT_GROUPS = {
     "request": {"request"},
     "fresh_observation": {"latest_tool_results"},
     "retained_context": {"conversation_background"},
-    "source_state": {"observation_map", "source_record_index"},
-    "evidence_state": {"investigation", "evidence_index"},
+    "observation_state": {"observation_map", "grounding_index"},
+    "semantic_state": {"investigation"},
     "runtime_feedback": {"runtime_feedback"},
 }
 
@@ -148,6 +148,7 @@ def build_prompt_cost_accounting(details: Dict[str, Any], *, limit: int = 20) ->
         for attempt in attempts:
             ordinal += 1
             sent = bool(attempt)
+            request_status = str(attempt.get("request_status") or "sent") if sent else "preflight_blocked"
             if sent:
                 physical_attempts += 1
                 if int(attempt.get("physical_attempt") or 1) > 1:
@@ -165,7 +166,7 @@ def build_prompt_cost_accounting(details: Dict[str, Any], *, limit: int = 20) ->
                 "call": ordinal,
                 "logical_call_id": logical.get("logical_call_id"),
                 "physical_attempt": attempt.get("physical_attempt") if sent else None,
-                "request_status": "sent" if sent else "preflight_blocked",
+                "request_status": request_status,
                 "turn": logical.get("turn"), "mode": logical.get("mode"),
                 "local_user_estimated_tokens": local_user,
                 "local_system_estimated_tokens": local_system,
@@ -180,7 +181,7 @@ def build_prompt_cost_accounting(details: Dict[str, Any], *, limit: int = 20) ->
             components = snap.get("components_after")
             if isinstance(components, dict):
                 item["components"] = {str(name): _component_metrics(metric) for name, metric in components.items()}
-            for key in ("selected_evidence_count", "evidence_excerpt_chars_per_item", "answer_anchor_count", "request_anchor_count", "investigation_target_count", "prompt_budget_tokens"):
+            for key in ("selected_grounding_count", "grounding_excerpt_chars_per_item", "answer_anchor_count", "request_anchor_count", "prompt_budget_tokens"):
                 if snap.get(key) is not None: item[key] = snap.get(key)
             calls.append({key:value for key,value in item.items() if value is not None})
 
@@ -192,45 +193,34 @@ def build_prompt_cost_accounting(details: Dict[str, Any], *, limit: int = 20) ->
     fixed_repeat_tokens = int(categories["system"]["estimated_tokens"]) + int(categories["fixed_contract"]["estimated_tokens"])
     claim_snaps = [item for item in prompt_views if "claim" in str(item.get("mode") or "") or "verification" in str(item.get("mode") or "")]
     claim_packet: Dict[str, Any] = {"calls": len(claim_snaps)}
-    selected_counts=[int(item.get("selected_evidence_count")) for item in claim_snaps if isinstance(item.get("selected_evidence_count"),(int,float))]
-    excerpt_widths=[int(item.get("evidence_excerpt_chars_per_item")) for item in claim_snaps if isinstance(item.get("evidence_excerpt_chars_per_item"),(int,float))]
+    selected_counts=[int(item.get("selected_grounding_count")) for item in claim_snaps if isinstance(item.get("selected_grounding_count"),(int,float))]
+    excerpt_widths=[int(item.get("grounding_excerpt_chars_per_item")) for item in claim_snaps if isinstance(item.get("grounding_excerpt_chars_per_item"),(int,float))]
     anchor_counts=[int(item.get("answer_anchor_count")) for item in claim_snaps if isinstance(item.get("answer_anchor_count"),(int,float))]
     request_anchor_counts=[int(item.get("request_anchor_count")) for item in claim_snaps if isinstance(item.get("request_anchor_count"),(int,float))]
-    target_counts=[int(item.get("investigation_target_count")) for item in claim_snaps if isinstance(item.get("investigation_target_count"),(int,float))]
-    if selected_counts: claim_packet.update({"selected_evidence_last":selected_counts[-1],"selected_evidence_max":max(selected_counts)})
-    if excerpt_widths: claim_packet.update({"evidence_excerpt_chars_last":excerpt_widths[-1],"evidence_excerpt_chars_min":min(excerpt_widths)})
+    if selected_counts: claim_packet.update({"selected_grounding_last":selected_counts[-1],"selected_grounding_max":max(selected_counts)})
+    if excerpt_widths: claim_packet.update({"grounding_excerpt_chars_last":excerpt_widths[-1],"grounding_excerpt_chars_min":min(excerpt_widths)})
     if anchor_counts: claim_packet.update({"answer_anchors_last":anchor_counts[-1],"answer_anchors_max":max(anchor_counts)})
     if request_anchor_counts: claim_packet.update({"request_anchors_last":request_anchor_counts[-1],"request_anchors_max":max(request_anchor_counts)})
-    if target_counts: claim_packet.update({"investigation_targets_last":target_counts[-1],"investigation_targets_max":max(target_counts)})
 
     observation_count=int(_number(details.get("observation_ledger_size")))
-    source_record_count=int(_number(details.get("source_record_count_total")))
-    evidence_count=int(_number(details.get("evidence_count_total")))
+    grounding_count=int(_number(details.get("grounding_count_total")))
     replays=int(_number(details.get("observation_replays")))
     tool_requests=len([item for item in (details.get("tool_history") or []) if isinstance(item,dict)])
-    evidence_usage=details.get("evidence_usage") if isinstance(details.get("evidence_usage"),dict) else {}
-    # Use canonical task-wide values when available; job-level detail remains a fallback.
-    source_record_count = int(_number(evidence_usage.get("total_source_record_count"))) or source_record_count
-    evidence_count = int(_number(evidence_usage.get("total_evidence_count"))) or evidence_count
-    promoted_source_count = int(_number(evidence_usage.get("promoted_source_record_count")))
+    grounding_usage=details.get("grounding_usage") if isinstance(details.get("grounding_usage"),dict) else {}
+    grounding_count = int(_number(grounding_usage.get("total_grounding_count"))) or grounding_count
     diagnostics={
-        "observation_count":observation_count, "source_record_count":source_record_count,
-        "evidence_count":evidence_count, "observation_replays":replays,
-        "tool_requests_observed":tool_requests,
+        "observation_count":observation_count, "grounding_count":grounding_count,
+        "observation_replays":replays, "tool_requests_observed":tool_requests,
     }
-    source_per_observation=_round_ratio(float(source_record_count),float(observation_count))
-    if source_per_observation is not None: diagnostics["source_records_per_observation"]=source_per_observation
-    admission=_round_ratio(float(promoted_source_count),float(source_record_count))
-    if admission is not None: diagnostics["evidence_admission_ratio"]=admission
+    grounding_per_observation=_round_ratio(float(grounding_count),float(observation_count))
+    if grounding_per_observation is not None: diagnostics["grounding_per_observation"]=grounding_per_observation
     replay_rate=_round_ratio(float(replays),float(tool_requests))
     if replay_rate is not None: diagnostics["replay_request_rate"]=replay_rate
     for key in (
-        "promoted_source_record_count","unpromoted_source_record_count",
-        "target_attached_evidence_count","claim_cited_evidence_count",
-        "structurally_unreferenced_evidence_count","tool_actions_with_source_records",
-        "tool_actions_with_promoted_sources","tool_actions_with_direct_evidence_refs",
+        "investigation_grounding_count","claim_grounding_count",
+        "unreferenced_grounding_count","tool_actions_with_grounding",
     ):
-        if evidence_usage.get(key) is not None: diagnostics[key]=evidence_usage.get(key)
+        if grounding_usage.get(key) is not None: diagnostics[key]=grounding_usage.get(key)
 
 
     summary: Dict[str, Any] = {
@@ -242,8 +232,8 @@ def build_prompt_cost_accounting(details: Dict[str, Any], *, limit: int = 20) ->
         "provider_cached_prompt_tokens":provider_cached_total,"fixed_repeat_tax_estimated_tokens":fixed_repeat_tokens,
         "fresh_observation_estimated_tokens":int(categories["fresh_observation"]["estimated_tokens"]),
         "retained_context_estimated_tokens":int(categories["retained_context"]["estimated_tokens"]),
-        "source_state_estimated_tokens":int(categories["source_state"]["estimated_tokens"]),
-        "evidence_state_estimated_tokens":int(categories["evidence_state"]["estimated_tokens"]),
+        "observation_state_estimated_tokens":int(categories["observation_state"]["estimated_tokens"]),
+        "semantic_state_estimated_tokens":int(categories["semantic_state"]["estimated_tokens"]),
     }
     ratio=_round_ratio(float(summary["provider_prompt_tokens"] or 0),float(local_total_estimated))
     if ratio is not None and summary["provider_prompt_tokens"] is not None: summary["provider_to_local_estimate_ratio"]=ratio

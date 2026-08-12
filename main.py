@@ -10,14 +10,14 @@ Fluxo principal da Eyle:
   Memória externa sob demanda (memory/agent_memory)
             |
             v
-  Eyle Agent -> tools -> evidence -> validation
+  Eyle Agent -> Runtime observations -> validation
             |
             v
   Persiste conversa e confirmação pendente
 
 Comandos:
     python main.py perguntar "sua pergunta aqui"
-    python main.py benchmark [--baseline-model MODELO]  # Atualizacao 47
+    python main.py benchmark [--baseline-model MODELO]
     python main.py status
     python main.py serve [--host HOST] [--port PORT]   # agente persistente (Flask + Worker)
 """
@@ -76,7 +76,7 @@ def cmd_perguntar(args):
         code = conclusao_agente.get("failure_code") or "ok"
         print(
             "\n[agente] "
-            f"task_id={conclusao_agente.get('task_id')} | "
+            f"execution_id={conclusao_agente.get('execution_id')} | "
             f"turns={conclusao_agente.get('turns', 0)} | "
             f"tools={conclusao_agente.get('tools_used', [])} | status={conclusao_agente.get('status')} | code={code}"
         )

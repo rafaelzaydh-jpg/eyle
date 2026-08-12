@@ -1,7 +1,9 @@
 """Run-scoped physical execution state.
 
 Configuration is immutable input. This context owns deadlines, physical budgets
-and the canonical LLM call ledger for one execution/resume.
+and the canonical LLM call ledger for one execution/resume. Rev1.3 keeps only
+physical fuses. Cumulative prompt/completion budgets are intentionally absent;
+the per-call model window, 90k total-token fuse and deadline provide physical containment.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
@@ -14,11 +16,8 @@ from typing import Any, Dict, List, Optional
 class ExecutionContext:
     started_monotonic: float
     deadline_monotonic: float
-    task_id: Optional[str]
+    execution_id: Optional[str]
     source_job_id: Optional[int]
-    max_llm_calls: int
-    max_prompt_tokens: int
-    max_completion_tokens: int
     max_total_tokens: int
     llm_calls: List[Dict[str, Any]] = field(default_factory=list)
     system_prompt_hashes: List[str] = field(default_factory=list)
@@ -27,8 +26,8 @@ class ExecutionContext:
     session_turn_start: int = 0
     decision_event_start: int = 0
     observation_event_start: int = 0
-    source_record_ids_start: List[str] = field(default_factory=list)
-    evidence_ids_start: List[str] = field(default_factory=list)
+    observation_replay_start: int = 0
+    grounding_ids_start: List[str] = field(default_factory=list)
     canonical_request_hash: Optional[str] = None
     prompt_tokens_budgeted_physical: int = 0
     prompt_tokens_estimated_raw: int = 0
@@ -42,23 +41,21 @@ class ExecutionContext:
     sandbox_backend: Optional[str] = None
     sandbox_protected_resources_omitted: int = 0
     sandbox_tempdir: Any = field(default=None, repr=False, compare=False)
+    sandbox_microsandbox_session: Any = field(default=None, repr=False, compare=False)
     sandbox_container_name: Optional[str] = None
     sandbox_docker_binary: Optional[str] = None
     terminal_capabilities: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any], *, task_id: Optional[str] = None,
+    def from_config(cls, config: Dict[str, Any], *, execution_id: Optional[str] = None,
                     source_job_id: Optional[int] = None) -> "ExecutionContext":
         agent = (config or {}).get("agent") or {}
         deadline = max(1, int(agent.get("task_deadline_seconds", 900) or 900))
         now = time.monotonic()
         return cls(
             started_monotonic=now, deadline_monotonic=now + deadline,
-            task_id=task_id, source_job_id=source_job_id,
-            max_llm_calls=max(1, int(agent.get("max_llm_calls", 12) or 12)),
-            max_prompt_tokens=max(1, int(agent.get("max_prompt_tokens", 90000) or 90000)),
-            max_completion_tokens=max(1, int(agent.get("max_completion_tokens", 8000) or 8000)),
-            max_total_tokens=max(1, int(agent.get("max_total_tokens", 98000) or 98000)),
+            execution_id=execution_id, source_job_id=source_job_id,
+            max_total_tokens=max(1, int(agent.get("max_total_tokens", 90000) or 90000)),
         )
 
     def bind_session_baseline(self, session: Any) -> None:
@@ -66,14 +63,11 @@ class ExecutionContext:
         self.session_turn_start = int(getattr(session, "turn", 0) or 0)
         decisions = getattr(session, "decision_ledger", {}) or {}
         observations = getattr(session, "observation_ledger", {}) or {}
-        source_records = getattr(session, "source_record_ledger", {}) or {}
-        evidence = getattr(session, "evidence_ledger", {}) or {}
         self.decision_event_start = len(decisions.get("events") or []) if isinstance(decisions, dict) else 0
         self.observation_event_start = len(observations.get("events") or []) if isinstance(observations, dict) else 0
-        source_items = source_records.get("items") if isinstance(source_records, dict) else {}
-        evidence_items = evidence.get("items") if isinstance(evidence, dict) else {}
-        self.source_record_ids_start = sorted(str(key) for key in (source_items or {}).keys()) if isinstance(source_items, dict) else []
-        self.evidence_ids_start = sorted(str(key) for key in (evidence_items or {}).keys()) if isinstance(evidence_items, dict) else []
+        self.observation_replay_start = max(0, int(observations.get("replay_count") or 0)) if isinstance(observations, dict) else 0
+        materials = observations.get("materials") if isinstance(observations, dict) else {}
+        self.grounding_ids_start = sorted(str(key) for key in (materials or {}).keys()) if isinstance(materials, dict) else []
         self.agent_turns = 0
 
     @staticmethod
@@ -137,16 +131,19 @@ class ExecutionContext:
         return sum(len(call.get("attempts") or []) for call in self.llm_calls if isinstance(call, dict))
 
     @property
-    def effective_tokens_used(self) -> int:
-        return int(self.prompt_tokens_effective or 0) + int(self.completion_tokens_actual or 0)
-
-    @property
     def prompt_token_calibration(self) -> float:
+        """Calibrate future reservations against provider-reported prompt usage.
+
+        Calibration exists only to protect the per-call physical context window when
+        provider usage differs from the local tokenizer estimate. It no longer
+        steers a separate cumulative prompt budget.
+        """
         estimated = int(self.prompt_tokens_estimated_raw or 0)
         actual = int(self.prompt_tokens_actual or 0)
         if estimated <= 0 or actual <= 0:
             return 1.0
-        return max(1.0, float(actual) / float(estimated))
+        ratio = float(actual) / float(estimated)
+        return min(4.0, max(0.75, ratio))
 
     @property
     def physical_tokens_used(self) -> int:
@@ -186,14 +183,22 @@ class ExecutionContext:
 
     def cleanup_sandbox(self) -> None:
         tempdir = self.sandbox_tempdir
+        microsandbox_session = self.sandbox_microsandbox_session
         docker = self.sandbox_docker_binary
         container = self.sandbox_container_name
         self.sandbox_tempdir = None
         self.sandbox_workspace_path = None
         self.sandbox_backend = None
         self.sandbox_protected_resources_omitted = 0
+        self.sandbox_microsandbox_session = None
         self.sandbox_container_name = None
         self.sandbox_docker_binary = None
+        # Release the microVM bind mount before deleting the disposable host snapshot.
+        if microsandbox_session is not None:
+            try:
+                microsandbox_session.close()
+            except Exception:
+                pass
         if docker and container:
             try:
                 import subprocess

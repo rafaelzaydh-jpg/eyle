@@ -27,8 +27,7 @@ def test_read_metadata_is_not_in_core_catalog():
     assert 'read_metadata' not in [x['name'] for x in tools.gerar_catalogo_tools()]
 
 def test_tool_contracts_and_schemas_are_explicit():
-    assert tools.TOOLS['run_tests']['category']=='READ_ONLY'
-    assert tools.TOOLS['run_tests']['effects']==['EXEC']
+    assert tools.TOOLS['run_tests']['effect']=='execute'
     for name,item in tools.TOOLS.items():
         assert item['input_schema']['type']=='object'
         assert item['input_schema']['additionalProperties'] is False

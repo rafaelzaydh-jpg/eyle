@@ -35,137 +35,194 @@ _PATCH_SCHEMA = {
 }
 
 
+_INVESTIGATION_ID_SCHEMA = {"type": "string", "minLength": 1, "maxLength": 80, "pattern": r"^[A-Za-z0-9._-]+$"}
+_INVESTIGATION_GOAL_SCHEMA = {"type": "string", "minLength": 1, "maxLength": 500}
+_INVESTIGATION_GROUNDING_ITEM_SCHEMA = {
+    "type": "string", "minLength": 1, "maxLength": 160, "pattern": r"^mat-[0-9]+$",
+}
+
+
+def _investigation_target_variant(status: str, *, requires_grounding: bool, requires_reason: bool) -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "id": deepcopy(_INVESTIGATION_ID_SCHEMA),
+            "goal": deepcopy(_INVESTIGATION_GOAL_SCHEMA),
+            "status": {"type": "string", "enum": [status]},
+            "grounding_ids": {
+                "type": "array",
+                **({"minItems": 1} if requires_grounding else {}),
+                "items": deepcopy(_INVESTIGATION_GROUNDING_ITEM_SCHEMA),
+            },
+            "reason": {
+                "type": "string",
+                **({"minLength": 1} if requires_reason else {}),
+                "maxLength": 500,
+            },
+        },
+        "required": ["id", "goal", "status", "grounding_ids", "reason"],
+        "additionalProperties": False,
+    }
+
+
 _INVESTIGATION_TARGET_SCHEMA = {
+    "anyOf": [
+        _investigation_target_variant("open", requires_grounding=False, requires_reason=False),
+        _investigation_target_variant("established", requires_grounding=False, requires_reason=False),
+        _investigation_target_variant("dismissed", requires_grounding=False, requires_reason=False),
+    ]
+}
+
+
+_TASK_ID_SCHEMA = {"type": "string", "minLength": 1, "maxLength": 80, "pattern": r"^[A-Za-z0-9._-]+$"}
+_TASK_DESCRIPTION_SCHEMA = {"type": "string", "minLength": 1, "maxLength": 500}
+_TASK_PARENT_SCHEMA = {
+    "anyOf": [
+        {"type": "null"},
+        deepcopy(_TASK_ID_SCHEMA),
+    ]
+}
+
+
+def _task_variant(status: str, *, requires_result: bool) -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "id": deepcopy(_TASK_ID_SCHEMA),
+            "parent_id": deepcopy(_TASK_PARENT_SCHEMA),
+            "description": deepcopy(_TASK_DESCRIPTION_SCHEMA),
+            "status": {"type": "string", "enum": [status]},
+            "result": {
+                "type": "string",
+                **({"minLength": 1} if requires_result else {}),
+                "maxLength": 1200,
+            },
+        },
+        "required": ["id", "parent_id", "description", "status", "result"],
+        "additionalProperties": False,
+    }
+
+
+_TASK_SCHEMA = {
+    "anyOf": [
+        _task_variant("open", requires_result=False),
+        _task_variant("completed", requires_result=True),
+        _task_variant("dropped", requires_result=True),
+    ]
+}
+
+
+_TOOL_CALL_SCHEMA = {
     "type": "object",
     "properties": {
-        "id": {"type": "string", "minLength": 1, "maxLength": 80, "pattern": r"^[A-Za-z0-9._-]+$"},
-        "goal": {"type": "string", "minLength": 1, "maxLength": 500},
-        "status": {"type": "string", "enum": ["open", "established", "dismissed"]},
-        "evidence_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
-        "reason": {"type": "string", "maxLength": 500},
+        "tool": {"type": "string", "minLength": 1},
+        "arguments": {"type": "object"},
     },
-    "required": ["id", "goal", "status", "evidence_ids", "reason"],
+    "required": ["tool", "arguments"],
     "additionalProperties": False,
+}
+
+_AGENT_ACTION_SCHEMA = {
+    "anyOf": [
+        {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["tool_calls"]},
+                "calls": {"type": "array", "minItems": 1, "maxItems": 4, "items": _TOOL_CALL_SCHEMA},
+            },
+            "required": ["kind", "calls"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["patches"]},
+                "patches": {"type": "array", "minItems": 1, "items": _PATCH_SCHEMA},
+            },
+            "required": ["kind", "patches"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["needs_user"]},
+                "question": {"type": "string", "minLength": 1},
+                "missing_information": {"type": "string", "minLength": 1},
+            },
+            "required": ["kind", "question", "missing_information"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["final"]},
+                "answer": {"type": "string", "minLength": 1},
+                "limitations": {"type": "array", "items": {"type": "string"}},
+                "grounding_ids": {"type": "array", "items": {"type": "string", "minLength": 1, "pattern": r"^mat-[0-9]+$"}},
+            },
+            "required": ["kind", "answer", "limitations", "grounding_ids"],
+            "additionalProperties": False,
+        },
+    ]
 }
 
 _AGENT_SCHEMA = {
     "type": "object",
     "properties": {
-        "tool_calls": {
-            "anyOf": [
-                {"type": "null"},
-                {
-                    "type": "array", "minItems": 1, "maxItems": 4,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "tool": {"type": "string", "minLength": 1},
-                            "arguments": {"type": "object"},
-                        },
-                        "required": ["tool", "arguments"],
-                        "additionalProperties": False,
-                    },
-                },
-            ],
-        },
-        "patches": {"anyOf": [{"type": "null"}, {"type": "array", "minItems": 1, "items": _PATCH_SCHEMA}]},
-        "needs_user": {
-            "anyOf": [
-                {"type": "null"},
-                {
-                    "type": "object",
-                    "properties": {
-                        "question": {"type": "string", "minLength": 1},
-                        "missing_information": {"type": "string", "minLength": 1},
-                    },
-                    "required": ["question", "missing_information"],
-                    "additionalProperties": False,
-                },
-            ]
-        },
-        "final": {
-            "anyOf": [
-                {"type": "null"},
-                {
-                    "type": "object",
-                    "properties": {
-                        "answer": {"type": "string", "minLength": 1},
-                        "limitations": {"type": "array", "items": {"type": "string"}},
-                        "evidence_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
-                    },
-                    "required": ["answer", "limitations", "evidence_ids"],
-                    "additionalProperties": False,
-                },
-            ]
-        },
+        "action": _AGENT_ACTION_SCHEMA,
         "investigation_updates": {"type": "array", "items": _INVESTIGATION_TARGET_SCHEMA},
+        "task_updates": {"type": "array", "items": _TASK_SCHEMA},
     },
-    "required": ["tool_calls", "patches", "needs_user", "final", "investigation_updates"],
+    "required": ["action", "investigation_updates", "task_updates"],
     "additionalProperties": False,
 }
 
-_GROUNDING_REF_PATTERN = r"^(?:request|request:r[1-9][0-9]*|(?:answer|evidence|runtime|investigation):[A-Za-z0-9._-]+)$"
+_GROUNDING_REF_PATTERN = r"^(?:request|request:r[1-9][0-9]*|(?:answer|observation|runtime):[A-Za-z0-9._-]+)$"
+
+# Claim is an adversarial critic with a deliberately narrow interface. These
+# bounds constrain only the canonical artifact returned to Runtime, not the
+# model's internal reasoning. Keeping the interface physically bounded prevents
+# Claim from expanding into a second Main while still allowing independent
+# blockers to be reported.
+CLAIM_MAX_ISSUES = 3
+CLAIM_MAX_GROUNDING_REFS = 4
+CLAIM_MAX_GROUNDING_REF_CHARS = 48
+CLAIM_MAX_ANSWER_REF_CHARS = 32
+CLAIM_MAX_REASON_CHARS = 160
+
 _GROUNDING_REFS_SCHEMA = {
-    "type": "array", "minItems": 1,
-    "items": {"type": "string", "minLength": 1, "maxLength": 160, "pattern": _GROUNDING_REF_PATTERN},
+    "type": "array", "minItems": 1, "maxItems": CLAIM_MAX_GROUNDING_REFS,
+    "items": {
+        "type": "string", "minLength": 1,
+        "maxLength": CLAIM_MAX_GROUNDING_REF_CHARS, "pattern": _GROUNDING_REF_PATTERN,
+    },
 }
 
+_CLAIM_ISSUE_KINDS = ["unsupported", "contradicted", "scope", "omission", "inconsistent"]
 _CLAIM_REVIEW_SCHEMA = {
     "type": "object",
     "properties": {
-        "material_satisfaction": {
-            "type": "object",
-            "properties": {
-                "status": {"type": "string", "enum": ["satisfied", "gap", "blocked"]},
-                "grounding_refs": _GROUNDING_REFS_SCHEMA,
-                "reason": {"type": "string", "minLength": 1, "maxLength": 240},
-            },
-            "required": ["status", "grounding_refs", "reason"],
-            "additionalProperties": False,
-        },
-        "answer_consistency": {
-            "type": "object",
-            "properties": {
-                "status": {"type": "string", "enum": ["consistent", "conflict"]},
-                "grounding_refs": _GROUNDING_REFS_SCHEMA,
-                "reason": {"type": "string", "minLength": 1, "maxLength": 240},
-            },
-            "required": ["status", "grounding_refs", "reason"],
-            "additionalProperties": False,
-        },
-        "claims": {
+        "verdict": {"type": "string", "enum": ["accept", "challenge"]},
+        "issues": {
             "type": "array",
+            "maxItems": CLAIM_MAX_ISSUES,
             "items": {
                 "type": "object",
                 "properties": {
-                    "answer_ref": {"type": "string", "minLength": 1, "maxLength": 80, "pattern": r"^answer:a[1-9][0-9]*$"},
-                    "target_id": {"anyOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 100, "pattern": r"^investigation:[A-Za-z0-9._-]+$"}]},
-                    "statement": {"type": "string", "minLength": 1, "maxLength": 500},
+                    "kind": {"type": "string", "enum": _CLAIM_ISSUE_KINDS},
+                    "answer_ref": {"anyOf": [
+                        {"type": "null"},
+                        {"type": "string", "minLength": 1, "maxLength": CLAIM_MAX_ANSWER_REF_CHARS, "pattern": r"^answer:a[1-9][0-9]*$"},
+                    ]},
                     "grounding_refs": _GROUNDING_REFS_SCHEMA,
-                    "verdict": {"type": "string", "enum": ["supported", "contradicted", "insufficient"]},
-                    "reason": {"type": "string", "maxLength": 160},
+                    "reason": {"type": "string", "minLength": 1, "maxLength": CLAIM_MAX_REASON_CHARS},
                 },
-                "required": ["answer_ref", "target_id", "statement", "grounding_refs", "verdict", "reason"],
-                "additionalProperties": False,
-            },
-        },
-        "semantic_gaps": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "type": {"type": "string", "enum": ["material_omission", "conflicting_evidence", "scope_gap"]},
-                    "target_id": {"anyOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 100, "pattern": r"^investigation:[A-Za-z0-9._-]+$"}]},
-                    "grounding_refs": _GROUNDING_REFS_SCHEMA,
-                    "required_property": {"type": "string", "minLength": 1, "maxLength": 300},
-                    "reason": {"type": "string", "minLength": 1, "maxLength": 240},
-                },
-                "required": ["type", "target_id", "grounding_refs", "required_property", "reason"],
+                "required": ["kind", "answer_ref", "grounding_refs", "reason"],
                 "additionalProperties": False,
             },
         },
     },
-    "required": ["material_satisfaction", "answer_consistency", "claims", "semantic_gaps"],
+    "required": ["verdict", "issues"],
     "additionalProperties": False,
 }
 
@@ -181,8 +238,8 @@ _PROFILE_NAMES = {
 }
 
 _PROFILE_TOP_LEVEL = {
-    "agent": ("tool_calls", "patches", "needs_user", "final", "investigation_updates"),
-    "claim_verifier": ("material_satisfaction", "answer_consistency", "claims", "semantic_gaps"),
+    "agent": ("action", "investigation_updates", "task_updates"),
+    "claim_verifier": ("verdict", "issues"),
 }
 
 
@@ -219,18 +276,21 @@ def contract_instruction(profile: str) -> str:
     keys = mandatory_top_level_keys(profile)
     if profile == "claim_verifier":
         return (
-            "Top-level JSON contract: return exactly one object containing material_satisfaction, answer_consistency, "
-            "and the arrays claims, semantic_gaps. All four keys are always required. material_satisfaction is "
-            "exactly {status,grounding_refs,reason}, status=satisfied|gap|blocked; answer_consistency is exactly "
-            "{status,grounding_refs,reason}, status=consistent|conflict. claims items are exactly "
-            "{answer_ref,target_id,statement,grounding_refs,verdict,reason}; semantic_gaps items are exactly "
-            "{type,target_id,grounding_refs,required_property,reason}. Use [] when an array has no items. "
-            "Grounding refs use request, request:rN, answer:aN, evidence:*, runtime:* or investigation:*. "
-            "Never omit a key, add alternate fields, or wrap the object."
+            "Top-level JSON contract: return exactly {verdict,issues}. verdict=accept|challenge. "
+            "issues is [] when accepted; otherwise include the smallest sufficient blocker set, at most 3 issues. "
+            "Each issue is exactly {kind,answer_ref,grounding_refs,reason}; "
+            "kind=unsupported|contradicted|scope|omission|inconsistent. answer_ref may be null. "
+            "Use at most 4 grounding_refs per issue; each reason is one concise sentence. "
+            "Grounding refs use request, request:rN, answer:aN, observation:mat-* or runtime:*. "
+            "Never add alternate fields or prose."
         )
     return (
-        "Top-level JSON contract: return exactly one object containing exactly these mandatory fields: "
-        + ", ".join(keys) + "."
+        "Top-level JSON contract: return exactly {action,investigation_updates,task_updates}. action is one discriminated object "
+        "with exactly one kind: tool_calls={kind,calls}, patches={kind,patches}, "
+        "needs_user={kind,question,missing_information}, or final={kind,answer,limitations,grounding_ids}. "
+        "Investigation is only what you are trying to understand. Tasks are what you decided you need to do. "
+        "Each task update is exactly {id,parent_id,description,status,result}, status=open|completed|dropped; "
+        "closed tasks require a concise non-empty result. Never emit legacy nullable top-level action slots or combine action kinds."
     )
 
 
@@ -297,56 +357,85 @@ def parse_agent_response(raw: Any) -> Dict[str, Any]:
     value = _object(raw)
     required = set(mandatory_top_level_keys("agent"))
     _exact_keys(value, required=required, allowed=required, profile="agent")
+
     investigation = value.get("investigation_updates")
     if not isinstance(investigation, list):
         raise StructuredResponseError("AGENT_INVESTIGATION_INVALID", "investigation_updates must be an array")
-    target_keys = {"id", "goal", "status", "evidence_ids", "reason"}
+    target_keys = {"id", "goal", "status", "grounding_ids", "reason"}
     for index, item in enumerate(investigation, start=1):
-        item = _exact_item(item, target_keys, code="AGENT_INVESTIGATION_TARGET_SHAPE_INVALID", detail=f"investigation_updates[{index}] must contain exactly id, goal, status, evidence_ids and reason")
+        item = _exact_item(item, target_keys, code="AGENT_INVESTIGATION_TARGET_SHAPE_INVALID", detail=f"investigation_updates[{index}] must contain exactly id, goal, status, grounding_ids and reason")
         _string(item["id"], code="AGENT_INVESTIGATION_TARGET_ID_INVALID", detail=f"investigation_updates[{index}].id must be non-empty")
         _string(item["goal"], code="AGENT_INVESTIGATION_TARGET_GOAL_INVALID", detail=f"investigation_updates[{index}].goal must be non-empty")
         if item["status"] not in {"open", "established", "dismissed"}:
             raise StructuredResponseError("AGENT_INVESTIGATION_TARGET_STATUS_INVALID", f"investigation_updates[{index}].status is invalid")
-        _string_list(item["evidence_ids"], code="AGENT_INVESTIGATION_TARGET_EVIDENCE_INVALID", detail=f"investigation_updates[{index}].evidence_ids must be an array of non-empty IDs")
+        grounding_ids = _string_list(item["grounding_ids"], code="AGENT_INVESTIGATION_TARGET_GROUNDING_INVALID", detail=f"investigation_updates[{index}].grounding_ids must be an array of canonical mat-* grounding IDs")
+        invalid_grounding = next((ref for ref in grounding_ids if re.fullmatch(r"mat-[0-9]+", ref) is None), None)
+        if invalid_grounding is not None:
+            raise StructuredResponseError("AGENT_INVESTIGATION_TARGET_GROUNDING_INVALID", f"investigation_updates[{index}].grounding_ids contains a noncanonical grounding ID")
         _string(item["reason"], code="AGENT_INVESTIGATION_TARGET_REASON_INVALID", detail=f"investigation_updates[{index}].reason must be a string", nonempty=False)
 
-    calls = value.get("tool_calls")
-    patches = value.get("patches")
-    question = value.get("needs_user")
-    final = value.get("final")
-    active_payloads = [
-        name for name, payload in (
-            ("tool_calls", calls), ("patches", patches), ("needs_user", question), ("final", final)
-        ) if payload is not None
-    ]
-    if len(active_payloads) != 1:
-        raise StructuredResponseError(
-            "AGENT_PAYLOAD_AMBIGUOUS",
-            "exactly one of tool_calls, patches, needs_user, or final must be non-null",
+    task_updates = value.get("task_updates")
+    if not isinstance(task_updates, list):
+        raise StructuredResponseError("AGENT_TASK_UPDATES_INVALID", "task_updates must be an array")
+    task_keys = {"id", "parent_id", "description", "status", "result"}
+    for index, item in enumerate(task_updates, start=1):
+        item = _exact_item(
+            item, task_keys,
+            code="AGENT_TASK_SHAPE_INVALID",
+            detail=f"task_updates[{index}] must contain exactly id, parent_id, description, status and result",
         )
-    active = active_payloads[0]
-    if active == "tool_calls":
+        task_id = _string(item["id"], code="AGENT_TASK_ID_INVALID", detail=f"task_updates[{index}].id must be non-empty").strip()
+        if len(task_id) > 80 or re.fullmatch(r"[A-Za-z0-9._-]+", task_id) is None:
+            raise StructuredResponseError("AGENT_TASK_ID_INVALID", f"task_updates[{index}].id is invalid")
+        parent_id = item["parent_id"]
+        if parent_id is not None:
+            _string(parent_id, code="AGENT_TASK_PARENT_ID_INVALID", detail=f"task_updates[{index}].parent_id must be null or a canonical task ID")
+            if len(parent_id) > 80 or re.fullmatch(r"[A-Za-z0-9._-]+", parent_id) is None or parent_id == task_id:
+                raise StructuredResponseError("AGENT_TASK_PARENT_ID_INVALID", f"task_updates[{index}].parent_id is invalid")
+        description = _string(item["description"], code="AGENT_TASK_DESCRIPTION_INVALID", detail=f"task_updates[{index}].description must be non-empty")
+        if len(description) > 500:
+            raise StructuredResponseError("AGENT_TASK_DESCRIPTION_INVALID", f"task_updates[{index}].description is too long")
+        status = item["status"]
+        if status not in {"open", "completed", "dropped"}:
+            raise StructuredResponseError("AGENT_TASK_STATUS_INVALID", f"task_updates[{index}].status is invalid")
+        result = _string(item["result"], code="AGENT_TASK_RESULT_INVALID", detail=f"task_updates[{index}].result must be a string", nonempty=False)
+        if len(result) > 1200:
+            raise StructuredResponseError("AGENT_TASK_RESULT_INVALID", f"task_updates[{index}].result is too long")
+        if status in {"completed", "dropped"} and not result.strip():
+            raise StructuredResponseError("AGENT_TASK_CLOSED_RESULT_REQUIRED", f"task_updates[{index}].result is required when status is {status}")
+
+    action = value.get("action")
+    if not isinstance(action, dict):
+        raise StructuredResponseError("AGENT_ACTION_INVALID", "action must be one discriminated object")
+    kind = action.get("kind")
+    if kind == "tool_calls":
+        if set(action) != {"kind", "calls"}:
+            raise StructuredResponseError("AGENT_TOOL_CALLS_SHAPE_INVALID", "tool_calls action must contain exactly kind and calls")
+        calls = action.get("calls")
         if not isinstance(calls, list) or not calls:
-            raise StructuredResponseError("AGENT_TOOL_CALLS_INVALID", "tool_calls must be a non-empty array when selected")
+            raise StructuredResponseError("AGENT_TOOL_CALLS_INVALID", "tool_calls.calls must be a non-empty array")
         if len(calls) > 4:
-            raise StructuredResponseError("AGENT_TOOL_CALL_LIMIT_EXCEEDED", "tool_calls may contain at most 4 calls per turn")
+            raise StructuredResponseError("AGENT_TOOL_CALL_LIMIT_EXCEEDED", "tool_calls.calls may contain at most 4 calls per turn")
         normalized = []
         for index, item in enumerate(calls, start=1):
             if not isinstance(item, dict) or set(item) != {"tool", "arguments"}:
-                raise StructuredResponseError("AGENT_TOOL_CALL_INVALID", f"tool_calls[{index}] must contain exactly tool and arguments")
+                raise StructuredResponseError("AGENT_TOOL_CALL_INVALID", f"action.calls[{index}] must contain exactly tool and arguments")
             tool = item.get("tool")
             arguments = item.get("arguments")
             if not isinstance(tool, str) or not tool.strip() or not isinstance(arguments, dict):
-                raise StructuredResponseError("AGENT_TOOL_CALL_INVALID", f"tool_calls[{index}] is invalid")
+                raise StructuredResponseError("AGENT_TOOL_CALL_INVALID", f"action.calls[{index}] is invalid")
             normalized.append({"tool": tool.strip(), "arguments": arguments})
-        return {"tool_calls": normalized, "investigation_updates": value["investigation_updates"]}
-    if active == "patches":
+        normalized_action = {"kind": "tool_calls", "calls": normalized}
+    elif kind == "patches":
+        if set(action) != {"kind", "patches"}:
+            raise StructuredResponseError("AGENT_PATCHES_SHAPE_INVALID", "patches action must contain exactly kind and patches")
+        patches = action.get("patches")
         if not isinstance(patches, list) or not patches:
-            raise StructuredResponseError("AGENT_PATCHES_INVALID", "patches must be a non-empty array when selected")
+            raise StructuredResponseError("AGENT_PATCHES_INVALID", "action.patches must be a non-empty array")
         normalized_patches = []
         for index, item in enumerate(patches, start=1):
             if not isinstance(item, dict):
-                raise StructuredResponseError("AGENT_PATCH_INVALID", f"patches[{index}] must be an object")
+                raise StructuredResponseError("AGENT_PATCH_INVALID", f"action.patches[{index}] must be an object")
             operation = item.get("operation")
             if operation in {"replace", "create"}:
                 keys = {"operation", "path", "content"}
@@ -355,51 +444,44 @@ def parse_agent_response(raw: Any) -> Dict[str, Any]:
             elif operation == "update":
                 keys = {"operation", "path", "line_start", "line_end", "new_code"}
             else:
-                raise StructuredResponseError("AGENT_PATCH_OPERATION_INVALID", f"patches[{index}].operation is invalid")
+                raise StructuredResponseError("AGENT_PATCH_OPERATION_INVALID", f"action.patches[{index}].operation is invalid")
             if set(item) != keys:
-                raise StructuredResponseError("AGENT_PATCH_SHAPE_INVALID", f"patches[{index}] must contain exactly the canonical fields for {operation}")
+                raise StructuredResponseError("AGENT_PATCH_SHAPE_INVALID", f"action.patches[{index}] must contain exactly the canonical fields for {operation}")
             if not isinstance(item.get("path"), str) or not item["path"].strip():
-                raise StructuredResponseError("AGENT_PATCH_PATH_INVALID", f"patches[{index}].path must be a non-empty string")
+                raise StructuredResponseError("AGENT_PATCH_PATH_INVALID", f"action.patches[{index}].path must be a non-empty string")
             if operation in {"replace", "create"} and not isinstance(item.get("content"), str):
-                raise StructuredResponseError("AGENT_PATCH_CONTENT_INVALID", f"patches[{index}].content must be a string")
+                raise StructuredResponseError("AGENT_PATCH_CONTENT_INVALID", f"action.patches[{index}].content must be a string")
             if operation == "update":
                 if not isinstance(item.get("line_start"), int) or isinstance(item.get("line_start"), bool) or item["line_start"] < 1:
-                    raise StructuredResponseError("AGENT_PATCH_RANGE_INVALID", f"patches[{index}].line_start must be a positive integer")
+                    raise StructuredResponseError("AGENT_PATCH_RANGE_INVALID", f"action.patches[{index}].line_start must be a positive integer")
                 if not isinstance(item.get("line_end"), int) or isinstance(item.get("line_end"), bool) or item["line_end"] < item["line_start"]:
-                    raise StructuredResponseError("AGENT_PATCH_RANGE_INVALID", f"patches[{index}].line_end must be >= line_start")
+                    raise StructuredResponseError("AGENT_PATCH_RANGE_INVALID", f"action.patches[{index}].line_end must be >= line_start")
                 if not isinstance(item.get("new_code"), str):
-                    raise StructuredResponseError("AGENT_PATCH_CONTENT_INVALID", f"patches[{index}].new_code must be a string")
+                    raise StructuredResponseError("AGENT_PATCH_CONTENT_INVALID", f"action.patches[{index}].new_code must be a string")
             normalized_patches.append(dict(item))
-        return {"patches": normalized_patches, "investigation_updates": value["investigation_updates"]}
-    if active == "needs_user":
-        if not isinstance(question, dict) or set(question) != {"question", "missing_information"}:
-            raise StructuredResponseError(
-                "AGENT_NEEDS_USER_INVALID",
-                "needs_user must contain exactly question and missing_information when selected",
-            )
-        q = question.get("question")
-        missing = question.get("missing_information")
-        if not isinstance(q, str) or not q.strip() or not isinstance(missing, str) or not missing.strip():
-            raise StructuredResponseError(
-                "AGENT_NEEDS_USER_INVALID",
-                "needs_user.question and needs_user.missing_information must be non-empty strings",
-            )
-        return {
-            "needs_user": {"question": q.strip(), "missing_information": missing.strip()},
-            "investigation_updates": value["investigation_updates"],
-        }
-    if active != "final" or final is None:
-        raise StructuredResponseError("AGENT_FINAL_INVALID", "final must be the only non-null result payload")
-    final_keys = {"answer", "limitations", "evidence_ids"}
-    final = _exact_item(
-        final, final_keys, code="AGENT_FINAL_SHAPE_INVALID",
-        detail="final must contain exactly answer, limitations and evidence_ids",
-    )
-    _string(final["answer"], code="AGENT_FINAL_ANSWER_INVALID", detail="final.answer must be a non-empty string")
-    if not isinstance(final["limitations"], list) or any(not isinstance(item, str) for item in final["limitations"]):
-        raise StructuredResponseError("AGENT_FINAL_LIMITATIONS_INVALID", "final.limitations must be an array of strings")
-    _string_list(final["evidence_ids"], code="AGENT_FINAL_EVIDENCE_INVALID", detail="final.evidence_ids must be an array of non-empty Evidence IDs")
-    return {"final": dict(final), "investigation_updates": value["investigation_updates"]}
+        normalized_action = {"kind": "patches", "patches": normalized_patches}
+    elif kind == "needs_user":
+        if set(action) != {"kind", "question", "missing_information"}:
+            raise StructuredResponseError("AGENT_NEEDS_USER_INVALID", "needs_user action must contain exactly kind, question and missing_information")
+        question = action.get("question")
+        missing = action.get("missing_information")
+        if not isinstance(question, str) or not question.strip() or not isinstance(missing, str) or not missing.strip():
+            raise StructuredResponseError("AGENT_NEEDS_USER_INVALID", "needs_user question and missing_information must be non-empty strings")
+        normalized_action = {"kind": "needs_user", "question": question.strip(), "missing_information": missing.strip()}
+    elif kind == "final":
+        final_keys = {"kind", "answer", "limitations", "grounding_ids"}
+        action = _exact_item(action, final_keys, code="AGENT_FINAL_SHAPE_INVALID", detail="final action must contain exactly kind, answer, limitations and grounding_ids")
+        _string(action["answer"], code="AGENT_FINAL_ANSWER_INVALID", detail="final.answer must be a non-empty string")
+        if not isinstance(action["limitations"], list) or any(not isinstance(item, str) for item in action["limitations"]):
+            raise StructuredResponseError("AGENT_FINAL_LIMITATIONS_INVALID", "final.limitations must be an array of strings")
+        grounding_ids = _string_list(action["grounding_ids"], code="AGENT_FINAL_GROUNDING_INVALID", detail="final.grounding_ids must be an array of canonical mat-* grounding IDs")
+        if any(re.fullmatch(r"mat-[0-9]+", ref) is None for ref in grounding_ids):
+            raise StructuredResponseError("AGENT_FINAL_GROUNDING_INVALID", "final.grounding_ids contains a noncanonical grounding ID")
+        normalized_action = dict(action)
+    else:
+        raise StructuredResponseError("AGENT_ACTION_KIND_INVALID", "action.kind must be tool_calls, patches, needs_user, or final")
+
+    return {"action": normalized_action, "investigation_updates": value["investigation_updates"], "task_updates": value["task_updates"]}
 
 
 def _claim_grounding_refs(value: Any, *, detail: str) -> None:
@@ -413,69 +495,81 @@ def _claim_grounding_refs(value: Any, *, detail: str) -> None:
 
 def _canonical_answer_ref(value: Any, *, detail: str) -> None:
     _string(value, code="CLAIM_REVIEW_ANSWER_REF_INVALID", detail=detail)
-    if re.fullmatch(r"answer:a[1-9][0-9]*", value) is None:
+    if len(value) > CLAIM_MAX_ANSWER_REF_CHARS or re.fullmatch(r"answer:a[1-9][0-9]*", value) is None:
         raise StructuredResponseError("CLAIM_REVIEW_ANSWER_REF_INVALID", detail)
-
-
-def _canonical_target_ref(value: Any, *, detail: str, code: str) -> None:
-    if value is None:
-        return
-    _string(value, code=code, detail=detail)
-    if re.fullmatch(r"investigation:[A-Za-z0-9._-]+", value) is None:
-        raise StructuredResponseError(code, detail)
 
 
 def parse_claim_review_response(raw: Any) -> Dict[str, Any]:
     value = _object(raw)
     top = set(mandatory_top_level_keys("claim_verifier"))
     _exact_keys(value, required=top, allowed=top, profile="claim_review")
-
-    satisfaction = _exact_item(
-        value["material_satisfaction"], {"status", "grounding_refs", "reason"},
-        code="CLAIM_REVIEW_MATERIAL_SATISFACTION_SHAPE_INVALID",
-        detail="material_satisfaction must contain exactly status, grounding_refs and reason",
-    )
-    if satisfaction["status"] not in {"satisfied", "gap", "blocked"}:
-        raise StructuredResponseError("CLAIM_REVIEW_MATERIAL_SATISFACTION_STATUS_INVALID", "material_satisfaction.status is invalid")
-    _claim_grounding_refs(satisfaction["grounding_refs"], detail="material_satisfaction.grounding_refs must be a non-empty canonical-ref array")
-    _string(satisfaction["reason"], code="CLAIM_REVIEW_MATERIAL_SATISFACTION_REASON_INVALID", detail="material_satisfaction.reason must be non-empty")
-
-    consistency = _exact_item(
-        value["answer_consistency"], {"status", "grounding_refs", "reason"},
-        code="CLAIM_REVIEW_ANSWER_CONSISTENCY_SHAPE_INVALID",
-        detail="answer_consistency must contain exactly status, grounding_refs and reason",
-    )
-    if consistency["status"] not in {"consistent", "conflict"}:
-        raise StructuredResponseError("CLAIM_REVIEW_ANSWER_CONSISTENCY_STATUS_INVALID", "answer_consistency.status is invalid")
-    _claim_grounding_refs(consistency["grounding_refs"], detail="answer_consistency.grounding_refs must be a non-empty canonical-ref array")
-    _string(consistency["reason"], code="CLAIM_REVIEW_ANSWER_CONSISTENCY_REASON_INVALID", detail="answer_consistency.reason must be non-empty")
-
-    for key in ("claims", "semantic_gaps"):
-        if not isinstance(value[key], list):
-            raise StructuredResponseError(f"CLAIM_REVIEW_{key.upper()}_LIST_REQUIRED", f"{key} must be an array")
-
-    claim_keys = {"answer_ref", "target_id", "statement", "grounding_refs", "verdict", "reason"}
-    for index, item in enumerate(value["claims"], start=1):
-        item = _exact_item(item, claim_keys, code="CLAIM_REVIEW_CLAIM_SHAPE_INVALID", detail=f"claims[{index}] must contain exactly the canonical Claim fields")
-        _canonical_answer_ref(item["answer_ref"], detail=f"claims[{index}].answer_ref must be a supplied answer:* ref")
-        _canonical_target_ref(item["target_id"], detail=f"claims[{index}].target_id must be null or a supplied investigation:* ref", code="CLAIM_REVIEW_TARGET_INVALID")
-        _string(item["statement"], code="CLAIM_REVIEW_STATEMENT_INVALID", detail=f"claims[{index}].statement must be non-empty")
-        _claim_grounding_refs(item["grounding_refs"], detail=f"claims[{index}].grounding_refs must be a non-empty canonical-ref array")
-        if item["verdict"] not in {"supported", "contradicted", "insufficient"}:
-            raise StructuredResponseError("CLAIM_REVIEW_VERDICT_INVALID", f"claims[{index}].verdict is invalid")
-        _string(item["reason"], code="CLAIM_REVIEW_REASON_INVALID", detail=f"claims[{index}].reason must be a string", nonempty=False)
-
-    gap_keys = {"type", "target_id", "grounding_refs", "required_property", "reason"}
-    for index, item in enumerate(value["semantic_gaps"], start=1):
-        item = _exact_item(item, gap_keys, code="CLAIM_REVIEW_SEMANTIC_GAP_SHAPE_INVALID", detail=f"semantic_gaps[{index}] must contain exactly type, target_id, grounding_refs, required_property and reason")
-        if item["type"] not in {"material_omission", "conflicting_evidence", "scope_gap"}:
-            raise StructuredResponseError("CLAIM_REVIEW_SEMANTIC_GAP_TYPE_INVALID", f"semantic_gaps[{index}].type is invalid")
-        _canonical_target_ref(item["target_id"], detail=f"semantic_gaps[{index}].target_id must be null or a supplied investigation:* ref", code="CLAIM_REVIEW_SEMANTIC_GAP_TARGET_INVALID")
-        _claim_grounding_refs(item["grounding_refs"], detail=f"semantic_gaps[{index}].grounding_refs must be a non-empty canonical-ref array")
-        _string(item["required_property"], code="CLAIM_REVIEW_REQUIRED_PROPERTY_INVALID", detail=f"semantic_gaps[{index}].required_property must be non-empty")
-        _string(item["reason"], code="CLAIM_REVIEW_SEMANTIC_GAP_REASON_INVALID", detail=f"semantic_gaps[{index}].reason must be non-empty")
+    if value["verdict"] not in {"accept", "challenge"}:
+        raise StructuredResponseError("CLAIM_REVIEW_VERDICT_INVALID", "verdict must be accept or challenge")
+    if not isinstance(value["issues"], list):
+        raise StructuredResponseError("CLAIM_REVIEW_ISSUES_LIST_REQUIRED", "issues must be an array")
+    if len(value["issues"]) > CLAIM_MAX_ISSUES:
+        raise StructuredResponseError("CLAIM_REVIEW_ISSUES_TOO_MANY", f"issues may contain at most {CLAIM_MAX_ISSUES} blockers")
+    issue_keys = {"kind", "answer_ref", "grounding_refs", "reason"}
+    for index, item in enumerate(value["issues"], start=1):
+        item = _exact_item(
+            item, issue_keys,
+            code="CLAIM_REVIEW_ISSUE_SHAPE_INVALID",
+            detail=f"issues[{index}] must contain exactly the canonical issue fields",
+        )
+        if item["kind"] not in set(_CLAIM_ISSUE_KINDS):
+            raise StructuredResponseError("CLAIM_REVIEW_ISSUE_KIND_INVALID", f"issues[{index}].kind is invalid")
+        if item["answer_ref"] is not None:
+            _canonical_answer_ref(item["answer_ref"], detail=f"issues[{index}].answer_ref must be null or a supplied answer:* ref")
+        _claim_grounding_refs(item["grounding_refs"], detail=f"issues[{index}].grounding_refs must be a non-empty canonical-ref array")
+        if len(item["grounding_refs"]) > CLAIM_MAX_GROUNDING_REFS:
+            raise StructuredResponseError(
+                "CLAIM_REVIEW_GROUNDING_REFS_TOO_MANY",
+                f"issues[{index}].grounding_refs may contain at most {CLAIM_MAX_GROUNDING_REFS} refs",
+            )
+        if any(len(ref) > CLAIM_MAX_GROUNDING_REF_CHARS for ref in item["grounding_refs"]):
+            raise StructuredResponseError(
+                "CLAIM_REVIEW_GROUNDING_REF_TOO_LONG",
+                f"issues[{index}].grounding_refs exceed the canonical length bound",
+            )
+        _string(item["reason"], code="CLAIM_REVIEW_REASON_INVALID", detail=f"issues[{index}].reason must be non-empty")
+        if len(item["reason"]) > CLAIM_MAX_REASON_CHARS:
+            raise StructuredResponseError(
+                "CLAIM_REVIEW_REASON_TOO_LONG",
+                f"issues[{index}].reason may contain at most {CLAIM_MAX_REASON_CHARS} characters",
+            )
+    if value["verdict"] == "accept" and value["issues"]:
+        raise StructuredResponseError("CLAIM_REVIEW_ACCEPT_WITH_ISSUES", "accept requires issues=[]")
+    if value["verdict"] == "challenge" and not value["issues"]:
+        raise StructuredResponseError("CLAIM_REVIEW_CHALLENGE_REQUIRES_ISSUE", "challenge requires at least one issue")
     return value
 
+
+
+def claim_review_contract_max_serialized_chars() -> int:
+    """Conservative maximum visible JSON size permitted by the Claim schema.
+
+    This bounds the protocol artifact, not reasoning. The output-token reserve
+    uses an intentionally pessimistic one-token-per-character assumption plus
+    margin so every ordinary canonical object has room to close cleanly.
+    """
+    ref = "runtime:" + ("x" * max(0, CLAIM_MAX_GROUNDING_REF_CHARS - len("runtime:")))
+    answer_ref = "answer:a" + ("9" * max(1, CLAIM_MAX_ANSWER_REF_CHARS - len("answer:a")))
+    issue = {
+        "kind": max(_CLAIM_ISSUE_KINDS, key=len),
+        "answer_ref": answer_ref[:CLAIM_MAX_ANSWER_REF_CHARS],
+        "grounding_refs": [ref[:CLAIM_MAX_GROUNDING_REF_CHARS]] * CLAIM_MAX_GROUNDING_REFS,
+        "reason": "x" * CLAIM_MAX_REASON_CHARS,
+    }
+    payload = {"verdict": "challenge", "issues": [issue] * CLAIM_MAX_ISSUES}
+    return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+
+
+def claim_review_output_budget(*, available_tokens: int | None = None) -> int:
+    """Reserve enough output for the entire bounded Claim protocol plus margin."""
+    desired = claim_review_contract_max_serialized_chars() + 256
+    if available_tokens is None:
+        return desired
+    return min(desired, max(1, int(available_tokens)))
 
 def parse_profile_response(raw: Any, profile: str) -> Dict[str, Any]:
     if profile == "agent":

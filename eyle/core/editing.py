@@ -9,13 +9,7 @@ import os
 import shlex
 import shutil
 import stat
-import sys
 import tempfile
-
-_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-BASE_DIR = os.path.dirname(_THIS_DIR)
-if BASE_DIR not in sys.path:
-    sys.path.insert(0, BASE_DIR)
 
 from .workspace_policy import PASTAS_IGNORADAS, build_protected_resource_index, is_protected_workspace_resource
 from .symbols import extract_python_definitions, extract_symbols
@@ -35,7 +29,7 @@ def localizar_simbolo(caminho_projeto, caminho_relativo, simbolo):
 
     Devolve {"line_start", "line_end", "codigo_original",
     "total_lines"} ou None se o arquivo nao existe mais, o
-    caminho tenta escapar da raiz do projeto (bug 3 do plano de correcao),
+    caminho tenta escapar da raiz do projeto,
     ou o simbolo nao foi encontrado (pode ter sido renomeado/removido
     desde a ultima leitura) -- nunca inventa uma posicao.
     """
@@ -89,18 +83,22 @@ def localizar_simbolo(caminho_projeto, caminho_relativo, simbolo):
     }
 
 
-def localizar_simbolo_no_projeto(caminho_projeto, simbolo, extensoes=None, limite=32):
-    """Localiza deterministicamente um símbolo no workspace atual.
+def localizar_simbolo_no_projeto(caminho_projeto, simbolo, extensoes=None, limite=None, *, return_metadata=False):
+    """Exhaustively locate a symbol across the current safe source workspace.
 
-    Usa o workspace vivo e varre apenas arquivos-fonte seguros,
-    ignora diretórios internos conhecidos e confirma cada candidato usando o
-    mesmo localizador fresco empregado por ``find_symbol``.
+    ``limite`` bounds only returned matches when explicitly requested; the scan
+    still exhausts the physical source scope so Coverage can truthfully report
+    what was examined. ``return_metadata`` exposes scan counts to the owning
+    capability without changing the low-level locator's default list API.
     """
     raiz = os.path.realpath(os.path.abspath(str(caminho_projeto or "")))
     if not raiz or not os.path.isdir(raiz) or not isinstance(simbolo, str) or not simbolo.strip():
-        return []
+        empty = {"matches": [], "files_examined": 0, "protected_resources_excluded": 0, "complete_scan": False}
+        return empty if return_metadata else []
     permitidas = set(extensoes or {".py", ".js", ".ts", ".jsx", ".tsx"})
     resultados = []
+    files_examined = 0
+    protected_excluded = 0
     protected_index = build_protected_resource_index(raiz)
     for diretorio, subdirs, arquivos in os.walk(raiz, followlinks=False):
         subdirs[:] = sorted(
@@ -113,17 +111,29 @@ def localizar_simbolo_no_projeto(caminho_projeto, simbolo, extensoes=None, limit
             absoluto = os.path.join(diretorio, nome)
             relativo = os.path.relpath(absoluto, raiz).replace(os.sep, "/")
             if is_protected_workspace_resource(raiz, relativo, index=protected_index):
+                protected_excluded += 1
                 continue
             seguro = _resolver_caminho_seguro(raiz, relativo)
             if seguro is None or not os.path.isfile(seguro):
                 continue
+            files_examined += 1
             localizado = localizar_simbolo(raiz, relativo, simbolo)
             if localizado is None:
                 continue
-            resultados.append({"file": relativo, "simbolo": simbolo, **localizado})
-            if len(resultados) >= max(1, int(limite)):
-                return resultados
-    return resultados
+            item = {"file": relativo, "simbolo": simbolo, **localizado}
+            resultados.append(item)
+    visible = resultados if limite is None else resultados[:max(1, int(limite))]
+    if return_metadata:
+        return {
+            "matches": visible,
+            "matches_observed": len(resultados),
+            "files_examined": files_examined,
+            "protected_resources_excluded": protected_excluded,
+            "complete_scan": True,
+            "remaining_matches": max(0, len(resultados) - len(visible)),
+            "all_matches": resultados,
+        }
+    return visible
 
 
 def _substituir_linhas(conteudo, linha_inicio, linha_fim, codigo_novo):
