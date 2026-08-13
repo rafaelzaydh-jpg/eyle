@@ -41,8 +41,12 @@ def carregar_config():
 
 
 def carregar_projeto():
-    from eyle.runtime.service import carregar_projeto as carregar
-    return carregar()
+    # Workspace is a concern of this bundled product shell, not Runtime.
+    # Runtime only exposes opaque Host presentation metadata.
+    from eyle.runtime.service import carregar_ambiente
+    ambiente = carregar_ambiente()
+    projeto = ambiente.get("workspace") if isinstance(ambiente, dict) else None
+    return projeto if isinstance(projeto, dict) else None
 
 
 

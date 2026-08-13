@@ -178,10 +178,49 @@ def test_architecture_boundaries_are_physically_separate():
     root = Path(__file__).resolve().parents[1]
     core = (root / "eyle/core/agent.py").read_text(encoding="utf-8")
     service_source = (root / "eyle/runtime/service.py").read_text(encoding="utf-8")
+    main_source = (root / "main.py").read_text(encoding="utf-8")
+    web_source = (root / "web/routes.py").read_text(encoding="utf-8")
     capability_init = (root / "eyle/capabilities/__init__.py").read_text(encoding="utf-8")
     assert "default_registry" not in core + capability_init
     assert "providers.standard" not in service_source and "standard_impl" not in service_source
+    assert "runtime.service import carregar_projeto" not in main_source
+    assert "eyle_service.carregar_projeto" not in web_source
     for folder in (root / "eyle/providers", root / "eyle/capabilities"):
         for path in folder.rglob("*.py"):
             text = path.read_text(encoding="utf-8")
             assert "from eyle.core" not in text and "import eyle.core" not in text, path
+
+
+def test_bundled_shell_reads_workspace_from_host_description_not_runtime_domain_api(monkeypatch, tmp_path):
+    import main as main_module
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    host = Host(
+        registry=build_registry([]),
+        context_factory=lambda: {},
+        describe_factory=lambda: {
+            "workspace": {
+                "caminho_origem": str(workspace),
+                "nome": "workspace",
+                "auto_discovered": True,
+            }
+        },
+    )
+    monkeypatch.setattr(service, "HOST", host)
+
+    project = main_module.carregar_projeto()
+    assert project["caminho_origem"] == str(workspace)
+    assert not hasattr(service, "carregar_projeto")
+
+
+def test_runtime_host_description_is_opaque_and_works_without_workspace(monkeypatch):
+    host = Host(
+        registry=build_registry([_petbot_provider()]),
+        context_factory=lambda: {"petbot": {"device_id": "petbot-1"}},
+        describe_factory=lambda: {"device": {"kind": "petbot", "connected": True}},
+    )
+    monkeypatch.setattr(service, "HOST", host)
+    assert service.carregar_ambiente() == {
+        "device": {"kind": "petbot", "connected": True}
+    }

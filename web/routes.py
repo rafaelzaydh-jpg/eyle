@@ -254,6 +254,15 @@ def proteger_api():
     return resposta
 
 
+
+
+def _carregar_projeto():
+    # Workspace rendering belongs to the bundled Web shell. Runtime remains
+    # domain-neutral and exposes only opaque Host presentation metadata.
+    ambiente = eyle_service.carregar_ambiente()
+    projeto = ambiente.get("workspace") if isinstance(ambiente, dict) else None
+    return projeto if isinstance(projeto, dict) else None
+
 def _projeto_publico(projeto):
     if not isinstance(projeto, dict):
         return None
@@ -393,7 +402,7 @@ def apagar_mensagem(mensagem_id):
 
 @app.route("/status", methods=["GET"])
 def status():
-    projeto = eyle_service.carregar_projeto()
+    projeto = _carregar_projeto()
     caminho_projeto = projeto.get("caminho_origem") if isinstance(projeto, dict) else None
     caminhos_internos = (caminho_projeto, BASE_DIR)
     config = carregar_config_validada(CONFIG_PATH, eyle_service.HOST.registry)
@@ -451,7 +460,7 @@ def job(job_id):
             "status": "erro", "error_code": "JOB_NOT_FOUND",
             "motivo": "tarefa nao encontrada",
         }), 404
-    projeto = eyle_service.carregar_projeto()
+    projeto = _carregar_projeto()
     caminho_projeto = projeto.get("caminho_origem") if isinstance(projeto, dict) else None
     publico = _job_publico(registro)
     return jsonify(_redigir_caminhos_internos(publico, (caminho_projeto, BASE_DIR)))
@@ -465,7 +474,7 @@ def job_history(job_id):
             "status": "erro", "error_code": "JOB_NOT_FOUND",
             "motivo": "tarefa nao encontrada",
         }), 404
-    projeto = eyle_service.carregar_projeto()
+    projeto = _carregar_projeto()
     caminho_projeto = projeto.get("caminho_origem") if isinstance(projeto, dict) else None
     history = build_public_job_history(registro)
     return jsonify(_redigir_caminhos_internos(history, (caminho_projeto, BASE_DIR)))

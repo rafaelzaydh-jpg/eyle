@@ -28,7 +28,8 @@
     "standard_provider": "Bundled workspace/code/Git/sandbox provider only. Persistent cognitive Memory is a separate bundled memory provider.",
     "semantic_freedom": "Capabilities are resources, not workflow stages. Main is only generally advised that when it is unsure whether it has enough information to answer reliably, it should prefer observing before answering. No keyword router or mandatory inspect rule exists.",
     "contracts": "Universal capability, Observation, Coverage and physical-effect contracts live below Core and Providers; provider implementations do not import eyle.core.*.",
-    "http_retry": "Transient OpenAI-compatible HTTP statuses (408/425/429/500/502/503/504) retain retryability through backend error translation."
+    "http_retry": "Transient OpenAI-compatible HTTP statuses (408/425/429/500/502/503/504) retain retryability through backend error translation.",
+    "host_description": "Host may expose opaque presentation/status metadata through describe(); Runtime passes it through without domain interpretation, while bundled CLI/Web choose which fields to render."
   },
   "bundled_providers": [
     "standard",

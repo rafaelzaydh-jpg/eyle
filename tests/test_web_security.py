@@ -22,8 +22,8 @@ def _cliente(monkeypatch):
     )
     routes._limitador.limpar()
     monkeypatch.setattr(
-        routes.eyle_service,
-        "carregar_projeto",
+        routes,
+        "_carregar_projeto",
         lambda: {
             "projeto": "Teste",
             "caminho_origem": "/tmp/segredo/projeto",

@@ -53,6 +53,18 @@ def carregar_config():
 def carregar_provider_context():
     return HOST.provider_context()
 
+def carregar_ambiente():
+    """Return opaque Host presentation metadata for product shells.
+
+    Runtime does not interpret domain fields. The bundled CLI/Web shell may
+    choose to render fields exposed by its Host; a PetBot or network Host can
+    expose different metadata without adding domain knowledge here.
+    """
+    value = HOST.describe()
+    if not isinstance(value, dict):
+        raise ValueError("HOST_DESCRIPTION_INVALID")
+    return value
+
 def carregar_conversa():
     return _carregar_json(os.path.join(MEMORY_DIR, "conversa.json"), [])
 

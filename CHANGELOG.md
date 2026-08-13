@@ -1,5 +1,6 @@
 # Eyle 2.7.5 Rev1.5.1 — Host-Injected Universal Capabilities
 
+- **Bundled shell hotfix:** CLI/Web no longer import the removed `runtime.service.carregar_projeto`. Host presentation metadata is exposed through a domain-neutral `Host.describe()` / `service.carregar_ambiente()` boundary, while workspace rendering stays in the bundled shell. Regression coverage now exercises the exact `main.carregar_projeto()` path that failed on Windows.
 - **Host owns the body:** Core no longer has a global/default Registry. `eyle/host.py` explicitly assembles Providers and provider context; `runtime/service.py` consumes the Host without importing `standard` domain code.
 - **Confirmation returns to Main:** confirmed capability execution records Observation/effect and resumes Main. Provider confirmation cannot terminate the task with its own message.
 - **Universal contracts moved below Core:** capability/Observation/Coverage/effect contracts live under `eyle/contracts/`; Providers and capability infrastructure no longer import `eyle.core.*`.
