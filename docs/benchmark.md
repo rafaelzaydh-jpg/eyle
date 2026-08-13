@@ -1,4 +1,4 @@
-# Benchmarking — Eyle 2.7.5 Rev1.4.1
+# Benchmarking — Eyle 2.7.5 Rev1.4.3
 
 Benchmarks must measure capability, reliability and physical cost rather than only whether a final string was produced.
 
@@ -11,8 +11,8 @@ Benchmarks must measure capability, reliability and physical cost rather than on
 - Observation count and replay rate;
 - Material/grounding count;
 - Coverage/Frontier behavior;
-- Investigation transitions;
-- Task transitions and completion criteria;
+- Investigation transitions and conclusions;
+- Task transitions, completion criteria and results;
 - committed grounding count;
 - whether Final required a Grounded Completion correction;
 - wall-clock duration.
@@ -28,11 +28,12 @@ Canonical tests should cover:
 3. every Task requires explicit completion criteria;
 4. completed parent cannot retain an open direct child;
 5. open Investigation blocks Final;
-6. established Investigation requires real Material;
-7. committed Investigation/Task Material cannot disappear from Final grounding;
-8. Runtime does not infer semantic truth or relevance;
-9. capability failure/rollback remains observable rather than silently converted into success;
-10. removed Claim contracts cannot reappear.
+6. established Investigation requires real Material and a non-empty semantic conclusion;
+7. closed Task requires a result against its declared criteria;
+8. committed Investigation/Task Material cannot disappear from Final grounding;
+9. Runtime does not infer semantic truth or relevance;
+10. capability failure/rollback remains observable rather than silently converted into success;
+11. removed Claim contracts cannot reappear.
 
 ## Token regressions
 
@@ -45,7 +46,8 @@ Track separately:
 - grounding-index cost;
 - epistemic/intentional state cost;
 - retained conversation context;
-- MemoryView cost when memory is explicitly activated.
+- MemoryView cost when memory is explicitly activated;
+- established Investigation raw grounding retained in prompt after semantic closure (expected: not pinned solely by established status).
 
 The expected Rev1.4 structural win is one fewer LLM request for every normally delivered Final because the universal Claim review no longer exists.
 

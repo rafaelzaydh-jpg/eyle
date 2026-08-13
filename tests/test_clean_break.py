@@ -14,7 +14,7 @@ from tests.canonical import base_config
 
 def test_rev1_session_schema_is_exact_and_old_state_is_not_migrated():
     current = AgentSession("x").to_dict()
-    assert current["session_schema_version"] == SESSION_SCHEMA_VERSION == "2.7.5-r1.4"
+    assert current["session_schema_version"] == SESSION_SCHEMA_VERSION == "2.7.5-r1.4.3"
     assert set(current) == {
         "session_schema_version", "request", "execution_id", "turn", "workspace_epoch",
         "observation_ledger", "decision_ledger", "investigation", "tasks",

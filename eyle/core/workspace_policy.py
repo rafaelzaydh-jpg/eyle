@@ -1,6 +1,6 @@
 """Canonical workspace visibility and protected-resource policy.
 
-Eyle 2.7.5 Rev1.4.1 keeps a structural protected-resource boundary. Normal project files are
+Eyle 2.7.5 Rev1.4.3 keeps a structural protected-resource boundary. Normal project files are
 readable regardless of identifiers or literal content. Only resources whose
 path identifies a credential/private-key store are protected, and every access
 surface resolves aliases to the same physical resource identity before deciding

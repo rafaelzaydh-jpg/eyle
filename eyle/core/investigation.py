@@ -1,16 +1,16 @@
-"""Main-owned grounded Investigation notebook for Eyle 2.7.5 Rev1.4.1.
+"""Main-owned grounded Investigation notebook for Eyle 2.7.5 Rev1.4.3.
 
 Investigation records questions Main decided must be resolved before delivery.
-Main owns their meaning; Runtime owns only shape and physical Material
-references. An established target therefore requires at least one real mat-*;
-an open target is an explicit unresolved commitment and blocks Final.
+Main owns their meaning and conclusion; Runtime owns only shape and physical
+Material references. An established target requires real mat-* grounding and a
+non-empty conclusion stating what Main established about its goal.
 """
 from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 TARGET_STATUSES = {"open", "established", "dismissed"}
-_TARGET_FIELDS = {"id", "goal", "status", "grounding_ids", "reason"}
+_TARGET_FIELDS = {"id", "goal", "status", "grounding_ids", "conclusion", "reason"}
 
 
 def _ids(values: Iterable[Any]) -> List[str]:
@@ -32,8 +32,8 @@ def apply_investigation_updates(
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Apply Main target deltas against canonical Observation grounding.
 
-    Omitted targets stay unchanged. Main may revise its own goal/status/reason.
-    Runtime only rejects malformed fields or references to nonexistent material.
+    Omitted targets stay unchanged. Main may revise its own semantic state.
+    Runtime only rejects malformed fields or references to nonexistent Material.
     """
     canonical = [dict(item) for item in (previous or []) if isinstance(item, dict)]
     if not isinstance(raw, list):
@@ -73,6 +73,7 @@ def apply_investigation_updates(
 
         goal = str(item.get("goal") or "").strip()
         status = str(item.get("status") or "").strip()
+        conclusion = str(item.get("conclusion") or "").strip()
         reason = str(item.get("reason") or "").strip()
         raw_grounding = item.get("grounding_ids")
         if not goal or len(goal) > 500:
@@ -98,8 +99,14 @@ def apply_investigation_updates(
         for grounding_id in incoming:
             if grounding_id not in grounding_ids:
                 grounding_ids.append(grounding_id)
+        if len(conclusion) > 1600:
+            reject(f"INVESTIGATION_TARGET_CONCLUSION_TOO_LONG:{target_id}")
+            continue
         if status == "established" and not grounding_ids:
             reject(f"INVESTIGATION_ESTABLISHED_GROUNDING_REQUIRED:{target_id}")
+            continue
+        if status == "established" and not conclusion:
+            reject(f"INVESTIGATION_ESTABLISHED_CONCLUSION_REQUIRED:{target_id}")
             continue
 
         if len(reason) > 500:
@@ -111,6 +118,7 @@ def apply_investigation_updates(
             "goal": goal,
             "status": status,
             "grounding_ids": grounding_ids,
+            "conclusion": conclusion,
             "reason": reason,
         }
         changed = current != normalized
@@ -125,16 +133,49 @@ def apply_investigation_updates(
             "changed": bool(changed),
             "status": status,
             "grounding_ids": grounding_ids,
+            "has_conclusion": bool(conclusion),
         })
 
     return canonical, accepted, rejected
 
 
-def investigation_grounding_ids(investigation: Sequence[Dict[str, Any]] | None) -> List[str]:
+def validate_investigation_state(investigation: Any) -> List[Dict[str, Any]]:
+    if not isinstance(investigation, list) or not all(isinstance(item, dict) for item in investigation):
+        raise ValueError("INVESTIGATION_STATE_INCOMPATIBLE")
+    grounding = {
+        ref: {"id": ref}
+        for item in investigation if isinstance(item, dict)
+        for ref in item.get("grounding_ids") or []
+        if isinstance(ref, str) and ref.strip()
+    }
+    state, accepted, rejected = apply_investigation_updates(
+        investigation, previous=[], grounding=grounding,
+    )
+    if rejected or len(accepted) != len(investigation) or state != investigation:
+        raise ValueError("INVESTIGATION_STATE_INCOMPATIBLE")
+    return [dict(item) for item in state]
+
+
+
+def open_investigation_grounding_ids(
+    investigation: Sequence[Dict[str, Any]] | None,
+) -> List[str]:
+    """Material still needed while an Investigation remains unresolved."""
+    return _grounding_ids_for_statuses(investigation, {"open"})
+
+def established_investigation_grounding_ids(
+    investigation: Sequence[Dict[str, Any]] | None,
+) -> List[str]:
+    return _grounding_ids_for_statuses(investigation, {"established"})
+
+
+def _grounding_ids_for_statuses(
+    investigation: Sequence[Dict[str, Any]] | None, statuses: set[str],
+) -> List[str]:
     result: List[str] = []
     seen = set()
     for item in investigation or []:
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or item.get("status") not in statuses:
             continue
         for grounding_id in item.get("grounding_ids") or []:
             value = str(grounding_id or "").strip()
@@ -142,3 +183,8 @@ def investigation_grounding_ids(investigation: Sequence[Dict[str, Any]] | None) 
                 seen.add(value)
                 result.append(value)
     return result
+
+
+def investigation_grounding_ids(investigation: Sequence[Dict[str, Any]] | None) -> List[str]:
+    """Grounding still relevant to open or established Investigation state."""
+    return _grounding_ids_for_statuses(investigation, {"open", "established"})

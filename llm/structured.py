@@ -49,9 +49,10 @@ _INVESTIGATION_TARGET_SCHEMA = {
         "goal": deepcopy(_INVESTIGATION_GOAL_SCHEMA),
         "status": {"type": "string", "enum": ["open", "established", "dismissed"]},
         "grounding_ids": {"type": "array", "items": deepcopy(_INVESTIGATION_GROUNDING_ITEM_SCHEMA)},
+        "conclusion": {"type": "string", "maxLength": 1600},
         "reason": {"type": "string", "maxLength": 500},
     },
-    "required": ["id", "goal", "status", "grounding_ids", "reason"],
+    "required": ["id", "goal", "status", "grounding_ids", "conclusion", "reason"],
     "additionalProperties": False,
 }
 
@@ -273,9 +274,9 @@ def parse_agent_response(raw: Any) -> Dict[str, Any]:
     investigation = value.get("investigation_updates")
     if not isinstance(investigation, list):
         raise StructuredResponseError("AGENT_INVESTIGATION_INVALID", "investigation_updates must be an array")
-    target_keys = {"id", "goal", "status", "grounding_ids", "reason"}
+    target_keys = {"id", "goal", "status", "grounding_ids", "conclusion", "reason"}
     for index, item in enumerate(investigation, start=1):
-        item = _exact_item(item, target_keys, code="AGENT_INVESTIGATION_TARGET_SHAPE_INVALID", detail=f"investigation_updates[{index}] must contain exactly id, goal, status, grounding_ids and reason")
+        item = _exact_item(item, target_keys, code="AGENT_INVESTIGATION_TARGET_SHAPE_INVALID", detail=f"investigation_updates[{index}] must contain exactly id, goal, status, grounding_ids, conclusion and reason")
         _string(item["id"], code="AGENT_INVESTIGATION_TARGET_ID_INVALID", detail=f"investigation_updates[{index}].id must be non-empty")
         _string(item["goal"], code="AGENT_INVESTIGATION_TARGET_GOAL_INVALID", detail=f"investigation_updates[{index}].goal must be non-empty")
         if item["status"] not in {"open", "established", "dismissed"}:
@@ -284,6 +285,11 @@ def parse_agent_response(raw: Any) -> Dict[str, Any]:
         invalid_grounding = next((ref for ref in grounding_ids if re.fullmatch(r"mat-[0-9]+", ref) is None), None)
         if invalid_grounding is not None:
             raise StructuredResponseError("AGENT_INVESTIGATION_TARGET_GROUNDING_INVALID", f"investigation_updates[{index}].grounding_ids contains a noncanonical grounding ID")
+        conclusion = _string(item["conclusion"], code="AGENT_INVESTIGATION_TARGET_CONCLUSION_INVALID", detail=f"investigation_updates[{index}].conclusion must be a string", nonempty=False)
+        if len(conclusion) > 1600:
+            raise StructuredResponseError("AGENT_INVESTIGATION_TARGET_CONCLUSION_INVALID", f"investigation_updates[{index}].conclusion is too long")
+        if item["status"] == "established" and not conclusion.strip():
+            raise StructuredResponseError("AGENT_INVESTIGATION_ESTABLISHED_CONCLUSION_REQUIRED", f"investigation_updates[{index}].conclusion is required when status is established")
         _string(item["reason"], code="AGENT_INVESTIGATION_TARGET_REASON_INVALID", detail=f"investigation_updates[{index}].reason must be a string", nonempty=False)
 
     task_updates = value.get("task_updates")

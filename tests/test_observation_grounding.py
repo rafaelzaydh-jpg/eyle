@@ -99,7 +99,7 @@ def test_investigation_grounding_points_directly_to_observed_material(tmp_path):
     core_agent._model_tool_result(session, "read_file", raw, base_config(), {"path": "app.py"})
 
     updated, accepted, rejected = apply_investigation_updates(
-        [{"id": "T1", "goal": "Establish VALUE", "status": "established", "grounding_ids": ["mat-0001"], "reason": "Observed."}],
+        [{"id": "T1", "goal": "Establish VALUE", "status": "established", "grounding_ids": ["mat-0001"], "conclusion": "VALUE is established by the observed file.", "reason": "Observed."}],
         previous=[], grounding=material_items(session.observation_ledger),
     )
     assert rejected == []

@@ -606,7 +606,7 @@ def _tool_symbol_relations(arguments, ctx):
     config = (ctx or {}).get("config") or {}
     agent_cfg = config.get("agent") or {}
     query = str(arguments.get("query") or "relations")
-    # Reachability depth is Runtime-owned in Eyle 2.7.5 Rev1.4.1. The resolved graph is
+    # Reachability depth is Runtime-owned in Eyle 2.7.5 Rev1.4.3. The resolved graph is
     # exhausted mechanically; only local relation queries honor max_depth.
     default_depth = 6
     try:
@@ -2354,7 +2354,7 @@ TOOLS = {
         "produces_grounding": False,
         "effect": "observe",
         "returns": "Bounded Memory Nodes, MemoryCoverage and optional MemoryFrontier.",
-        "caveats": ["Memory is prior cognitive state, not current-world proof."],
+        "caveats": ["Memory is prior cognitive context, not proof of current external state."],
         "input_schema": _schema_objeto({
             "query": {"type": "string", "maxLength": 1000, "description": "Optional lexical Memory seed."},
             "seed": {"type": "object", "additionalProperties": False, "properties": {

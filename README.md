@@ -1,6 +1,6 @@
 # Eyle
 
-**Version:** 2.7.5 · **Schema:** 2.7.5-r1.4.1 · **Revision:** rev1.4.1-semantic-freedom
+**Version:** 2.7.5 · **Schema:** 2.7.5-r1.4.3 · **Revision:** rev1.4.3-semantic-completion
 
 Eyle is a small universal agency kernel built around one Main LLM, deterministic capabilities, explicit physical Observation, Main-owned Investigation/Tasks, persistent bounded Memory and supervised mutation.
 
@@ -8,9 +8,33 @@ The Core principle is simple:
 
 > **Give Main observable tools and it can do the work; Runtime constrains physical reality, not thought.**
 
-## Rev1.4.1: Semantic Freedom
+## Rev1.4.3: Semantic Completion
 
-Rev1.4.1 keeps Rev1.4 Grounded Completion but removes strategy from the fixed model-facing surface. Main may answer directly, use capabilities, keep optional Investigation/Tasks, ask for blocking input or stop. Workspace state and tool availability are context, not work requests.
+Rev1.4.3 completes the meaning of the optional work-state contracts without adding another planner, reviewer or semantic gate. Investigation now carries `conclusion`: what Main concludes its selected Material establishes about that Investigation goal. An `established` Investigation requires both real `mat-*` grounding and a non-empty conclusion.
+
+Task keeps its existing minimal shape. `completion_criteria` defines what Main chose to accomplish; `result` records what Main considers achieved against those criteria. Runtime verifies only shape, references and closure. It does not decide whether the conclusion is intellectually sufficient or whether the Task result truly satisfies the criteria.
+
+```text
+Task: what must I accomplish?
+  ↓
+Investigation: what must I understand?
+  ↓
+Observation: what did reality expose?
+  ↓
+Investigation.conclusion: what does that establish about the question?
+  ↓
+Task.result: what was achieved against the criteria?
+  ↓
+Final
+```
+
+Investigation and Task remain optional. Direct conversation and simple requests can still go straight to Final. Grounding from a `dismissed` Investigation is no longer completion grounding. Only open Investigation Material stays pinned in the prompt; once established, the `conclusion` carries semantic meaning while canonical Material remains in Runtime and its IDs still bind Final continuity. Session and Queue advance to `2.7.5-r1.4.3` because the persisted Investigation shape changed.
+
+## Rev1.4.2: Epistemic Clarity
+
+Rev1.4.2 keeps Semantic Freedom and adds one missing distinction: Main knows the epistemic role of each context source without being told which workflow to follow. Prior conversation and Memory are prior context; capabilities are available actions; Runtime Observation/Material is current observed physical state.
+
+Main remains free to answer directly. Tools, Task and Investigation are never mandatory merely because they exist. When current reality matters and has not been observed, inspection is available; when existing context is sufficient, Final remains a normal path. Prior context, Memory, capability metadata and inference must not be presented as newly observed fact.
 
 The fixed surface follows three rules:
 
@@ -90,7 +114,7 @@ grounding_ids
 
 Investigation is epistemic state: a question Main explicitly decided must be resolved before delivery.
 
-An Investigation can remain `open`, become `established`, or be `dismissed`. `established` requires at least one real Material grounding. An open Investigation blocks Final because Main itself declared that unresolved knowledge necessary.
+An Investigation can remain `open`, become `established`, or be `dismissed`. `established` requires at least one real Material grounding plus a non-empty `conclusion`. An open Investigation blocks Final because Main itself declared that unresolved knowledge necessary.
 
 Investigation is not a planner and does not automatically expand Frontiers. Main decides what matters.
 

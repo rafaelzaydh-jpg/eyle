@@ -1,4 +1,4 @@
-"""Universal physical observation/result contract for Eyle 2.7.5 Rev1.4.1.
+"""Universal physical observation/result contract for Eyle 2.7.5 Rev1.4.3.
 
 Capabilities own how reality is executed, identified and projected into Material,
 Coverage and Frontier. Observation stores those physical facts generically.

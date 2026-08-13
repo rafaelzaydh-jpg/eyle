@@ -180,8 +180,18 @@ def _model_surface_violations(base: Path) -> List[str]:
         from llm.structured import contract_instruction
         from eyle.core.tools import TOOLS
 
-        if len(PROMPT_AGENTE) >= 2000:
+        if len(PROMPT_AGENTE) >= 1700:
             violations.append(f"PROMPT_AGENTE excessivo:{len(PROMPT_AGENTE)} chars")
+        for required in (
+            "prior_conversation is retained context",
+            "Memory is persistent prior cognition",
+            "available_capabilities names invokable actions",
+            "runtime_observations/current_material represent current physically observed state",
+            "Investigation.conclusion states what grounding establishes about its goal",
+            "Task.result states what was achieved against completion_criteria",
+        ):
+            if required not in PROMPT_AGENTE:
+                violations.append(f"epistemic clarity ausente:{required}")
         instruction = contract_instruction("agent")
         if len(instruction) >= 220:
             violations.append(f"contract_instruction excessivo:{len(instruction)} chars")

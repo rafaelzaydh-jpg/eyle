@@ -9,11 +9,11 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, List, Optional
 
 _COMPONENT_GROUPS = {
-    "fixed_contract": {"capability_index", "active_tools"},
+    "fixed_contract": {"available_capabilities", "active_tools"},
     "request": {"request"},
-    "fresh_observation": {"latest_tool_results"},
-    "retained_context": {"conversation_background"},
-    "observation_state": {"observation_map", "grounding_index"},
+    "fresh_observation": {"latest_capability_results"},
+    "retained_context": {"prior_conversation"},
+    "observation_state": {"runtime_observations", "current_material"},
     "epistemic_state": {"investigation"},
     "intentional_state": {"task_state"},
     "runtime_feedback": {"runtime_feedback"},

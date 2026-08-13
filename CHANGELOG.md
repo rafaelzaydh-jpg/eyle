@@ -1,3 +1,25 @@
+## 2.7.5 Rev1.4.3 — Semantic Completion — 2026-08-13
+
+- **Investigation gained semantic closure:** canonical Investigation now includes `conclusion`, preserving what Main believes selected Material establishes about the Investigation goal.
+- **`established` means more than “looked enough”:** Runtime requires real `mat-*` grounding and a non-empty conclusion before accepting an established Investigation. Runtime still does not judge whether the conclusion is intellectually correct or sufficient.
+- **Task completion meaning clarified:** existing `completion_criteria` remains Main-defined intent and `result` is explicitly the Main-authored account of what was achieved against those criteria. Closed Tasks still require non-empty result; no confidence/sufficient flag was added.
+- **No new workflow mandate:** Investigation and Tasks remain optional. Direct Final is unchanged for conversation/simple requests.
+- **Conclusion becomes semantic compression:** only open Investigation Material remains prompt-pinned while unresolved. Once established, raw Material is no longer pinned solely by the Investigation; `conclusion` carries working semantic state while canonical Material and grounding IDs remain available to Runtime/Final continuity. Dismissed grounding is not completion grounding.
+- **Semantic auditability:** decision history records Investigation goal/conclusion/grounding and Task completion criteria/result on accepted updates.
+- **Clean persisted-state break:** Session and Queue advance to `2.7.5-r1.4.3`; prior Investigation state without `conclusion` is rejected rather than migrated. Memory Kernel schema remains unchanged.
+- **Prompt remains compact:** Semantic Completion adds only field meaning, not a planner/checklist. The fixed Agent prompt remains below the Rev1.4.2 size guard.
+
+## 2.7.5 Rev1.4.2 — Epistemic Clarity — 2026-08-12
+
+- **Epistemic source distinction:** Main now receives one compact law separating prior conversation, persistent Memory, available capabilities and current Runtime Observation/Material.
+- **No workflow mandate:** the new law does not require tools, Task or Investigation. Direct Final remains valid whenever Main judges existing context sufficient.
+- **Capability ≠ evidence:** capability metadata states what can be invoked; it no longer has any implied authority as proof of current workspace or implementation facts.
+- **Memory/background ≠ current reality:** both may inform reasoning but may be incomplete or stale. They are not presented as newly observed state.
+- **Inference stays inference:** Main is explicitly told not to present prior context, Memory, capability metadata or inference as newly observed fact.
+- **Clear model-facing labels without extra envelope:** `available_capabilities`, `prior_conversation`, `latest_capability_results`, `runtime_observations` and `current_material` replace ambiguous projection labels. Persisted Session/Queue fields are unchanged.
+- **Memory Kernel unchanged:** Memory remains Main-owned persistent cognition with bounded retrieval; no automatic truth/salience system was added.
+- **No state-schema churn:** Session/Queue remain `2.7.5-r1.4`; Memory Kernel remains `2.7.5-r1.3.6-memory-kernel-v1`. Only config/release identity advances to `2.7.5-r1.4.2` / `rev1.4.2-epistemic-clarity`.
+
 ## 2.7.5 Rev1.4.1 — Semantic Freedom — 2026-08-12
 
 - **Freedom is explicit:** Main may Final directly, use capabilities, keep optional Investigation/Tasks or ask for blocking input. Ambient workspace state is context, not a task.

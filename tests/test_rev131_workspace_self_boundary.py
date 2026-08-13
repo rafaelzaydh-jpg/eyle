@@ -180,7 +180,7 @@ def test_prompt_keeps_self_boundary_without_turning_workspace_into_a_task():
     assert "source=eyle" in lowered
     assert "isolated sandbox" in lowered
     assert "real workspace writes use patch transactions" in lowered
-    assert "workspace state is context, not a task" in lowered
+    assert "ambient workspace state and capability availability are context, not tasks" in lowered
     assert "trivial single-step" not in lowered
 
 

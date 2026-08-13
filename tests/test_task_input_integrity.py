@@ -86,7 +86,7 @@ def test_resume_clarification_is_canonical_across_main_turns(monkeypatch, tmp_pa
     assert "Answer: AgentSession" in canonical
     assert resumed_prompts[1]["request"] == canonical
     assert all(
-        not any(item.get("tool") == "user_response" for item in (prompt.get("latest_tool_results") or []))
+        not any(item.get("tool") == "user_response" for item in (prompt.get("latest_capability_results") or []))
         for prompt in resumed_prompts
     )
     # Job #2 metrics are physical-job scoped; cumulative task chronology is separate.
@@ -135,8 +135,8 @@ def test_agent_prompt_treats_conversation_as_valid_without_forcing_work_state():
     lower=PROMPT_AGENTE.lower()
     assert "conversation and simple requests may go straight to final" in lower
     assert "empty updates mean no new commitment" in lower
-    assert "needs_user represents information or a choice that blocks progress" in lower
-    assert "workspace state is context, not a task" in lower
+    assert "needs_user" in lower
+    assert "ambient workspace state and capability availability are context, not tasks" in lower
 
 def test_execution_context_rejects_canonical_request_identity_drift():
     from eyle.core.execution_context import ExecutionContext

@@ -23,7 +23,7 @@ def test_greeting_is_written_by_same_agent(monkeypatch, tmp_path):
     assert text.startswith("Oiii")
     assert pending is None
     assert len(prompts) == 1
-    index = prompts[0]["capability_index"]
+    index = prompts[0]["available_capabilities"]
     assert any(item.startswith("calculate(") for item in index)
     assert not any(item.startswith("agent_info(") for item in index)
     assert not any(item.startswith("execution_trace(") for item in index)
@@ -48,8 +48,8 @@ def test_analysis_uses_one_agent_loop_and_retained_evidence(monkeypatch, tmp_pat
     assert status == "success"
     assert "adição" in text
     assert len(prompts) == 2
-    assert "def soma" in prompts[1]["latest_tool_results"][0]["detail"]["numbered_content"]
-    assert "content" not in prompts[1]["latest_tool_results"][0]["detail"]
+    assert "def soma" in prompts[1]["latest_capability_results"][0]["detail"]["numbered_content"]
+    assert "content" not in prompts[1]["latest_capability_results"][0]["detail"]
     assert details["investigation"][0]["goal"] == "Establish what app.py does"
 
 
@@ -133,7 +133,7 @@ def test_disabled_tests_are_not_advertised(monkeypatch, tmp_path):
         "olhe o projeto", config(tmp_path), projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True,
     )
     assert status == "success"
-    assert not any(item.startswith("run_tests(") for item in prompts[0]["capability_index"])
+    assert not any(item.startswith("run_tests(") for item in prompts[0]["available_capabilities"])
 
 
 def test_external_memory_only_moves_through_tools(monkeypatch, tmp_path):

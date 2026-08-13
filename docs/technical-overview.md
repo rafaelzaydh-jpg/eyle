@@ -1,8 +1,8 @@
-# Technical overview — Eyle 2.7.5 Rev1.4.1
+# Technical overview — Eyle 2.7.5 Rev1.4.3
 
 ## Grounded Completion
 
-Rev1.4.1 adds no planner/router. It reduces the fixed model-facing surface so Main chooses naturally among direct Final, capabilities, optional Investigation/Tasks and blocking user input. Workspace metadata is ambient context, not an implicit assignment.
+Rev1.4.3 adds no planner/router or semantic reviewer. It keeps the small model-facing surface and completes optional semantic state: Investigation records what Main established from grounding, while Task result records what Main considers achieved against its criteria.
 
 Rev1.4 removes the Claim subsystem and makes Main the only LLM in the normal decision loop.
 
@@ -41,7 +41,7 @@ Runtime validates IDs, parent references, cycles, closure shape, Material refere
 
 ## Investigation state
 
-Investigation is a Main-owned epistemic commitment. An open Investigation also blocks Final. `established` requires real Material grounding; `dismissed` records an explicit semantic decision to stop pursuing it.
+Investigation is a Main-owned epistemic commitment. An open Investigation blocks Final. `established` requires real Material grounding plus a non-empty `conclusion` stating what Main established about its goal. `dismissed` records an explicit semantic decision to stop pursuing it.
 
 ## Final grounding continuity
 
@@ -49,13 +49,15 @@ Investigation is a Main-owned epistemic commitment. An open Investigation also b
 
 Runtime does not decide whether those materials semantically prove the answer. It prevents Main from silently dropping its own declared evidence during synthesis.
 
+Once an Investigation is established, its raw Material is no longer pinned merely for that Investigation. The Main-authored `conclusion` is the compact semantic state; canonical Material stays in Runtime and grounding IDs remain available for Final continuity.
+
 ## Observation projection
 
 Canonical Observation remains Runtime-owned while the prompt receives bounded projections:
 
-- `latest_tool_results` for fresh physical results;
-- `observation_map` for compact observed-state coordinates;
-- `grounding_index` for selected Material coordinates;
+- `latest_capability_results` for fresh physical results;
+- `runtime_observations` for compact observed-state coordinates;
+- `current_material` for selected Material coordinates;
 - open Frontiers/committed coordinates as needed.
 
 Coverage and Frontier remain physical facts. Main decides whether continuation matters.

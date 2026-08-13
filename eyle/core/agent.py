@@ -31,7 +31,7 @@ from .observation import (
     seed_runtime_failure as _seed_runtime_failure,
 )
 from .investigation import (
-    apply_investigation_updates, investigation_grounding_ids,
+    apply_investigation_updates, established_investigation_grounding_ids, investigation_grounding_ids, open_investigation_grounding_ids,
 )
 from .tasks import apply_task_updates, task_grounding_ids, task_state_view
 from .security import _resolver_caminho_seguro
@@ -203,7 +203,7 @@ def _project_grounding_index(
     selected ``mat-*`` id.
     """
     full = [item for item in session.grounding_index() if isinstance(item, dict)]
-    pinned_ids = set(investigation_grounding_ids(session.investigation))
+    pinned_ids = set(open_investigation_grounding_ids(session.investigation))
     pending_ids: List[str] = []
     for result in _pending_observation_results(session):
         if not isinstance(result, dict):
@@ -242,7 +242,7 @@ def _project_observation_map(session: AgentSession) -> List[Dict[str, Any]]:
     Every still-open Frontier remains visible independently of row recency.
     """
     full = [item for item in _observation_map(session) if isinstance(item, dict)]
-    pinned_ids = set(investigation_grounding_ids(session.investigation))
+    pinned_ids = set(open_investigation_grounding_ids(session.investigation))
     fresh_turn = max(0, int(getattr(session, "turn", 0) or 0) - 1)
 
     def key(item: Dict[str, Any]) -> Tuple[Any, Any, Any]:
@@ -530,7 +530,7 @@ def _minimal_tool_context(result: Dict[str, Any], *, detail_char_limit: int = 30
 def _crop_payload(payload: Dict[str, Any], budget: int, chars_per_token: int) -> Dict[str, Any]:
     """Fit the model view without altering canonical Runtime state."""
     while estimate_tokens(payload, chars_per_token) > budget:
-        results = payload.get("latest_tool_results") or []
+        results = payload.get("latest_capability_results") or []
         reduced = False
         for result in sorted(
             [item for item in results if isinstance(item, dict)],
@@ -555,7 +555,7 @@ def _crop_payload(payload: Dict[str, Any], budget: int, chars_per_token: int) ->
         if reduced:
             continue
 
-        observation_map = payload.get("observation_map") or []
+        observation_map = payload.get("runtime_observations") or []
         if len(observation_map) > 5:
             retained = [
                 item for item in observation_map
@@ -566,25 +566,25 @@ def _crop_payload(payload: Dict[str, Any], budget: int, chars_per_token: int) ->
             slots = max(0, 5 - len(retained))
             compacted = retained + (recent[-slots:] if slots else [])
             if compacted != observation_map:
-                payload["observation_map"] = compacted
+                payload["runtime_observations"] = compacted
                 continue
 
-        grounding_index = payload.get("grounding_index") or []
+        grounding_index = payload.get("current_material") or []
         if len(grounding_index) > 8:
             pinned = [item for item in grounding_index if isinstance(item, dict) and item.get("pinned") is True]
             pinned_ids = {str(item.get("id") or "") for item in pinned}
             recent = [item for item in grounding_index if str((item or {}).get("id") or "") not in pinned_ids]
             compacted = pinned if len(pinned) >= 8 else pinned + recent[-max(0, 8 - len(pinned)):]
             if compacted != grounding_index:
-                payload["grounding_index"] = compacted
+                payload["current_material"] = compacted
                 continue
 
-        background = payload.get("conversation_background") or []
+        background = payload.get("prior_conversation") or []
         if len(background) > 1:
-            payload["conversation_background"] = background[1:]
+            payload["prior_conversation"] = background[1:]
             continue
         if background:
-            payload["conversation_background"] = []
+            payload["prior_conversation"] = []
             continue
 
         compacted_any = False
@@ -601,10 +601,10 @@ def _crop_payload(payload: Dict[str, Any], budget: int, chars_per_token: int) ->
         # Under physical headroom pressure keep tool callability while dropping
         # explanatory repetition. Compact capability signatures remain enough
         # for discovery; active contracts keep canonical input shape.
-        capability_index = payload.get("capability_index") or []
+        capability_index = payload.get("available_capabilities") or []
         compact_index = [str(item).split(" — ", 1)[0] for item in capability_index]
         if compact_index != capability_index:
-            payload["capability_index"] = compact_index
+            payload["available_capabilities"] = compact_index
             continue
 
         active_tools = payload.get("active_tools") or []
@@ -627,10 +627,10 @@ def _crop_payload(payload: Dict[str, Any], budget: int, chars_per_token: int) ->
         # Finally drop unpinned Material directory rows. Fresh result payloads
         # still carry their grounding ids and pinned Investigation material is
         # never removed by this fallback.
-        grounding_index = payload.get("grounding_index") or []
+        grounding_index = payload.get("current_material") or []
         unpinned = [item for item in grounding_index if not (isinstance(item, dict) and item.get("pinned") is True)]
         if unpinned:
-            payload["grounding_index"] = [
+            payload["current_material"] = [
                 item for item in grounding_index if isinstance(item, dict) and item.get("pinned") is True
             ]
             continue
@@ -732,15 +732,15 @@ def _compile_prompt(
         "turn": session.turn,
         "investigation": session.investigation,
         "project": _project_descriptor(project),
-        "conversation_background": _project_conversation_background(session),
-        "observation_map": _project_observation_map(session),
-        "latest_tool_results": _project_pending_results(session, config),
-        "grounding_index": _project_grounding_index(session),
+        "prior_conversation": _project_conversation_background(session),
+        "runtime_observations": _project_observation_map(session),
+        "latest_capability_results": _project_pending_results(session, config),
+        "current_material": _project_grounding_index(session),
         "physical_limits": {
             "physical_tokens_remaining": token_remaining,
             "terminal_capabilities": execution.terminal_capabilities_view() if execution is not None else {},
         },
-        "capability_index": capability_index,
+        "available_capabilities": capability_index,
         "active_tools": active_tools,
         "runtime_feedback": str(feedback or "").strip() or None,
     }
@@ -1436,11 +1436,23 @@ def _run(
         # siblings cannot roll back accepted work, and omitted targets remain in
         # the canonical runtime-owned contract unchanged.
         session.investigation = prospective_investigation
+        by_investigation_id = {
+            str(item.get("id") or ""): item
+            for item in session.investigation if isinstance(item, dict) and str(item.get("id") or "")
+        }
         for item in accepted_updates:
+            current_target = by_investigation_id.get(str(item.get("id") or ""), {})
             _record_decision(
                 session, "investigation_update",
                 "committed" if item.get("changed") else "unchanged",
                 reason=f"{item.get('id')}={item.get('status')}",
+                facts={
+                    "investigation_id": item.get("id"),
+                    "goal": current_target.get("goal"),
+                    "status": current_target.get("status"),
+                    "conclusion": current_target.get("conclusion"),
+                    "grounding_ids": list(current_target.get("grounding_ids") or []),
+                },
             )
         for item in rejected_updates:
             reason = str(item.get("reason") or "INVESTIGATION_UPDATE_REJECTED")
@@ -1495,6 +1507,7 @@ def _run(
                     "parent_id": current_task.get("parent_id"),
                     "description": current_task.get("description"),
                     "status": current_task.get("status"),
+                    "completion_criteria": current_task.get("completion_criteria"),
                     "result": current_task.get("result"),
                 },
             )
@@ -1619,7 +1632,7 @@ def _run(
                 continue
 
             required_grounding_ids = list(dict.fromkeys(
-                investigation_grounding_ids(session.investigation)
+                established_investigation_grounding_ids(session.investigation)
                 + task_grounding_ids(session.tasks)
             ))
             final_obj = {
@@ -1857,15 +1870,15 @@ def _executar_agente_bound(
                 details = {
                     "status": "failed",
                     "failure_code": code,
-                    "limitations": ["Eyle 2.7.5 Rev1.4.1 does not migrate or adapt pending continuations from older shapes."],
+                    "limitations": ["Eyle 2.7.5 Rev1.4.3 does not migrate or adapt pending continuations from older shapes."],
                 }
                 return _return("failed", text, None, details, full)
             if code == "SESSION_SCHEMA_INCOMPATIBLE":
-                text = "The persisted session belongs to a different contract and cannot be resumed in Eyle 2.7.5 Rev1.4.1."
+                text = "The persisted session belongs to a different contract and cannot be resumed in Eyle 2.7.5 Rev1.4.3."
                 details = {
                     "status": "failed",
                     "failure_code": "SESSION_SCHEMA_INCOMPATIBLE",
-                    "limitations": ["Eyle 2.7.5 Rev1.4.1 does not migrate or adapt sessions from earlier revisions."],
+                    "limitations": ["Eyle 2.7.5 Rev1.4.3 does not migrate or adapt sessions from earlier revisions."],
                 }
                 return _return("failed", text, None, details, full)
             raise

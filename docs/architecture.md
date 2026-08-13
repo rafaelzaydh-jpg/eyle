@@ -1,4 +1,4 @@
-# Architecture — Eyle 2.7.5 Rev1.4.1
+# Architecture — Eyle 2.7.5 Rev1.4.3
 
 ## 1. Core thesis
 
@@ -24,9 +24,35 @@ Runtime owns physical/contract authority only. It does not decide semantic relev
 
 ## 2. Rev1.4 Grounded Completion
 
-## 2.1 Rev1.4.1 Semantic Freedom
+### 2.1 Rev1.4.3 Semantic Completion
 
-Rev1.4.1 changes guidance, not semantic ownership. Main is not required to create Task/Investigation or use a capability merely because one is available. Direct Final is a normal path. Fixed model-facing text is limited to:
+Rev1.4.3 closes the semantic gap between evidence collection and intentional completion while preserving Main authority. The optional structures now form a complete cognitive chain when Main chooses to use them:
+
+```text
+Task.description / completion_criteria
+            ↓
+Investigation.goal
+            ↓
+Observation / Material
+            ↓
+Investigation.conclusion
+            ↓
+Task.result
+            ↓
+Final
+```
+
+`Investigation.conclusion` states what Main believes its selected grounding establishes about the Investigation goal. Runtime requires a non-empty conclusion plus real Material before accepting `status=established`, but does not judge whether the conclusion is correct or sufficient.
+
+`Task.result` remains the semantic closure of `completion_criteria`: what Main considers achieved against the criteria it created. Runtime requires a non-empty result for closed Tasks and preserves the criteria/result state, but does not grade semantic adequacy.
+
+Dismissed Investigation grounding is not completion grounding. Only open Investigation Material is pinned while epistemic work is unresolved. Once established, `conclusion` becomes the semantic working-state compression; canonical Material remains in Runtime and established grounding IDs still contribute to Final continuity.
+
+Session and Queue use schema `2.7.5-r1.4.3` because Investigation gained persisted `conclusion`. There is no migration alias.
+
+### 2.2 Rev1.4.2 Epistemic Clarity
+
+Rev1.4.2 changes guidance, not semantic ownership. Main is not required to create Task/Investigation or use a capability merely because one is available. Direct Final is a normal path. Fixed model-facing text is limited to:
 
 1. semantic/physical authority boundaries;
 2. available action paths;
@@ -50,17 +76,17 @@ There is no:
 
 Reliability instead uses explicit Main-owned commitments.
 
-### 2.1 Investigation
+### 2.3 Investigation
 
 Investigation answers: **what did Main explicitly decide it must understand?**
 
 - `open`: unresolved epistemic commitment; blocks Final.
-- `established`: resolved with one or more real `mat-*` Material IDs.
+- `established`: resolved with one or more real `mat-*` Material IDs and a non-empty semantic `conclusion`.
 - `dismissed`: Main explicitly decides the question no longer needs resolution.
 
-Runtime validates structure and Material existence. Main owns the meaning of the conclusion.
+Runtime validates structure, Material existence and presence of the conclusion. Main owns what the conclusion means and whether it answers the epistemic goal.
 
-### 2.2 Tasks
+### 2.4 Tasks
 
 Task answers: **what work did Main explicitly commit to perform?**
 
@@ -86,7 +112,7 @@ Rules:
 
 Runtime never infers Task completion from tool execution or from children. Main owns completion semantics.
 
-### 2.3 Final continuity
+### 2.5 Final continuity
 
 Before accepting Final, Runtime mechanically gathers Material IDs committed by:
 
@@ -97,7 +123,7 @@ Those IDs must appear in Final `grounding_ids`. Missing committed coordinates re
 
 This is continuity, not truth grading. Runtime proves only that evidence Main explicitly committed did not disappear during synthesis.
 
-### 2.4 Direct Final remains valid
+### 2.6 Direct Final remains valid
 
 If Main creates no Task and no Investigation, there is no commitment to close. Conversational or simple requests can return Final directly.
 

@@ -1,17 +1,17 @@
 {
   "release": "2.7.5",
   "app_version": "2.7.5",
-  "config_schema_version": "2.7.5-r1.4.1",
-  "revision": "rev1.4.1-semantic-freedom",
-  "released_at": "2026-08-12",
-  "title": "Rev1.4.1 Semantic Freedom",
+  "config_schema_version": "2.7.5-r1.4.3",
+  "revision": "rev1.4.3-semantic-completion",
+  "released_at": "2026-08-13",
+  "title": "Rev1.4.3 Semantic Completion",
   "compatibility": {
     "backward_compatible": false,
-    "session_schema": "2.7.5-r1.4",
-    "queue_schema": "2.7.5-r1.4",
+    "session_schema": "2.7.5-r1.4.3",
+    "queue_schema": "2.7.5-r1.4.3",
     "pending_continuation_schema": "1",
     "benchmark_schema": "1",
-    "policy": "Rev1.4.1 changes model-facing guidance, not Session/Queue data shape. Rev1.4 Session/Queue state remains structurally compatible; removed Core contracts still receive no aliases or migrations.",
+    "policy": "Rev1.4.3 changes persisted Investigation shape by adding conclusion; Session/Queue advance to r1.4.3 and older state is rejected without aliases or migration.",
     "memory_kernel_schema": "2.7.5-r1.3.6-memory-kernel-v1"
   },
   "architecture": {
@@ -20,8 +20,8 @@
     "grounded_completion": "Final is accepted without a second LLM only when Main-owned open commitments are resolved and every Material coordinate explicitly committed by established Investigations or grounded completed Tasks is preserved in Final grounding_ids.",
     "observation": "Generic physical boundary containing domain-neutral mat-* Material (`locator`, `content_hash`, optional opaque `source_version`), mechanically validated Coverage, public fr-* Frontiers, and Runtime-private shared snapshots/lightweight continuation cursors. Snapshot payload is stored once and only requested slices are copied during pagination. Observation contains no public-capability or filesystem-specific extraction, freshness, identity or continuation logic.",
     "memory": "Persistent cognitive state owned semantically by Main and physically by the Memory Kernel. SQLite stores revisioned Memory Nodes, tags, relations, atomic ChangeSets, append-only history and opaque continuation snapshots. Bounded MemoryView uses MemoryCoverage/MemoryFrontier distinct from Observation contracts; no memory body is injected automatically.",
-    "tasks": "Optional Main-owned intentional commitments. Runtime enforces them only after Main creates them; empty task_updates create no obligation.",
-    "investigation": "Optional Main-owned epistemic commitments. Runtime enforces them only after Main creates them; empty investigation_updates create no obligation.",
+    "tasks": "Optional Main-owned intentional commitments. completion_criteria defines what Main chose to accomplish; result records what Main considers achieved. Runtime enforces shape/closure only after Main creates a Task.",
+    "investigation": "Optional Main-owned epistemic commitments. established requires real Material plus Main-authored conclusion stating what the grounding establishes about the goal; Runtime does not judge semantic sufficiency.",
     "capabilities": "Every public registry entry owns execution plus identity/memoization, Material, canonical Coverage/Frontier, continuation/freshness, normalization and public/model projection hooks. Generic dispatch contains no capability-name branches. One effect=observe|execute|mutate field replaces redundant category/effects metadata.",
     "verification_future": "Consolidated future direction only: capability-owned deterministic or specialist-LLM validators may evaluate explicit domain criteria and return physical results through normal Observation. Rev1.4 adds no validator framework or replacement universal gate.",
     "writes": "Real patch transactions target only the dedicated workspace. Eyle self-source is read-only to direct capabilities; self-change experiments run only in an isolated sandbox copy and can leave the sandbox only as an inert ZIP artifact.",
@@ -31,9 +31,15 @@
     "transport": "LLM transport records physical request start separately from preflight, preserves backend failure status such as read_timeout/model_output_truncated, and uses the real ExecutionContext for stream eligibility/progress. Structured response validation remains fail-closed.",
     "observation_projection": "Canonical Observation remains complete in Runtime state while Main receives fresh deltas, Investigation-pinned coordinates, open Frontiers and a bounded Material directory. Cached replays return coordinates plus short recall excerpts instead of rematerializing full prior payloads.",
     "model_window": "Current llama-server physical context ceiling is 38000 tokens per Main call. The task-wide physical token fuse remains capped at 90000. Rev1.4 has no Claim call and no downstream Claim reserve.",
-    "semantic_freedom": "Fixed model-facing text exposes paths, physical facts and contract boundaries without turning workspace state, tools, Tasks or Investigation into prerequisites. Direct Final is a first-class path."
+    "semantic_freedom": "Fixed model-facing text exposes paths, physical facts and contract boundaries without turning workspace state, tools, Tasks or Investigation into prerequisites. Direct Final is a first-class path.",
+    "epistemic_clarity": "Main distinguishes retained conversation, persistent Memory, available capabilities and current Runtime Observation/Material by epistemic role. Capability metadata and Memory are context, not proof of current external state; inference is not presented as newly observed fact.",
+    "semantic_completion": "Observation exposes reality; Investigation.conclusion records what Main believes that grounding establishes; Task.result records what Main believes was achieved against completion_criteria. Only open Investigation Material remains prompt-pinned; established conclusions become semantic compression while canonical Material and Final grounding continuity remain Runtime-owned."
   },
   "removed": [
+    "established Investigation without a semantic conclusion; Rev1.4.3 requires conclusion + real Material",
+    "dismissed Investigation grounding as a Final completion requirement; dismissed epistemic branches no longer pin delivery grounding",
+    "ambiguous model-facing payload labels capability_index/conversation_background/latest_tool_results/observation_map/grounding_index; Rev1.4.2 uses available_capabilities/prior_conversation/latest_capability_results/runtime_observations/current_material",
+    "implicit equivalence between capability metadata or prior context and current observed implementation state",
     "task-oriented wording in canonical user clarification continuation",
     "tool discovery prose that advised when Main should or should not use capabilities",
     "prescriptive Runtime feedback instruction fields; feedback now reports codes/state/expectations only",
@@ -147,7 +153,7 @@
     "final"
   ],
   "publication": {
-    "target_tag": "v2.7.5-rev1.4.1",
+    "target_tag": "v2.7.5-rev1.4.3",
     "status": "artifact_verified",
     "requires_extracted_artifact_verification": true
   }

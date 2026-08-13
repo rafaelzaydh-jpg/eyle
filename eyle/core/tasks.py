@@ -1,7 +1,8 @@
-"""Main-owned completion commitments for Eyle 2.7.5 Rev1.4.1.
+"""Main-owned completion commitments for Eyle 2.7.5 Rev1.4.3.
 
 A Task records work Main decided is required before delivery. Main owns the
-meaning of the objective, completion criteria, result and evidence selection.
+meaning of the objective and criteria; ``result`` records what Main considers
+achieved against those criteria, with optional selected Material grounding.
 Runtime owns only structural integrity and enforces the commitments Main
 explicitly created: open Tasks block Final, completed parents cannot retain open
 children, and referenced Material must physically exist.

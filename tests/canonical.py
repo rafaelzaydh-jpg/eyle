@@ -3,13 +3,18 @@ from __future__ import annotations
 
 def investigation_target(
     target_id="T1", *, goal="Establish the material project fact needed by the request",
-    status="open", grounding_ids=None, reason="",
+    status="open", grounding_ids=None, conclusion=None, reason="",
 ):
+    if status == "established" and conclusion is None:
+        conclusion = "The grounded Material establishes the Investigation goal."
+    if conclusion is None:
+        conclusion = ""
     return {
         "id": str(target_id),
         "goal": str(goal),
         "status": str(status),
         "grounding_ids": list(grounding_ids or []),
+        "conclusion": str(conclusion),
         "reason": str(reason),
     }
 
@@ -80,8 +85,8 @@ def agent_needs_user(message, investigation=None, tasks=None, *, missing_informa
 def base_config(*, tests_enabled=False):
     return {
         "app_version": "2.7.5",
-        "config_schema_version": "2.7.5-r1.4.1",
-        "revision": "rev1.4.1-semantic-freedom",
+        "config_schema_version": "2.7.5-r1.4.3",
+        "revision": "rev1.4.3-semantic-completion",
         "llm": {
             "context_window_tokens": 38000,
             "agent_max_tokens": 3600,

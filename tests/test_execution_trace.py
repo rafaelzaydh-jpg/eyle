@@ -31,7 +31,7 @@ def test_compile_prompt_records_context_composition_without_exposing_diagnostic_
         reset_execution(token)
     assert "execution_trace" not in allowed
     payload = json.loads(prompt)
-    assert not any(item.startswith("execution_trace(") for item in payload["capability_index"])
+    assert not any(item.startswith("execution_trace(") for item in payload["available_capabilities"])
     snap = execution.llm_calls[-1]["prompt"]
     serialized = json.dumps(snap, ensure_ascii=False)
     assert "SECRET_MARKER" not in serialized
@@ -45,7 +45,7 @@ def test_internal_execution_trace_projects_runtime_facts_without_raw_prompts():
         "llm_usage": {"llm_calls": 2, "llm_requests": 2, "prompt_tokens_actual": 2100, "prompt_tokens_uncached": 2100},
         "llm_calls": [{"logical_call_id": 1, "turn": 1, "mode": "agent", "prompt": {
             "characters": 3000, "estimated_tokens": 1000, "tool_count": 16,
-            "components_after": {"capability_index": {"characters": 900, "estimated_tokens": 300, "items": 16}},
+            "components_after": {"available_capabilities": {"characters": 900, "estimated_tokens": 300, "items": 16}},
         }, "attempts": [{"physical_attempt": 1, "prompt_tokens": 2100}]}],
         "decision_history": [{"turn": 1, "decision": "tool", "outcome": "validated", "tools": ["project_stats"]}],
         "tool_history": [{"turn": 1, "tool": "project_stats", "status": "success", "arguments": {}, "result": {"ok": True, "files": 92}}],

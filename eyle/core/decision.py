@@ -1,4 +1,4 @@
-"""Canonical runtime decision history for Eyle 2.7.5 Rev1.4.1.
+"""Canonical runtime decision history for Eyle 2.7.5 Rev1.4.3.
 
 DecisionLedger is observability only. It records what Main requested and what
 Runtime accepted/rejected/executed. It does not fingerprint behaviour, count

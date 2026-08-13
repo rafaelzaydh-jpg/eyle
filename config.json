@@ -126,6 +126,6 @@
     "window_seconds": 3600
   },
   "app_version": "2.7.5",
-  "config_schema_version": "2.7.5-r1.4.1",
-  "revision": "rev1.4.1-semantic-freedom"
+  "config_schema_version": "2.7.5-r1.4.3",
+  "revision": "rev1.4.3-semantic-completion"
 }

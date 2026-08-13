@@ -1,4 +1,4 @@
-"""Canonical Runtime observation state for Eyle 2.7.5 Rev1.4.1.
+"""Canonical Runtime observation state for Eyle 2.7.5 Rev1.4.3.
 
 Observation owns physical tool history, replay identity, materialized grounding,
 Coverage/Frontier continuity and the pending model-facing delta.  The Main LLM

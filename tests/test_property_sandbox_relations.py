@@ -105,8 +105,8 @@ def test_repeated_identical_investigation_transition_does_not_create_semantic_fa
     def fake(prompt,cfg):
         nonlocal calls; calls+=1
         if calls<3:
-            return agent_tools(tool_call("count_tokens",{}),investigation=[{"id":"T1","goal":"x","status":"open","grounding_ids":[],"reason":""}])
-        return agent_final("done",investigation=[{"id":"T1","goal":"x","status":"dismissed","grounding_ids":[],"reason":"not needed for final"}])
+            return agent_tools(tool_call("count_tokens",{}),investigation=[{"id":"T1","goal":"x","status":"open","grounding_ids":[],"conclusion":"","reason":""}])
+        return agent_final("done",investigation=[{"id":"T1","goal":"x","status":"dismissed","grounding_ids":[],"conclusion":"","reason":"not needed for final"}])
     monkeypatch.setattr(core_agent,"executar_agente_llm",fake)
     status,text,_,details=core_agent.executar_agente("x",base_config(),projeto={"caminho_origem":str(tmp_path)},retornar_detalhes=True)
     assert status=="success" and text=="done"

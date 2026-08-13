@@ -1,12 +1,12 @@
-# Publishing Eyle 2.7.5 Rev1.4.1
+# Publishing Eyle 2.7.5 Rev1.4.3
 
 Canonical identity:
 
 ```text
 app          2.7.5
-schema       2.7.5-r1.4.1
-revision     rev1.4.1-semantic-freedom
-tag          v2.7.5-rev1.4.1
+schema       2.7.5-r1.4.3
+revision     rev1.4.3-semantic-completion
+tag          v2.7.5-rev1.4.3
 ```
 
 Before publishing, validate the extracted artifact rather than only the working directory:
@@ -24,9 +24,9 @@ Publish:
 
 ```bash
 git add .
-git commit -m "Eyle 2.7.5 Rev1.4.1 - Semantic Freedom"
+git commit -m "Eyle 2.7.5 Rev1.4.3 - Semantic Completion"
 git push
 
-git tag -a v2.7.5-rev1.4.1 -m "Eyle 2.7.5 Rev1.4.1 — Semantic Freedom"
-git push origin v2.7.5-rev1.4.1
+git tag -a v2.7.5-rev1.4.3 -m "Eyle 2.7.5 Rev1.4.3 — Semantic Completion"
+git push origin v2.7.5-rev1.4.3
 ```

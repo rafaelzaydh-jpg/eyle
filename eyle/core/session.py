@@ -1,4 +1,4 @@
-"""One active Eyle 2.7.5 Rev1.4 agent session.
+"""One active Eyle 2.7.5 Rev1.4.3 agent session.
 
 Observation owns physical history and Material. Investigation records unresolved
 epistemic commitments; Tasks record intentional completion commitments. Runtime
@@ -12,9 +12,10 @@ from typing import Any, Dict, List, Optional
 from .decision import empty_ledger as empty_decision_ledger, persisted_view as persisted_decisions
 from .observation import empty_ledger as empty_observation_ledger, material_index_view, persisted_view as persisted_observations
 from .transactions import empty_transaction
+from .investigation import validate_investigation_state
 from .tasks import validate_task_state
 
-SESSION_SCHEMA_VERSION = "2.7.5-r1.4"
+SESSION_SCHEMA_VERSION = "2.7.5-r1.4.3"
 
 
 @dataclass
@@ -109,7 +110,10 @@ class AgentSession:
             "materials": {str(k): dict(v) for k, v in obs["materials"].items()},
         }
         session.decision_ledger = {"events": [dict(item) for item in decisions["events"]]}
-        session.investigation = [dict(item) for item in data["investigation"]]
+        try:
+            session.investigation = validate_investigation_state(data["investigation"])
+        except ValueError as error:
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE") from error
         try:
             session.tasks = validate_task_state(data["tasks"])
         except ValueError as error:

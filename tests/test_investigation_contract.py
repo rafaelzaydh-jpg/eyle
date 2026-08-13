@@ -3,8 +3,8 @@ from __future__ import annotations
 from eyle.core.investigation import apply_investigation_updates, investigation_grounding_ids
 
 
-def target(status="open", grounding_ids=None, reason="", goal="Establish X"):
-    return {"id": "T1", "goal": goal, "status": status, "grounding_ids": list(grounding_ids or []), "reason": reason}
+def target(status="open", grounding_ids=None, conclusion="", reason="", goal="Establish X"):
+    return {"id": "T1", "goal": goal, "status": status, "grounding_ids": list(grounding_ids or []), "conclusion": conclusion, "reason": reason}
 
 
 def test_empty_investigation_is_valid_state():
@@ -27,9 +27,9 @@ def test_established_requires_real_grounding_and_grounding_remains_additive():
     unchanged,_,rejected=apply_investigation_updates([target(status="established",reason="Decided")],previous=state,grounding=grounding)
     assert unchanged == state
     assert rejected[0]["reason"].startswith("INVESTIGATION_ESTABLISHED_GROUNDING_REQUIRED")
-    state,_,rejected=apply_investigation_updates([target(status="established",grounding_ids=["mat-0001"],reason="Decided")],previous=state,grounding=grounding)
+    state,_,rejected=apply_investigation_updates([target(status="established",grounding_ids=["mat-0001"],conclusion="X is established",reason="Decided")],previous=state,grounding=grounding)
     assert not rejected
-    state,_,rejected=apply_investigation_updates([target(status="established",grounding_ids=["mat-0002"],reason="Still decided")],previous=state,grounding=grounding)
+    state,_,rejected=apply_investigation_updates([target(status="established",grounding_ids=["mat-0002"],conclusion="X remains established",reason="Still decided")],previous=state,grounding=grounding)
     assert not rejected and investigation_grounding_ids(state)==["mat-0001","mat-0002"]
 
 def test_unknown_grounding_is_rejected_without_promotion_or_aliases():

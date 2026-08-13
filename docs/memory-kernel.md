@@ -1,4 +1,4 @@
-# Memory Kernel — Eyle 2.7.5 Rev1.4.1
+# Memory Kernel — Eyle 2.7.5 Rev1.4.3
 
 Rev1.3.6 introduced the first Memory Kernel directly in Eyle; Rev1.4 keeps that contract unchanged. It is deliberately small and does **not** merge Observation, Tasks or Investigation.
 

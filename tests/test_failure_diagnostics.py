@@ -131,7 +131,7 @@ def test_follow_up_can_cite_runtime_failure_instead_of_restored_code(monkeypatch
         payload = json.loads(prompt)
         prompts.append(payload)
         runtime_sources = [
-            item.get("detail") for item in payload["latest_tool_results"]
+            item.get("detail") for item in payload["latest_capability_results"]
             if isinstance(item, dict)
             and isinstance(item.get("detail"), dict)
             and item["detail"].get("source_type") == "runtime_validation"
@@ -173,5 +173,5 @@ def test_follow_up_can_cite_runtime_failure_instead_of_restored_code(monkeypatch
 
     assert status == "success"
     assert "render_template" in text
-    assert prompts[0]["grounding_index"][0]["source_type"] == "runtime_validation"
+    assert prompts[0]["current_material"][0]["source_type"] == "runtime_validation"
     assert details["grounding"][0]["source_type"] == "runtime_validation"

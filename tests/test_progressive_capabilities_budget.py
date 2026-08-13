@@ -19,18 +19,18 @@ def test_capability_index_is_small_and_first_use_expands_only_requested_tool(mon
         prompts.append(payload)
         if len(prompts) == 1:
             assert payload["active_tools"] == []
-            assert any(item.startswith("read_file(") for item in payload["capability_index"])
+            assert any(item.startswith("read_file(") for item in payload["available_capabilities"])
             assert "available_tools" not in payload
             assert "tool_taxonomy" not in payload
             # The discovery view should stay far below the old ~2.2k-token full catalog.
-            assert len(json.dumps(payload["capability_index"], ensure_ascii=False)) < 2200
-            assert estimate_tokens(payload["capability_index"], 3) < 650
+            assert len(json.dumps(payload["available_capabilities"], ensure_ascii=False)) < 2200
+            assert estimate_tokens(payload["available_capabilities"], 3) < 650
             return agent_tools(tool_call("read_file", {"path": "app.py"}))
         active = {item["name"] for item in payload["active_tools"]}
         assert active == {"read_file"}
-        assert not any(item.startswith("read_file(") for item in payload["capability_index"])
-        assert any(item.startswith("search_code(") for item in payload["capability_index"])
-        assert estimate_tokens(payload["capability_index"], 3) + estimate_tokens(payload["active_tools"], 3) < 1000
+        assert not any(item.startswith("read_file(") for item in payload["available_capabilities"])
+        assert any(item.startswith("search_code(") for item in payload["available_capabilities"])
+        assert estimate_tokens(payload["available_capabilities"], 3) + estimate_tokens(payload["active_tools"], 3) < 1000
         return agent_final("app.py foi observado.")
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)

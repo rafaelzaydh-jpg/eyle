@@ -36,7 +36,7 @@ def test_fixed_agent_prompt_is_compact_and_non_prescriptive():
     assert "you own semantic decisions" in lower
     assert "freely choose" in lower
     assert "use structure only when it helps" in lower
-    assert "ambient workspace state is context, not a task" in lower
+    assert "ambient workspace state and capability availability are context, not tasks" in lower
     assert "mat-*" in llm_mod.PROMPT_AGENTE
     assert "fr-*" in llm_mod.PROMPT_AGENTE
     assert "mf-*" in llm_mod.PROMPT_AGENTE
@@ -52,7 +52,7 @@ def test_common_multifile_write_reaches_transaction_in_three_calls(monkeypatch, 
 
     def fake(prompt, cfg):
         payload = json.loads(prompt); prompts.append(payload)
-        index_text = "\n".join(payload["capability_index"])
+        index_text = "\n".join(payload["available_capabilities"])
         assert not any(name in index_text for name in ("apply_patch", "test_patch_dry_run", "apply_patch_set", "test_patch_set_dry_run"))
         if len(prompts) == 1:
             return agent_tools(tool_call("list_tree", {}), investigation=[investigation_target(goal="Establish the files needed for the requested refactor")])
@@ -95,7 +95,7 @@ def test_semantic_read_coverage_blocks_overlapping_range(monkeypatch, tmp_path):
         assert any(
             item.get("coverage_replayed") is True
             and item.get("source_observation_tool") == "read_file"
-            for item in payload["latest_tool_results"]
+            for item in payload["latest_capability_results"]
         )
         return agent_final({"answer": "app.py define x como 1.", "grounding_ids": ["mat-0001"]}, investigation=[investigation_target(goal="Establish what app.py defines", status="established", grounding_ids=["mat-0001"], reason="app.py was read")])
 
