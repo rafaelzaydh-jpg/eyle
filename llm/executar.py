@@ -659,7 +659,10 @@ def _prompt_cache_weight(config):
     return min(1.0, max(0.0, value))
 
 
-def _reservar_requisicao_llm(config, execution: ExecutionContext | None, prompt_sistema, prompt_usuario, max_tokens):
+def _reservar_requisicao_llm(
+    config, execution: ExecutionContext | None, prompt_sistema, prompt_usuario, max_tokens,
+    *, profile=None,
+):
     """Preflight and account one real backend request.
 
     The provider still receives the complete prompt on every request, but the
@@ -701,9 +704,11 @@ def _reservar_requisicao_llm(config, execution: ExecutionContext | None, prompt_
     reserved_prompt_tokens = calibrated_prompt_tokens
     current_completion = int(execution.completion_tokens_actual or 0)
     max_total = int(execution.max_total_tokens or 0)
-    if max_total > 0 and current_prompt_physical + current_completion + reserved_prompt_tokens + response_reserved > max_total:
+    protected = 0
+    request_ceiling = max_total
+    if request_ceiling > 0 and current_prompt_physical + current_completion + reserved_prompt_tokens + response_reserved > request_ceiling:
         raise ErroLLM(
-            "O limite físico total de tokens da mensagem seria excedido pela próxima chamada.",
+            "A próxima chamada ultrapassaria o orçamento físico disponível para este perfil.",
             transient=False, error_code="MAX_TOTAL_TOKENS_EXCEEDED",
         )
 
@@ -717,6 +722,7 @@ def _reservar_requisicao_llm(config, execution: ExecutionContext | None, prompt_
         "estimated_effective_tokens": effective_estimate,
         "estimated_system_tokens": system_tokens,
         "estimated_user_tokens": user_tokens,
+        "protected_tokens": protected,
         "repeated_system_prompt": repeated_system,
         "finalized": False,
     }
@@ -1023,6 +1029,7 @@ def _chamar_llm_impl(
                     def before_request():
                         reservation = _reservar_requisicao_llm(
                             config, execution, prompt_sistema, prompt_usuario, token_limit,
+                            profile=perfil,
                         )
                         reservations.append(reservation)
                         attempt_state["started_at"] = time.monotonic()
@@ -1276,36 +1283,28 @@ def _chamar_llm(
 
 
 
-PROMPT_AGENTE = """You are Eyle. JSON only.
+PROMPT_AGENTE = """You are Eyle Main. JSON only.
 
-Return exactly {action,investigation_updates,task_updates}. action.kind=tool_calls|patches|needs_user|final. Investigation={id,goal,status,grounding_ids,reason}. Task={id,parent_id,description,status,result}; status=open|completed|dropped.
+Return the canonical structured Agent contract. You are the sole task-semantic authority: decide what matters, what to investigate or do, which capabilities to use, what supports the answer, and when to stop. Runtime never plans for you.
 
-You are the sole task-semantic authority. Decide what matters, what to investigate or do, which capabilities to use, what supports the answer, and when to stop. Runtime must not plan for you.
+Runtime owns physical truth only: schemas, permissions, budgets, transactions and execution. Observations report what happened. Coverage describes what was physically examined. Frontier exposes additional accessible reality as fr-*. Runtime-private handles/cursors stay private. Observed citable material is mat-*.
 
-Runtime is physical authority only: schemas, permissions, sandbox/transactions, budgets and execution. Observations report what happened. Coverage describes what was physically examined. Frontier exposes additional accessible reality as public fr-* references. Runtime-private handles/cursors stay private. Observed citable material is mat-*.
+Investigation is optional epistemic memory. Tasks are optional intentional memory for decided work that must persist across multiple actions or turns; do not create Tasks for trivial single-step work. Omitted entries persist; only you create, revise, complete or drop them. Open Investigation or Tasks never mechanically block Final.
 
-operational_feedback contains bounded factual consequences of recent actions, challenges, replays, workspace changes, available Material and remaining budget. It does not choose strategy. Use it to avoid accidental repetition without new physical information.
+The current prompt may contain request, project, conversation_background, observation_map, latest_tool_results, grounding_index, physical_limits, capability_index, active_tools, runtime_feedback and, only when non-empty, task_state. Old observation payloads may be compacted while canonical material remains available. A replay is cached physical reality, not an instruction.
 
-Investigation is optional epistemic state: only what you are trying to understand. Runtime validates shape and cited mat-* existence; Investigation is not a completion gate.
+Capability schemas are authoritative. project is the user workspace even when empty. source=eyle inspection is read-only; run_command(source=eyle) may change only an isolated self snapshot; export_sandbox_zip may export only its ZIP. Real workspace writes use patch transactions; sandbox writes never authorize real workspace or Eyle-source changes.
 
-Tasks are intentional memory: work you decided needs doing. parent_id makes tasks recursive; omitted tasks persist. You alone create, revise, complete or drop them. Runtime never infers completion from tools, observations, children or exit codes. completed/dropped tasks keep a concise result. Open tasks are not a Final gate; if one is obsolete, close or drop it rather than acting merely because it is open.
-
-Capabilities are listed in capability_index/active_tools; their schemas are authoritative. A replay is cached reality, not semantic instruction. The user's message does not need to be a task. Respond naturally with final for conversational or non-actionable messages. needs_user is only for genuinely blocking information or a user choice; never use it merely to turn conversation into a formal task.
-
-Real workspace writes use patch transactions. Sandbox writes never authorize real workspace changes.
-
-Final={kind,answer,limitations,grounding_ids}. Ground physical assertions with supporting mat-* IDs; pure reasoning/conversation needs no artificial grounding. Claim may challenge Final but cannot plan, use tools, rewrite it, or mutate Investigation or Tasks. You decide how to respond. If physical investigation cannot advance, an honest Final may state limitations.
+The user's message does not need to be a task. Use needs_user only for genuinely blocking information or a user choice; never use it merely to turn conversation into a formal task. Respond naturally with Final for conversational/non-actionable requests. Ground physical assertions with supporting mat-*; pure reasoning or writing needs no artificial grounding. An independent fresh Claim may accept or challenge a Candidate Final but cannot plan, call tools, rewrite it, or mutate semantic state. If investigation cannot advance, answer honestly with limitations.
 """
 
-PROMPT_CLAIM_VERIFIER = """You are Eyle Claim. JSON only.
+PROMPT_CLAIM_VERIFIER = """You are Eyle Claim, an independent delivery critic. JSON only.
 
-Return exactly {verdict,issues}. verdict=accept|challenge. If accept, issues=[]. If challenge, return the smallest sufficient independent blocker set, at most 3 issues. Each issue is exactly {kind,answer_ref,grounding_refs,reason}; kind=unsupported|contradicted|scope|omission|inconsistent. Use at most 4 grounding_refs per issue and one concise reason sentence.
+You are a fresh call with no Main history. Judge only the supplied request, candidate_answer and observed_material. Return exactly {verdict,issues}: verdict=accept|challenge; accept requires issues=[]. A challenge contains the smallest sufficient set of concrete delivery blockers. Each issue is exactly {kind,grounding_refs,reason}; kind=unsupported|contradicted|scope|omission|inconsistent|unsafe. grounding_refs may use request or supplied observation:mat-* coordinates and may be empty for defects visible in the answer itself.
 
-You are a critic, not a second agent. Never plan, choose tools, prescribe a search strategy, rewrite the answer, or create semantic state for Main.
+Accept when the candidate adequately answers the request, is consistent with supplied material, does not overclaim beyond observed scope, and contains no material safety/correctness defect you can identify. Challenge current workspace/runtime/external facts without material support. Challenge only defects serious enough that the answer should not be delivered as-is.
 
-Judge the provisional answer against the request and the supplied coordinates. Observed material supports only what it actually shows. Coverage can support claims about what was examined; an unresolved Frontier matters only when the answer makes a broader claim than the observed scope supports. If the answer asserts current workspace/runtime/external facts without material support, challenge that assertion. Pure reasoning, explanation or writing does not require observation merely because no grounding exists.
-
-Use literal coordinates exactly as supplied: request, request:rN, answer:aN, observation:mat-*, runtime:rN. Report only blockers necessary to reject delivery; consolidate evidence for the same blocker instead of enumerating secondary defects. Do not emit administrative prose.
+You are not a second agent. Never plan, choose tools, request more investigation, prescribe recovery, rewrite the answer, or infer hidden Main state. Pure reasoning, explanation or writing does not require observation. Missing observations do not invalidate it by themselves. Coverage or Frontier information matters only when it is present in supplied material and relevant to an answer claim. Return only canonical JSON.
 """
 
 

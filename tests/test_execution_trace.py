@@ -5,7 +5,7 @@ import json
 import eyle.core.agent as core_agent
 import eyle.core.tools as tools
 from eyle.core.execution_context import ExecutionContext, bind_execution, reset_execution
-from eyle.core.execution_trace import build_execution_trace
+from eyle.runtime.history import build_execution_trace
 from eyle.core.session import AgentSession
 from tests.canonical import base_config
 
@@ -56,3 +56,5 @@ def test_internal_execution_trace_projects_runtime_facts_without_raw_prompts():
     assert trace["tools"][0]["tool"] == "project_stats"
     assert trace["privacy"]["raw_prompts_exposed"] is False
     assert "diagnosis" not in trace
+    assert "repeated_rejected_decisions" not in trace["summary"]
+    assert "completion_remaining" not in trace["tokens"]

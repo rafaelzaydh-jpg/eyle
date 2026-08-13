@@ -1,5 +1,38 @@
-# Architecture — Eyle 2.7.5 Rev1.3
 
+# Architecture — Eyle 2.7.5 Rev1.3.4
+
+### Rev1.3.4 fresh Claim and token cleanup
+
+Rev1.3.4 restores Claim as an isolated Final-delivery gate. Default `fresh` mode creates a new LLM request using Main's transport/model but no Main message history or semantic state. Its semantic packet is exactly original Request + Candidate Final + Main-selected observed Material. Claim has no tool access and cannot see Investigation, Tasks, Runtime event history or prior Claim reasoning. `verified` retains the option of a distinct verifier transport/model.
+
+The revision also removes prompt/state duplication: the standalone `operational_feedback` projection is gone, empty `task_state` is omitted, Main's fixed system prompt is compacted, Investigation/Task JSON schemas no longer duplicate one object per status, and Claim anchors/runtime compaction/hard issue quotas are removed. The former fixed Claim token reserve is also gone; Claim fits its packet to the task budget actually remaining after Candidate Final creation.
+
+### Rev1.3.3 ownership cleanup
+
+Rev1.3.3 applies the removal rule to the current tree. Pure execution-history/prompt-cost diagnostics are Runtime-owned, write-transaction state is colocated with transaction mechanics, and dead Agent projection/config helpers are gone. The canonical capability-result contract contains only status plus `observations`, `coverage` and `frontiers`; opaque continuation handles exist only in Runtime-private ledger/frontier state. Investigation and Tasks remain separate because they represent different Main-owned semantic concerns.
+
+### Rev1.3.2 bounded context projection
+
+Canonical Runtime state is intentionally larger than model-facing state. Observation keeps the complete physical ledger, Material directory, Coverage and Frontier state, while Main receives a bounded projection:
+
+```text
+Observation canonical state
+  ├─ fresh delta --------------------→ latest_tool_results
+  ├─ immediately previous rows ------→ observation_map
+  ├─ Investigation-pinned Material --→ grounding_index
+  ├─ tiny Material recency tail -----→ grounding_index
+  └─ every open Frontier ------------→ observation_map
+```
+
+Older unrelated Observation rows and Material directory entries disappear from later prompts without being deleted from Runtime state. Cache hits return coordinates and short recall excerpts rather than replaying full source payloads. This is projection compaction, not semantic forgetting.
+
+Rev1.3.2 historically protected a fixed Claim reserve inside the task-wide fuse. Rev1.3.4 supersedes that mechanism: Main is no longer pre-starved for a future review, and Claim instead fits its fresh packet to the real physical headroom remaining after Candidate Final creation.
+
+### Rev1.3.1 workspace/self boundary
+
+`workspace/` is always the automatic user work plane, including its empty state. The Eyle installation is not a fallback workspace. Observational capabilities can explicitly use `source=eyle` for read-only self-analysis. `run_command(source=eyle)` works only on a disposable isolated source snapshot with live workspace/memory/context state omitted. The only supported egress for a modified self snapshot is `export_sandbox_zip`; it exports a non-overwriting ZIP artifact beside Eyle and never copies source files back into the running installation.
+
+This keeps control plane and work plane separate without adding a planner/router: Main still chooses semantics; Runtime only enforces the physical source boundary.
 ### Rev1.3 Task Memory
 
 
@@ -61,13 +94,15 @@ Runtime may reject an impossible or unsafe effect. It does not turn a poor seman
 
 ### Claim
 
-Claim is a small adversarial critic over a provisional Final when enabled. It returns only:
+Claim is an independent delivery critic over a Candidate Final when enabled. Default `fresh` mode is a new backend call with the same Main transport/model but a clean message context. It receives exactly three semantic inputs: original `request`, `candidate_answer`, and Main-selected `observed_material`. It returns only:
 
 ```text
 {verdict: accept|challenge, issues: [...]}
 ```
 
-Claim may challenge unsupported, contradicted, over-broad, omitted or internally inconsistent conclusions. It does not plan, select capabilities, prescribe a recovery strategy, rewrite the answer or mutate `Investigation` or `Tasks`. Its canonical output contains at most 3 independent blockers, at most 4 coordinates per blocker and a concise reason. These bounds constrain the protocol artifact, not the model's internal reasoning. Runtime derives enough output reservation from the bounded schema and permits only one protocol recovery after truncation/invalid structured output; repeated failure stays fail-closed.
+Each issue is exactly `{kind, grounding_refs, reason}`. Claim may challenge unsupported, contradicted, over-broad, omitted, internally inconsistent or unsafe conclusions. It does not plan, select capabilities, prescribe recovery, rewrite Final or mutate `Investigation`/`Tasks`. There is no semantic quota on issue count, reference count or reason length; only normal physical context/output ceilings and strict protocol/coordinate validation apply.
+
+A first semantic `challenge` is returned to Main as feedback for one Candidate Final revision. If the fresh Claim still returns `challenge` after that revision, Runtime stops explicitly with `CLAIM_CHALLENGE_UNRESOLVED` instead of burning tokens in an open-ended Main↔Claim loop. One separate protocol retry remains allowed for malformed/truncated structured output; repeated protocol failure stays fail-closed.
 
 ## Investigation
 
@@ -148,11 +183,9 @@ If Main requests an observation already covered at the current workspace epoch, 
 
 Replay is telemetry, not semantic debt. It does not create a duplicate Observation and does not trigger a specialized `OBSERVATION_REPLAY_LOOP` task failure. Ordinary physical fuses still contain pathological repetition.
 
-## Operational self-observation
+## Main-facing runtime facts
 
-Runtime derives a bounded `operational_feedback` projection from canonical DecisionLedger, Observation, Claim outcome and ExecutionContext facts. It can expose recent accepted/rejected actions, the last challenge, Main-selected grounding IDs, available Material IDs, replay-only preflights, executed observations, open Frontiers, workspace epoch and remaining physical token budget.
-
-This projection is factual only. Runtime does not label a sequence as a semantic loop, choose a recovery strategy, or force stopping. Main decides whether already-observed Material is sufficient, whether another capability is useful, or whether to return a Final with honest limitations.
+Rev1.3.4 removes the standalone `operational_feedback` projection because it duplicated facts already present in `latest_tool_results`, `observation_map`, `grounding_index`, `physical_limits` and explicit challenge feedback. Main receives those canonical projections directly. Runtime still does not diagnose semantic loops, prescribe strategy or infer completion.
 
 ## Capability failures
 
@@ -177,7 +210,7 @@ max_total_tokens       90000
 task_deadline_seconds 1800
 ```
 
-Rev1.3 has no fixed LLM-turn, LLM-call or tool-call quota. Each additional semantic turn is allowed until the physical token/deadline envelope is exhausted. The 90k task fuse is deliberately much closer than the experimental 1M Rev1.2.x value.
+There is no standing Claim reserve and no fixed semantic stopping quota. Main may use the shared task-wide physical envelope. After Candidate Final exists, Claim fits its fresh packet and physical output ceiling to the actual remaining headroom. If a viable review cannot fit, Runtime fails closed with `CLAIM_REVIEW_BUDGET_UNAVAILABLE`; it does not retroactively reserve 12k tokens from Main.
 
 Canonical state may outlive one model call. Main-facing views are bounded physical projections; open Frontiers and referenced grounding remain addressable without exposing private handles.
 

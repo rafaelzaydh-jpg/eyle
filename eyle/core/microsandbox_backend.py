@@ -310,6 +310,21 @@ class MicrosandboxSession:
                 f"falha ao copiar snapshot para filesystem privado da microVM: {exc}"
             ) from exc
 
+    async def _copy_guest_file_to_host(self, guest_path: str, host_path: str) -> None:
+        if self._sandbox is None:
+            raise MicrosandboxBackendError("Microsandbox ainda nao iniciou")
+        fs = getattr(self._sandbox, "fs", None)
+        if fs is None or not hasattr(fs, "copy_to_host"):
+            raise MicrosandboxBackendError("Microsandbox SDK sem Sandbox.fs.copy_to_host")
+        try:
+            await fs.copy_to_host(str(guest_path), os.path.realpath(host_path))
+        except Exception as exc:
+            raise MicrosandboxBackendError(f"falha ao exportar arquivo da microVM: {exc}") from exc
+
+    def copy_to_host(self, guest_path: str, host_path: str, *, timeout: float = 120.0) -> None:
+        """Export one explicit guest file through the SDK agent channel."""
+        self._submit(self._copy_guest_file_to_host(guest_path, host_path), timeout=timeout)
+
     def _rlimits(self) -> list[Any]:
         memory_bytes = int(self.limits["memoria_mb"]) * 1024 * 1024
         file_bytes = int(self.limits["arquivo_mb"]) * 1024 * 1024

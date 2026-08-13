@@ -1,12 +1,12 @@
-# Publishing Eyle 2.7.5 Rev1.3
+# Publishing Eyle 2.7.5 Rev1.3.4
 
 Target release identity:
 
 ```text
 app version  2.7.5
-schema       2.7.5-r1.3
-revision     rev1.3-task-memory
-tag          v2.7.5-rev1.3
+schema       2.7.5-r1.3.4
+revision     rev1.3.4-fresh-claim-token-cleanup
+tag          v2.7.5-rev1.3.4
 ```
 
 ## Public tag rules
@@ -43,8 +43,8 @@ Before publication, README/config/manifest identities must agree; current docs m
 After extracted-artifact verification:
 
 ```bash
-git tag -a v2.7.5-rev1.3 -m "Eyle 2.7.5 Rev1.3 — Task Memory"
-git push origin v2.7.5-rev1.3
+git tag -a v2.7.5-rev1.3.4 -m "Eyle 2.7.5 Rev1.3.4 — Fresh Claim & Token Cleanup"
+git push origin v2.7.5-rev1.3.4
 ```
 
 Rev1.3 never resumes or migrates incompatible older Core state.

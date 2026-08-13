@@ -15,6 +15,8 @@ import stat
 import subprocess
 import tempfile
 import uuid
+import hashlib
+import zipfile
 
 DEFAULT_OCI_IMAGE = "python:3.12-slim"
 
@@ -105,12 +107,21 @@ def _limites(cfg):
     }
 
 
-def _copiar_projeto(caminho_projeto, limites):
-    """Cria snapshot gravavel sem seguir symlinks nem copiar arquivos especiais."""
+def _copiar_projeto(caminho_projeto, limites, *, source_kind="workspace"):
+    """Create a writable snapshot without exposing protected/live Runtime state."""
     protected_index = build_protected_resource_index(caminho_projeto)
+    source_kind = str(source_kind or "workspace")
+    self_runtime_dirs = {"workspace", "memory", "context", "agent_memory"} if source_kind == "eyle" else set()
     total_itens = 0
     total_bytes = 0
     for raiz, pastas, arquivos in os.walk(caminho_projeto, followlinks=False):
+        rel_raiz = os.path.relpath(raiz, caminho_projeto).replace(os.sep, "/")
+        if source_kind == "eyle":
+            pastas[:] = [p for p in pastas if p != ".git"]
+            first = "" if rel_raiz == "." else rel_raiz.split("/", 1)[0]
+            if first in self_runtime_dirs:
+                pastas[:] = []
+                arquivos = [name for name in arquivos if name in {".gitkeep", ".keep", ".placeholder"}]
         for nome in list(pastas) + list(arquivos):
             caminho = os.path.join(raiz, nome)
             relativo = os.path.relpath(caminho, caminho_projeto).replace(os.sep, "/")
@@ -140,9 +151,18 @@ def _copiar_projeto(caminho_projeto, limites):
 
     def ignore_protected_resources(directory, names):
         ignored = []
+        current_relative = os.path.relpath(directory, raiz_real).replace(os.sep, "/")
+        current_first = "" if current_relative == "." else current_relative.split("/", 1)[0]
         for name in names:
             absolute = os.path.join(directory, name)
             relative = os.path.relpath(absolute, raiz_real).replace(os.sep, "/")
+            if source_kind == "eyle":
+                if relative == ".git" or relative.startswith(".git/"):
+                    ignored.append(name)
+                    continue
+                if current_first in self_runtime_dirs and name not in {".gitkeep", ".keep", ".placeholder"}:
+                    ignored.append(name)
+                    continue
             if is_protected_workspace_resource(caminho_projeto, relative, index=protected_index):
                 ignored.append(name)
                 protected_omitted.add(relative)
@@ -407,20 +427,28 @@ def _safe_sandbox_cwd(workspace, cwd):
     return target
 
 
-def _agent_sandbox_workspace(caminho_projeto, cfg, limites):
-    """Return one writable snapshot that persists for the current job only."""
+def _agent_sandbox_workspace(caminho_projeto, cfg, limites, *, source_kind="workspace"):
+    """Return one writable snapshot, bound to one explicit physical source per job."""
     execution = current_execution()
+    source_root = os.path.realpath(caminho_projeto)
+    source_kind = str(source_kind or "workspace")
     if execution is not None and execution.sandbox_workspace_path and os.path.isdir(execution.sandbox_workspace_path):
+        if execution.sandbox_source_root != source_root or execution.sandbox_source_kind != source_kind:
+            raise ErroSandbox(
+                f"SANDBOX_SOURCE_CONFLICT: active={execution.sandbox_source_kind or 'unknown'}; requested={source_kind}"
+            )
         return execution.sandbox_workspace_path, execution.sandbox_tempdir
-    workspace, tempdir = _copiar_projeto(caminho_projeto, limites)
+    workspace, tempdir = _copiar_projeto(source_root, limites, source_kind=source_kind)
     if execution is not None:
         execution.sandbox_workspace_path = workspace
+        execution.sandbox_source_root = source_root
+        execution.sandbox_source_kind = source_kind
         execution.sandbox_tempdir = tempdir
         execution.sandbox_protected_resources_omitted = len(getattr(tempdir, "protected_resources_omitted", []) or [])
     return workspace, tempdir
 
 
-def executar_comando_livre_no_sandbox(caminho_projeto, comando, cfg_sandbox=None, *, cwd=".", timeout_segundos=None):
+def executar_comando_livre_no_sandbox(caminho_projeto, comando, cfg_sandbox=None, *, cwd=".", timeout_segundos=None, source_kind="workspace"):
     """Run an unrestricted shell command inside a strong, disposable project snapshot.
 
     The command may mutate the snapshot, install workspace-local dependencies,
@@ -443,7 +471,7 @@ def executar_comando_livre_no_sandbox(caminho_projeto, comando, cfg_sandbox=None
                 raise ErroSandbox(f"timeout_segundos deve estar entre 1 e {limites['timeout']}")
             limites["timeout"] = requested
         backend = _strong_backend(cfg)
-        workspace, tempdir = _agent_sandbox_workspace(os.path.realpath(caminho_projeto), cfg, limites)
+        workspace, tempdir = _agent_sandbox_workspace(os.path.realpath(caminho_projeto), cfg, limites, source_kind=source_kind)
         cwd_host = _safe_sandbox_cwd(workspace, cwd)
         rel_cwd = os.path.relpath(cwd_host, workspace).replace(os.sep, "/")
         shell_command = str(comando or "").strip()
@@ -545,6 +573,113 @@ def executar_comando_livre_no_sandbox(caminho_projeto, comando, cfg_sandbox=None
         "protected_resources_omitted": int(getattr(current_execution(), "sandbox_protected_resources_omitted", 0) or 0),
         "real_workspace_changed": False, "cwd": rel_cwd,
     }
+
+_EXPORT_IGNORED_DIRS = {".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+
+
+def _safe_export_name(value, *, suffix=".zip"):
+    name = os.path.basename(str(value or "").strip())
+    if not name or name in {".", ".."} or len(name) > 160:
+        raise ErroSandbox("nome de artefato invalido")
+    if not name.lower().endswith(suffix):
+        raise ErroSandbox(f"artefato deve terminar em {suffix}")
+    if not all(ch.isalnum() or ch in "._-" for ch in name):
+        raise ErroSandbox("nome de artefato contem caracteres nao permitidos")
+    return name
+
+
+def _safe_archive_root(value, fallback):
+    raw = str(value or fallback or "candidate").strip()
+    if not raw or len(raw) > 120 or not all(ch.isalnum() or ch in "._-" for ch in raw):
+        raise ErroSandbox("archive_root invalido")
+    return raw
+
+
+def _write_snapshot_zip_host(workspace, destination, archive_root):
+    root = os.path.realpath(workspace)
+    with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        for current, dirs, files in os.walk(root, followlinks=False):
+            dirs[:] = [d for d in dirs if d not in _EXPORT_IGNORED_DIRS and not os.path.islink(os.path.join(current, d))]
+            for name in sorted(files):
+                if name.endswith((".pyc", ".pyo")):
+                    continue
+                absolute = os.path.join(current, name)
+                if os.path.islink(absolute) or not os.path.isfile(absolute):
+                    continue
+                rel = os.path.relpath(absolute, root).replace(os.sep, "/")
+                zf.write(absolute, f"{archive_root}/{rel}")
+
+
+def export_active_sandbox_zip(destination_dir, filename, *, archive_root=None, timeout_seconds=120):
+    """Package the current isolated snapshot and export only an inert ZIP artifact."""
+    execution = current_execution()
+    if execution is None or not execution.sandbox_workspace_path:
+        raise ErroSandbox("SANDBOX_NOT_INITIALIZED")
+    destination_dir = os.path.realpath(destination_dir)
+    if not os.path.isdir(destination_dir):
+        raise ErroSandbox("diretorio de exportacao inexistente")
+    filename = _safe_export_name(filename)
+    destination = os.path.realpath(os.path.join(destination_dir, filename))
+    if os.path.dirname(destination) != destination_dir:
+        raise ErroSandbox("destino de artefato tenta escapar da raiz autorizada")
+    if os.path.exists(destination):
+        raise ErroSandbox("ARTIFACT_ALREADY_EXISTS")
+    root_name = _safe_archive_root(archive_root, os.path.splitext(filename)[0])
+    temp_destination = destination + f".tmp-{uuid.uuid4().hex[:10]}"
+    try:
+        session = execution.sandbox_microsandbox_session
+        if (
+            execution.sandbox_backend == "microsandbox"
+            and session is not None
+            and getattr(session, "workspace_transport", "") == "guest_fs_copy"
+        ):
+            guest_zip = f"/tmp/eyle-export-{uuid.uuid4().hex[:12]}.zip"
+            script = (
+                "python - <<'PYZIP'\n"
+                "import os, zipfile\n"
+                "root='/workspace'\n"
+                f"out={guest_zip!r}\n"
+                f"prefix={root_name!r}\n"
+                "ignored={'.git','__pycache__','.pytest_cache','.mypy_cache','.ruff_cache'}\n"
+                "with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=6) as zf:\n"
+                "    for current, dirs, files in os.walk(root, followlinks=False):\n"
+                "        dirs[:] = [d for d in dirs if d not in ignored and not os.path.islink(os.path.join(current,d))]\n"
+                "        for name in sorted(files):\n"
+                "            if name.endswith(('.pyc','.pyo')): continue\n"
+                "            path=os.path.join(current,name)\n"
+                "            if os.path.islink(path) or not os.path.isfile(path): continue\n"
+                "            rel=os.path.relpath(path,root).replace(os.sep,'/')\n"
+                "            zf.write(path, prefix+'/'+rel)\n"
+                "print(out)\n"
+                "PYZIP"
+            )
+            result = session.execute(script, rel_cwd=".", timeout=max(10, int(timeout_seconds)), max_output_bytes=16 * 1024)
+            if not result.executed or result.code != 0 or result.error:
+                raise ErroSandbox(f"falha ao empacotar snapshot na microVM: {result.error or result.output}")
+            session.copy_to_host(guest_zip, temp_destination, timeout=max(30, float(timeout_seconds) + 30.0))
+        else:
+            _write_snapshot_zip_host(execution.sandbox_workspace_path, temp_destination, root_name)
+        if not os.path.isfile(temp_destination):
+            raise ErroSandbox("exportacao nao produziu arquivo")
+        os.replace(temp_destination, destination)
+        digest = hashlib.sha256()
+        with open(destination, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return {
+            "artifact": os.path.basename(destination),
+            "bytes": os.path.getsize(destination),
+            "sha256": digest.hexdigest(),
+            "sandbox_source": execution.sandbox_source_kind,
+            "real_source_modified": False,
+        }
+    finally:
+        try:
+            if os.path.exists(temp_destination):
+                os.unlink(temp_destination)
+        except OSError:
+            pass
+
 
 def _supervised_backend(cfg):
     """Resolve the supervised-test backend mechanically and fail closed."""

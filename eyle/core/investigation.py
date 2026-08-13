@@ -1,4 +1,4 @@
-"""Main-owned semantic notebook for Eyle 2.7.5 Rev1.3.
+"""Main-owned semantic notebook for Eyle 2.7.5 Rev1.3.4.
 
 Runtime validates only shape and physical grounding references. Goals, status,
 reasons and whether grounding is semantically needed belong entirely to Main.

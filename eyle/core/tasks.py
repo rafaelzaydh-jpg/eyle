@@ -1,4 +1,4 @@
-"""Main-owned recursive task state for Eyle 2.7.5 Rev1.3.
+"""Main-owned recursive task state for Eyle 2.7.5 Rev1.3.4.
 
 Tasks are commitments, not observations and not investigations. Main owns the
 semantic decision to create, revise, complete or drop them. Runtime only

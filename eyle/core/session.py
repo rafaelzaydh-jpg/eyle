@@ -1,4 +1,4 @@
-"""One active Eyle 2.7.5 Rev1.3 agent session.
+"""One active Eyle 2.7.5 Rev1.3.4 agent session.
 
 Observation owns physical history, grounding material and continuation state.
 Investigation is Main-owned epistemic state. Tasks are separate Main-owned
@@ -11,10 +11,10 @@ from typing import Any, Dict, List, Optional
 
 from .decision import empty_ledger as empty_decision_ledger, persisted_view as persisted_decisions
 from .observation import empty_ledger as empty_observation_ledger, material_index_view, persisted_view as persisted_observations
-from .write_transaction import empty_transaction
+from .transactions import empty_transaction
 from .tasks import validate_task_state
 
-SESSION_SCHEMA_VERSION = "2.7.5-r1.3"
+SESSION_SCHEMA_VERSION = "2.7.5-r1.3.4"
 
 
 @dataclass

@@ -42,35 +42,17 @@ _INVESTIGATION_GROUNDING_ITEM_SCHEMA = {
 }
 
 
-def _investigation_target_variant(status: str, *, requires_grounding: bool, requires_reason: bool) -> Dict[str, Any]:
-    return {
-        "type": "object",
-        "properties": {
-            "id": deepcopy(_INVESTIGATION_ID_SCHEMA),
-            "goal": deepcopy(_INVESTIGATION_GOAL_SCHEMA),
-            "status": {"type": "string", "enum": [status]},
-            "grounding_ids": {
-                "type": "array",
-                **({"minItems": 1} if requires_grounding else {}),
-                "items": deepcopy(_INVESTIGATION_GROUNDING_ITEM_SCHEMA),
-            },
-            "reason": {
-                "type": "string",
-                **({"minLength": 1} if requires_reason else {}),
-                "maxLength": 500,
-            },
-        },
-        "required": ["id", "goal", "status", "grounding_ids", "reason"],
-        "additionalProperties": False,
-    }
-
-
 _INVESTIGATION_TARGET_SCHEMA = {
-    "anyOf": [
-        _investigation_target_variant("open", requires_grounding=False, requires_reason=False),
-        _investigation_target_variant("established", requires_grounding=False, requires_reason=False),
-        _investigation_target_variant("dismissed", requires_grounding=False, requires_reason=False),
-    ]
+    "type": "object",
+    "properties": {
+        "id": deepcopy(_INVESTIGATION_ID_SCHEMA),
+        "goal": deepcopy(_INVESTIGATION_GOAL_SCHEMA),
+        "status": {"type": "string", "enum": ["open", "established", "dismissed"]},
+        "grounding_ids": {"type": "array", "items": deepcopy(_INVESTIGATION_GROUNDING_ITEM_SCHEMA)},
+        "reason": {"type": "string", "maxLength": 500},
+    },
+    "required": ["id", "goal", "status", "grounding_ids", "reason"],
+    "additionalProperties": False,
 }
 
 
@@ -84,31 +66,17 @@ _TASK_PARENT_SCHEMA = {
 }
 
 
-def _task_variant(status: str, *, requires_result: bool) -> Dict[str, Any]:
-    return {
-        "type": "object",
-        "properties": {
-            "id": deepcopy(_TASK_ID_SCHEMA),
-            "parent_id": deepcopy(_TASK_PARENT_SCHEMA),
-            "description": deepcopy(_TASK_DESCRIPTION_SCHEMA),
-            "status": {"type": "string", "enum": [status]},
-            "result": {
-                "type": "string",
-                **({"minLength": 1} if requires_result else {}),
-                "maxLength": 1200,
-            },
-        },
-        "required": ["id", "parent_id", "description", "status", "result"],
-        "additionalProperties": False,
-    }
-
-
 _TASK_SCHEMA = {
-    "anyOf": [
-        _task_variant("open", requires_result=False),
-        _task_variant("completed", requires_result=True),
-        _task_variant("dropped", requires_result=True),
-    ]
+    "type": "object",
+    "properties": {
+        "id": deepcopy(_TASK_ID_SCHEMA),
+        "parent_id": deepcopy(_TASK_PARENT_SCHEMA),
+        "description": deepcopy(_TASK_DESCRIPTION_SCHEMA),
+        "status": {"type": "string", "enum": ["open", "completed", "dropped"]},
+        "result": {"type": "string", "maxLength": 1200},
+    },
+    "required": ["id", "parent_id", "description", "status", "result"],
+    "additionalProperties": False,
 }
 
 
@@ -177,47 +145,29 @@ _AGENT_SCHEMA = {
     "additionalProperties": False,
 }
 
-_GROUNDING_REF_PATTERN = r"^(?:request|request:r[1-9][0-9]*|(?:answer|observation|runtime):[A-Za-z0-9._-]+)$"
+_GROUNDING_REF_PATTERN = r"^(?:request|observation:mat-[0-9]+)$"
 
-# Claim is an adversarial critic with a deliberately narrow interface. These
-# bounds constrain only the canonical artifact returned to Runtime, not the
-# model's internal reasoning. Keeping the interface physically bounded prevents
-# Claim from expanding into a second Main while still allowing independent
-# blockers to be reported.
-CLAIM_MAX_ISSUES = 3
-CLAIM_MAX_GROUNDING_REFS = 4
-CLAIM_MAX_GROUNDING_REF_CHARS = 48
-CLAIM_MAX_ANSWER_REF_CHARS = 32
-CLAIM_MAX_REASON_CHARS = 160
-
-_GROUNDING_REFS_SCHEMA = {
-    "type": "array", "minItems": 1, "maxItems": CLAIM_MAX_GROUNDING_REFS,
-    "items": {
-        "type": "string", "minLength": 1,
-        "maxLength": CLAIM_MAX_GROUNDING_REF_CHARS, "pattern": _GROUNDING_REF_PATTERN,
-    },
-}
-
-_CLAIM_ISSUE_KINDS = ["unsupported", "contradicted", "scope", "omission", "inconsistent"]
+# Claim has only a protocol shape, not semantic quotas. Runtime validates the
+# coordinates it understands; the fresh critic decides how many blockers are
+# necessary. Physical output/context ceilings still apply at the LLM boundary.
+_CLAIM_ISSUE_KINDS = ["unsupported", "contradicted", "scope", "omission", "inconsistent", "unsafe"]
 _CLAIM_REVIEW_SCHEMA = {
     "type": "object",
     "properties": {
         "verdict": {"type": "string", "enum": ["accept", "challenge"]},
         "issues": {
             "type": "array",
-            "maxItems": CLAIM_MAX_ISSUES,
             "items": {
                 "type": "object",
                 "properties": {
                     "kind": {"type": "string", "enum": _CLAIM_ISSUE_KINDS},
-                    "answer_ref": {"anyOf": [
-                        {"type": "null"},
-                        {"type": "string", "minLength": 1, "maxLength": CLAIM_MAX_ANSWER_REF_CHARS, "pattern": r"^answer:a[1-9][0-9]*$"},
-                    ]},
-                    "grounding_refs": _GROUNDING_REFS_SCHEMA,
-                    "reason": {"type": "string", "minLength": 1, "maxLength": CLAIM_MAX_REASON_CHARS},
+                    "grounding_refs": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1, "pattern": _GROUNDING_REF_PATTERN},
+                    },
+                    "reason": {"type": "string", "minLength": 1},
                 },
-                "required": ["kind", "answer_ref", "grounding_refs", "reason"],
+                "required": ["kind", "grounding_refs", "reason"],
                 "additionalProperties": False,
             },
         },
@@ -277,11 +227,10 @@ def contract_instruction(profile: str) -> str:
     if profile == "claim_verifier":
         return (
             "Top-level JSON contract: return exactly {verdict,issues}. verdict=accept|challenge. "
-            "issues is [] when accepted; otherwise include the smallest sufficient blocker set, at most 3 issues. "
-            "Each issue is exactly {kind,answer_ref,grounding_refs,reason}; "
-            "kind=unsupported|contradicted|scope|omission|inconsistent. answer_ref may be null. "
-            "Use at most 4 grounding_refs per issue; each reason is one concise sentence. "
-            "Grounding refs use request, request:rN, answer:aN, observation:mat-* or runtime:*. "
+            "issues is [] when accepted; otherwise include the smallest sufficient blocker set. "
+            "Each issue is exactly {kind,grounding_refs,reason}; "
+            "kind=unsupported|contradicted|scope|omission|inconsistent|unsafe. "
+            "Grounding refs use request or observation:mat-* and may be empty for answer-internal defects. "
             "Never add alternate fields or prose."
         )
     return (
@@ -486,17 +435,9 @@ def parse_agent_response(raw: Any) -> Dict[str, Any]:
 
 def _claim_grounding_refs(value: Any, *, detail: str) -> None:
     _string_list(value, code="CLAIM_REVIEW_GROUNDING_REFS_INVALID", detail=detail)
-    if not value:
-        raise StructuredResponseError("CLAIM_REVIEW_GROUNDING_REFS_REQUIRED", detail)
     invalid = next((item for item in value if re.fullmatch(_GROUNDING_REF_PATTERN, item) is None), None)
     if invalid is not None:
         raise StructuredResponseError("CLAIM_REVIEW_GROUNDING_REF_FORMAT_INVALID", f"noncanonical grounding ref: {invalid}")
-
-
-def _canonical_answer_ref(value: Any, *, detail: str) -> None:
-    _string(value, code="CLAIM_REVIEW_ANSWER_REF_INVALID", detail=detail)
-    if len(value) > CLAIM_MAX_ANSWER_REF_CHARS or re.fullmatch(r"answer:a[1-9][0-9]*", value) is None:
-        raise StructuredResponseError("CLAIM_REVIEW_ANSWER_REF_INVALID", detail)
 
 
 def parse_claim_review_response(raw: Any) -> Dict[str, Any]:
@@ -507,9 +448,7 @@ def parse_claim_review_response(raw: Any) -> Dict[str, Any]:
         raise StructuredResponseError("CLAIM_REVIEW_VERDICT_INVALID", "verdict must be accept or challenge")
     if not isinstance(value["issues"], list):
         raise StructuredResponseError("CLAIM_REVIEW_ISSUES_LIST_REQUIRED", "issues must be an array")
-    if len(value["issues"]) > CLAIM_MAX_ISSUES:
-        raise StructuredResponseError("CLAIM_REVIEW_ISSUES_TOO_MANY", f"issues may contain at most {CLAIM_MAX_ISSUES} blockers")
-    issue_keys = {"kind", "answer_ref", "grounding_refs", "reason"}
+    issue_keys = {"kind", "grounding_refs", "reason"}
     for index, item in enumerate(value["issues"], start=1):
         item = _exact_item(
             item, issue_keys,
@@ -518,25 +457,8 @@ def parse_claim_review_response(raw: Any) -> Dict[str, Any]:
         )
         if item["kind"] not in set(_CLAIM_ISSUE_KINDS):
             raise StructuredResponseError("CLAIM_REVIEW_ISSUE_KIND_INVALID", f"issues[{index}].kind is invalid")
-        if item["answer_ref"] is not None:
-            _canonical_answer_ref(item["answer_ref"], detail=f"issues[{index}].answer_ref must be null or a supplied answer:* ref")
-        _claim_grounding_refs(item["grounding_refs"], detail=f"issues[{index}].grounding_refs must be a non-empty canonical-ref array")
-        if len(item["grounding_refs"]) > CLAIM_MAX_GROUNDING_REFS:
-            raise StructuredResponseError(
-                "CLAIM_REVIEW_GROUNDING_REFS_TOO_MANY",
-                f"issues[{index}].grounding_refs may contain at most {CLAIM_MAX_GROUNDING_REFS} refs",
-            )
-        if any(len(ref) > CLAIM_MAX_GROUNDING_REF_CHARS for ref in item["grounding_refs"]):
-            raise StructuredResponseError(
-                "CLAIM_REVIEW_GROUNDING_REF_TOO_LONG",
-                f"issues[{index}].grounding_refs exceed the canonical length bound",
-            )
+        _claim_grounding_refs(item["grounding_refs"], detail=f"issues[{index}].grounding_refs must be a canonical-ref array")
         _string(item["reason"], code="CLAIM_REVIEW_REASON_INVALID", detail=f"issues[{index}].reason must be non-empty")
-        if len(item["reason"]) > CLAIM_MAX_REASON_CHARS:
-            raise StructuredResponseError(
-                "CLAIM_REVIEW_REASON_TOO_LONG",
-                f"issues[{index}].reason may contain at most {CLAIM_MAX_REASON_CHARS} characters",
-            )
     if value["verdict"] == "accept" and value["issues"]:
         raise StructuredResponseError("CLAIM_REVIEW_ACCEPT_WITH_ISSUES", "accept requires issues=[]")
     if value["verdict"] == "challenge" and not value["issues"]:
@@ -544,32 +466,6 @@ def parse_claim_review_response(raw: Any) -> Dict[str, Any]:
     return value
 
 
-
-def claim_review_contract_max_serialized_chars() -> int:
-    """Conservative maximum visible JSON size permitted by the Claim schema.
-
-    This bounds the protocol artifact, not reasoning. The output-token reserve
-    uses an intentionally pessimistic one-token-per-character assumption plus
-    margin so every ordinary canonical object has room to close cleanly.
-    """
-    ref = "runtime:" + ("x" * max(0, CLAIM_MAX_GROUNDING_REF_CHARS - len("runtime:")))
-    answer_ref = "answer:a" + ("9" * max(1, CLAIM_MAX_ANSWER_REF_CHARS - len("answer:a")))
-    issue = {
-        "kind": max(_CLAIM_ISSUE_KINDS, key=len),
-        "answer_ref": answer_ref[:CLAIM_MAX_ANSWER_REF_CHARS],
-        "grounding_refs": [ref[:CLAIM_MAX_GROUNDING_REF_CHARS]] * CLAIM_MAX_GROUNDING_REFS,
-        "reason": "x" * CLAIM_MAX_REASON_CHARS,
-    }
-    payload = {"verdict": "challenge", "issues": [issue] * CLAIM_MAX_ISSUES}
-    return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
-
-
-def claim_review_output_budget(*, available_tokens: int | None = None) -> int:
-    """Reserve enough output for the entire bounded Claim protocol plus margin."""
-    desired = claim_review_contract_max_serialized_chars() + 256
-    if available_tokens is None:
-        return desired
-    return min(desired, max(1, int(available_tokens)))
 
 def parse_profile_response(raw: Any, profile: str) -> Dict[str, Any]:
     if profile == "agent":

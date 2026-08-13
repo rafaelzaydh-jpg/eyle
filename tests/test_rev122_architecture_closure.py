@@ -9,7 +9,6 @@ import pytest
 
 import eyle.core.agent as core_agent
 from eyle.core import observation, tools
-from eyle.core.claim_review import _bounded_runtime_result
 from eyle.core.observation import record
 from eyle.core.observation_contract import _paged_payload
 from eyle.core.session import AgentSession
@@ -133,20 +132,6 @@ def test_capability_specific_dispatch_is_registry_owned(monkeypatch):
 
     source = inspect.getsource(tools.capability_public_arguments) + inspect.getsource(tools.capability_public_result) + inspect.getsource(tools.capability_model_detail) + inspect.getsource(tools.capability_find_covering)
     assert "if tool" not in source and "if name" not in source
-
-
-def test_claim_runtime_compaction_has_no_domain_specific_vocabulary():
-    source = inspect.getsource(_bounded_runtime_result)
-    for word in ("matches_observed", "ranges_materialized", "files_with_matches", '"file"', '"symbol"', '"lines"'):
-        assert word not in source
-    value = {
-        "status": "success", "ok": True, "executed": True, "changed": False,
-        "coverage": {"scope": {"kind": "sensor"}, "examined": {"samples": 10}, "complete": True, "boundaries": []},
-        "detail": {"temperature": "x" * 2000},
-    }
-    bounded = _bounded_runtime_result(value, 300)
-    assert bounded["coverage"]["scope"]["kind"] == "sensor"
-    assert bounded["payload_truncated"] is True
 
 
 def test_registry_has_one_effect_and_full_hook_surface():

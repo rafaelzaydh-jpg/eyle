@@ -1,4 +1,4 @@
-"""Canonical runtime decision history for Eyle 2.7.5 Rev1.3.
+"""Canonical runtime decision history for Eyle 2.7.5 Rev1.3.4.
 
 DecisionLedger is observability only. It records what Main requested and what
 Runtime accepted/rejected/executed. It does not fingerprint behaviour, count
@@ -72,12 +72,6 @@ def requested_tool_names(ledger: Dict[str, Any]) -> List[str]:
                 seen.add(name)
                 result.append(name)
     return result
-
-
-def history_view(ledger: Dict[str, Any], *, limit: int = 50) -> List[Dict[str, Any]]:
-    events = _events(ledger)
-    selected = events[-max(1, int(limit)):] if limit else events
-    return [copy.deepcopy(item) for item in selected if isinstance(item, dict)]
 
 
 def persisted_view(ledger: Dict[str, Any]) -> Dict[str, Any]:

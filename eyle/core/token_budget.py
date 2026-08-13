@@ -18,6 +18,34 @@ def estimate_tokens(value: Any, chars_per_token: int = 3) -> int:
     return (len(text) + chars_per_token - 1) // chars_per_token
 
 
+def physical_user_prompt_tokens(
+    config: dict,
+    system_prompt: str,
+    *,
+    output_tokens: int,
+    physical_tokens_remaining: int,
+    protected_tokens: int = 0,
+    token_estimate_multiplier: float = 1.0,
+) -> int:
+    """Return a local user-prompt ceiling inside remaining task budget.
+
+    This complements the per-call context-window bound.  ``protected_tokens``
+    is intentionally generic so Main can protect Claim headroom without the
+    token helper knowing any semantic state.
+    """
+    context = (config or {}).get("context_engine") or {}
+    chars_per_token = max(1, int(context.get("chars_per_token_fallback", 3) or 3))
+    try:
+        multiplier = min(4.0, max(0.75, float(token_estimate_multiplier or 1.0)))
+    except (TypeError, ValueError):
+        multiplier = 1.0
+    remaining = max(0, int(physical_tokens_remaining or 0))
+    protected = max(0, int(protected_tokens or 0))
+    output = max(0, int(output_tokens or 0))
+    local_total_prompt = int(max(0, remaining - protected - output) / multiplier)
+    return max(0, local_total_prompt - estimate_tokens(system_prompt, chars_per_token))
+
+
 def available_user_prompt_tokens(
     config: dict,
     system_prompt: str,

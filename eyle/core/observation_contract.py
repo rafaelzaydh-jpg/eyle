@@ -1,4 +1,4 @@
-"""Universal physical observation/result contract for Eyle 2.7.5 Rev1.3.
+"""Universal physical observation/result contract for Eyle 2.7.5 Rev1.3.4.
 
 Capabilities own how reality is executed, identified and projected into Material,
 Coverage and Frontier. Observation stores those physical facts generically.
@@ -183,7 +183,7 @@ def materialize_snapshot_handle(
     }
     result: Dict[str, Any] = {
         "handle": str(handle_id), "kind": handle.get("kind"), "source_tool": handle.get("source_tool"),
-        "payload": payload, "coverage": coverage, "frontiers": [], "handles": [],
+        "payload": payload, "coverage": coverage, "frontiers": [],
     }
     if not complete:
         next_handle = _register_handle_for_snapshot(
@@ -192,7 +192,6 @@ def materialize_snapshot_handle(
             source_tool=str(handle.get("source_tool") or ""), description=str(handle.get("description") or ""),
             page_size=page_size, offset=end,
         )
-        result["handles"] = [next_handle]
         result["frontiers"] = [{
             "kind": "continuation_not_materialized", "at": str(handle.get("source_tool") or "continuation"),
             "count": max(0, total - end),
@@ -242,12 +241,10 @@ def result_observation_fields(
     *, observations: Optional[Iterable[Dict[str, Any]]] = None,
     coverage: Optional[Dict[str, Any]] = None,
     frontiers: Optional[Iterable[Dict[str, Any]]] = None,
-    handles: Optional[Iterable[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Canonical physical observation fields shared by every capability result."""
     return {
         "observations": [copy.deepcopy(item) for item in (observations or []) if isinstance(item, dict)],
         "coverage": copy.deepcopy(coverage) if isinstance(coverage, dict) else {},
         "frontiers": [copy.deepcopy(item) for item in (frontiers or []) if isinstance(item, dict)],
-        "handles": [copy.deepcopy(item) for item in (handles or []) if isinstance(item, dict)],
     }

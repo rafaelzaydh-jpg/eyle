@@ -85,11 +85,6 @@
     "max_file_read_lines": 400,
     "task_deadline_seconds": 1800,
     "max_total_tokens": 90000,
-    "context_view": {
-      "max_source_preview_chars": 3500,
-      "max_symbol_preview_chars": 2600,
-      "max_search_source_chars": 600
-    },
     "max_project_scan_entries": 20000,
     "max_project_scan_depth": 32,
     "max_project_file_bytes": 4194304,
@@ -98,7 +93,7 @@
     "max_search_matches": 40,
     "max_search_ranges": 12,
     "claims": {
-      "mode": "self_check",
+      "mode": "fresh",
       "verifier": {
         "temperature": 0.0
       },
@@ -140,6 +135,6 @@
     "window_seconds": 3600
   },
   "app_version": "2.7.5",
-  "config_schema_version": "2.7.5-r1.3",
-  "revision": "rev1.3-task-memory"
+  "config_schema_version": "2.7.5-r1.3.4",
+  "revision": "rev1.3.4-fresh-claim-token-cleanup"
 }

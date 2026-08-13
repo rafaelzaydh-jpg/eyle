@@ -14,7 +14,7 @@ from tests.canonical import base_config
 
 def test_rev1_session_schema_is_exact_and_old_state_is_not_migrated():
     current = AgentSession("x").to_dict()
-    assert current["session_schema_version"] == SESSION_SCHEMA_VERSION == "2.7.5-r1.3"
+    assert current["session_schema_version"] == SESSION_SCHEMA_VERSION == "2.7.5-r1.3.4"
     assert set(current) == {
         "session_schema_version", "request", "execution_id", "turn", "workspace_epoch",
         "observation_ledger", "decision_ledger", "investigation", "tasks", "claim_review",
@@ -44,7 +44,7 @@ def test_removed_config_keys_are_errors_not_aliases():
 
 
 def test_removed_context_and_output_ceiling_keys_are_not_aliases():
-    cfg = base_config(); cfg["agent"]["context_view"]["max_relevant_sources"] = 4
+    cfg = base_config(); cfg["agent"]["context_view"] = {"max_source_preview_chars": 3500}
     with pytest.raises(ConfigError, match="UNKNOWN_CONFIG_FIELD"):
         validar_config(cfg)
     cfg = base_config(); cfg["context_engine"]["working_set_target_tokens"] = 12000
@@ -127,7 +127,7 @@ def test_agent_contract_uses_grounding_ids_and_rejects_evidence_ids():
 
 
 def test_claim_contract_is_small_and_uses_canonical_coordinates():
-    payload={"verdict":"challenge","issues":[{"kind":"unsupported","answer_ref":"answer:a1","grounding_refs":["observation:mat-0001"],"reason":"not established"}]}
+    payload={"verdict":"challenge","issues":[{"kind":"unsupported","grounding_refs":["observation:mat-0001"],"reason":"not established"}]}
     parsed=parse_claim_review_response(payload)
     assert parsed["verdict"]=="challenge"
     assert parsed["issues"][0]["grounding_refs"]==["observation:mat-0001"]
@@ -137,7 +137,7 @@ def test_tool_registry_has_one_contract_source_and_rev1_cuts():
     assert "read_file" in tools.TOOLS and "read_range" not in tools.TOOLS
     assert "continue_observation" in tools.TOOLS and "expand_observation" not in tools.TOOLS
     assert "agent_info" not in tools.TOOLS and "execution_trace" not in tools.TOOLS
-    assert len(tools.TOOLS) == 16
+    assert len(tools.TOOLS) == 17
     for entry in tools.TOOLS.values():
         assert "category" not in entry
         assert "effects" not in entry

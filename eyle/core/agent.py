@@ -16,17 +16,13 @@ from llm.executar import (
     ErroLLM, PROMPT_AGENTE, PROMPT_CLAIM_VERIFIER,
     executar_agente as executar_agente_llm, executar_verificador_claims,
 )
-from llm.structured import claim_review_output_budget
-
 from .session import AgentSession
 from .continuation import PENDING_SCHEMA_VERSION, validate_pending_continuation
 from .execution_context import ExecutionContext, bind_execution, reset_execution, current_execution
 from .decision import (
     record as _decision_record, record_rejection as _decision_record_rejection,
-    history_view as _decision_history_view, requested_tool_names as _requested_tool_names,
+    requested_tool_names as _requested_tool_names,
 )
-from .operational_feedback import build_operational_feedback as _operational_feedback
-from .write_transaction import begin as _begin_write_transaction, set_status as _set_write_status, record_validation as _record_write_validation, increment_attempt as _increment_write_attempt, record_failure as _record_write_failure, clear_failure as _clear_write_failure, public_view as _write_transaction_view
 from .observation import (
     lookup as _lookup_observation, record as _record_observation,
     record_replay as _record_observation_replay, navigation_view as _observation_map,
@@ -42,8 +38,11 @@ from .investigation import (
 )
 from .tasks import apply_task_updates, task_state_view
 from .security import _resolver_caminho_seguro
-from .token_budget import available_user_prompt_tokens, estimate_tokens
-from .text_hash import hash_faixa, hash_texto
+from .token_budget import (
+    available_user_prompt_tokens, estimate_tokens,
+    physical_user_prompt_tokens,
+)
+from .text_hash import hash_faixa
 from .post_write import (
     expected_outputs_from_patches,
     run_compileall_for_changes,
@@ -62,12 +61,17 @@ from .tools import (
     capability_validate_material_freshness as _validate_material_freshness,
     capability_rehydrate_materials as _rehydrate_grounding,
 )
-from .transactions import dry_run_patch_set, apply_patch_set, rollback_patch_set
+from .transactions import (
+    dry_run_patch_set, apply_patch_set, rollback_patch_set,
+    begin as _begin_write_transaction, set_status as _set_write_status,
+    record_validation as _record_write_validation, increment_attempt as _increment_write_attempt,
+    record_failure as _record_write_failure, clear_failure as _clear_write_failure,
+    public_view as _write_transaction_view,
+)
 from .validation import validate_final
 from .claim_review import (
     claim_config, claim_grounding_ledger, compact_grounding,
     review_followup_feedback, normalize_claim_review, review_prompt,
-    build_answer_anchors, build_request_anchors, compact_runtime_facts,
 )
 
 def _return(status: str, text: str, pending: Any, details: Dict[str, Any], full: bool):
@@ -116,25 +120,25 @@ def _append_user_clarification(request: str, pending: Dict[str, Any], response: 
 
 def _project_descriptor(project: Dict[str, Any]) -> Dict[str, Any]:
     root = (project or {}).get("caminho_origem")
+    self_root = (project or {}).get("eyle_root")
     return {
         "available": bool(root and os.path.isdir(root)),
         "name": os.path.basename(os.path.realpath(root)) if root else None,
         "discovery": (project or {}).get("discovery"),
+        "content_state": (project or {}).get("content_state"),
+        "self_source_available": bool(self_root and os.path.isdir(self_root)),
+    }
+
+
+def _physical_source_roots(project: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "workspace": (project or {}).get("caminho_origem"),
+        "eyle": (project or {}).get("eyle_root"),
     }
 
 
 def _tests_enabled(config: Dict[str, Any]) -> bool:
     return bool((((config or {}).get("codar") or {}).get("testes") or {}).get("ativado", False))
-
-
-def _context_view_config(config: Dict[str, Any]) -> Dict[str, Any]:
-    raw = (((config or {}).get("agent") or {}).get("context_view") or {})
-    return {
-        "max_source_preview_chars": max(500, int(raw.get("max_source_preview_chars", 3500) or 3500)),
-        "max_search_source_chars": max(300, int(raw.get("max_search_source_chars", 600) or 600)),
-        "max_symbol_preview_chars": max(500, int(raw.get("max_symbol_preview_chars", 2600) or 2600)),
-    }
-
 
 
 def _allowed_tools(config: Dict[str, Any], project: Dict[str, Any]) -> set[str]:
@@ -195,43 +199,88 @@ def _tool_views(
     return allowed, index, active
 
 
-def _project_grounding_index(session: AgentSession, *, recent_limit: int = 8) -> List[Dict[str, Any]]:
-    """Bound Main-visible Observation material without creating a second grounding copy."""
-    full = session.grounding_index()
+def _project_grounding_index(
+    session: AgentSession, *, recent_limit: int = 2, pending_limit: int = 6,
+) -> List[Dict[str, Any]]:
+    """Project only currently useful Material coordinates to Main.
+
+    The canonical Material directory can grow for the whole task, but the model
+    does not need that directory replayed on every turn.  Investigation-pinned
+    Material is always retained, fresh pending Material is surfaced in a small
+    window, and a tiny recency tail preserves navigation continuity.  Full
+    Material remains canonical in Observation and Claim can still address it by
+    selected ``mat-*`` id.
+    """
+    full = [item for item in session.grounding_index() if isinstance(item, dict)]
     pinned_ids = set(investigation_grounding_ids(session.investigation))
-    pinned = [item for item in full if isinstance(item, dict) and str(item.get("id") or "") in pinned_ids]
-    recent = [item for item in full if isinstance(item, dict) and str(item.get("id") or "") not in pinned_ids]
-    return pinned + recent[-max(0, int(recent_limit)):]
+    pending_ids: List[str] = []
+    for result in _pending_observation_results(session):
+        if not isinstance(result, dict):
+            continue
+        for grounding_id in result.get("grounding_ids") or []:
+            value = str(grounding_id or "")
+            if value and value not in pending_ids:
+                pending_ids.append(value)
+    pending_ids = pending_ids[-max(0, int(pending_limit)):]
+
+    recent_ids = [
+        str(item.get("id") or "") for item in full
+        if str(item.get("id") or "") not in pinned_ids and str(item.get("id") or "") not in pending_ids
+    ][-max(0, int(recent_limit)):]
+    wanted = pinned_ids | set(pending_ids) | set(recent_ids)
+    projected: List[Dict[str, Any]] = []
+    for item in full:
+        material_id = str(item.get("id") or "")
+        if material_id not in wanted:
+            continue
+        clone = copy.deepcopy(item)
+        if material_id in pinned_ids:
+            clone["pinned"] = True
+        elif material_id not in pending_ids:
+            clone["reference_only"] = True
+        projected.append(clone)
+    return projected
 
 
-def _project_observation_map(session: AgentSession, *, recent_limit: int = 5) -> List[Dict[str, Any]]:
-    """Return bounded navigation without losing still-open Frontiers.
+def _project_observation_map(session: AgentSession) -> List[Dict[str, Any]]:
+    """Project Observation as a delta plus durable coordinates.
 
-    Investigation-grounded entries and all open Frontier coordinates survive
-    recency compaction. Older Frontier-bearing observations collapse into one
-    tiny bundle instead of keeping full historical navigation rows.
+    Fresh rows from the immediately preceding Main action remain detailed.
+    Older rows are not replayed merely because they exist: only rows pinned by
+    Investigation survive, and those are reduced to navigation coordinates.
+    Every still-open Frontier remains visible independently of row recency.
     """
     full = [item for item in _observation_map(session) if isinstance(item, dict)]
     pinned_ids = set(investigation_grounding_ids(session.investigation))
+    fresh_turn = max(0, int(getattr(session, "turn", 0) or 0) - 1)
 
     def key(item: Dict[str, Any]) -> Tuple[Any, Any, Any]:
         return (item.get("turn"), item.get("observation_signature"), item.get("tool"))
 
     pinned: List[Dict[str, Any]] = []
     for item in full:
+        if int(item.get("turn") or 0) >= fresh_turn:
+            continue
         if pinned_ids.intersection(str(gid) for gid in item.get("grounding_ids") or []):
-            clone = copy.deepcopy(item)
-            clone["retained_for"] = "investigation_grounding"
-            pinned.append(clone)
+            clone = {
+                "turn": item.get("turn"),
+                "tool": item.get("tool"),
+                "grounding_ids": list(item.get("grounding_ids") or []),
+                "observation_signature": item.get("observation_signature"),
+                "retained_for": "investigation_grounding",
+            }
+            if isinstance(item.get("coverage"), dict):
+                clone["coverage"] = copy.deepcopy(item.get("coverage"))
+            pinned.append({k: v for k, v in clone.items() if v not in (None, "", [], {})})
     pinned_keys = {key(item) for item in pinned}
     candidates = [item for item in full if key(item) not in pinned_keys]
-    recent = [copy.deepcopy(item) for item in candidates[-max(0, int(recent_limit)):]]
-    recent_keys = {key(item) for item in recent}
+    fresh = [copy.deepcopy(item) for item in candidates if int(item.get("turn") or 0) >= fresh_turn]
+    fresh_keys = {key(item) for item in fresh}
 
     open_frontiers: List[Dict[str, Any]] = []
     seen_frontiers: set[str] = set()
     for item in candidates:
-        if key(item) in recent_keys:
+        if key(item) in fresh_keys:
             continue
         for frontier in item.get("frontiers") or []:
             if not isinstance(frontier, dict) or frontier.get("status") != "open":
@@ -247,7 +296,7 @@ def _project_observation_map(session: AgentSession, *, recent_limit: int = 5) ->
     retained: List[Dict[str, Any]] = []
     if open_frontiers:
         retained.append({"retained_for": "open_frontiers", "frontiers": open_frontiers})
-    return pinned + retained + recent
+    return pinned + retained + fresh
 
 def _project_pending_results(session: AgentSession, config: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """Project one bounded fresh delta; canonical bytes stay in ObservationLedger.
@@ -359,25 +408,6 @@ def _bounded_source_text(text: Any, max_chars: int, *, source_span: Optional[Tup
     return _bounded_context_text(value, max_chars, marker=marker)
 
 
-def _material_model_view(item: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
-    """Generic compact view of one canonical Material."""
-    context_view = _context_view_config(config)
-    max_chars = max(300, int(context_view.get("max_source_preview_chars", 6000) or 6000))
-    text = str(item.get("numbered_content") or item.get("content") or "")
-    entry = {
-        "grounding_id": item.get("id"),
-        "locator": copy.deepcopy(item.get("locator") or {}),
-        "source_type": item.get("source_type"),
-        "content_hash": item.get("content_hash"),
-    }
-    if text:
-        entry["excerpt"] = _bounded_source_text(text, max_chars)
-        entry["excerpt_complete"] = len(text) <= max_chars
-    if isinstance(item.get("metadata"), dict) and item.get("metadata"):
-        entry["metadata"] = copy.deepcopy(item.get("metadata"))
-    return {k: v for k, v in entry.items() if v not in (None, "", {}, [])}
-
-
 def _model_tool_result(session: AgentSession, tool: str, result: Dict[str, Any], config: Optional[Dict[str, Any]] = None, arguments: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Project one capability result without interpreting the capability in Agent."""
     produces_grounding = bool((TOOLS.get(tool) or {}).get("produces_grounding"))
@@ -396,8 +426,6 @@ def _model_tool_result(session: AgentSession, tool: str, result: Dict[str, Any],
         value = result.get(field)
         if value:
             model_result[field] = copy.deepcopy(value)
-    if result.get("handles"):
-        model_result["handles"] = copy.deepcopy(result.get("handles"))
     return {k: v for k, v in model_result.items() if v is not None}
 
 
@@ -486,7 +514,10 @@ def _minimal_tool_context(result: Dict[str, Any], *, detail_char_limit: int = 30
     """Last-resort bounded model view while preserving canonical grounding refs."""
     compact = {
         key: result.get(key)
-        for key in ("tool", "status", "ok", "executed", "changed", "error_code", "grounding_ids", "frontiers")
+        for key in (
+            "tool", "status", "ok", "executed", "changed", "error_code", "retryable",
+            "failure_scope", "failure_resource", "grounding_ids", "frontiers",
+        )
         if result.get(key) is not None
     }
     detail = copy.deepcopy(result.get("detail"))
@@ -561,6 +592,9 @@ def _crop_payload(payload: Dict[str, Any], budget: int, chars_per_token: int) ->
         if len(background) > 1:
             payload["conversation_background"] = background[1:]
             continue
+        if background:
+            payload["conversation_background"] = []
+            continue
 
         compacted_any = False
         for index, result in enumerate(list(results)):
@@ -572,12 +606,63 @@ def _crop_payload(payload: Dict[str, Any], budget: int, chars_per_token: int) ->
                 compacted_any = True
         if compacted_any:
             continue
+
+        # Under physical headroom pressure keep tool callability while dropping
+        # explanatory repetition. Compact capability signatures remain enough
+        # for discovery; active contracts keep canonical input shape.
+        capability_index = payload.get("capability_index") or []
+        compact_index = [str(item).split(" — ", 1)[0] for item in capability_index]
+        if compact_index != capability_index:
+            payload["capability_index"] = compact_index
+            continue
+
+        active_tools = payload.get("active_tools") or []
+        compact_active = []
+        changed_active = False
+        for item in active_tools:
+            if not isinstance(item, dict):
+                compact_active.append(item)
+                continue
+            compact = {
+                key: copy.deepcopy(item.get(key))
+                for key in ("name", "effect", "inputs") if item.get(key) is not None
+            }
+            compact_active.append(compact)
+            changed_active = changed_active or compact != item
+        if changed_active:
+            payload["active_tools"] = compact_active
+            continue
+
+        # Finally drop unpinned Material directory rows. Fresh result payloads
+        # still carry their grounding ids and pinned Investigation material is
+        # never removed by this fallback.
+        grounding_index = payload.get("grounding_index") or []
+        unpinned = [item for item in grounding_index if not (isinstance(item, dict) and item.get("pinned") is True)]
+        if unpinned:
+            payload["grounding_index"] = [
+                item for item in grounding_index if isinstance(item, dict) and item.get("pinned") is True
+            ]
+            continue
         break
     return payload
 
 
 def _claim_review_has_debt(review: Dict[str, Any]) -> bool:
     return str((review or {}).get("verdict") or "") == "challenge"
+
+
+def _claim_challenge_count(session: AgentSession) -> int:
+    """Count Claim challenges in the current execution only."""
+    ledger = session.decision_ledger if isinstance(session.decision_ledger, dict) else {}
+    events = list(ledger.get("events") or [])
+    execution = current_execution()
+    start = int(execution.decision_event_start or 0) if execution is not None else 0
+    return sum(
+        1 for item in events[start:]
+        if isinstance(item, dict)
+        and item.get("decision") == "claim_review"
+        and item.get("outcome") == "challenge"
+    )
 
 
 def _persistent_claim_feedback(session: AgentSession, config: Dict[str, Any]) -> str:
@@ -587,7 +672,7 @@ def _persistent_claim_feedback(session: AgentSession, config: Dict[str, Any]) ->
 
 
 def _agent_config(config: Dict[str, Any], session: AgentSession, project: Dict[str, Any]) -> Dict[str, Any]:
-    """Return the physical LLM configuration without semantic phase steering."""
+    """Return Main's physical LLM configuration without downstream token hostage-taking."""
     clone = dict(config)
     llm = dict(config.get("llm") or {})
     configured_ceiling = max(1, int(llm.get("agent_max_tokens", 3600) or 3600))
@@ -620,10 +705,10 @@ def _trace_prompt_components(payload: Dict[str, Any], chars_per_token: int) -> D
 
 
 def _merged_runtime_feedback(transient: str, persistent: str) -> Any:
-    """Preserve semantic follow-up while attaching transient deterministic notices.
+    """Preserve persisted Claim feedback while attaching transient Runtime notices.
 
-    Semantic diagnosis is runtime-owned state until a later Claim Review replaces
-    or resolves it. A no-progress/validation notice must not hide that diagnosis.
+    Runtime stores the critic's blocker set but does not own its semantics. A
+    physical/validation notice must not hide that feedback before Main revises.
     """
     transient = str(transient or "").strip()
     persistent = str(persistent or "").strip()
@@ -683,7 +768,6 @@ def _compile_prompt(
         "request": session.request,
         "turn": session.turn,
         "investigation": session.investigation,
-        "task_state": task_state_view(session.tasks),
         "project": _project_descriptor(project),
         "conversation_background": _project_conversation_background(session),
         "observation_map": _project_observation_map(session),
@@ -695,9 +779,10 @@ def _compile_prompt(
         },
         "capability_index": capability_index,
         "active_tools": active_tools,
-        "operational_feedback": _operational_feedback(session),
         "runtime_feedback": _merged_runtime_feedback(feedback, _persistent_claim_feedback(session, config)),
     }
+    if session.tasks:
+        payload["task_state"] = task_state_view(session.tasks)
     claim_config(config)
     llm_cfg = config.get("llm") or {}
     output_tokens = int(llm_cfg.get("agent_max_tokens", 3600) or 3600)
@@ -708,7 +793,17 @@ def _compile_prompt(
         token_estimate_multiplier=calibration,
     )
     system_tokens = estimate_tokens(PROMPT_AGENTE, chars_per_token)
-    prompt_budget = window_prompt_budget
+    physical_prompt_budget = None
+    if execution is not None:
+        physical_prompt_budget = physical_user_prompt_tokens(
+            config,
+            PROMPT_AGENTE,
+            output_tokens=output_tokens,
+            physical_tokens_remaining=execution.physical_tokens_remaining,
+            protected_tokens=0,
+            token_estimate_multiplier=calibration,
+        )
+    prompt_budget = min(window_prompt_budget, physical_prompt_budget) if physical_prompt_budget is not None else window_prompt_budget
     components_before = _trace_prompt_components(payload, chars_per_token)
     pre_crop = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
     pre_crop_tokens = estimate_tokens(pre_crop, chars_per_token)
@@ -721,6 +816,7 @@ def _compile_prompt(
             "characters": len(prompt), "estimated_tokens": post_crop_tokens, "tool_count": len(allowed),
             "active_tool_count": len(active_tools),
             "prompt_budget_tokens": prompt_budget, "window_user_prompt_budget_tokens": window_prompt_budget,
+            "physical_user_prompt_budget_tokens": physical_prompt_budget,
             "output_tokens_requested": output_tokens_configured, "output_tokens_reserved": output_tokens,
             "completion_ceiling_clamped": output_tokens < output_tokens_configured,
             "system_prompt_characters": len(PROMPT_AGENTE),
@@ -789,56 +885,93 @@ def _record_aux_prompt(
 
 def _fit_claim_grounding_view(
     session: AgentSession, config: Dict[str, Any], answer: str, selected_ids: List[str],
-    *, output_tokens: int, answer_anchors: Optional[List[Dict[str, Any]]] = None,
-    request_anchors: Optional[List[Dict[str, Any]]] = None,
-    runtime_facts: Optional[List[Dict[str, Any]]] = None,
-) -> Tuple[bool, str, List[Dict[str, Any]], Dict[str, int]]:
-    """Fit all Main-selected observed material into the Claim working set."""
+) -> Tuple[bool, str, List[Dict[str, Any]], Dict[str, int], int]:
+    """Fit the fresh Claim packet into the real remaining context/task budget.
+
+    There is no standing Claim reserve. Main and Claim share the task budget;
+    once a candidate Final exists, Claim receives the physical headroom that is
+    actually left. Material excerpts are cropped before the critic's output
+    ceiling is reduced.
+    """
     cfg = claim_config(config)
     verifier_config = _claim_llm_config(config, cfg["mode"])
     context_cfg = (config or {}).get("context_engine") or {}
     chars_per_token = max(1, int(context_cfg.get("chars_per_token_fallback", 3) or 3))
     execution = current_execution()
+    calibration = execution.prompt_token_calibration if execution is not None else 1.0
+    llm_cfg = verifier_config.get("llm") or {}
+    desired_output = max(1, int(llm_cfg.get("agent_max_tokens", llm_cfg.get("max_tokens", 3600)) or 3600))
+    maximum = int(cfg["grounding"]["max_chars_per_item"])
+    minimum = min(120, maximum)
+    grounding = _grounding_items(session.observation_ledger)
+
+    def build(cap: int) -> Tuple[List[Dict[str, Any]], str, int]:
+        view = compact_grounding(grounding, selected_ids, max_chars_per_item=max(0, int(cap)))
+        prompt = review_prompt(answer, view, session.request)
+        return view, prompt, estimate_tokens(prompt, chars_per_token)
+
+    minimum_view, _minimum_prompt, minimum_tokens = build(minimum)
+    output_tokens = desired_output
+    if execution is not None:
+        margin = max(0, int(context_cfg.get("safety_margin_tokens", 500) or 0))
+        system_tokens = estimate_tokens(PROMPT_CLAIM_VERIFIER, chars_per_token)
+        calibrated_min_prompt = int((system_tokens + minimum_tokens) * max(0.75, min(4.0, float(calibration or 1.0)))) + 1
+        physical_output_room = int(execution.physical_tokens_remaining or 0) - calibrated_min_prompt - margin
+        window = max(1, int(llm_cfg.get("context_window_tokens", 38000) or 38000))
+        window_output_room = window - system_tokens - minimum_tokens - margin
+        output_tokens = min(desired_output, physical_output_room, window_output_room)
+        if output_tokens < 128:
+            return False, "CLAIM_REVIEW_BUDGET_UNAVAILABLE", [], {
+                "minimum_prompt_estimated_tokens": minimum_tokens,
+                "desired_output_tokens": desired_output,
+                "physical_tokens_remaining": int(execution.physical_tokens_remaining or 0),
+            }, 0
+
+    output_tokens = max(1, int(output_tokens))
     prompt_budget = available_user_prompt_tokens(
         verifier_config, PROMPT_CLAIM_VERIFIER, output_tokens=output_tokens,
-        token_estimate_multiplier=(execution.prompt_token_calibration if execution is not None else 1.0),
+        token_estimate_multiplier=calibration,
     )
-
-    def build(cap: int) -> Tuple[List[Dict[str, Any]], int]:
-        view = compact_grounding(
-            _grounding_items(session.observation_ledger), selected_ids, max_chars_per_item=max(0, int(cap)),
+    physical_prompt_budget = None
+    if execution is not None:
+        physical_prompt_budget = physical_user_prompt_tokens(
+            verifier_config,
+            PROMPT_CLAIM_VERIFIER,
+            output_tokens=output_tokens,
+            physical_tokens_remaining=execution.physical_tokens_remaining,
+            protected_tokens=0,
+            token_estimate_multiplier=calibration,
         )
-        prompt = review_prompt(
-            answer, view, session.request, answer_anchors=answer_anchors, request_anchors=request_anchors,
-            runtime_facts=runtime_facts,
-        )
-        return view, estimate_tokens(prompt, chars_per_token)
+        prompt_budget = min(prompt_budget, physical_prompt_budget)
 
-    maximum = int(cfg["grounding"]["max_chars_per_item"])
-    full_view, full_tokens = build(maximum)
+    full_view, _full_prompt, full_tokens = build(maximum)
     if full_tokens <= prompt_budget:
         return True, "ok", full_view, {
             "prompt_budget_tokens": prompt_budget,
+            "physical_user_prompt_budget_tokens": physical_prompt_budget,
             "prompt_estimated_tokens": full_tokens,
             "grounding_excerpt_chars_per_item": maximum,
             "selected_grounding_count": len(selected_ids),
-        }
+            "output_tokens_reserved": output_tokens,
+            "output_tokens_desired": desired_output,
+        }, output_tokens
 
-    minimum = min(120, maximum)
-    minimum_view, minimum_tokens = build(minimum)
     if minimum_tokens > prompt_budget:
         return False, f"CLAIM_REVIEW_WORKING_SET_EXCEEDED:{minimum_tokens}>{prompt_budget}", [], {
             "prompt_budget_tokens": prompt_budget,
+            "physical_user_prompt_budget_tokens": physical_prompt_budget,
             "prompt_estimated_tokens": minimum_tokens,
             "grounding_excerpt_chars_per_item": minimum,
             "selected_grounding_count": len(selected_ids),
-        }
+            "output_tokens_reserved": output_tokens,
+            "output_tokens_desired": desired_output,
+        }, output_tokens
 
     best_view, best_tokens, best_cap = minimum_view, minimum_tokens, minimum
     low, high = minimum, maximum
     while low <= high:
         mid = (low + high) // 2
-        view, tokens = build(mid)
+        view, _prompt, tokens = build(mid)
         if tokens <= prompt_budget:
             best_view, best_tokens, best_cap = view, tokens, mid
             low = mid + 1
@@ -846,10 +979,13 @@ def _fit_claim_grounding_view(
             high = mid - 1
     return True, "ok", best_view, {
         "prompt_budget_tokens": prompt_budget,
+        "physical_user_prompt_budget_tokens": physical_prompt_budget,
         "prompt_estimated_tokens": best_tokens,
         "grounding_excerpt_chars_per_item": best_cap,
         "selected_grounding_count": len(selected_ids),
-    }
+        "output_tokens_reserved": output_tokens,
+        "output_tokens_desired": desired_output,
+    }, output_tokens
 
 
 def _is_structured_response_error(error: Exception, profile: Optional[str] = None) -> bool:
@@ -862,9 +998,9 @@ def _is_structured_response_error(error: Exception, profile: Optional[str] = Non
 
 def _run_claim_verification(
     session: AgentSession, config: Dict[str, Any], answer: str, grounding_ids: List[str],
-    *, project_root: Any = None,
+    *, source_roots: Any = None,
 ) -> Tuple[bool, str, Dict[str, Any], List[Dict[str, Any]]]:
-    """Run Claim against Main-selected Observation material."""
+    """Run a fresh critic over Request + candidate Final + Main-selected material only."""
     cfg = claim_config(config)
     execution = current_execution()
     if execution is not None:
@@ -872,22 +1008,20 @@ def _run_claim_verification(
     selected_ids = list(dict.fromkeys(str(item) for item in (grounding_ids or []) if str(item)))
     grounding = _grounding_items(session.observation_ledger)
 
-    fresh, freshness_reason = _validate_material_freshness(_grounding_items(session.observation_ledger), selected_ids, project_root)
+    fresh, freshness_reason = _validate_material_freshness(grounding, selected_ids, source_roots)
     if not fresh:
         return False, freshness_reason, {}, []
 
     verifier_config = _claim_llm_config(config, cfg["mode"])
-    answer_anchors = build_answer_anchors(answer)
-    request_anchors = build_request_anchors(session.request)
-    runtime_facts = compact_runtime_facts(session.observation_ledger)
-    output_tokens = claim_review_output_budget()
-    fit_ok, fit_reason, view, fit_meta = _fit_claim_grounding_view(
-        session, config, answer, selected_ids, output_tokens=output_tokens,
-        answer_anchors=answer_anchors, request_anchors=request_anchors, runtime_facts=runtime_facts,
+    fit_ok, fit_reason, view, fit_meta, output_tokens = _fit_claim_grounding_view(
+        session, config, answer, selected_ids,
     )
     if not fit_ok:
         return False, fit_reason, {}, []
-    visible_ids = [str(item.get("ref") or "").split(":", 1)[1] for item in view if str(item.get("ref") or "").startswith("observation:")]
+    visible_ids = [
+        str(item.get("ref") or "").split(":", 1)[1]
+        for item in view if str(item.get("ref") or "").startswith("observation:")
+    ]
     visible_set = set(visible_ids)
     if any(item not in visible_set for item in selected_ids):
         missing = [item for item in selected_ids if item not in visible_set]
@@ -895,15 +1029,11 @@ def _run_claim_verification(
 
     verifier_config["llm"].pop("downstream_completion_reserve_tokens", None)
     verifier_config["llm"]["claim_verifier_max_tokens"] = output_tokens
-    prompt = review_prompt(
-        answer, view, session.request, answer_anchors=answer_anchors, request_anchors=request_anchors,
-        runtime_facts=runtime_facts,
-    )
+    prompt = review_prompt(answer, view, session.request)
     fit_meta = dict(fit_meta)
     fit_meta.update({
-        "answer_anchor_count": len(answer_anchors),
-        "request_anchor_count": len(request_anchors),
-        "runtime_fact_count": len(runtime_facts),
+        "fresh_call": True,
+        "semantic_packet_fields": ["request", "candidate_answer", "observed_material"],
     })
     _record_aux_prompt(
         session, verifier_config, mode="claim_verification", prompt=prompt,
@@ -922,11 +1052,7 @@ def _run_claim_verification(
         retry_payload = json.loads(prompt)
         retry_payload["protocol_feedback"] = {
             "code": "CANONICAL_CLAIM_RECOVERY",
-            "instruction": (
-                "Return only the canonical verdict and the smallest sufficient blocker set. "
-                "Use at most 3 issues, at most 4 grounding refs per issue, and one concise reason sentence. "
-                "Do not enumerate secondary defects."
-            ),
+            "instruction": "Return only the canonical Claim JSON. Keep blockers concrete and concise; do not add prose.",
         }
         retry_prompt = json.dumps(retry_payload, ensure_ascii=False, separators=(",", ":"), default=str)
         _record_aux_prompt(
@@ -941,17 +1067,16 @@ def _run_claim_verification(
             _record_decision(session, "claim_protocol", "failed", reason=retry_error.error_code)
             raise
 
-    fresh, freshness_reason = _validate_material_freshness(_grounding_items(session.observation_ledger), selected_ids, project_root)
+    fresh, freshness_reason = _validate_material_freshness(grounding, selected_ids, source_roots)
     if not fresh:
         return False, freshness_reason, {}, view
     if not isinstance(parsed, dict):
         return False, "CLAIM_REVIEW_PROTOCOL_ERROR:STRUCTURED_OBJECT_REQUIRED", {}, view
     ok, reason, review = normalize_claim_review(
-        parsed, grounding, answer=answer, answer_anchors=answer_anchors,
-        request_anchors=request_anchors, visible_grounding_ids=visible_ids,
-        runtime_facts=runtime_facts,
+        parsed, grounding, visible_grounding_ids=visible_ids,
     )
     return ok, reason, review, view
+
 
 def _append_claim_review(session: AgentSession, review: Dict[str, Any]) -> None:
     session.claim_review = {
@@ -1033,7 +1158,6 @@ def _details(
             "verdict": session.claim_review.get("verdict"),
             "issues": [dict(item) for item in session.claim_review.get("issues") or [] if isinstance(item, dict)],
         } if session.claim_review else {},
-        "operational_feedback": _operational_feedback(session),
         "limitations": list(limitations or []), "failure_code": failure_code,
         "write_failure": dict(session.write_transaction.get("failure") or {}) if isinstance(session.write_transaction, dict) and session.write_transaction.get("failure") else None,
         "llm_usage": execution.usage_view() if execution else {},
@@ -1468,17 +1592,41 @@ def _rehydrate_observation(session: AgentSession, entry: Dict[str, Any], config:
             "grounding_ids": grounding_ids, "frontiers": frontier_ids,
         }
     if replay is None:
-        materials = []
-        for grounding_id in grounding_ids:
-            item = dict(grounding.get(grounding_id) or {})
-            item["id"] = grounding_id
-            materials.append(_material_model_view(item, config))
-        detail: Any = materials[0] if len(materials) == 1 else {"materials": materials}
         replay = {
             "tool": tool, "status": "success", "ok": True, "executed": False,
-            "changed": False, "error_code": None, "detail": detail,
+            "changed": False, "error_code": None,
             "grounding_ids": grounding_ids, "frontiers": frontier_ids,
         }
+
+    # A cache hit proves that canonical physical reality is already in
+    # Observation. Replaying the old source body defeats memoization at the LLM
+    # boundary, so Main receives coordinates plus a very small recall excerpt.
+    # Stable failures keep their concise failure detail because there may be no
+    # Material coordinate to cite.
+    if grounding_ids:
+        materials: List[Dict[str, Any]] = []
+        for grounding_id in grounding_ids[:3]:
+            item = dict(grounding.get(grounding_id) or {})
+            text = str(item.get("numbered_content") or item.get("content") or "")
+            material = {
+                "grounding_id": grounding_id,
+                "locator": copy.deepcopy(item.get("locator") or {}),
+                "source_type": item.get("source_type"),
+            }
+            if text:
+                material["excerpt"] = _bounded_source_text(text, 700)
+                material["excerpt_complete"] = len(text) <= 700
+            materials.append({k: v for k, v in material.items() if v not in (None, "", {}, [])})
+        replay["detail"] = {
+            "cached_observation": True,
+            "materials": materials,
+            "material_count": len(grounding_ids),
+            "omitted_materials": max(0, len(grounding_ids) - len(materials)),
+        }
+        replay["context_compacted"] = True
+    else:
+        replay = _minimal_tool_context(replay, detail_char_limit=700)
+        replay["cached_observation"] = True
     replay["tool"] = tool or replay.get("tool")
     replay["status"] = "replayed"
     replay["executed"] = False
@@ -1754,7 +1902,7 @@ def _run(
                 )
                 try:
                     review_ok, review_reason, review, _grounding_view = _run_claim_verification(
-                        session, config, answer, review_grounding_ids, project_root=project_root,
+                        session, config, answer, review_grounding_ids, source_roots=_physical_source_roots(project),
                     )
                 except ErroLLM as error:
                     text = f"A verificação de claims falhou: {error.error_code or 'CLAIM_VERIFIER_LLM_FAILED'}."
@@ -1790,6 +1938,17 @@ def _run(
                             "workspace_epoch": int(session.workspace_epoch or 0),
                         },
                     )
+                    if _claim_challenge_count(session) >= 2:
+                        text = "O Claim independente voltou a bloquear a resposta após uma revisão da Main."
+                        return _return(
+                            "failed", text, None,
+                            _details(
+                                session, "failed", config,
+                                limitations=["Candidate Final remained challenged after one Main revision."],
+                                failure_code="CLAIM_CHALLENGE_UNRESOLVED",
+                            ),
+                            full,
+                        )
                     feedback = review_followup_feedback(review)
                     _clear_pending_observation_results(session)
                     continue
@@ -2009,22 +2168,22 @@ def _executar_agente_bound(
                 details = {
                     "status": "failed",
                     "failure_code": code,
-                    "limitations": ["Eyle 2.7.5 Rev1.3 does not migrate or adapt pending continuations from older shapes."],
+                    "limitations": ["Eyle 2.7.5 Rev1.3.4 does not migrate or adapt pending continuations from older shapes."],
                 }
                 return _return("failed", text, None, details, full)
             if code == "SESSION_SCHEMA_INCOMPATIBLE":
-                text = "The persisted session belongs to a different contract and cannot be resumed in Eyle 2.7.5 Rev1.3."
+                text = "The persisted session belongs to a different contract and cannot be resumed in Eyle 2.7.5 Rev1.3.4."
                 details = {
                     "status": "failed",
                     "failure_code": "SESSION_SCHEMA_INCOMPATIBLE",
-                    "limitations": ["Eyle 2.7.5 Rev1.3 does not migrate or adapt sessions from earlier revisions."],
+                    "limitations": ["Eyle 2.7.5 Rev1.3.4 does not migrate or adapt sessions from earlier revisions."],
                 }
                 return _return("failed", text, None, details, full)
             raise
         execution = current_execution()
         if execution is not None:
             execution.bind_session_baseline(session)
-        _rehydrate_grounding(_grounding_items(session.observation_ledger), project.get("caminho_origem"), max_lines=max(1, int(((config or {}).get("agent") or {}).get("max_file_read_lines", 400) or 400)))
+        _rehydrate_grounding(_grounding_items(session.observation_ledger), _physical_source_roots(project), max_lines=max(1, int(((config or {}).get("agent") or {}).get("max_file_read_lines", 400) or 400)))
         if retomar.get("continuation_kind") == "user_input":
             try:
                 session.request = _append_user_clarification(session.request, retomar, str(resposta_usuario or ""))

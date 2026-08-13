@@ -24,7 +24,6 @@ def _config():
             "max_tree_depth": 6,
             "max_file_read_lines": 400,
             "claims": {"mode": "off"},
-            "context_view": {"max_source_preview_chars": 3500, "max_symbol_preview_chars": 2600, "max_search_source_chars": 600},
         },
         "codar": {"ativado": True, "testes": {"ativado": False}},
 

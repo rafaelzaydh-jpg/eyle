@@ -43,7 +43,7 @@ def test_snapshot_payload_is_stored_once_across_pages_and_gc_after_last_handle()
 
     page1, error = materialize_snapshot_handle(ledger, first["id"], workspace_epoch=4)
     assert error is None
-    second = page1["handles"][0]["id"]
+    second = page1["frontiers"][0]["handle"]
     assert len(ledger["snapshots"]) == 1
     assert ledger["handles"][first["id"]]["snapshot_id"] == ledger["handles"][second]["snapshot_id"]
     assert all("payload" not in item for item in ledger["handles"].values())
@@ -52,7 +52,7 @@ def test_snapshot_payload_is_stored_once_across_pages_and_gc_after_last_handle()
     assert len(ledger["snapshots"]) == 1
     page2, error = materialize_snapshot_handle(ledger, second, workspace_epoch=4)
     assert error is None
-    third = page2["handles"][0]["id"]
+    third = page2["frontiers"][0]["handle"]
     release_snapshot_handle(ledger, second)
     assert len(ledger["snapshots"]) == 1
 

@@ -1,4 +1,4 @@
-# Configuration — Eyle 2.7.5 Rev1.3
+# Configuration — Eyle 2.7.5 Rev1.3.4
 
 Runtime baseline: **Python 3.11+**. Older Python runtimes are not a compatibility target.
 
@@ -7,12 +7,12 @@ Runtime baseline: **Python 3.11+**. Older Python runtimes are not a compatibilit
 ```json
 {
   "app_version": "2.7.5",
-  "config_schema_version": "2.7.5-r1.3",
-  "revision": "rev1.3-task-memory"
+  "config_schema_version": "2.7.5-r1.3.4",
+  "revision": "rev1.3.4-fresh-claim-token-cleanup"
 }
 ```
 
-Unknown fields and mismatched identity are errors. Removed fields are not aliases. Session, queue and project-memory schemas use the same `2.7.5-r1.3` clean-break identity.
+Unknown fields and mismatched identity are errors. Removed fields are not aliases. Session, queue and project-memory schemas use the same `2.7.5-r1.3.4` clean-break identity.
 
 ## Physical containment
 
@@ -24,15 +24,15 @@ agent.task_deadline_seconds 1800
 
 `context_window_tokens=38000` is the hard per-call deployment ceiling for the current llama-server. Runtime reserves model-output and safety headroom inside that window.
 
-There is **no cumulative `max_prompt_tokens` or `max_completion_tokens` contract**. The 90,000-token total fuse and deadline are physical runaway containment; they do not define semantic completeness or prescribe a strategy. Values above 90,000 are rejected by the current strict config contract. There is no fixed LLM-turn, LLM-call or tool-call quota.
+There is **no cumulative `max_prompt_tokens` or `max_completion_tokens` quota** and no fixed `claim_reserve_tokens`. The 90,000-token total fuse and deadline are physical runaway containment; they do not define semantic completeness or prescribe strategy. Once a Candidate Final exists, Claim sizes its fresh review packet/output ceiling against the actual physical headroom remaining. Values above 90,000 are rejected by the current strict config contract. There is no fixed semantic LLM-turn or tool-call quota.
 
 ## Claims
 
-`agent.claims.mode` is `off`, `self_check`, or `verified`.
+`agent.claims.mode` is `off`, `fresh`, or `verified`.
 
-Claim uses a small `accept|challenge` contract. Its output artifact is bounded by schema: at most 3 independent blockers, at most 4 grounding coordinates per blocker, and one concise reason. The output-token reservation is derived internally from that canonical contract; `agent.claims.verifier.max_tokens` was removed and is rejected as an unknown field. `agent.claims.grounding.max_chars_per_item` still bounds each material excerpt. Zero grounding is reviewable but is not automatically wrong: Claim judges whether the actual answer requires current/external observation.
+Claim uses the strict `accept|challenge` protocol. Each issue is exactly `{kind,grounding_refs,reason}`; there is no semantic quota on issue count, reference count or reason length. Normal provider/context/output ceilings remain physical limits. `agent.claims.grounding.max_chars_per_item` bounds each selected Material excerpt. Zero grounding is reviewable but is not automatically wrong: Claim judges whether the Candidate Final actually requires observed current/external facts.
 
-`self_check` reuses the Main model. `verified` requires an explicit verifier transport/model.
+`fresh` is the default and starts a new request using Main's transport/model with no Main message history. Its semantic packet contains exactly `request`, `candidate_answer` and `observed_material`. `verified` requires an explicit distinct verifier transport/model. A first semantic challenge permits one Main revision; a second returns `CLAIM_CHALLENGE_UNRESOLVED`. The removed `self_check`, verifier `max_tokens`, Claim reserve and anchor/runtime-fact fields are rejected rather than aliased.
 
 ## Sandbox
 

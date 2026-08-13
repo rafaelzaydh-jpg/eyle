@@ -1,8 +1,28 @@
 # Eyle
 
-**Version:** 2.7.5 · **Schema:** 2.7.5-r1.3 · **Revision:** rev1.3-task-memory
+**Version:** 2.7.5 · **Schema:** 2.7.5-r1.3.4 · **Revision:** rev1.3.4-fresh-claim-token-cleanup
 
-Eyle is a supervised agent runtime built around one Main LLM, deterministic capabilities, canonical physical Observation, Main-owned Investigation/Tasks and optional Claim review.
+Eyle is a supervised agent runtime built around one Main LLM, deterministic capabilities, canonical physical Observation, Main-owned Investigation/Tasks and optional independent Claim review.
+
+## Rev1.3.4: Fresh Claim & Token Cleanup
+
+Rev1.3.4 restores Claim to its intended role: a fresh delivery-gate call, not a second participant in Main's investigation. In default `fresh` mode it reuses Main's transport/model but starts with no Main conversation/history and receives only the original Request, the Candidate Final and Main-selected observed Material. `verified` may use a distinct verifier transport/model. Claim can only `accept` or `challenge`; it cannot plan, call capabilities, mutate Investigation/Tasks or rewrite the answer.
+
+The fixed 12k Claim reserve, Claim anchors/runtime-fact packet, hard 3-issue/4-ref/160-character quotas, `operational_feedback` projection, empty `task_state` projection and duplicated Investigation/Task JSON-schema variants are removed. Main's fixed system prompt is compacted. A first semantic challenge returns the complete blocker set to Main for one revision; a second semantic challenge fails explicitly as `CLAIM_CHALLENGE_UNRESOLVED` instead of creating an unbounded Main↔Claim loop. Claim still retains one protocol retry for malformed/truncated structured output.
+
+## Rev1.3.3: Ownership Cleanup
+
+Rev1.3.3 is a surgical cleanup revision: Runtime diagnostics now live in Runtime, write-transaction state lives with transaction mechanics, dead compatibility-shaped telemetry/config is removed, and unused Core/model projection helpers are deleted. The canonical capability result is now exactly status + `observations` + `coverage` + `frontiers`; opaque continuation handles remain Runtime-private. It adds no planner, no compatibility bridge and no new semantic authority.
+
+## Rev1.3.2: Bounded Context Projection
+
+Rev1.3.2 keeps the Rev1.3.1 workspace/self boundary intact and closes the token-economy failure exposed by long self-analysis runs. Canonical Observation still retains complete physical state, while Main receives an incremental projection: fresh tool-result deltas, fresh Observation rows, Investigation-pinned Material coordinates, a tiny Material recency tail, and every still-open Frontier. Cached observations no longer rematerialize full prior payloads; replay returns coordinates plus short recall excerpts.
+
+Rev1.3.2 historically introduced a fixed `claim_reserve_tokens` budget. Rev1.3.4 removes that reservation: Claim now fits its fresh review packet against the actual physical budget remaining after a Candidate Final exists.
+
+## Rev1.3.1: Workspace/Self Boundary Closure
+
+Rev1.3.1 makes `workspace/` the only automatically writable work plane even when it is empty. Eyle source is a separate `source=eyle` observation/self-sandbox source: Main may inspect it, may experiment on an isolated writable copy, and may export that copy only as a non-overwriting ZIP artifact. No modified self-source files can be promoted back into the running installation. Task Memory from Rev1.3 remains unchanged except for clearer activation guidance on multi-action work.
 
 ## Rev1.3: Task Memory
 
@@ -86,7 +106,7 @@ Adding a new observational capability should require its registry/implementation
 
 ### Investigation and Claim
 
-`Investigation` remains an optional Main-owned notebook. Claim receives only Request, provisional Final, Main-selected physical grounding and compact Runtime facts. It does not inspect Investigation or the filesystem.
+`Investigation` remains an optional Main-owned notebook. Claim receives only the original Request, Candidate Final and Main-selected observed Material. It does not receive Investigation, Tasks, Main history, Runtime event history or filesystem access.
 
 ## Core rules
 
@@ -101,9 +121,9 @@ Adding a new observational capability should require its registry/implementation
 
 ## Public capabilities
 
-Rev1.3 exposes **16** deterministic capabilities:
+Rev1.3.2 exposes **17** deterministic capabilities:
 
-`calculate`, `project_stats`, `count_tokens`, `inspect_project`, `list_tree`, `search_code`, `symbol_relations`, `continue_observation`, `find_symbol`, `read_file`, `run_command`, `memory_search`, `memory_store`, `run_tests`, `git_status`, `git_diff`.
+`calculate`, `project_stats`, `count_tokens`, `inspect_project`, `list_tree`, `search_code`, `symbol_relations`, `continue_observation`, `find_symbol`, `read_file`, `run_command`, `export_sandbox_zip`, `memory_search`, `memory_store`, `run_tests`, `git_status`, `git_diff`.
 
 Execution trace remains internal diagnostics. Real workspace writes are not a public tool; Main emits patches and Runtime owns dry-run, confirmation, apply, verification and rollback.
 
@@ -124,11 +144,11 @@ context_window_tokens = 38000   # hard per model call
 The remaining task-wide containment is deliberately minimal:
 
 ```text
-max_total_tokens         90000
-task_deadline_seconds 1800
+max_total_tokens       90000
+task_deadline_seconds    1800
 ```
 
-There are no cumulative prompt/completion budgets and no fixed LLM-turn, LLM-call or tool-call quota. The 90k total-token fuse and deadline are physical runaway containment, not semantic stopping rules. Main sees remaining physical headroom in its factual operational view and still decides whether to continue, change approach or finish.
+There are no cumulative prompt/completion quotas, no fixed LLM-turn/tool-call quota and no standing Claim reserve. The 90k total-token fuse and deadline remain physical runaway containment. Once Main produces a Candidate Final, Claim uses only the physical headroom that actually remains; lack of enough review headroom fails closed instead of pre-starving Main.
 
 ## Run
 
@@ -145,11 +165,13 @@ Development verification:
 
 ```bash
 python -m pip install -r requirements-dev.lock
+python -B -m eyle.devtools.release_identity
 python -B -m pytest -q
 python -B -m compileall -q eyle llm web main.py
-python -B -m eyle.devtools.release_identity
 node --check web/static/app.js
 ```
+
+Run release-identity validation on a clean extracted tree; remove generated `__pycache__`/`.pytest_cache` state before packaging.
 
 ## Documentation
 

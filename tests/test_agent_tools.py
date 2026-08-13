@@ -1,7 +1,7 @@
 import hashlib
 import eyle.core.tools as tools
 
-FIELDS={"status","ok","executed","changed","error_code","detail","retryable","failure_scope","failure_resource","observations","coverage","frontiers","handles"}
+FIELDS={"status","ok","executed","changed","error_code","detail","retryable","failure_scope","failure_resource","observations","coverage","frontiers"}
 HASH='a'*64
 
 def ctx(root):
@@ -43,7 +43,7 @@ def test_validation_rejects_unknown_and_bad_arguments(tmp_path):
 def test_run_tests_skipped_is_not_claimed_as_executed(tmp_path,monkeypatch):
     monkeypatch.setattr(tools,'rodar_testes_projeto',lambda *a,**k:{'executado':False,'ok':True,'detalhe':'sem suite'})
     result=tools.executar_tool('run_tests',{},ctx(tmp_path))
-    assert result=={'status':'skipped','ok':True,'executed':False,'changed':False,'error_code':'TESTS_DISABLED','detail':"A execução de testes está desativada em config['codar']['testes']['ativado'].",'retryable':None,'failure_scope':None,'failure_resource':None,'observations':[],'coverage':{},'frontiers':[],'handles':[]}
+    assert result=={'status':'skipped','ok':True,'executed':False,'changed':False,'error_code':'TESTS_DISABLED','detail':"A execução de testes está desativada em config['codar']['testes']['ativado'].",'retryable':None,'failure_scope':None,'failure_resource':None,'observations':[],'coverage':{},'frontiers':[]}
 
 def test_patch_operations_are_not_public_tools():
     names=set(tools.TOOLS)

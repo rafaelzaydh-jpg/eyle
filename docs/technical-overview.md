@@ -1,4 +1,20 @@
-# Technical overview — Eyle 2.7.5 Rev1.3
+# Technical overview — Eyle 2.7.5 Rev1.3.4
+
+## Rev1.3.4 fresh Claim and token cleanup
+
+Claim is now a genuinely fresh Final gate. In default `fresh` mode Runtime starts a separate LLM request using Main's transport/model but sends no Main history or semantic state. The review packet contains only the original Request, Candidate Final and Main-selected observed Material. `verified` may use a distinct verifier. Claim returns only `accept|challenge` plus concrete issues and has no tool/planning/state-mutation authority.
+
+Token cleanup removes the fixed 12k Claim reserve, request/answer anchors, Claim runtime-event compaction, hard semantic issue quotas, the duplicated `operational_feedback` projection and empty Task projection. Main's fixed prompt is shorter and status-variant duplication is removed from Investigation/Task JSON schema. A first challenge permits one Main revision; a second semantic challenge ends as `CLAIM_CHALLENGE_UNRESOLVED`.
+
+## Rev1.3.3 ownership cleanup
+
+Rev1.3.3 removes dead contracts rather than adding machinery. Internal trace/accounting is part of Runtime history, write-transaction bookkeeping is part of transaction mechanics, the unused `agent.context_view` knobs are gone, and capability results no longer carry a redundant `handles` slot. Prompt accounting separately measures Investigation (epistemic state) and Tasks (intentional state).
+
+## Rev1.3.2 bounded model view
+
+Rev1.3.2 separates **canonical observation size** from **prompt projection size**. Fresh tool results are still delivered immediately, but old unrelated Observation navigation and Material-directory rows are not replayed on every Main turn. Investigation-pinned Material and all open Frontiers remain visible. Memoized observation replays return references plus short recall excerpts instead of the original full payload.
+
+Rev1.3.2 introduced a default 12k Claim reserve inside the 90k task fuse. Rev1.3.4 removes that standing reservation: Main uses the shared physical envelope, and a fresh Claim fits to the actual headroom remaining only after a Candidate Final exists.
 
 ## Request path
 
@@ -11,11 +27,13 @@ Main → Runtime capability → Observation → Main
 When Main chooses to conclude and Claim is enabled:
 
 ```text
-Main → provisional Final → Claim → accept → User
-                         └→ challenge → Main
+Main → Candidate Final → fresh Claim → accept → User
+                           └→ challenge → Main revision → fresh Claim
+                                                      ├→ accept → User
+                                                      └→ challenge → CLAIM_CHALLENGE_UNRESOLVED
 ```
 
-Claim also reviews a zero-grounding Final. It may accept a pure reasoning/writing answer or challenge a current-state assertion that lacks material support.
+Claim also reviews a zero-grounding Final. It may accept pure reasoning/writing where observation is unnecessary or challenge unsupported current/external assertions. It judges only the supplied Request, Candidate Final and selected observed Material.
 
 ## Canonical owners
 
@@ -81,7 +99,7 @@ Schema rejection, protected-resource denial, sandbox failure and other physical 
 
 The current llama-server deployment is physically limited to **38,000 context tokens per call**.
 
-Runtime compiles each Main/Claim request inside that window, reserving output/safety headroom. The old cumulative `max_prompt_tokens` and `max_completion_tokens` controls are absent. A task-wide `max_total_tokens=90,000` fuse and deadline provide runaway containment. Rev1.3 has no fixed LLM-turn, LLM-call or tool-call quota.
+Runtime compiles each Main/Claim request inside that window, reserving output/safety headroom. The old cumulative `max_prompt_tokens` and `max_completion_tokens` controls are absent. A task-wide `max_total_tokens=90,000` fuse and deadline provide runaway containment. Rev1.3.2 adds a protected Claim reserve inside that same physical envelope; it does not create a semantic stop rule or a fixed LLM-turn, LLM-call or tool-call quota.
 
 ## Diagnostics
 
@@ -99,9 +117,9 @@ The former physical run identifier `task_id` is renamed `execution_id` in AgentS
 
 The Rev1.2.3.2.2 Microsandbox physical closure remains unchanged beneath this semantic addition.
 
-- Main receives bounded `operational_feedback` derived from canonical runtime facts, including recent problems, replay-only activity, available Material, selected Final grounding, open Frontiers, workspace epoch and physical token headroom.
-- The projection never prescribes retry/stop/replan; Main remains sole semantic authority.
-- `max_total_tokens` defaults to and is capped at 90,000 for this release.
+- Main receives canonical `latest_tool_results`, `observation_map`, `grounding_index` and `physical_limits` directly; the duplicative `operational_feedback` layer is removed.
+- Runtime never prescribes retry/stop/replan; Main remains sole task-semantic authority.
+- `max_total_tokens` defaults to and is capped at 90,000; there is no fixed Claim reserve.
 
 - Coverage is normalized and validated at the capability execution boundary; arbitrary parallel Coverage dialects are rejected.
 - Frontier pagination retains a single snapshot and copies only the requested page slice.
@@ -116,3 +134,8 @@ The Rev1.2.3.2.2 Microsandbox physical closure remains unchanged beneath this se
 ### Microsandbox 0.6.8 API closure
 
 The Runtime targets the pinned Python SDK contract directly: it bootstraps the local runtime with `is_installed()`/`await install()`, uses `Network.from_profiles("public")` for ordinary `run_command`, and `Network.none()` only for explicitly network-isolated supervised execution. The removed/historical `Network.public_only()` helper is not part of the active integration.
+
+
+## Rev1.3.1 workspace and self-source
+
+The automatic project root is always the dedicated `workspace/`. Empty is a valid physical state. Self-analysis is explicit through `source=eyle`; direct writes remain workspace-only. Self-change experiments use the persistent per-job sandbox snapshot and can be exported only through `export_sandbox_zip`, which produces an inert ZIP artifact without promoting modified files into the installation.

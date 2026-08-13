@@ -73,17 +73,17 @@ def agent_needs_user(message, investigation=None, tasks=None, *, missing_informa
 
 
 def issue(
-    *, kind="unsupported", answer_ref="answer:a1",
-    grounding_ids=None, grounding_refs=None, reason="Material support is insufficient.",
+    *, kind="unsupported", grounding_ids=None, grounding_refs=None,
+    reason="Material support is insufficient.",
 ):
-    refs = list(grounding_refs or [])
-    if not refs:
+    if grounding_refs is None:
         refs = [f"observation:{item}" for item in (grounding_ids or [])]
-    if not refs:
-        refs = ["request:r1"]
+        if not refs:
+            refs = ["request"]
+    else:
+        refs = list(grounding_refs)
     return {
         "kind": str(kind),
-        "answer_ref": answer_ref,
         "grounding_refs": refs,
         "reason": str(reason),
     }
@@ -99,8 +99,8 @@ def review(*, verdict="accept", issues=None):
 def base_config(*, claims_mode="off", tests_enabled=False):
     return {
         "app_version": "2.7.5",
-        "config_schema_version": "2.7.5-r1.3",
-        "revision": "rev1.3-task-memory",
+        "config_schema_version": "2.7.5-r1.3.4",
+        "revision": "rev1.3.4-fresh-claim-token-cleanup",
         "llm": {
             "context_window_tokens": 38000,
             "agent_max_tokens": 3600,
@@ -120,11 +120,6 @@ def base_config(*, claims_mode="off", tests_enabled=False):
             "max_search_range_lines": 16,
             "max_search_matches": 40,
             "max_search_ranges": 12,
-            "context_view": {
-                "max_source_preview_chars": 3500,
-                "max_symbol_preview_chars": 2600,
-                "max_search_source_chars": 600,
-            },
             "claims": {
                 "mode": claims_mode,
                 "verifier": {"temperature": 0.0},

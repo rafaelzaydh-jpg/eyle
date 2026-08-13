@@ -1,4 +1,4 @@
-"""Eyle 2.7.5 Rev1.3 strict physical configuration boundary."""
+"""Eyle 2.7.5 Rev1.3.4 strict physical configuration boundary."""
 from __future__ import annotations
 
 import json
@@ -27,14 +27,10 @@ _LLM_FIELDS = {
 _AGENT_FIELDS = {
     "max_tree_entries", "max_tree_depth", "max_file_read_lines",
     "task_deadline_seconds", "max_total_tokens",
-    "context_view", "max_project_scan_entries",
+    "max_project_scan_entries",
     "max_project_scan_depth", "max_project_file_bytes", "max_inspect_relation_edges",
     "max_git_diff_chars", "max_search_matches", "max_search_ranges", "claims",
     "max_search_range_lines", "sandbox",
-}
-_CONTEXT_VIEW_FIELDS = {
-    "max_source_preview_chars",
-    "max_symbol_preview_chars", "max_search_source_chars",
 }
 _CONTEXT_FIELDS = {
     "safety_margin_tokens", "chars_per_token_fallback", "cached_prompt_weight",
@@ -71,11 +67,6 @@ _AGENT_POSITIVE_DEFAULTS = {
     "max_search_ranges": 12,
     "task_deadline_seconds": 1800,
     "max_total_tokens": 90000,
-}
-_CONTEXT_VIEW_POSITIVE_DEFAULTS = {
-    "max_source_preview_chars": 3500,
-    "max_search_source_chars": 600,
-    "max_symbol_preview_chars": 2600,
 }
 
 _SANDBOX_BACKENDS = {"auto", "microsandbox", "docker", "bwrap", "process", "trusted_local"}
@@ -191,12 +182,6 @@ def validar_config(config):
     _reject_unknown(agent_sandbox, _SANDBOX_FIELDS, "agent.sandbox")
     _validate_sandbox_backend(agent_sandbox, "agent.sandbox")
 
-    context_view = agent.get("context_view") or {}
-    if not isinstance(context_view, dict):
-        raise ConfigError("agent.context_view precisa ser um objeto")
-    _reject_unknown(context_view, _CONTEXT_VIEW_FIELDS, "agent.context_view")
-    for key, default in _CONTEXT_VIEW_POSITIVE_DEFAULTS.items():
-        _validate_int(context_view, key, default, minimum=1, prefix="agent.context_view")
 
     context = config.get("context_engine") or {}
     if not isinstance(context, dict):

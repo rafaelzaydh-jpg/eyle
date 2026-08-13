@@ -29,7 +29,7 @@ def test_needs_user_contract_is_blocking_object_and_rejects_legacy_string():
 
 def test_resume_clarification_is_canonical_across_tool_and_claim(monkeypatch, tmp_path):
     (tmp_path / "session.py").write_text("class AgentSession:\n    pass\n", encoding="utf-8")
-    cfg = base_config(claims_mode="self_check")
+    cfg = base_config(claims_mode="fresh")
 
     first_prompts = []
     monkeypatch.setattr(

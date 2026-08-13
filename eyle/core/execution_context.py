@@ -1,7 +1,7 @@
 """Run-scoped physical execution state.
 
 Configuration is immutable input. This context owns deadlines, physical budgets
-and the canonical LLM call ledger for one execution/resume. Rev1.3 keeps only
+and the canonical LLM call ledger for one execution/resume. Rev1.3.2 keeps only
 physical fuses. Cumulative prompt/completion budgets are intentionally absent;
 the per-call model window, 90k total-token fuse and deadline provide physical containment.
 """
@@ -38,6 +38,8 @@ class ExecutionContext:
     completion_tokens_actual: int = 0
     reasoning_tokens_actual: int = 0
     sandbox_workspace_path: Optional[str] = None
+    sandbox_source_kind: Optional[str] = None
+    sandbox_source_root: Optional[str] = None
     sandbox_backend: Optional[str] = None
     sandbox_protected_resources_omitted: int = 0
     sandbox_tempdir: Any = field(default=None, repr=False, compare=False)
@@ -188,6 +190,8 @@ class ExecutionContext:
         container = self.sandbox_container_name
         self.sandbox_tempdir = None
         self.sandbox_workspace_path = None
+        self.sandbox_source_kind = None
+        self.sandbox_source_root = None
         self.sandbox_backend = None
         self.sandbox_protected_resources_omitted = 0
         self.sandbox_microsandbox_session = None

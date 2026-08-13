@@ -16,6 +16,10 @@ _FORBIDDEN_FILE_NAMES = {".coverage"}
 _REMOVED_CORE_FILES = (
     "eyle/core/source_record.py",
     "eyle/core/evidence.py",
+    "eyle/core/execution_trace.py",
+    "eyle/core/prompt_accounting.py",
+    "eyle/core/write_transaction.py",
+    "eyle/core/operational_feedback.py",
 )
 
 

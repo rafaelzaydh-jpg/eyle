@@ -8,7 +8,7 @@ from eyle.core.post_write import (
     verify_expected_outputs,
 )
 from eyle.core.session import AgentSession
-from eyle.core.write_transaction import begin as begin_write_transaction, set_status as set_write_status
+from eyle.core.transactions import begin as begin_write_transaction, set_status as set_write_status
 
 
 def _config(tests_enabled=False):

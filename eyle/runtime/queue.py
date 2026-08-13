@@ -59,7 +59,7 @@ def _serializar(valor):
     return json.dumps(valor, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
-QUEUE_SCHEMA_VERSION = "2.7.5-r1.3"
+QUEUE_SCHEMA_VERSION = "2.7.5-r1.3.4"
 
 _EXPECTED_TABLE_COLUMNS = {
     "jobs": [
@@ -92,7 +92,7 @@ def _validate_schema(conexao):
 
 
 def _inicializar_schema(conexao, caminho_banco, *, new_database):
-    """Create exactly the Eyle 2.7.5 Rev1.3 queue schema or reject the existing database."""
+    """Create exactly the Eyle 2.7.5 Rev1.3.4 queue schema or reject the existing database."""
     with _schema_lock:
         if caminho_banco in _schemas_prontos:
             return

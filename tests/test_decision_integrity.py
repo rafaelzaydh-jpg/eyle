@@ -4,7 +4,6 @@ import json
 import pytest
 
 import eyle.core.agent as core_agent
-from eyle.core.claim_review import compact_runtime_facts
 from eyle.core.workspace_io import listar_arvore_projeto
 from llm.executar import ErroLLM, PROMPT_CLAIM_VERIFIER
 from llm.structured import StructuredResponseError, parse_agent_response, schema_for_profile
@@ -68,41 +67,20 @@ def test_claim_protocol_gets_one_fresh_retry(monkeypatch):
     monkeypatch.setattr(core_agent, "executar_verificador_claims", fake_claim)
     from eyle.core.session import AgentSession
     session = AgentSession("Say hi")
-    ok, reason, normalized, _ = core_agent._run_claim_verification(session, base_config(claims_mode="self_check"), "Hi", [])
+    ok, reason, normalized, _ = core_agent._run_claim_verification(session, base_config(claims_mode="fresh"), "Hi", [])
     assert ok is True and reason == "ok"
     assert normalized["verdict"] == "accept"
     assert normalized["issues"] == []
     assert len(calls) == 2
 
 
-def test_claim_runtime_view_preserves_coverage_and_public_frontier_under_truncation():
-    ledger = {"events": [{
-        "event_id": "obs-0001", "turn": 1, "tool": "search_code", "status": "success",
-        "executed": True, "ok": True, "error_code": None,
-        "result": {
-            "status": "success", "ok": True, "executed": True, "changed": False,
-            "coverage": {
-                "scope": {"kind": "arbitrary_domain"},
-                "examined": {"objects": 969},
-                "complete": True,
-                "boundaries": [],
-            },
-            "frontiers": [{"id": "fr-0001", "kind": "material_continuation", "count": 581}],
-            "noise": "x" * 5000,
-        },
-    }]}
-    facts = compact_runtime_facts(ledger)
-    result = facts[0]["result"]
-    assert result["coverage"]["complete"] is True
-    assert result["frontiers"][0]["id"] == "fr-0001"
-    assert "handle" not in json.dumps(result)
-    assert result["payload_truncated"] is True
-
-
-def test_claim_prompt_treats_coverage_and_frontier_as_physical_not_semantic():
-    assert "Coverage" in PROMPT_CLAIM_VERIFIER
-    assert "Frontier" in PROMPT_CLAIM_VERIFIER
-    assert "Projection" not in PROMPT_CLAIM_VERIFIER
+def test_claim_prompt_declares_fresh_isolation_and_no_main_state():
+    lower = PROMPT_CLAIM_VERIFIER.lower()
+    assert "fresh call" in lower
+    assert "no main history" in lower
+    assert "request, candidate_answer and observed_material" in PROMPT_CLAIM_VERIFIER
+    for forbidden in ("runtime_facts", "request_anchors", "answer_anchors", "investigation state", "task_state"):
+        assert forbidden not in lower
 
 
 def test_output_truncation_is_only_provider_ceiling_after_cumulative_completion_budget_removal():

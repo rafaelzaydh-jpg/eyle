@@ -1,3 +1,62 @@
+## 2.7.5 Rev1.3.4 — Fresh Claim & Token Cleanup — 2026-08-12
+
+- **Fresh Claim restored:** default Claim mode is now `fresh`: a separate LLM request using Main's transport/model but no Main conversation/history. Its semantic packet is exactly original Request + Candidate Final + Main-selected observed Material. `verified` remains available for a distinct verifier transport/model.
+- **Claim authority narrowed:** Claim still only returns `accept|challenge`; it cannot plan, call capabilities, rewrite Final or mutate Investigation/Tasks. Added `unsafe` as a blocker kind.
+- **Claim protocol de-caged:** removed `answer_ref`, request/answer anchors, runtime-fact compaction and the hard 3-issue / 4-reference / 160-character quotas. Issues are exactly `{kind,grounding_refs,reason}`; physical context/output ceilings remain.
+- **Loop closure:** one semantic challenge returns its blocker set to Main for one Candidate Final revision. A second semantic challenge fails explicitly as `CLAIM_CHALLENGE_UNRESOLVED` instead of entering an open-ended Main↔Claim loop. One protocol retry remains for malformed/truncated structured output.
+- **Token architecture:** removed fixed `agent.claim_reserve_tokens` / `CLAIM_RESERVE_PROTECTED`. Main is no longer pre-starved by 12k tokens; after Candidate Final exists, Claim fits its packet/output ceiling to actual remaining physical headroom and fails closed as `CLAIM_REVIEW_BUDGET_UNAVAILABLE` if a viable review cannot fit.
+- **CORDA:** deleted `eyle/core/operational_feedback.py` and its duplicate prompt projection; canonical `latest_tool_results`, `observation_map`, `grounding_index`, `physical_limits` and explicit Claim feedback already carry the useful facts.
+- **Prompt cleanup:** compacted `PROMPT_AGENTE`, omitted `task_state` when no Tasks exist, and removed duplicated per-status Investigation/Task JSON-schema variants while preserving local semantic validation.
+- Clean-break identity advances to `2.7.5-r1.3.4` / `rev1.3.4-fresh-claim-token-cleanup`; no compatibility aliases or migrations were added.
+
+## 2.7.5 Rev1.3.3 — Ownership Cleanup — 2026-08-12
+
+- **CORDA / dead contract removal:** deleted the unused Agent Material model-view helper, the redundant top-level handle projection, the unused DecisionLedger `history_view`, and stale `repeated_rejected_decisions` / `completion_tokens_remaining` diagnostics.
+- **Physical contract closure:** removed `handles` from the canonical capability-result envelope. The universal result is now exactly Material/observations + Coverage + Frontier; opaque handle IDs exist only inside Runtime continuation/frontier machinery.
+- **Dead config removal:** deleted `agent.context_view` (`max_source_preview_chars`, `max_search_source_chars`, `max_symbol_preview_chars`). These knobs no longer had any consumer after capability-owned projection replaced Agent-specific presentation logic.
+- **Runtime ownership:** merged internal execution tracing and prompt-cost accounting into `eyle/runtime/history.py`; deleted `eyle/core/execution_trace.py` and `eyle/core/prompt_accounting.py`. Execution history remains factual telemetry only and is not a Main capability.
+- **Transaction ownership:** merged canonical write-transaction state helpers into `eyle/core/transactions.py`; deleted the standalone `write_transaction.py` shim.
+- **Telemetry closure:** prompt accounting now distinguishes Main-owned epistemic `investigation` state from intentional `task_state` instead of silently charging Tasks to `other`.
+- Preserved the Rev1.3.2 bounded Observation projection, protected Claim reserve, Rev1.3.1 workspace/self boundary, Rev1.3 Task contract, all 17 public capabilities and the no-compatibility-bridge policy.
+- Clean-break identity advances to `2.7.5-r1.3.3` / `rev1.3.3-ownership-cleanup`; config, Session, queue and project-memory identities advance together.
+
+## 2.7.5 Rev1.3.2 — Bounded Context Projection — 2026-08-12
+
+### Context economy without semantic amnesia
+
+- Canonical Observation remains complete in Runtime state, but Main now receives an incremental model-facing projection instead of repeated historical navigation.
+- `observation_map` carries the immediately fresh physical delta, compact Investigation-pinned coordinates, and every still-open Frontier; old unrelated rows no longer accumulate in each prompt.
+- `grounding_index` is bounded to Investigation-pinned, fresh pending and tiny recency coordinates. Material is never deleted from the canonical ledger merely because it is omitted from the current prompt.
+- Memoized observation replay now returns physical coordinates plus bounded recall excerpts instead of rematerializing full prior source payloads.
+- Low-headroom prompt cropping can remove repeated descriptions from capability contracts while preserving callable signatures/input shapes and pinned grounding coordinates.
+
+### Protected Claim headroom
+
+- Adds strict `agent.claim_reserve_tokens` (default `12000`, smaller than `max_total_tokens`; ignored when Claim is off).
+- Main prompt/output envelopes are physically clamped before the protected Claim reserve is consumed. This is budget containment only and does not infer task completion.
+- LLM preflight records/enforces the reserve for `agent` calls while `claim_verifier` may use the reserved headroom.
+- Claim working-set fitting now considers both the 38k per-call model window and the task's actual physical tokens remaining, preventing a packet that fits the model window from failing only at task-total preflight.
+- Main receives factual `claim_reserve_tokens` and `main_tokens_before_claim_reserve` coordinates in `physical_limits`.
+
+### Contract and verification
+
+- Clean-break identity advances to `2.7.5-r1.3.2` / `rev1.3.2-bounded-context-projection`; config, Session, queue and project-memory identities advance together.
+- Rev1.3.1 workspace/self-source containment remains unchanged: real Eyle source is read-only, self experiments stay sandboxed, and only inert ZIP export is allowed.
+- Added deterministic regressions for delta Observation projection, pinned/open-Frontier retention, bounded Material projection, compact replay, protected Claim reserve and low-headroom Main output clamping.
+- Deterministic suite: **315 passed, 1 Flask-dependent skip** in the available offline environment.
+
+## 2.7.5 Rev1.3.1 — Workspace/Self Boundary Closure — 2026-08-12
+
+- Made `workspace/` the sole automatic writable work plane even when empty; removed the fallback that treated the Eyle installation as the active project.
+- Added explicit `source=workspace|eyle` identity to observational/self-sandbox capabilities. Eyle self-source can be inspected without becoming writable state.
+- File Material, memoization, Coverage, freshness and continuation preserve source identity so workspace and self observations cannot be conflated.
+- `run_command(source=eyle)` creates an isolated writable self snapshot only; live workspace, memory, context, agent-memory and `.git` state are omitted from that snapshot. A job keeps one sandbox source and source switching fails closed.
+- Added `export_sandbox_zip`, the only egress for modified self snapshots. It exports a non-overwriting ZIP beside Eyle, strips caches/VCS metadata, reports SHA-256, and never copies modified source files back. Native-Windows Microsandbox export uses `Sandbox.fs.copy_to_host`.
+- Clarified Task activation: Main may persist decided multi-action/multi-turn work as Tasks without forcing trivial requests into task state.
+- Public capabilities: 16 → 17. No Planner, Router, self-update gate, source promotion path or compatibility bridge was added.
+- Clean-break identity advances to `2.7.5-r1.3.1`; older config/Session/queue/project-memory state is rejected rather than migrated.
+- Offline deterministic suite during release preparation: **307 passed, 1 Flask-dependent skip**.
+
 ## 2.7.5 Rev1.3 — Task Memory — 2026-08-12
 
 - Added a separate Main-owned recursive `Task` contract: exactly `id`, `parent_id`, `description`, `status=open|completed|dropped`, and `result`.

@@ -225,7 +225,6 @@
       historyLine("groundings", agent.grounding_count_total),
       historyLine("observation ledger", agent.observation_ledger_size),
       historyLine("replays/rehydrations", agent.observation_replays),
-      historyLine("rejeições repetidas", agent.repeated_rejected_decisions),
       historyLine("workspace epoch", agent.workspace_epoch),
       historyLine("duração", history.duration_seconds != null ? `${history.duration_seconds}s` : null),
       historyLine("falha", agent.failure_code),

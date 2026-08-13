@@ -235,7 +235,7 @@ def test_claim_verifier_never_selects_an_earlier_partial_json_object(monkeypatch
 def test_transport_timeout_is_recorded_as_started_physical_attempt_not_preflight(monkeypatch):
     import socket
     from eyle.core.execution_context import ExecutionContext
-    from eyle.core.execution_trace import build_execution_trace
+    from eyle.runtime.history import build_execution_trace
     from tests.canonical import base_config
 
     cfg = base_config()
@@ -267,7 +267,7 @@ def test_transport_timeout_is_recorded_as_started_physical_attempt_not_preflight
 
 def test_true_preflight_rejection_has_no_physical_attempt(monkeypatch):
     from eyle.core.execution_context import ExecutionContext
-    from eyle.core.execution_trace import build_execution_trace
+    from eyle.runtime.history import build_execution_trace
     from tests.canonical import base_config
 
     cfg = base_config()

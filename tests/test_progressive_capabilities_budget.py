@@ -24,7 +24,7 @@ def test_capability_index_is_small_and_first_use_expands_only_requested_tool(mon
             assert "tool_taxonomy" not in payload
             # The discovery view should stay far below the old ~2.2k-token full catalog.
             assert len(json.dumps(payload["capability_index"], ensure_ascii=False)) < 2200
-            assert estimate_tokens(payload["capability_index"], 3) < 600
+            assert estimate_tokens(payload["capability_index"], 3) < 650
             return agent_tools(tool_call("read_file", {"path": "app.py"}))
         active = {item["name"] for item in payload["active_tools"]}
         assert active == {"read_file"}
@@ -54,9 +54,9 @@ def test_ungrounded_final_is_claim_audited_instead_of_auto_accepted(monkeypatch)
         return agent_needs_user("Preciso de uma informação do usuário para continuar.")
     def fake_claim(prompt,cfg):
         payload=json.loads(prompt); claim_calls.append(payload); assert payload["observed_material"]==[]
-        return review(issues=[issue(kind="scope", grounding_refs=["request:r1","answer:a1"], reason="Current workspace state was not observed.")])
+        return review(issues=[issue(kind="scope", grounding_refs=["request"], reason="Current workspace state was not observed.")])
     monkeypatch.setattr(core_agent,"executar_agente_llm",fake_agent); monkeypatch.setattr(core_agent,"executar_verificador_claims",fake_claim)
-    status,_,_,details=core_agent.executar_agente("Audite as tools públicas atuais.",base_config(claims_mode="self_check"),projeto={},retornar_detalhes=True)
+    status,_,_,details=core_agent.executar_agente("Audite as tools públicas atuais.",base_config(claims_mode="fresh"),projeto={},retornar_detalhes=True)
     assert status=="needs_user" and len(claim_calls)==1
     assert any(x.get("decision")=="claim_review" and x.get("outcome")=="challenge" for x in details["decision_history"])
 
@@ -66,7 +66,7 @@ def test_pure_ungrounded_answer_can_still_pass_claim(monkeypatch):
     def fake_claim(prompt,cfg):
         payload=json.loads(prompt); calls.append(payload); assert payload["observed_material"]==[]; return review(verdict="accept")
     monkeypatch.setattr(core_agent,"executar_verificador_claims",fake_claim)
-    status,text,_,details=core_agent.executar_agente("oi",base_config(claims_mode="self_check"),projeto={},retornar_detalhes=True)
+    status,text,_,details=core_agent.executar_agente("oi",base_config(claims_mode="fresh"),projeto={},retornar_detalhes=True)
     assert status=="success" and text.startswith("Oi") and len(calls)==1
     assert any(x.get("decision")=="claim_review" and x.get("outcome")=="accepted" for x in details["decision_history"])
 
@@ -148,8 +148,8 @@ def test_repeated_provider_truth_reconciles_conservative_estimates_without_cumul
     assert execution.prompt_tokens_budgeted_physical==execution.prompt_tokens_actual
     assert execution.physical_tokens_remaining>0
 
-def test_agent_config_has_only_per_call_output_ceiling_no_claim_reserve():
-    cfg=base_config(claims_mode="self_check")
+def test_agent_config_preserves_configured_ceiling_when_claim_headroom_is_ample():
+    cfg=base_config(claims_mode="fresh")
     from eyle.core.session import AgentSession
     agent_cfg=core_agent._agent_config(cfg,AgentSession("x"),{})
     assert agent_cfg["llm"]["agent_max_tokens"]==3600

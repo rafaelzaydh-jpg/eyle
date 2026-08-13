@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 import eyle.core.tools as tools
-from eyle.core.claim_review import build_answer_anchors, compact_grounding, review_prompt
+from eyle.core.claim_review import compact_grounding, review_prompt
 from eyle.core.tools import capability_observation_signature as observation_signature
 from tests.canonical import base_config, review, issue
 
@@ -44,19 +44,16 @@ def test_capability_index_exposes_small_enums_without_full_catalog():
     assert "direction?:incoming|outgoing|both" in index[0]
 
 
-def test_claim_packet_uses_observation_grounding_and_no_evidence_layer():
-    anchors = build_answer_anchors("Alpha. Beta.")
+def test_claim_packet_is_fresh_and_contains_only_request_answer_and_selected_material():
     grounding = {"mat-0001": {"locator": {"kind":"file","path":"x.py","line_start":1,"line_end":1}, "content_hash":"h", "content": "x=1"}}
     view = compact_grounding(grounding, ["mat-0001"], max_chars_per_item=200)
-    runtime = [{"ref": "runtime:r1", "tool": "run_command", "status": "failed", "ok": False, "executed": False}]
-    packet = json.loads(review_prompt(
-        "Alpha. Beta.", view, "Do it", answer_anchors=anchors, runtime_facts=runtime,
-    ))
-    assert packet["answer_anchors"][0]["ref"] == "answer:a1"
+    packet = json.loads(review_prompt("Alpha. Beta.", view, "Do it"))
+    assert set(packet) == {"request", "candidate_answer", "observed_material"}
+    assert packet["request"] == "Do it"
+    assert packet["candidate_answer"] == "Alpha. Beta."
     assert packet["observed_material"][0]["ref"] == "observation:mat-0001"
-    assert packet["runtime_facts"][0]["ref"] == "runtime:r1"
-    assert "investigation" not in packet
-    assert "evidence" not in packet
+    for dead in ("investigation", "task_state", "runtime_facts", "request_anchors", "answer_anchors", "evidence"):
+        assert dead not in packet
 
 
 def test_claim_parser_rejects_unprefixed_grounding_ref_locally():
@@ -69,16 +66,20 @@ def test_claim_parser_rejects_unprefixed_grounding_ref_locally():
     else:
         raise AssertionError("local Claim parser must reject noncanonical refs")
 
-def test_claim_parser_requires_canonical_answer_refs_and_rejects_removed_target_field():
+
+def test_claim_parser_rejects_removed_answer_and_target_coordinates():
     from llm.structured import StructuredResponseError, parse_claim_review_response
-    base={"kind":"unsupported","answer_ref":"a1","grounding_refs":["request:r1"],"reason":"x"}
-    try: parse_claim_review_response({"verdict":"challenge","issues":[base]})
-    except StructuredResponseError as error: assert error.code=="CLAIM_REVIEW_ANSWER_REF_INVALID"
-    else: raise AssertionError("short answer ref must fail")
-    legacy={**base,"answer_ref":"answer:a1","target_id":"investigation:T1"}
-    try: parse_claim_review_response({"verdict":"challenge","issues":[legacy]})
-    except StructuredResponseError as error: assert error.code=="CLAIM_REVIEW_ISSUE_SHAPE_INVALID"
-    else: raise AssertionError("Claim must reject Investigation coordinates")
+    canonical = {"kind":"unsupported","grounding_refs":["request"],"reason":"x"}
+    for legacy in (
+        {**canonical, "answer_ref":"answer:a1"},
+        {**canonical, "target_id":"investigation:T1"},
+    ):
+        try:
+            parse_claim_review_response({"verdict":"challenge","issues":[legacy]})
+        except StructuredResponseError as error:
+            assert error.code == "CLAIM_REVIEW_ISSUE_SHAPE_INVALID"
+        else:
+            raise AssertionError("fresh Claim must reject removed Main-state coordinates")
 
 
 def test_symbol_relations_model_view_is_bounded_but_preserves_full_counts():

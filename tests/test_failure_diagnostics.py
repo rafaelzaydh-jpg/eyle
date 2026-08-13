@@ -3,7 +3,7 @@ import json
 
 import eyle.core.agent as core_agent
 from eyle.core.session import AgentSession
-from eyle.core.write_transaction import begin as begin_write_transaction, set_status as set_write_status
+from eyle.core.transactions import begin as begin_write_transaction, set_status as set_write_status
 from eyle.runtime import service
 from tests.canonical import agent_final
 
@@ -18,7 +18,6 @@ def _config(tests_enabled=True):
         "agent": {
             "max_file_read_lines": 400,
             "claims": {"mode": "off"},
-            "context_view": {"max_source_preview_chars": 3500, "max_symbol_preview_chars": 2600, "max_search_source_chars": 600},
         },
         "codar": {
             "ativado": True,

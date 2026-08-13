@@ -79,6 +79,7 @@ class FakeFs:
         self.paths = {"/"}
         self.mkdir_calls = []
         self.copy_calls = []
+        self.copy_to_host_calls = []
 
     async def exists(self, path):
         return path in self.paths
@@ -90,6 +91,11 @@ class FakeFs:
     async def copy_from_host(self, host_path, guest_path):
         self.copy_calls.append((os.path.realpath(host_path), guest_path))
         self.paths.add(guest_path)
+
+    async def copy_to_host(self, guest_path, host_path):
+        self.copy_to_host_calls.append((guest_path, os.path.realpath(host_path)))
+        with open(host_path, "wb") as handle:
+            handle.write(b"fake-export")
 
 
 class FakeSandboxInstance:
@@ -446,3 +452,21 @@ def test_load_sdk_accepts_exact_v068_surface(monkeypatch):
     assert sdk.Network is FakeNetwork
     assert sdk.Rlimit is FakeRlimit
     assert sdk.Sandbox is FakeSandbox
+
+
+def test_windows_session_can_export_one_guest_file_via_sdk(monkeypatch, tmp_path):
+    _reset_fakes()
+    monkeypatch.setattr(msb_mod, "_windows_guest_staging_required", lambda: True)
+    monkeypatch.setattr(msb_mod, "_load_sdk", lambda: _fake_sdk())
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    session = msb_mod.MicrosandboxSession(str(snapshot), {}, _limits(), block_network=False)
+    try:
+        target = tmp_path / "candidate.zip"
+        session.copy_to_host("/tmp/candidate.zip", str(target), timeout=5)
+        assert target.read_bytes() == b"fake-export"
+        assert FakeSandbox.instance.fs.copy_to_host_calls == [
+            ("/tmp/candidate.zip", os.path.realpath(target))
+        ]
+    finally:
+        session.close()

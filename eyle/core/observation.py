@@ -1,4 +1,4 @@
-"""Canonical Runtime observation state for Eyle 2.7.5 Rev1.3.
+"""Canonical Runtime observation state for Eyle 2.7.5 Rev1.3.4.
 
 Observation owns physical tool history, replay identity, materialized grounding,
 Coverage/Frontier continuity and the pending model-facing delta.  The Main LLM
@@ -241,10 +241,8 @@ def expose_frontiers(session: Any, tool: str, model_result: Dict[str, Any]) -> L
         model_result["frontiers"] = published
     else:
         model_result.pop("frontiers", None)
-    model_result.pop("handles", None)
     detail = model_result.get("detail")
     if isinstance(detail, dict):
-        detail.pop("handles", None)
         if published:
             detail["frontiers"] = copy.deepcopy(published)
         elif "frontiers" in detail:
@@ -315,7 +313,6 @@ def _strip_private_handles(value: Any) -> Any:
     clone = copy.deepcopy(value)
     if not isinstance(clone, dict):
         return clone
-    clone.pop("handles", None)
     frontiers = clone.get("frontiers")
     if isinstance(frontiers, list):
         clone["frontiers"] = [
@@ -324,7 +321,6 @@ def _strip_private_handles(value: Any) -> Any:
         ]
     detail = clone.get("detail")
     if isinstance(detail, dict):
-        detail.pop("handles", None)
         if isinstance(detail.get("frontiers"), list):
             detail["frontiers"] = [
                 {k: v for k, v in item.items() if k != "handle"}

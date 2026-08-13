@@ -3,18 +3,14 @@ from __future__ import annotations
 import eyle.core.agent as core_agent
 import eyle.core.tools as tools
 from eyle.core.tools import capability_observation_signature as observation_signature
-from eyle.core.claim_review import (
-    build_answer_anchors,
-    build_request_anchors,
-    normalize_claim_review,
-)
+from eyle.core.claim_review import normalize_claim_review
 from eyle.core.investigation import apply_investigation_updates
 from eyle.core.observation import (
     material_items,
     record,
 )
 from eyle.core.session import AgentSession
-from llm.structured import contract_instruction, claim_review_output_budget, claim_review_contract_max_serialized_chars, schema_for_profile
+from llm.structured import contract_instruction, schema_for_profile
 from tests.canonical import base_config, review, issue
 
 
@@ -112,30 +108,26 @@ def test_investigation_grounding_points_directly_to_observed_material(tmp_path):
     assert updated[0]["grounding_ids"] == ["mat-0001"]
 
 
-def test_request_anchors_are_literal_coordinates_not_requirements():
-    request = "Give me five examples. If only three are established, say so."
-    anchors = build_request_anchors(request, max_chars=24)
-    assert anchors
-    assert [item["ref"] for item in anchors] == [f"request:r{i}" for i in range(1, len(anchors) + 1)]
-    assert all(item["text"] in request for item in anchors)
-    assert all(set(item) == {"id", "ref", "text", "start", "end"} for item in anchors)
-
-
-def test_claim_contract_instruction_matches_current_schema_shape():
+def test_claim_contract_instruction_matches_fresh_schema_shape():
     instruction = contract_instruction("claim_verifier")
     assert "{verdict,issues}" in instruction
     assert "accept|challenge" in instruction
-    assert "request:rN" in instruction
+    assert "{kind,grounding_refs,reason}" in instruction
+    assert "request or observation:mat-*" in instruction
+    assert "answer_ref" not in instruction
+    assert "runtime:" not in instruction
+
 
 def test_claim_accept_cannot_carry_issues():
     from llm.structured import StructuredResponseError, parse_claim_review_response
-    raw = {"verdict":"accept","issues":[{"kind":"omission","answer_ref":"answer:a1","grounding_refs":["request:r1","answer:a1"],"reason":"B is omitted."}]}
+    raw = {"verdict":"accept","issues":[{"kind":"omission","grounding_refs":["request"],"reason":"B is omitted."}]}
     try:
         parse_claim_review_response(raw)
     except StructuredResponseError as error:
         assert error.code == "CLAIM_REVIEW_ACCEPT_WITH_ISSUES"
     else:
         raise AssertionError("accept with blockers must be rejected")
+
 
 def test_claim_challenge_requires_concrete_issue():
     from llm.structured import StructuredResponseError, parse_claim_review_response
@@ -146,29 +138,30 @@ def test_claim_challenge_requires_concrete_issue():
     else:
         raise AssertionError("challenge without blocker must be rejected")
 
+
 def test_claim_issue_accepts_request_coordinate_and_rejects_unknown_prefix():
     from llm.structured import StructuredResponseError, parse_claim_review_response
-    ok={"verdict":"challenge","issues":[{"kind":"unsupported","answer_ref":"answer:a1","grounding_refs":["request"],"reason":"x"}]}
+    ok={"verdict":"challenge","issues":[{"kind":"unsupported","grounding_refs":["request"],"reason":"x"}]}
     assert parse_claim_review_response(ok)["issues"][0]["grounding_refs"]==["request"]
     bad={"verdict":"challenge","issues":[{**ok["issues"][0],"grounding_refs":["mystery:x"]}]}
-    try: parse_claim_review_response(bad)
-    except StructuredResponseError as error: assert error.code=="CLAIM_REVIEW_GROUNDING_REF_FORMAT_INVALID"
-    else: raise AssertionError("unknown coordinate prefix must fail")
-
-def test_claim_output_budget_is_derived_from_bounded_contract_not_task_size():
-    budget = claim_review_output_budget()
-    assert budget == claim_review_contract_max_serialized_chars() + 256
-    assert budget > 520
-    assert claim_review_output_budget(available_tokens=budget - 1) == budget - 1
+    try:
+        parse_claim_review_response(bad)
+    except StructuredResponseError as error:
+        assert error.code=="CLAIM_REVIEW_GROUNDING_REF_FORMAT_INVALID"
+    else:
+        raise AssertionError("unknown coordinate prefix must fail")
 
 
-def test_claim_schema_bounds_the_protocol_artifact():
+def test_claim_schema_has_protocol_shape_without_semantic_quotas():
     schema = schema_for_profile("claim_verifier")
     issues = schema["properties"]["issues"]
     issue_schema = issues["items"]
-    assert issues["maxItems"] == 3
-    assert issue_schema["properties"]["grounding_refs"]["maxItems"] == 4
-    assert issue_schema["properties"]["reason"]["maxLength"] == 160
+    assert "maxItems" not in issues
+    assert "maxItems" not in issue_schema["properties"]["grounding_refs"]
+    assert "maxLength" not in issue_schema["properties"]["reason"]
+    assert set(issue_schema["properties"]) == {"kind", "grounding_refs", "reason"}
+    assert "unsafe" in issue_schema["properties"]["kind"]["enum"]
+
 
 def test_agent_prompt_exposes_physical_frontier_without_prescribing_tool_strategy():
     from llm.executar import PROMPT_AGENTE
@@ -208,7 +201,7 @@ def test_old_open_frontier_remains_in_main_navigation_after_recency_compaction(t
         read = tools.executar_tool("read_file", args, context)
         _observe(session, "read_file", args, read, context["config"])
 
-    projected = core_agent._project_observation_map(session, recent_limit=3)
+    projected = core_agent._project_observation_map(session)
     retained = [
         frontier for item in projected for frontier in (item.get("frontiers") or [])
         if frontier.get("id") == frontier_id
@@ -218,51 +211,37 @@ def test_old_open_frontier_remains_in_main_navigation_after_recency_compaction(t
     assert any(item.get("retained_for") == "open_frontiers" for item in projected)
 
 
-def test_claim_local_validation_rejects_protocol_growth_beyond_schema_bounds():
-    from llm.structured import StructuredResponseError, parse_claim_review_response
-    four = [
-        {"kind": "unsupported", "answer_ref": "answer:a1", "grounding_refs": ["request:r1"], "reason": "x"}
-        for _ in range(4)
+def test_claim_local_validation_does_not_impose_semantic_blocker_quota():
+    from llm.structured import parse_claim_review_response
+    many = [
+        {"kind": "unsupported", "grounding_refs": ["request"], "reason": f"blocker {index}"}
+        for index in range(8)
     ]
-    try:
-        parse_claim_review_response({"verdict": "challenge", "issues": four})
-    except StructuredResponseError as error:
-        assert error.code == "CLAIM_REVIEW_ISSUES_TOO_MANY"
-    else:
-        raise AssertionError("Claim output must stay bounded to the canonical blocker set")
-
-    too_many_refs = {
-        "verdict": "challenge",
-        "issues": [{
-            "kind": "unsupported", "answer_ref": "answer:a1",
-            "grounding_refs": ["request:r1", "answer:a1", "runtime:r1", "runtime:r2", "runtime:r3"],
-            "reason": "x",
-        }],
-    }
-    try:
-        parse_claim_review_response(too_many_refs)
-    except StructuredResponseError as error:
-        assert error.code == "CLAIM_REVIEW_GROUNDING_REFS_TOO_MANY"
-    else:
-        raise AssertionError("Claim issue references must stay physically bounded")
+    parsed = parse_claim_review_response({"verdict": "challenge", "issues": many})
+    assert len(parsed["issues"]) == 8
 
 
-def test_claim_normalizer_enforces_same_bounds_as_structured_contract():
+def test_claim_normalizer_validates_coordinates_not_reason_length():
     from eyle.core.claim_review import normalize_claim_review
-    grounding = {}
-    anchors = [{"ref": "answer:a1", "id": "a1", "text": "x", "start": 0, "end": 1}]
-    req = [{"ref": "request:r1", "id": "r1", "text": "x", "start": 0, "end": 1}]
     raw = {
         "verdict": "challenge",
         "issues": [{
             "kind": "unsupported",
-            "answer_ref": "answer:a1",
-            "grounding_refs": ["request:r1"],
-            "reason": "x" * 161,
+            "grounding_refs": ["request"],
+            "reason": "x" * 1200,
         }],
     }
-    ok, reason, _ = normalize_claim_review(
-        raw, grounding, answer="x", answer_anchors=anchors, request_anchors=req,
-    )
+    ok, reason, normalized = normalize_claim_review(raw, {}, visible_grounding_ids=[])
+    assert ok is True and reason == "ok"
+    assert len(normalized["issues"][0]["reason"]) == 1200
+
+
+def test_claim_normalizer_rejects_material_not_supplied_to_fresh_call():
+    from eyle.core.claim_review import normalize_claim_review
+    raw = {
+        "verdict": "challenge",
+        "issues": [{"kind": "unsupported", "grounding_refs": ["observation:mat-9999"], "reason": "x"}],
+    }
+    ok, reason, _ = normalize_claim_review(raw, {}, visible_grounding_ids=[])
     assert ok is False
-    assert reason == "CLAIM_REVIEW_REASON_TOO_LONG:1"
+    assert reason.startswith("CLAIM_REVIEW_GROUNDING_OBSERVATION_NOT_VISIBLE")

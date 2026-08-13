@@ -22,7 +22,7 @@ def test_one_global_claim_review_can_accept_grounded_final_without_investigation
     monkeypatch.setattr(core_agent, "executar_verificador_claims", fake_claim)
     (tmp_path / "a.py").write_text("x=1\n", encoding="utf-8")
     status, _, _, details = core_agent.executar_agente(
-        "Meça o projeto.", base_config(claims_mode="self_check"),
+        "Meça o projeto.", base_config(claims_mode="fresh"),
         projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True,
     )
     assert status == "success"
@@ -48,10 +48,10 @@ def test_scope_gap_with_null_target_never_creates_runtime_target(monkeypatch, tm
         )
     def fake_claim(prompt, _config):
         payload=json.loads(prompt); claim_calls.append(payload)
-        return review(issues=[issue(kind="scope", answer_ref="answer:a1", grounding_refs=["request:r1","answer:a1"], reason="Current scope does not establish active reachability.")])
+        return review(issues=[issue(kind="scope", grounding_refs=["request"], reason="Current scope does not establish active reachability.")])
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake_agent)
     monkeypatch.setattr(core_agent, "executar_verificador_claims", fake_claim)
-    cfg=base_config(claims_mode="self_check")
+    cfg=base_config(claims_mode="fresh")
     status, _, _, details=core_agent.executar_agente("Isso participa do runtime?", cfg, projeto={"caminho_origem":str(tmp_path)}, retornar_detalhes=True)
     assert status == "needs_user"
     assert len(claim_calls)==1
@@ -77,7 +77,7 @@ def test_claim_truncation_gets_one_protocol_recovery_then_accepts(monkeypatch, t
 
     monkeypatch.setattr(core_agent, "executar_verificador_claims", fake_claim)
     status, text, _, details = core_agent.executar_agente(
-        "Quanto é 2+2?", base_config(claims_mode="self_check"),
+        "Quanto é 2+2?", base_config(claims_mode="fresh"),
         projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True,
     )
     assert status == "success"
@@ -104,7 +104,7 @@ def test_claim_second_truncation_remains_fail_closed(monkeypatch, tmp_path):
 
     monkeypatch.setattr(core_agent, "executar_verificador_claims", fake_claim)
     status, _, _, details = core_agent.executar_agente(
-        "Quanto é 2+2?", base_config(claims_mode="self_check"),
+        "Quanto é 2+2?", base_config(claims_mode="fresh"),
         projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True,
     )
     assert status == "failed"

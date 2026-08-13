@@ -178,7 +178,7 @@ def test_search_negative_observation_preserves_protected_coverage_boundary(tmp_p
     assert result["coverage"]["facts"]["coverage_scope"] == "readable_workspace_files"
     assert any(item.get("kind") == "protected_resource" and item.get("count") == 1 for item in result["coverage"]["boundaries"])
     assert len(result["observations"]) == 1
-    assert result["observations"][0]["locator"] == {"kind": "capability", "name": "search_code"}
+    assert result["observations"][0]["locator"] == {"kind": "capability", "name": "search_code", "source": "workspace"}
 
 
 def test_sandbox_omits_symlink_and_hardlink_aliases_of_protected_resource(tmp_path):
