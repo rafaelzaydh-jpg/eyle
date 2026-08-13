@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from typing import Any, Iterable
 
-from eyle.core.memory_store import (
+from eyle.providers.memory_impl.memory_store import (
     advance_continuation,
     candidate_ids,
     load_continuation,

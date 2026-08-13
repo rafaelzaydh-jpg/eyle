@@ -1,3 +1,4 @@
+from tests.canonical import run_agent
 import copy
 import json
 
@@ -15,7 +16,7 @@ from eyle.core.tasks import apply_task_updates, task_state_view
 from eyle.runtime.queue import QUEUE_SCHEMA_VERSION
 from llm.executar import PROMPT_AGENTE
 from llm.structured import StructuredResponseError, parse_agent_response
-from tests.canonical import agent_final, agent_tools, base_config, investigation_target, task_item, tool_call
+from tests.canonical import agent_complete, agent_tools, base_config, investigation_target, task_item, tool_call
 
 
 def test_established_investigation_requires_semantic_conclusion_after_grounding_exists():
@@ -85,7 +86,7 @@ def test_task_result_remains_the_semantic_completion_of_criteria():
 
 
 def test_structured_contract_rejects_established_investigation_without_conclusion():
-    payload = agent_final("done", investigation=[investigation_target(
+    payload = agent_complete("done", investigation=[investigation_target(
         status="established", grounding_ids=["mat-0001"], conclusion="",
     )])
     with pytest.raises(StructuredResponseError, match="conclusion is required"):
@@ -93,14 +94,14 @@ def test_structured_contract_rejects_established_investigation_without_conclusio
 
 
 def test_session_and_queue_advance_for_new_persisted_investigation_shape():
-    assert SESSION_SCHEMA_VERSION == "2.7.5-r1.4.3"
+    assert SESSION_SCHEMA_VERSION == "2.7.5-r1.5.1"
+    # Queue storage shape did not change in Rev1.5; do not bump persistence schemas cosmetically.
     assert QUEUE_SCHEMA_VERSION == "2.7.5-r1.4.3"
     state = AgentSession("x").to_dict()
     old = copy.deepcopy(state)
     old["session_schema_version"] = "2.7.5-r1.4"
     with pytest.raises(ValueError, match="SESSION_SCHEMA_INCOMPATIBLE"):
         AgentSession.from_dict(old)
-
 
 def test_persisted_session_rejects_investigation_without_conclusion():
     state = AgentSession("x").to_dict()
@@ -112,17 +113,17 @@ def test_persisted_session_rejects_investigation_without_conclusion():
 
 
 def test_prompt_expresses_meaning_without_mandating_investigation_or_task():
-    assert "Investigation.conclusion states what grounding establishes about its goal" in PROMPT_AGENTE
-    assert "Task.result states what was achieved against completion_criteria" in PROMPT_AGENTE
+    assert "Investigation is an optional Main-owned notebook" in PROMPT_AGENTE
+    assert "Task is an optional Main-owned commitment" in PROMPT_AGENTE
+    assert "Do not create either merely because the structures exist" in PROMPT_AGENTE
     lower = PROMPT_AGENTE.lower()
     assert "must create an investigation" not in lower
     assert "must create a task" not in lower
 
-
 def test_main_can_still_answer_directly_without_semantic_commitments(monkeypatch, tmp_path):
-    monkeypatch.setattr(agent, "executar_agente_llm", lambda prompt, cfg: agent_final("Olá!"))
-    status, text, _, details = agent.executar_agente(
-        "oi", base_config(), projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True,
+    monkeypatch.setattr(agent, "executar_agente_llm", lambda prompt, cfg: agent_complete("Olá!"))
+    status, text, _, details = run_agent(agent, 
+        "oi", base_config(), provider_context={"standard": {"caminho_origem": str(tmp_path)}}, retornar_detalhes=True,
     )
     assert status == "success" and text == "Olá!"
     assert details["investigation"] == [] and details["tasks"] == []

@@ -3,7 +3,9 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 
-from eyle.core import agent, observation, tools
+from eyle.core import agent
+from eyle.runtime import observation
+from eyle.providers import standard as tools
 
 
 def test_generic_material_accepts_non_file_locator():
@@ -24,7 +26,7 @@ def test_generic_material_accepts_non_file_locator():
 
 def test_observation_core_does_not_name_public_capabilities():
     source = Path(observation.__file__).read_text(encoding="utf-8")
-    for name in tools.TOOLS:
+    for name in tools.CAPABILITIES:
         assert f'"{name}"' not in source
         assert f"'{name}'" not in source
     assert "material_candidates_from_tool" not in source
@@ -33,13 +35,13 @@ def test_observation_core_does_not_name_public_capabilities():
 
 def test_agent_has_no_capability_specific_branching():
     source = Path(agent.__file__).read_text(encoding="utf-8")
-    for name in tools.TOOLS:
+    for name in tools.CAPABILITIES:
         assert f'if tool == "{name}"' not in source
         assert f'if tool in {{"{name}"' not in source
         assert f'elif tool == "{name}"' not in source
 
 
 def test_grounding_capabilities_own_material_extraction():
-    for name, spec in tools.TOOLS.items():
+    for name, spec in tools.CAPABILITIES.items():
         if spec.get("produces_grounding"):
             assert callable(spec.get("observe")), name

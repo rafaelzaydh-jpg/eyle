@@ -1,3 +1,95 @@
+# Eyle 2.7.5 Rev1.5.1 — Host-Injected Universal Capabilities
+
+- **Host owns the body:** Core no longer has a global/default Registry. `eyle/host.py` explicitly assembles Providers and provider context; `runtime/service.py` consumes the Host without importing `standard` domain code.
+- **Confirmation returns to Main:** confirmed capability execution records Observation/effect and resumes Main. Provider confirmation cannot terminate the task with its own message.
+- **Universal contracts moved below Core:** capability/Observation/Coverage/effect contracts live under `eyle/contracts/`; Providers and capability infrastructure no longer import `eyle.core.*`.
+- **Mechanical effect coherence:** Registry rejects impossible combinations between declared `observe|execute|mutate`, `executed`, `changed` and `physical_effect`.
+- **Canonical namespacing:** Providers register local capability IDs; Registry exposes `provider.local` IDs automatically, allowing multiple Providers to use the same local name safely.
+- **Optional Main notebooks:** `investigation_updates` / `task_updates` are optional and omitted when unused rather than emitted as empty ceremony every turn.
+- **Memory separated:** persistent cognitive Memory moved from the workspace provider to independent `memory.search` / `memory.store` capabilities.
+- **Active request refinement:** immutable `request` gains bounded authoritative `request_context` for answers supplied during `await_user`; resumed work no longer remains semantically frozen on the original incomplete wording.
+- **HTTP retry fixed:** transient OpenAI-compatible HTTP statuses retain transient classification through backend translation, allowing configured retry.
+- **Provider-host validation:** tests include an end-to-end PetBot Host through the public Runtime service, plus namespacing, effect-coherence, confirmation-return, request-context and HTTP-retry regression coverage.
+- Session/config identity advances to `2.7.5-r1.5.1`; Queue remains `2.7.5-r1.4.3`; pending continuation remains schema `4`.
+
+---
+
+# Eyle 2.7.5 Rev1.5.0 — Capability Provider Architecture
+
+## Arquitetura
+
+- Core deixa de possuir o catálogo de domínio: `eyle/core/tools.py` foi removido.
+- Entrou `eyle/capabilities/` com contrato/registry genéricos e providers independentes.
+- O protocolo da Main agora tem somente `capability_calls`, `await_user` e `complete`.
+- `patches` deixa de ser ação especial; mutação de workspace é a capability `workspace_transaction` do provider `standard`.
+- Capabilities se descrevem com provider, propósito, inputs, returns, caveats, limits, effect e confirmação explícita.
+- O prompt fixo não conhece ferramentas do provider padrão nem regras por palavra-chave. Capabilities são recursos, não fases.
+- `completion_mode` foi removido. `complete` conserva apenas `grounding_ids`/`effect_ids` como coordenadas opcionais.
+- Efeitos físicos agora são universais: `{resource, operation, persistence, changed}`; mudanças persistentes avançam `reality_epoch`.
+- `provider_context` substitui o conceito central de projeto no Core; continuations usam `provider_context_hash`.
+- Configuração de domínio vive em `providers.*` e é validada pelo próprio provider.
+- Estado de sandbox/container saiu de `ExecutionContext` e vive em `provider_state` privado com cleanup genérico.
+- Módulos de workspace/Git/sandbox/símbolos/memória foram movidos de `eyle/core/` para `eyle/providers/standard_impl/`.
+- Falha model-facing de escrita foi generalizada para `execution_failure`.
+
+## Confiabilidade e validação
+
+- Confirmações de capabilities são provider-owned e efeitos confirmados entram no Observation/`eff-*`.
+- Toda capability model-facing declara `confirmation=none|required` explicitamente.
+- Queue permanece no schema `2.7.5-r1.4.3` porque sua forma persistida não mudou; Session/config avançam para `2.7.5-r1.5.0`; pending continuation é schema `4`.
+- Testes incluem provider PetBot para provar observação e confirmação/mutação sem alterações no Core.
+
+---
+
+## 2.7.5 Rev1.4.8 — Completion Basis — 2026-08-13
+
+- **Complete ↔ physical basis:** `complete` now carries `completion_mode=direct|observed|effect`, `grounding_ids` and `effect_ids`. `direct` requires no physical refs; `observed` requires current `mat-*` Material; `effect` requires at least one current `eff-*` physical-effect coordinate.
+- **Stable `eff-*` coordinates:** executed capability results that expose `physical_effect` receive a Runtime-owned `eff-*` id derived directly from the canonical Observation event. No second semantic/effect ledger was added.
+- **Runtime stays mechanical:** Complete validation checks only shape, canonical IDs, existence of referenced Material/effects and already-created Main commitments. Runtime still does not read answer prose, classify the Request, infer which capability should have been used or judge semantic truth.
+- **Explicit model teaching:** the fixed Main contract now explains `direct`, `observed` and `effect`, the difference between planning and execution, capability availability versus execution, sandbox versus real workspace, Material versus Memory, and real patches versus isolated command snapshots.
+- **Full capability contracts before selection:** Main now sees model-readable purpose, effect class, inputs, returns, caveats and limits for every physically available capability before first use. The old tiny discovery signature + two recently-expanded contracts is no longer the default model surface.
+- **Cost-driven token pressure removed:** deleted `agent.max_total_tokens`, `MAX_TOTAL_TOKENS_EXCEEDED`, cumulative physical-token prompt steering and turn/token-pressure shrinking of fresh capability results. Token accounting remains telemetry only.
+- **Physical context safety preserved:** the real per-call `context_window_tokens` ceiling, safety margin, output reservation, wall-clock deadline, capability limits, sandbox resource limits and final context-window crop remain. Context is compacted only when it must physically fit the provider/model window, not merely to reduce billed tokens.
+- No Claim, planner, classifier, mandatory Task/Investigation, semantic verifier or `Commitment` object was added. The change restores the lost Intent/Reality link without rebuilding the removed coordination machinery.
+- Session/Queue remain `2.7.5-r1.4.3`; Pending remains schema `2`; Memory Kernel schema is unchanged. Config/release identity advances to `2.7.5-r1.4.8`.
+
+## 2.7.5 Rev1.4.7 — Completion Semantics — 2026-08-13
+
+- Clean-break rename of the model-facing terminal action: `final` → `complete`.
+- `complete` means Main considers the requested work already complete, not merely planned, and its claims supported by the current basis. Payload remains exactly `answer`, `limitations`, `grounding_ids`.
+- Runtime decision history and validation feedback use `complete` / `COMPLETE_*`; legacy `action.kind=final` is rejected, not aliased or migrated.
+- No new planner, verifier, Investigation/Task requirement, capability, persisted state, or workflow stage was introduced.
+- Rev1.4.6 `physical_effect`, Rev1.4.5 self-source identity, Rev1.4.4 `await_user`, Rev1.4.3 Semantic Completion and Memory Kernel remain unchanged.
+- Session/Queue remain `2.7.5-r1.4.3`; Pending remains schema `2`; Memory Kernel schema is unchanged. Config/release identity advances to `2.7.5-r1.4.7`.
+
+## 2.7.5 Rev1.4.6 — Supported Final — 2026-08-13
+
+- **Supported Final:** `final` now means Main considers the requested work complete, not merely planned, and its claims supported by its current basis. No new boolean confidence/sufficiency field and no second LLM were added.
+- **Direct grounding semantics:** `final.grounding_ids` is explicitly the set of current `mat-*` Materials Main says directly support Final claims; `limitations` names relevant remaining gaps. Runtime still validates only physical references and previously created commitments.
+- **Canonical physical effects:** capability result envelopes gain optional normalized `physical_effect = {target, persistence, real_workspace_changed, real_eyle_changed}`.
+- `run_command` reports an isolated per-job snapshot and explicitly says real workspace/Eyle Root are unchanged. Its effect is copied into the generated Material as well as the fresh capability result.
+- `run_tests`, `export_sandbox_zip` and `memory_store` expose their distinct physical targets/persistence. Confirmed patches identify `real_workspace` as the persistent mutation target.
+- No forced Task/Investigation/tool workflow was introduced. Simple conversation can still go directly to Final.
+- Session/Queue remain `2.7.5-r1.4.3`; Pending remains schema `2`; Memory Kernel schema is unchanged. Config/release identity advances to `2.7.5-r1.4.6`.
+
+## 2.7.5 Rev1.4.5 — Self Source Identity — 2026-08-13
+
+- `project.identity` now exposes `running_instance=Eyle Root` and `self_source=eyle` as physical runtime facts.
+- `project.sources.workspace.kind=user_workspace`; `project.sources.eyle.kind=running_eyle_root`. Main can now understand that `source=eyle` is its own running implementation tree, not an opaque source enum.
+- No routing rule was added: Runtime exposes identity and availability; Main still decides whether observation is needed.
+- Root protection is unchanged: direct self writes remain forbidden; `source=eyle` is read-only except inside isolated sandbox experiments.
+- `await_user`, Semantic Completion, Memory Kernel, 17 public capabilities, Session/Queue schemas (`2.7.5-r1.4.3`) and Pending schema (`2`) remain unchanged. Config/release identity advances to `2.7.5-r1.4.5`.
+
+## 2.7.5 Rev1.4.4 — Supervised Continuation — 2026-08-13
+
+- Replaced Main action `needs_user` with `await_user`: `{question, reason, options[]}`. Main owns whether a human dependency exists and authors the meaningful response paths.
+- Replaced pending `user_input` with clean-break pending schema `2` / `await_user`. Runtime persists the full open AgentSession and resumes the same canonical Request after the response.
+- Removed request concatenation of clarification blocks. User resolutions are retained as bounded prior conversation, preventing repeated supervision from growing `session.request`.
+- `await_user` does not expire while waiting for human input; explicit cancel ends it. Runtime write confirmations remain separate and keep their configured TTL.
+- Added model-facing `project.sources.workspace` and `project.sources.eyle` physical descriptors. Empty workspace is no longer ambiguous with unavailable Eyle self-source.
+- Added web controls for Main-authored options, custom response and cancel. Pending session/private state is never exposed to the browser.
+- Session/Queue stay at `2.7.5-r1.4.3`; config/release identity advances to `2.7.5-r1.4.4`; Memory Kernel schema remains unchanged.
+
 ## 2.7.5 Rev1.4.3 — Semantic Completion — 2026-08-13
 
 - **Investigation gained semantic closure:** canonical Investigation now includes `conclusion`, preserving what Main believes selected Material establishes about the Investigation goal.

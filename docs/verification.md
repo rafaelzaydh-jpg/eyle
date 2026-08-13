@@ -1,4 +1,4 @@
-# Verification Direction — Eyle 2.7.5 Rev1.4.3
+# Verification Direction — Eyle 2.7.5 Rev1.4.8
 
 Rev1.4 removes the universal Claim reviewer. Reliability is split into two layers with different authority.
 
@@ -15,7 +15,7 @@ Main closes commitments
         ↓
 Runtime verifies structural closure + committed Material continuity
         ↓
-Final
+Complete
 ```
 
 Runtime can decide:
@@ -25,7 +25,7 @@ Runtime can decide:
 - whether an established Investigation contains a non-empty Main-authored `conclusion`;
 - whether a closed Task contains a non-empty `result`;
 - whether a completed parent retains an open child;
-- whether committed Material IDs appear in Final grounding;
+- whether committed Material IDs appear in Complete grounding;
 - whether schemas/status transitions are valid.
 
 Runtime cannot decide:

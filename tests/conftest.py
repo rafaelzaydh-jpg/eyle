@@ -7,7 +7,6 @@ import pytest
 @pytest.fixture(autouse=True)
 def _isolate_runtime_state(monkeypatch, tmp_path):
     """Never let tests write persistent Runtime state into the repository tree."""
-    from eyle.core import tools
     from eyle.runtime import limiter, queue, service, telemetry
 
     state_root = tmp_path / "eyle-runtime-state"
@@ -22,6 +21,5 @@ def _isolate_runtime_state(monkeypatch, tmp_path):
     monkeypatch.setattr(queue, "DB_PATH", str(context_dir / "fila.sqlite3"))
     monkeypatch.setattr(limiter, "DB_PATH", str(context_dir / "llm_limiter.sqlite3"))
     monkeypatch.setattr(telemetry, "DB_PATH", str(context_dir / "telemetry.sqlite3"))
-    monkeypatch.setattr(tools, "MEMORY_DIR", str(memory_dir / "project"))
     limiter._READY.clear()
     telemetry._READY.clear()

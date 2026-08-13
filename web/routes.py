@@ -109,7 +109,7 @@ def cabecalhos_seguros(resposta):
 
 
 def _carregar_config_web():
-    config = carregar_config_validada(CONFIG_PATH)
+    config = carregar_config_validada(CONFIG_PATH, eyle_service.HOST.registry)
     web = config.get("web", {}) if isinstance(config, dict) else {}
     return web if isinstance(web, dict) else {}
 
@@ -396,7 +396,7 @@ def status():
     projeto = eyle_service.carregar_projeto()
     caminho_projeto = projeto.get("caminho_origem") if isinstance(projeto, dict) else None
     caminhos_internos = (caminho_projeto, BASE_DIR)
-    config = carregar_config_validada(CONFIG_PATH)
+    config = carregar_config_validada(CONFIG_PATH, eyle_service.HOST.registry)
     worker_cfg = config.get("worker", {})
     telemetry_cfg = config.get("telemetry", {})
     fila = _redigir_caminhos_internos(
@@ -419,13 +419,14 @@ def status():
         "eventos_na_fila": queue.tamanho(),
         "fila": fila,
         "metricas": metricas,
+        "await_user": eyle_service.carregar_await_user_publico(),
         "avisos_config": config.get("_config_warnings", []),
     })
 
 
 @app.route("/health", methods=["GET"])
 def health():
-    config = carregar_config_validada(CONFIG_PATH)
+    config = carregar_config_validada(CONFIG_PATH, eyle_service.HOST.registry)
     worker_cfg = config.get("worker", {})
     fila = queue.estatisticas(
         stale_after_seconds=worker_cfg.get("stale_worker_seconds", 30),
@@ -475,7 +476,7 @@ if __name__ == "__main__":
     from eyle.runtime.worker import iniciar_em_thread
     from llm.executar import diagnosticar_backend
 
-    config = carregar_config_validada(CONFIG_PATH)
+    config = carregar_config_validada(CONFIG_PATH, eyle_service.HOST.registry)
     diagnostico_llm = diagnosticar_backend(config)
     if diagnostico_llm.get("ok"):
         print(f"[web] Backend LLM online: {diagnostico_llm.get('base_url')}")

@@ -10,12 +10,11 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from .decision import empty_ledger as empty_decision_ledger, persisted_view as persisted_decisions
-from .observation import empty_ledger as empty_observation_ledger, material_index_view, persisted_view as persisted_observations
-from .transactions import empty_transaction
+from eyle.runtime.observation import empty_ledger as empty_observation_ledger, material_index_view, persisted_view as persisted_observations
 from .investigation import validate_investigation_state
 from .tasks import validate_task_state
 
-SESSION_SCHEMA_VERSION = "2.7.5-r1.4.3"
+SESSION_SCHEMA_VERSION = "2.7.5-r1.5.1"
 
 
 @dataclass
@@ -23,13 +22,14 @@ class AgentSession:
     request: str
     execution_id: Optional[str] = None
     turn: int = 0
-    workspace_epoch: int = 0
+    reality_epoch: int = 0
     observation_ledger: Dict[str, Any] = field(default_factory=empty_observation_ledger)
     decision_ledger: Dict[str, Any] = field(default_factory=empty_decision_ledger)
     investigation: List[Dict[str, Any]] = field(default_factory=list)
     tasks: List[Dict[str, Any]] = field(default_factory=list)
     conversation_background: List[Dict[str, Any]] = field(default_factory=list)
-    write_transaction: Dict[str, Any] = field(default_factory=empty_transaction)
+    request_context: List[Dict[str, Any]] = field(default_factory=list)
+    pending_capability: Dict[str, Any] = field(default_factory=dict)
 
     def grounding_index(self) -> List[Dict[str, Any]]:
         return material_index_view(self.observation_ledger)
@@ -40,21 +40,22 @@ class AgentSession:
             "request": self.request,
             "execution_id": self.execution_id,
             "turn": int(self.turn),
-            "workspace_epoch": int(self.workspace_epoch),
+            "reality_epoch": int(self.reality_epoch),
             "observation_ledger": persisted_observations(self.observation_ledger),
             "decision_ledger": persisted_decisions(self.decision_ledger),
             "investigation": [dict(item) for item in self.investigation if isinstance(item, dict)],
             "tasks": [dict(item) for item in self.tasks if isinstance(item, dict)],
             "conversation_background": [dict(item) for item in self.conversation_background if isinstance(item, dict)],
-            "write_transaction": dict(self.write_transaction or {}),
+            "request_context": [dict(item) for item in self.request_context if isinstance(item, dict)],
+            "pending_capability": dict(self.pending_capability or {}),
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AgentSession":
         expected_top_level = {
-            "session_schema_version", "request", "execution_id", "turn", "workspace_epoch",
+            "session_schema_version", "request", "execution_id", "turn", "reality_epoch",
             "observation_ledger", "decision_ledger", "investigation", "tasks",
-            "conversation_background", "write_transaction",
+            "conversation_background", "request_context", "pending_capability",
         }
         if not isinstance(data, dict) or data.get("session_schema_version") != SESSION_SCHEMA_VERSION:
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
@@ -66,7 +67,7 @@ class AgentSession:
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
         if not isinstance(data["turn"], int) or isinstance(data["turn"], bool) or data["turn"] < 0:
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-        if not isinstance(data["workspace_epoch"], int) or isinstance(data["workspace_epoch"], bool) or data["workspace_epoch"] < 0:
+        if not isinstance(data["reality_epoch"], int) or isinstance(data["reality_epoch"], bool) or data["reality_epoch"] < 0:
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
 
         obs = data["observation_ledger"]
@@ -93,12 +94,14 @@ class AgentSession:
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
         if not isinstance(data["conversation_background"], list) or not all(isinstance(item, dict) for item in data["conversation_background"]):
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-        if not isinstance(data["write_transaction"], dict):
+        if not isinstance(data["request_context"], list) or not all(isinstance(item, dict) for item in data["request_context"]):
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        if not isinstance(data["pending_capability"], dict):
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
 
         session = cls(request=data["request"], execution_id=data["execution_id"])
         session.turn = data["turn"]
-        session.workspace_epoch = data["workspace_epoch"]
+        session.reality_epoch = data["reality_epoch"]
         session.observation_ledger = {
             "entries": {str(k): dict(v) for k, v in obs["entries"].items()},
             "events": [dict(item) for item in obs["events"]],
@@ -119,5 +122,6 @@ class AgentSession:
         except ValueError as error:
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE") from error
         session.conversation_background = [dict(item) for item in data["conversation_background"]]
-        session.write_transaction = dict(data["write_transaction"])
+        session.request_context = [dict(item) for item in data["request_context"]]
+        session.pending_capability = dict(data["pending_capability"])
         return session

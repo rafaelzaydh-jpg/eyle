@@ -18,6 +18,13 @@ from .security import _resolver_caminho_seguro
 from .text_hash import hash_texto
 
 
+
+def _tests_config(config):
+    providers = (config or {}).get("providers") or {}
+    standard = providers.get("standard") or {} if isinstance(providers, dict) else {}
+    tests = standard.get("tests") or {} if isinstance(standard, dict) else {}
+    return tests if isinstance(tests, dict) else {}
+
 def _unique_python_paths(paths: Iterable[str]) -> List[str]:
     result: List[str] = []
     seen = set()
@@ -130,14 +137,19 @@ def verify_after_write(config: Dict[str, Any], context: Dict[str, Any]) -> Dict[
     This code-domain verification policy belongs to the post-write boundary,
     not Agent's capability-selection logic.
     """
-    enabled = bool((((config or {}).get("codar") or {}).get("testes") or {}).get("ativado", False))
+    enabled = bool(_tests_config(config).get("enabled", False))
     if not enabled:
         return {
             "status": "skipped", "ok": True, "executed": False,
             "error_code": "TESTS_DISABLED", "detail": "Execução de testes desativada explicitamente.",
         }
-    from .tools import executar_tool
-    return executar_tool("run_tests", {}, context)
+    registry = (context or {}).get("registry")
+    if registry is None or "run_tests" not in registry.names():
+        return {
+            "status": "skipped", "ok": True, "executed": False,
+            "error_code": "TESTS_NOT_FOUND", "detail": "Capability de testes indisponível.",
+        }
+    return registry.execute("run_tests", {}, context)
 
 
 def expected_outputs_from_patches(applied_patches: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:

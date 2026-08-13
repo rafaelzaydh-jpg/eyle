@@ -59,7 +59,7 @@ JS_FRAMEWORK_PACKAGES = {
 
 
 def _scan_limits(config: Dict[str, Any]) -> Tuple[int, int, int]:
-    agent = (config or {}).get("agent") or {}
+    agent = ((((config or {}).get("providers") or {}).get("standard") or {}))
     return (
         max(100, int(agent.get("max_project_scan_entries", 20000) or 20000)),
         max(1, int(agent.get("max_project_scan_depth", 32) or 32)),

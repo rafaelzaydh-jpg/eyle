@@ -1,6 +1,6 @@
-"""Canonical Runtime observation state for Eyle 2.7.5 Rev1.4.3.
+"""Canonical Runtime observation state for Eyle 2.7.5 Rev1.5.0.
 
-Observation owns physical tool history, replay identity, materialized grounding,
+Observation owns physical capability history, replay identity, materialized grounding,
 Coverage/Frontier continuity and the pending model-facing delta.  The Main LLM
 never manages opaque Runtime handles and there is no second grounding ledger.
 """
@@ -11,8 +11,12 @@ import hashlib
 import json
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from .observation_contract import persisted_handles, persisted_snapshots, release_snapshot_handle
-from .text_hash import hash_texto
+from eyle.contracts.observation import persisted_handles, persisted_snapshots, release_snapshot_handle
+
+
+def _content_hash(value: Any) -> str:
+    canonical = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def empty_ledger() -> Dict[str, Any]:
@@ -56,6 +60,36 @@ def clear_pending_results(session: Any) -> None:
     session.observation_ledger["pending_results"] = []
 
 
+def physical_effect_items(ledger: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Return canonical physical effects derived from executed Observation events.
+
+    Effects are not a second semantic ledger. ``eff-*`` is only a stable
+    coordinate for a physical_effect already recorded inside Observation.
+    """
+    result: Dict[str, Dict[str, Any]] = {}
+    events = ledger.get("events") if isinstance(ledger, dict) else []
+    for event in events or []:
+        if not isinstance(event, dict) or event.get("executed") is not True:
+            continue
+        effect_id = str(event.get("effect_id") or "").strip()
+        public_result = event.get("result") if isinstance(event.get("result"), dict) else {}
+        effect = public_result.get("physical_effect") if isinstance(public_result, dict) else None
+        if not effect_id or not isinstance(effect, dict):
+            continue
+        result[effect_id] = {
+            "id": effect_id,
+            "event_id": event.get("event_id"),
+            "turn": event.get("turn"),
+            "capability": event.get("capability"),
+            "physical_effect": copy.deepcopy(effect),
+        }
+    return result
+
+
+def physical_effect_index_view(ledger: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [copy.deepcopy(item) for item in physical_effect_items(ledger).values()]
+
+
 # ---------------------------------------------------------------------------
 # Materialized grounding. Material is domain-neutral: capabilities provide a
 # locator plus content identity; Observation only stores and addresses it.
@@ -90,7 +124,7 @@ def register_material_candidates(ledger: Dict[str, Any], candidates: Iterable[Di
         content = item.get("content")
         content_hash = str(item.get("content_hash") or "").strip()
         if not content_hash and content is not None:
-            content_hash = hash_texto(str(content))
+            content_hash = _content_hash(str(content))
         if not content_hash:
             continue
         item["content_hash"] = content_hash
@@ -162,24 +196,24 @@ def seed_runtime_failure(ledger: Dict[str, Any], conversation_context: Any) -> L
     for message in reversed(messages):
         if not isinstance(message, dict):
             continue
-        failure = message.get("write_failure")
+        failure = message.get("execution_failure")
         if not isinstance(failure, dict) or not failure:
             continue
         detail = str(failure.get("detail") or "").strip()
         if not detail:
             continue
-        content_hash = hash_texto(detail)
+        content_hash = _content_hash(detail)
         material_id = register_runtime_material(ledger, {
-            "locator": {"kind": "runtime", "name": "write_failure"},
+            "locator": {"kind": "runtime", "name": "execution_failure"},
             "content_hash": content_hash, "content": detail,
-            "source_type": "runtime_validation", "stage": failure.get("stage"),
+            "source_type": "runtime_failure", "capability": failure.get("capability"),
             "error_code": failure.get("error_code"), "paths": list(failure.get("paths") or []),
             "rollback_confirmed": failure.get("rollback_confirmed"),
         })
         return [{
-            "tool": "runtime_validation", "status": "success", "ok": True,
+            "capability": "runtime_failure", "status": "success", "ok": True,
             "executed": False, "changed": False, "error_code": None,
-            "detail": {"grounding_id": material_id, "source_type": "runtime_validation", "stage": failure.get("stage"), "error_code": failure.get("error_code"), "content": detail[:700]},
+            "detail": {"grounding_id": material_id, "source_type": "runtime_failure", "capability": failure.get("capability"), "error_code": failure.get("error_code"), "content": detail[:700]},
             "grounding_ids": [material_id] if material_id else [],
         }]
     return []
@@ -201,7 +235,7 @@ def _frontier_id_for_handle(store: Dict[str, Dict[str, Any]], handle_id: str) ->
     return None
 
 
-def expose_frontiers(session: Any, tool: str, model_result: Dict[str, Any]) -> List[str]:
+def expose_frontiers(session: Any, capability: str, model_result: Dict[str, Any]) -> List[str]:
     """Replace opaque continuation handles with stable Main-facing Frontier refs."""
     if not isinstance(model_result, dict):
         return []
@@ -226,8 +260,8 @@ def expose_frontiers(session: Any, tool: str, model_result: Dict[str, Any]) -> L
                 store[frontier_id] = {
                     "id": frontier_id,
                     "handle": handle_id,
-                    "workspace_epoch": int(getattr(session, "workspace_epoch", 0) or 0),
-                    "source_tool": str(tool or ""),
+                    "reality_epoch": int(getattr(session, "reality_epoch", 0) or 0),
+                    "source_capability": str(capability or ""),
                     "kind": item.get("kind"),
                     "at": item.get("at"),
                     "reason": item.get("reason"),
@@ -250,13 +284,13 @@ def expose_frontiers(session: Any, tool: str, model_result: Dict[str, Any]) -> L
     return ids
 
 
-def resolve_frontier(ledger: Dict[str, Any], frontier_id: str, *, workspace_epoch: int) -> Tuple[Optional[str], Optional[str]]:
+def resolve_frontier(ledger: Dict[str, Any], frontier_id: str, *, reality_epoch: int) -> Tuple[Optional[str], Optional[str]]:
     item = frontier_store(ledger).get(str(frontier_id or ""))
     if not isinstance(item, dict):
         return None, "FRONTIER_NOT_FOUND"
     if item.get("status") != "open":
         return None, "FRONTIER_CONSUMED"
-    if int(item.get("workspace_epoch") or 0) != int(workspace_epoch or 0):
+    if int(item.get("reality_epoch") or 0) != int(reality_epoch or 0):
         return None, "FRONTIER_STALE"
     handle_id = str(item.get("handle") or "")
     if not handle_id:
@@ -280,7 +314,7 @@ def frontier_view(ledger: Dict[str, Any], ids: Optional[Iterable[str]] = None) -
         entry = {
             "id": frontier_id,
             "kind": item.get("kind"),
-            "source_tool": item.get("source_tool"),
+            "source_capability": item.get("source_capability"),
             "reason": item.get("reason"),
             "count": item.get("count"),
             "status": item.get("status"),
@@ -293,14 +327,14 @@ def frontier_view(ledger: Dict[str, Any], ids: Optional[Iterable[str]] = None) -
 # Observation/replay identity and history.
 # ---------------------------------------------------------------------------
 
-def ledger_key(signature: str, workspace_epoch: int) -> str:
-    return f"w{int(workspace_epoch)}:{signature}"
+def ledger_key(signature: str, reality_epoch: int) -> str:
+    return f"w{int(reality_epoch)}:{signature}"
 
 
 def lookup(session: Any, signature: Optional[str]) -> Optional[Dict[str, Any]]:
     if not signature:
         return None
-    item = _entries(session).get(ledger_key(signature, getattr(session, "workspace_epoch", 0)))
+    item = _entries(session).get(ledger_key(signature, getattr(session, "reality_epoch", 0)))
     return copy.deepcopy(item) if isinstance(item, dict) else None
 
 
@@ -329,14 +363,14 @@ def _strip_private_handles(value: Any) -> Any:
     return clone
 
 
-def _append_event(session: Any, *, tool: str, arguments: Dict[str, Any], result: Dict[str, Any],
+def _append_event(session: Any, *, capability: str, arguments: Dict[str, Any], result: Dict[str, Any],
                   model_result: Dict[str, Any], observation_signature: Optional[str], status: str,
                   replay_reason: Optional[str] = None, public_arguments: Optional[Dict[str, Any]] = None,
                   public_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     events = _events(session)
     event = {
         "event_id": f"obs-{len(events)+1:04d}", "turn": int(getattr(session, "turn", 0)),
-        "workspace_epoch": int(getattr(session, "workspace_epoch", 0)), "tool": str(tool),
+        "reality_epoch": int(getattr(session, "reality_epoch", 0)), "capability": str(capability),
         "arguments": copy.deepcopy(public_arguments if public_arguments is not None else arguments), "status": str(status),
         "executed": result.get("executed") is True, "ok": result.get("ok") is True,
         "error_code": result.get("error_code"), "retryable": result.get("retryable"),
@@ -346,38 +380,43 @@ def _append_event(session: Any, *, tool: str, arguments: Dict[str, Any], result:
         "frontier_ids": [str(item.get("id")) for item in model_result.get("frontiers") or [] if isinstance(item, dict) and item.get("id")],
         "result": _strip_private_handles(public_result if public_result is not None else result),
     }
+    if result.get("executed") is True and isinstance(result.get("physical_effect"), dict):
+        event["effect_id"] = f"eff-{len(events)+1:04d}"
     if replay_reason:
         event["replay_reason"] = str(replay_reason)
     events.append(event)
     return event
 
 
-def record(session: Any, signature: Optional[str], tool: str, arguments: Dict[str, Any], result: Dict[str, Any],
+def record(session: Any, signature: Optional[str], capability: str, arguments: Dict[str, Any], result: Dict[str, Any],
            model_result: Dict[str, Any], *, public_arguments: Optional[Dict[str, Any]] = None,
            public_result: Optional[Dict[str, Any]] = None) -> None:
     """Record one physical outcome without interpreting capability semantics."""
-    frontier_ids = expose_frontiers(session, tool, model_result)
-    _append_event(
-        session, tool=tool, arguments=arguments, result=result, model_result=model_result,
+    frontier_ids = expose_frontiers(session, capability, model_result)
+    event = _append_event(
+        session, capability=capability, arguments=arguments, result=result, model_result=model_result,
         observation_signature=signature, status=str(result.get("status") or ("success" if result.get("ok") else "failed")),
         public_arguments=public_arguments, public_result=public_result,
     )
+    if event.get("effect_id"):
+        model_result["effect_id"] = str(event["effect_id"])
     if not signature or result.get("executed") is not True:
-        return
+        return event
     reusable = result.get("ok") is True or bool(result.get("observations")) or (
         result.get("retryable") is False and result.get("failure_scope") in {"request", "resource"}
     )
     if not reusable:
         return
-    key = ledger_key(signature, getattr(session, "workspace_epoch", 0))
+    key = ledger_key(signature, getattr(session, "reality_epoch", 0))
     _entries(session)[key] = {
         "observation_signature": signature,
-        "workspace_epoch": int(getattr(session, "workspace_epoch", 0)),
-        "tool": tool,
+        "reality_epoch": int(getattr(session, "reality_epoch", 0)),
+        "capability": capability,
         "arguments": copy.deepcopy(arguments),
         "public_arguments": copy.deepcopy(public_arguments if public_arguments is not None else arguments),
         "result_fingerprint": result_fingerprint(result),
         "grounding_ids": list(model_result.get("grounding_ids") or []),
+        "effect_id": model_result.get("effect_id"),
         "frontier_ids": list(frontier_ids),
         "coverage": copy.deepcopy(result.get("coverage") or {}),
         "failure_scope": result.get("failure_scope"),
@@ -387,6 +426,7 @@ def record(session: Any, signature: Optional[str], tool: str, arguments: Dict[st
         "replay_result": copy.deepcopy(model_result),
         "turn": int(getattr(session, "turn", 0)),
     }
+    return event
 
 
 def record_replay(session: Any, entry: Dict[str, Any], model_result: Dict[str, Any], *, reason: str,
@@ -407,11 +447,12 @@ def event_history(session: Any, *, limit: int = 50) -> List[Dict[str, Any]]:
         if not isinstance(event, dict):
             continue
         out.append({
-            "turn": event.get("turn"), "tool": event.get("tool"), "status": event.get("status"), "error_code": event.get("error_code"), "retryable": event.get("retryable"),
+            "turn": event.get("turn"), "capability": event.get("capability"), "status": event.get("status"), "error_code": event.get("error_code"), "retryable": event.get("retryable"),
             "failure_scope": event.get("failure_scope"), "failure_resource": event.get("failure_resource"),
             "observation_signature": event.get("observation_signature"), "arguments": copy.deepcopy(event.get("arguments") or {}),
             "result": copy.deepcopy(event.get("result") or {}),
             "grounding_ids": list(event.get("grounding_ids") or []),
+            "effect_id": event.get("effect_id"),
             "frontier_ids": list(event.get("frontier_ids") or []), "replay_reason": event.get("replay_reason"),
         })
     return out
@@ -426,8 +467,9 @@ def navigation_view(session: Any) -> List[Dict[str, Any]]:
     for item in ordered:
         frontier_ids = list(item.get("frontier_ids") or [])
         entry = {
-            "turn": item.get("turn"), "tool": item.get("tool"),
+            "turn": item.get("turn"), "capability": item.get("capability"),
             "grounding_ids": list(item.get("grounding_ids") or []),
+            "effect_id": item.get("effect_id"),
             "frontiers": frontier_view(_ledger(session), frontier_ids),
         }
         if item.get("observation_signature"):
@@ -439,7 +481,7 @@ def navigation_view(session: Any) -> List[Dict[str, Any]]:
     return out
 
 
-def physical_tool_calls(session: Any) -> int:
+def physical_capability_calls(session: Any) -> int:
     return sum(1 for event in _events(session) if isinstance(event, dict) and event.get("executed") is True)
 
 
@@ -458,8 +500,8 @@ def persisted_view(ledger: Dict[str, Any]) -> Dict[str, Any]:
         safe_entries[str(key)] = {
             field: copy.deepcopy(value.get(field))
             for field in (
-                "observation_signature", "workspace_epoch", "tool", "arguments", "public_arguments",
-                "result_fingerprint", "grounding_ids", "frontier_ids", "coverage",
+                "observation_signature", "reality_epoch", "capability", "arguments", "public_arguments",
+                "result_fingerprint", "grounding_ids", "effect_id", "frontier_ids", "coverage",
                 "failure_scope", "failure_resource", "failure_error_code", "failure_detail", "turn",
             )
             if value.get(field) is not None
@@ -471,9 +513,9 @@ def persisted_view(ledger: Dict[str, Any]) -> Dict[str, Any]:
         safe_events.append({
             field: copy.deepcopy(item.get(field))
             for field in (
-                "event_id", "turn", "workspace_epoch", "tool", "arguments", "status", "executed",
+                "event_id", "turn", "reality_epoch", "capability", "arguments", "status", "executed",
                 "ok", "error_code", "failure_scope", "failure_resource", "observation_signature",
-                "grounding_ids", "frontier_ids", "result", "replay_reason",
+                "grounding_ids", "effect_id", "frontier_ids", "result", "replay_reason",
             )
             if item.get(field) is not None
         })
@@ -488,7 +530,7 @@ def persisted_view(ledger: Dict[str, Any]) -> Dict[str, Any]:
     safe_frontiers = {
         str(key): {
             field: copy.deepcopy(item.get(field))
-            for field in ("id", "handle", "workspace_epoch", "source_tool", "kind", "at", "reason", "count", "status")
+            for field in ("id", "handle", "reality_epoch", "source_capability", "kind", "at", "reason", "count", "status")
             if item.get(field) is not None
         }
         for key, item in frontier_store(ledger).items() if isinstance(item, dict)

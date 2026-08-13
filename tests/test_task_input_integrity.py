@@ -1,33 +1,38 @@
+from tests.canonical import run_agent
 import json
-from pathlib import Path
 
 import eyle.core.agent as core_agent
 import eyle.runtime.service as service_mod
 from llm.structured import parse_agent_response, StructuredResponseError
-from tests.canonical import agent_final, agent_needs_user, agent_tools, base_config, tool_call
+from tests.canonical import agent_await_user, agent_complete, agent_tools, base_config, tool_call
 
 
-def test_needs_user_contract_is_blocking_object_and_rejects_legacy_string():
-    parsed = parse_agent_response({
-        "action": {"kind": "needs_user", "question": "Qual porta?", "missing_information": "The server port"},
-        "investigation_updates": [],
-        "task_updates": [],
-    })
-    assert parsed["action"] == {"kind": "needs_user", "question": "Qual porta?", "missing_information": "The server port"}
+def test_await_user_contract_carries_main_authored_choices_and_rejects_needs_user():
+    payload = agent_await_user(
+        "Qual árvore devo usar?",
+        reason="There are two physically available source trees with different authority.",
+        options=[
+            {"id": "root", "label": "Eyle Root"},
+            {"id": "workspace", "label": "Eyle Workspace"},
+        ],
+    )
+    parsed = parse_agent_response(payload)
+    assert parsed["action"]["kind"] == "await_user"
+    assert parsed["action"]["options"][0] == {"id": "root", "label": "Eyle Root"}
 
     try:
         parse_agent_response({
-            "action": {"kind": "needs_user", "question": "Qual porta?"},
+            "action": {"kind": "needs_user", "question": "Qual porta?", "missing_information": "port"},
             "investigation_updates": [],
             "task_updates": [],
         })
     except StructuredResponseError as error:
-        assert "AGENT_NEEDS_USER_INVALID" in str(error.code)
+        assert "AGENT_ACTION_KIND_INVALID" in str(error.code)
     else:
-        raise AssertionError("legacy string needs_user must be rejected")
+        raise AssertionError("Rev1.4.4 must reject the removed needs_user action")
 
 
-def test_resume_clarification_is_canonical_across_main_turns(monkeypatch, tmp_path):
+def test_resume_preserves_canonical_request_and_retains_human_resolution(monkeypatch, tmp_path):
     (tmp_path / "session.py").write_text("class AgentSession:\n    pass\n", encoding="utf-8")
     cfg = base_config()
 
@@ -35,28 +40,30 @@ def test_resume_clarification_is_canonical_across_main_turns(monkeypatch, tmp_pa
     monkeypatch.setattr(
         core_agent,
         "executar_agente_llm",
-        lambda prompt, _cfg: first_prompts.append(json.loads(prompt)) or agent_needs_user(
+        lambda prompt, _cfg: first_prompts.append(json.loads(prompt)) or agent_await_user(
             "Qual classe devo localizar?",
-            missing_information="The class name required to perform the requested lookup",
+            reason="The requested symbol name must come from the user.",
+            options=[{"id": "session", "label": "AgentSession"}],
         ),
     )
-    status, _, pending, details1 = core_agent.executar_agente(
-        "Localize a classe que eu indicar e responda com o arquivo.",
+    original_request = "Localize a classe que eu indicar e responda com o arquivo."
+    status, _, pending, details1 = run_agent(core_agent, 
+        original_request,
         cfg,
-        projeto={"caminho_origem": str(tmp_path)},
+        provider_context={"standard": {"caminho_origem": str(tmp_path)}},
         retornar_detalhes=True,
         execution_id="job-1",
         source_job_id=1,
     )
-    assert status == "needs_user"
-    assert pending["clarification"]["question"] == "Qual classe devo localizar?"
-    assert pending["session"]["request"] == "Localize a classe que eu indicar e responda com o arquivo."
+    assert status == "await_user"
+    assert pending["continuation_kind"] == "await_user"
+    assert pending["session"]["request"] == original_request
     assert details1["turns"] == 1
 
     resumed_prompts = []
     outputs = iter([
         agent_tools(tool_call("find_symbol", {"symbol": "AgentSession"})),
-        agent_final({"answer": "session.py:1", "grounding_ids": ["mat-0001"]}),
+        agent_complete({"answer": "session.py:1", "grounding_ids": ["mat-0001"]}),
     ])
     monkeypatch.setattr(
         core_agent,
@@ -64,10 +71,10 @@ def test_resume_clarification_is_canonical_across_main_turns(monkeypatch, tmp_pa
         lambda prompt, _cfg: resumed_prompts.append(json.loads(prompt)) or next(outputs),
     )
 
-    status, text, pending2, details2 = core_agent.executar_agente(
+    status, text, pending2, details2 = run_agent(core_agent, 
         pending["session"]["request"],
         cfg,
-        projeto={"caminho_origem": str(tmp_path)},
+        provider_context={"standard": {"caminho_origem": str(tmp_path)}},
         retomar=pending,
         resposta_usuario="AgentSession",
         retornar_detalhes=True,
@@ -78,68 +85,55 @@ def test_resume_clarification_is_canonical_across_main_turns(monkeypatch, tmp_pa
     assert text == "session.py:1"
     assert pending2 is None
     assert len(resumed_prompts) == 2
-    canonical = resumed_prompts[0]["request"]
-    assert "Localize a classe" in canonical
-    assert "Missing information:" in canonical
-    assert "The class name required" in canonical
-    assert "Question: Qual classe devo localizar?" in canonical
-    assert "Answer: AgentSession" in canonical
-    assert resumed_prompts[1]["request"] == canonical
+    assert resumed_prompts[0]["request"] == original_request
+    assert resumed_prompts[1]["request"] == original_request
+    retained = resumed_prompts[0]["request_context"]
+    assert any(item.get("answer") == "AgentSession" for item in retained)
+    assert any("Qual classe" in item.get("question", "") for item in retained)
     assert all(
         not any(item.get("tool") == "user_response" for item in (prompt.get("latest_capability_results") or []))
         for prompt in resumed_prompts
     )
-    # Job #2 metrics are physical-job scoped; cumulative task chronology is separate.
     assert details2["turns"] == 2
-    assert details2["tool_calls"] == 1
-    assert all(item.get("decision") != "needs_user" for item in details2["decision_history"])
+    assert details2["capability_calls"] == 1
+    assert any(item.get("decision") == "await_user_resolution" for item in details2["decision_history"])
     assert details2["task_totals"]["turns"] == 3
-    assert details2["task_totals"]["tool_calls"] == 1
+    assert details2["task_totals"]["capability_calls"] == 1
 
 
-def test_expired_user_input_pending_cannot_capture_new_request(monkeypatch, tmp_path):
-    calls = {"resume": 0, "new": 0}
+def test_await_user_pending_does_not_expire_but_old_pending_schema_is_rejected(monkeypatch):
     pending = {
-        "pending_schema_version": "1",
-        "continuation_kind": "user_input",
-        "question": "Which class?",
-        "session": {"request": "old request", "execution_id": "job-old"},
-        "clarification": {"question": "Which class?", "missing_information": "class name"},
+        "pending_schema_version": "4",
+        "continuation_kind": "await_user",
+        "question": "Which source?",
+        "session": {"request": "task", "execution_id": "job-1"},
+        "reason": "A user-owned choice is required.",
+        "options": [{"id": "root", "label": "Eyle Root"}],
         "id": "ABCD",
-        "created_at": "1999-01-01T00:00:00+00:00",
-        "expires_at": "2000-01-01T00:00:00+00:00",
-        "project_hash": "stale",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "expires_at": None,
+        "provider_context_hash": None,
     }
-    monkeypatch.setattr(service_mod, "carregar_agent_pendente", lambda: pending)
-    monkeypatch.setattr(service_mod, "carregar_config", lambda: base_config())
-    monkeypatch.setattr(service_mod, "carregar_projeto", lambda: {"caminho_origem": str(tmp_path)})
-    monkeypatch.setattr(service_mod, "carregar_conversa", lambda: [])
-    monkeypatch.setattr(service_mod, "registrar_mensagem", lambda *args, **kwargs: None)
-    cleared = []
-    monkeypatch.setattr(service_mod, "limpar_agent_pendente", lambda: cleared.append(True))
-    monkeypatch.setattr(service_mod, "_retomar_agente_pendente", lambda *a, **k: calls.__setitem__("resume", calls["resume"] + 1))
+    valid, reason = service_mod._validar_pendencia(pending, {}, now=None)
+    assert valid is True and reason is None
 
-    def fake_process(question, config, project, **kwargs):
-        calls["new"] += 1
-        return {"status": "success", "resposta": question, "avisos": [], "details": {"status": "success"}}
-    monkeypatch.setattr(service_mod, "_processar_agente", fake_process)
-
-    result = service_mod.processar("novo pedido real", registrar_pergunta=False, execution_id="job-2", source_job_id=2)
-    assert result["resposta"] == "novo pedido real"
-    assert calls == {"resume": 0, "new": 1}
-    assert cleared == [True]
+    old = dict(pending)
+    old["pending_schema_version"] = "1"
+    valid, reason = service_mod._validar_pendencia(old, {}, now=None)
+    assert valid is False and reason == "PENDING_SCHEMA_INCOMPATIBLE"
 
 
 def test_agent_prompt_treats_conversation_as_valid_without_forcing_work_state():
     from llm.executar import PROMPT_AGENTE
-    lower=PROMPT_AGENTE.lower()
-    assert "conversation and simple requests may go straight to final" in lower
-    assert "empty updates mean no new commitment" in lower
-    assert "needs_user" in lower
-    assert "ambient workspace state and capability availability are context, not tasks" in lower
+    lower = PROMPT_AGENTE.lower()
+    assert "prior_conversation can resolve references" in lower and "request_context" in lower
+    assert "do not create either merely because the structures exist" in lower
+    assert "await_user" in lower
+    assert "needs_user" not in lower
+    assert "an available capability is not evidence that it was called" in lower
 
 def test_execution_context_rejects_canonical_request_identity_drift():
-    from eyle.core.execution_context import ExecutionContext
+    from eyle.runtime.execution_context import ExecutionContext
     execution = ExecutionContext.from_config(base_config(), execution_id="job-1", source_job_id=1)
     execution.bind_canonical_request("task A")
     execution.assert_canonical_request("task A")
@@ -151,21 +145,21 @@ def test_execution_context_rejects_canonical_request_identity_drift():
         raise AssertionError("request identity drift must fail")
 
 
-
-def test_user_input_pending_cancel_is_control_but_plain_sim_is_clarification(monkeypatch):
+def test_await_user_cancel_is_runtime_control_but_plain_sim_is_resolution(monkeypatch):
     pending = {
-        "pending_schema_version": "1",
-        "continuation_kind": "user_input",
+        "pending_schema_version": "2",
+        "continuation_kind": "await_user",
         "question": "Continue?",
         "session": {"request": "task", "execution_id": "job-1"},
-        "clarification": {"question": "Continue?", "missing_information": "user choice"},
+        "reason": "User approval is required.",
+        "options": [{"id": "continue", "label": "Continuar"}],
         "id": "ABCD",
         "created_at": "2026-01-01T00:00:00+00:00",
-        "expires_at": "2099-01-01T00:00:00+00:00",
-        "project_hash": "project",
+        "expires_at": None,
+        "provider_context_hash": None,
     }
     monkeypatch.setattr(service_mod, "carregar_config", lambda: base_config())
-    monkeypatch.setattr(service_mod, "carregar_projeto", lambda: {})
+    monkeypatch.setattr(service_mod, "carregar_provider_context", lambda: {})
     monkeypatch.setattr(service_mod, "registrar_mensagem", lambda *a, **k: None)
     monkeypatch.setattr(service_mod, "carregar_agent_pendente", lambda: pending)
     monkeypatch.setattr(service_mod, "_validar_pendencia", lambda p, project: (True, None))

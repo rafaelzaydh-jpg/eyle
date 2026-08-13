@@ -3,23 +3,24 @@ from __future__ import annotations
 import copy
 
 from eyle.core.decision import empty_ledger as empty_decisions, record_rejection, persisted_view as persisted_decisions
-from eyle.core.execution_context import ExecutionContext
-from eyle.core.observation import record as record_observation, set_pending_results, persisted_view as persisted_observations
+from eyle.runtime.execution_context import ExecutionContext
+from eyle.runtime.observation import record as record_observation, set_pending_results, persisted_view as persisted_observations
 from eyle.core.session import AgentSession, SESSION_SCHEMA_VERSION
 from eyle.runtime.config import ConfigError, validar_config
 from tests.canonical import base_config
+from tests.canonical import standard_registry
 
 
 def test_session_persists_only_canonical_state_owners():
     state = AgentSession("x").to_dict()
-    assert state["session_schema_version"] == SESSION_SCHEMA_VERSION == "2.7.5-r1.4.3"
+    assert state["session_schema_version"] == SESSION_SCHEMA_VERSION == "2.7.5-r1.5.1"
     assert set(state) == {
-        "session_schema_version", "request", "execution_id", "turn", "workspace_epoch",
+        "session_schema_version", "request", "execution_id", "turn", "reality_epoch",
         "observation_ledger", "decision_ledger", "investigation", "tasks",
-        "conversation_background", "write_transaction",
+        "conversation_background", "request_context", "pending_capability",
     }
     for removed in (
-        "tool_history", "latest_tool_results", "decision_history", "prompt_snapshots",
+        "capability_history", "latest_tool_results", "decision_history", "prompt_snapshots",
         "llm_responses", "patch_failures", "write_validation", "repeated_rejected_decisions",
     ):
         assert removed not in state
@@ -39,8 +40,8 @@ def test_llm_call_ledger_owns_prompt_and_all_provider_attempts_together():
 
 def test_decision_ledger_is_observability_not_semantic_repetition_policy():
     ledger = empty_decisions()
-    record_rejection(ledger, turn=1, code="X", decision="final")
-    record_rejection(ledger, turn=2, code="X", decision="final")
+    record_rejection(ledger, turn=1, code="X", decision="complete")
+    record_rejection(ledger, turn=2, code="X", decision="complete")
     history = persisted_decisions(ledger)["events"]
     assert [item["outcome"] for item in history] == ["rejected", "rejected"]
     assert all("rejection_fingerprint" not in item for item in history)
@@ -85,7 +86,7 @@ def test_removed_runtime_budget_is_not_a_hidden_compatibility_key():
     cfg = base_config()
     cfg["_runtime_agent_budget"] = {}
     try:
-        validar_config(cfg)
+        validar_config(cfg, standard_registry())
     except ConfigError as error:
         assert "UNKNOWN_CONFIG_FIELD:root:_runtime_agent_budget" in str(error)
     else:

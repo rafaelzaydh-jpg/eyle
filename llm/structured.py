@@ -20,21 +20,6 @@ class StructuredResponseError(ValueError):
         self.detail = detail or code
 
 
-_PATCH_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "operation": {"type": "string", "enum": ["replace", "create", "delete", "update"]},
-        "path": {"type": "string", "minLength": 1},
-        "content": {"type": "string"},
-        "line_start": {"type": "integer", "minimum": 1},
-        "line_end": {"type": "integer", "minimum": 1},
-        "new_code": {"type": "string"},
-    },
-    "required": ["operation", "path"],
-    "additionalProperties": False,
-}
-
-
 _INVESTIGATION_ID_SCHEMA = {"type": "string", "minLength": 1, "maxLength": 80, "pattern": r"^[A-Za-z0-9._-]+$"}
 _INVESTIGATION_GOAL_SCHEMA = {"type": "string", "minLength": 1, "maxLength": 500}
 _INVESTIGATION_GROUNDING_ITEM_SCHEMA = {
@@ -92,13 +77,13 @@ _TASK_SCHEMA = {
 }
 
 
-_TOOL_CALL_SCHEMA = {
+_CAPABILITY_CALL_SCHEMA = {
     "type": "object",
     "properties": {
-        "tool": {"type": "string", "minLength": 1},
+        "capability": {"type": "string", "minLength": 1},
         "arguments": {"type": "object"},
     },
-    "required": ["tool", "arguments"],
+    "required": ["capability", "arguments"],
     "additionalProperties": False,
 }
 
@@ -107,8 +92,8 @@ _AGENT_ACTION_SCHEMA = {
         {
             "type": "object",
             "properties": {
-                "kind": {"type": "string", "enum": ["tool_calls"]},
-                "calls": {"type": "array", "minItems": 1, "maxItems": 4, "items": _TOOL_CALL_SCHEMA},
+                "kind": {"type": "string", "enum": ["capability_calls"]},
+                "calls": {"type": "array", "minItems": 1, "maxItems": 4, "items": _CAPABILITY_CALL_SCHEMA},
             },
             "required": ["kind", "calls"],
             "additionalProperties": False,
@@ -116,31 +101,35 @@ _AGENT_ACTION_SCHEMA = {
         {
             "type": "object",
             "properties": {
-                "kind": {"type": "string", "enum": ["patches"]},
-                "patches": {"type": "array", "minItems": 1, "items": _PATCH_SCHEMA},
+                "kind": {"type": "string", "enum": ["await_user"]},
+                "question": {"type": "string", "minLength": 1, "maxLength": 800},
+                "reason": {"type": "string", "minLength": 1, "maxLength": 500},
+                "options": {
+                    "type": "array", "maxItems": 4,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string", "minLength": 1, "maxLength": 80, "pattern": r"^[A-Za-z0-9._-]+$"},
+                            "label": {"type": "string", "minLength": 1, "maxLength": 200},
+                        },
+                        "required": ["id", "label"],
+                        "additionalProperties": False,
+                    },
+                },
             },
-            "required": ["kind", "patches"],
+            "required": ["kind", "question", "reason", "options"],
             "additionalProperties": False,
         },
         {
             "type": "object",
             "properties": {
-                "kind": {"type": "string", "enum": ["needs_user"]},
-                "question": {"type": "string", "minLength": 1},
-                "missing_information": {"type": "string", "minLength": 1},
-            },
-            "required": ["kind", "question", "missing_information"],
-            "additionalProperties": False,
-        },
-        {
-            "type": "object",
-            "properties": {
-                "kind": {"type": "string", "enum": ["final"]},
+                "kind": {"type": "string", "enum": ["complete"]},
                 "answer": {"type": "string", "minLength": 1},
                 "limitations": {"type": "array", "items": {"type": "string"}},
                 "grounding_ids": {"type": "array", "items": {"type": "string", "minLength": 1, "pattern": r"^mat-[0-9]+$"}},
+                "effect_ids": {"type": "array", "items": {"type": "string", "minLength": 1, "pattern": r"^eff-[0-9]+$"}},
             },
-            "required": ["kind", "answer", "limitations", "grounding_ids"],
+            "required": ["kind", "answer", "limitations", "grounding_ids", "effect_ids"],
             "additionalProperties": False,
         },
     ]
@@ -153,7 +142,7 @@ _AGENT_SCHEMA = {
         "investigation_updates": {"type": "array", "items": _INVESTIGATION_TARGET_SCHEMA},
         "task_updates": {"type": "array", "items": _TASK_SCHEMA},
     },
-    "required": ["action", "investigation_updates", "task_updates"],
+    "required": ["action"],
     "additionalProperties": False,
 }
 
@@ -166,7 +155,7 @@ _PROFILE_NAMES = {
 }
 
 _PROFILE_TOP_LEVEL = {
-    "agent": ("action", "investigation_updates", "task_updates"),
+    "agent": ("action",),
 }
 
 def schema_for_profile(profile: str) -> Dict[str, Any]:
@@ -202,7 +191,7 @@ def contract_instruction(profile: str) -> str:
     mandatory_top_level_keys(profile)
     return (
         "Return only the JSON object required by the schema. "
-        "investigation_updates and task_updates are state deltas and may be empty. "
+        "investigation_updates and task_updates are optional state deltas; omit them when unused. "
         "action contains exactly one action kind."
     )
 
@@ -269,10 +258,11 @@ def _exact_item(value: Any, keys: set[str], *, code: str, detail: str) -> Dict[s
 def parse_agent_response(raw: Any) -> Dict[str, Any]:
     value = _object(raw)
     required = set(mandatory_top_level_keys("agent"))
-    _exact_keys(value, required=required, allowed=required, profile="agent")
+    allowed = {"action", "investigation_updates", "task_updates"}
+    _exact_keys(value, required=required, allowed=allowed, profile="agent")
 
-    investigation = value.get("investigation_updates")
-    if not isinstance(investigation, list):
+    investigation = value.get("investigation_updates", [])
+    if "investigation_updates" in value and not isinstance(investigation, list):
         raise StructuredResponseError("AGENT_INVESTIGATION_INVALID", "investigation_updates must be an array")
     target_keys = {"id", "goal", "status", "grounding_ids", "conclusion", "reason"}
     for index, item in enumerate(investigation, start=1):
@@ -292,8 +282,8 @@ def parse_agent_response(raw: Any) -> Dict[str, Any]:
             raise StructuredResponseError("AGENT_INVESTIGATION_ESTABLISHED_CONCLUSION_REQUIRED", f"investigation_updates[{index}].conclusion is required when status is established")
         _string(item["reason"], code="AGENT_INVESTIGATION_TARGET_REASON_INVALID", detail=f"investigation_updates[{index}].reason must be a string", nonempty=False)
 
-    task_updates = value.get("task_updates")
-    if not isinstance(task_updates, list):
+    task_updates = value.get("task_updates", [])
+    if "task_updates" in value and not isinstance(task_updates, list):
         raise StructuredResponseError("AGENT_TASK_UPDATES_INVALID", "task_updates must be an array")
     task_keys = {"id", "parent_id", "description", "completion_criteria", "status", "result", "grounding_ids"}
     for index, item in enumerate(task_updates, start=1):
@@ -332,80 +322,77 @@ def parse_agent_response(raw: Any) -> Dict[str, Any]:
     if not isinstance(action, dict):
         raise StructuredResponseError("AGENT_ACTION_INVALID", "action must be one discriminated object")
     kind = action.get("kind")
-    if kind == "tool_calls":
+    if kind == "capability_calls":
         if set(action) != {"kind", "calls"}:
-            raise StructuredResponseError("AGENT_TOOL_CALLS_SHAPE_INVALID", "tool_calls action must contain exactly kind and calls")
+            raise StructuredResponseError("AGENT_CAPABILITY_CALLS_SHAPE_INVALID", "capability_calls action must contain exactly kind and calls")
         calls = action.get("calls")
         if not isinstance(calls, list) or not calls:
-            raise StructuredResponseError("AGENT_TOOL_CALLS_INVALID", "tool_calls.calls must be a non-empty array")
+            raise StructuredResponseError("AGENT_CAPABILITY_CALLS_INVALID", "capability_calls.calls must be a non-empty array")
         if len(calls) > 4:
-            raise StructuredResponseError("AGENT_TOOL_CALL_LIMIT_EXCEEDED", "tool_calls.calls may contain at most 4 calls per turn")
+            raise StructuredResponseError("AGENT_CAPABILITY_CALL_LIMIT_EXCEEDED", "capability_calls.calls may contain at most 4 calls per turn")
         normalized = []
         for index, item in enumerate(calls, start=1):
-            if not isinstance(item, dict) or set(item) != {"tool", "arguments"}:
-                raise StructuredResponseError("AGENT_TOOL_CALL_INVALID", f"action.calls[{index}] must contain exactly tool and arguments")
-            tool = item.get("tool")
+            if not isinstance(item, dict) or set(item) != {"capability", "arguments"}:
+                raise StructuredResponseError("AGENT_CAPABILITY_CALL_INVALID", f"action.calls[{index}] must contain exactly capability and arguments")
+            capability = item.get("capability")
             arguments = item.get("arguments")
-            if not isinstance(tool, str) or not tool.strip() or not isinstance(arguments, dict):
-                raise StructuredResponseError("AGENT_TOOL_CALL_INVALID", f"action.calls[{index}] is invalid")
-            normalized.append({"tool": tool.strip(), "arguments": arguments})
-        normalized_action = {"kind": "tool_calls", "calls": normalized}
-    elif kind == "patches":
-        if set(action) != {"kind", "patches"}:
-            raise StructuredResponseError("AGENT_PATCHES_SHAPE_INVALID", "patches action must contain exactly kind and patches")
-        patches = action.get("patches")
-        if not isinstance(patches, list) or not patches:
-            raise StructuredResponseError("AGENT_PATCHES_INVALID", "action.patches must be a non-empty array")
-        normalized_patches = []
-        for index, item in enumerate(patches, start=1):
-            if not isinstance(item, dict):
-                raise StructuredResponseError("AGENT_PATCH_INVALID", f"action.patches[{index}] must be an object")
-            operation = item.get("operation")
-            if operation in {"replace", "create"}:
-                keys = {"operation", "path", "content"}
-            elif operation == "delete":
-                keys = {"operation", "path"}
-            elif operation == "update":
-                keys = {"operation", "path", "line_start", "line_end", "new_code"}
-            else:
-                raise StructuredResponseError("AGENT_PATCH_OPERATION_INVALID", f"action.patches[{index}].operation is invalid")
-            if set(item) != keys:
-                raise StructuredResponseError("AGENT_PATCH_SHAPE_INVALID", f"action.patches[{index}] must contain exactly the canonical fields for {operation}")
-            if not isinstance(item.get("path"), str) or not item["path"].strip():
-                raise StructuredResponseError("AGENT_PATCH_PATH_INVALID", f"action.patches[{index}].path must be a non-empty string")
-            if operation in {"replace", "create"} and not isinstance(item.get("content"), str):
-                raise StructuredResponseError("AGENT_PATCH_CONTENT_INVALID", f"action.patches[{index}].content must be a string")
-            if operation == "update":
-                if not isinstance(item.get("line_start"), int) or isinstance(item.get("line_start"), bool) or item["line_start"] < 1:
-                    raise StructuredResponseError("AGENT_PATCH_RANGE_INVALID", f"action.patches[{index}].line_start must be a positive integer")
-                if not isinstance(item.get("line_end"), int) or isinstance(item.get("line_end"), bool) or item["line_end"] < item["line_start"]:
-                    raise StructuredResponseError("AGENT_PATCH_RANGE_INVALID", f"action.patches[{index}].line_end must be >= line_start")
-                if not isinstance(item.get("new_code"), str):
-                    raise StructuredResponseError("AGENT_PATCH_CONTENT_INVALID", f"action.patches[{index}].new_code must be a string")
-            normalized_patches.append(dict(item))
-        normalized_action = {"kind": "patches", "patches": normalized_patches}
-    elif kind == "needs_user":
-        if set(action) != {"kind", "question", "missing_information"}:
-            raise StructuredResponseError("AGENT_NEEDS_USER_INVALID", "needs_user action must contain exactly kind, question and missing_information")
+            if not isinstance(capability, str) or not capability.strip() or not isinstance(arguments, dict):
+                raise StructuredResponseError("AGENT_CAPABILITY_CALL_INVALID", f"action.calls[{index}] is invalid")
+            normalized.append({"capability": capability.strip(), "arguments": arguments})
+        normalized_action = {"kind": "capability_calls", "calls": normalized}
+    elif kind == "await_user":
+        if set(action) != {"kind", "question", "reason", "options"}:
+            raise StructuredResponseError("AGENT_AWAIT_USER_INVALID", "await_user action must contain exactly kind, question, reason and options")
         question = action.get("question")
-        missing = action.get("missing_information")
-        if not isinstance(question, str) or not question.strip() or not isinstance(missing, str) or not missing.strip():
-            raise StructuredResponseError("AGENT_NEEDS_USER_INVALID", "needs_user question and missing_information must be non-empty strings")
-        normalized_action = {"kind": "needs_user", "question": question.strip(), "missing_information": missing.strip()}
-    elif kind == "final":
-        final_keys = {"kind", "answer", "limitations", "grounding_ids"}
-        action = _exact_item(action, final_keys, code="AGENT_FINAL_SHAPE_INVALID", detail="final action must contain exactly kind, answer, limitations and grounding_ids")
-        _string(action["answer"], code="AGENT_FINAL_ANSWER_INVALID", detail="final.answer must be a non-empty string")
+        reason = action.get("reason")
+        options = action.get("options")
+        if not isinstance(question, str) or not question.strip() or len(question.strip()) > 800:
+            raise StructuredResponseError("AGENT_AWAIT_USER_INVALID", "await_user question must be a non-empty bounded string")
+        if not isinstance(reason, str) or not reason.strip() or len(reason.strip()) > 500:
+            raise StructuredResponseError("AGENT_AWAIT_USER_INVALID", "await_user reason must be a non-empty bounded string")
+        if not isinstance(options, list) or len(options) > 4:
+            raise StructuredResponseError("AGENT_AWAIT_USER_INVALID", "await_user options must be an array with at most 4 items")
+        normalized_options = []
+        option_ids = set()
+        for index, item in enumerate(options, start=1):
+            if not isinstance(item, dict) or set(item) != {"id", "label"}:
+                raise StructuredResponseError("AGENT_AWAIT_USER_INVALID", f"await_user options[{index}] must contain exactly id and label")
+            option_id = item.get("id")
+            label = item.get("label")
+            if not isinstance(option_id, str) or re.fullmatch(r"[A-Za-z0-9._-]+", option_id.strip()) is None or len(option_id.strip()) > 80:
+                raise StructuredResponseError("AGENT_AWAIT_USER_INVALID", f"await_user options[{index}].id is invalid")
+            if option_id.strip() in option_ids:
+                raise StructuredResponseError("AGENT_AWAIT_USER_INVALID", "await_user option IDs must be unique")
+            if not isinstance(label, str) or not label.strip() or len(label.strip()) > 200:
+                raise StructuredResponseError("AGENT_AWAIT_USER_INVALID", f"await_user options[{index}].label is invalid")
+            option_ids.add(option_id.strip())
+            normalized_options.append({"id": option_id.strip(), "label": label.strip()})
+        normalized_action = {
+            "kind": "await_user", "question": question.strip(), "reason": reason.strip(),
+            "options": normalized_options,
+        }
+    elif kind == "complete":
+        complete_keys = {"kind", "answer", "limitations", "grounding_ids", "effect_ids"}
+        action = _exact_item(action, complete_keys, code="AGENT_COMPLETE_SHAPE_INVALID", detail="complete action must contain exactly kind, answer, limitations, grounding_ids and effect_ids")
+        _string(action["answer"], code="AGENT_COMPLETE_ANSWER_INVALID", detail="complete.answer must be a non-empty string")
         if not isinstance(action["limitations"], list) or any(not isinstance(item, str) for item in action["limitations"]):
-            raise StructuredResponseError("AGENT_FINAL_LIMITATIONS_INVALID", "final.limitations must be an array of strings")
-        grounding_ids = _string_list(action["grounding_ids"], code="AGENT_FINAL_GROUNDING_INVALID", detail="final.grounding_ids must be an array of canonical mat-* grounding IDs")
+            raise StructuredResponseError("AGENT_COMPLETE_LIMITATIONS_INVALID", "complete.limitations must be an array of strings")
+        grounding_ids = _string_list(action["grounding_ids"], code="AGENT_COMPLETE_GROUNDING_INVALID", detail="complete.grounding_ids must be an array of canonical mat-* grounding IDs")
         if any(re.fullmatch(r"mat-[0-9]+", ref) is None for ref in grounding_ids):
-            raise StructuredResponseError("AGENT_FINAL_GROUNDING_INVALID", "final.grounding_ids contains a noncanonical grounding ID")
+            raise StructuredResponseError("AGENT_COMPLETE_GROUNDING_INVALID", "complete.grounding_ids contains a noncanonical grounding ID")
+        effect_ids = _string_list(action["effect_ids"], code="AGENT_COMPLETE_EFFECT_INVALID", detail="complete.effect_ids must be an array of canonical eff-* physical-effect IDs")
+        if any(re.fullmatch(r"eff-[0-9]+", ref) is None for ref in effect_ids):
+            raise StructuredResponseError("AGENT_COMPLETE_EFFECT_INVALID", "complete.effect_ids contains a noncanonical effect ID")
         normalized_action = dict(action)
     else:
-        raise StructuredResponseError("AGENT_ACTION_KIND_INVALID", "action.kind must be tool_calls, patches, needs_user, or final")
+        raise StructuredResponseError("AGENT_ACTION_KIND_INVALID", "action.kind must be capability_calls, await_user, or complete")
 
-    return {"action": normalized_action, "investigation_updates": value["investigation_updates"], "task_updates": value["task_updates"]}
+    normalized = {"action": normalized_action}
+    if "investigation_updates" in value:
+        normalized["investigation_updates"] = investigation
+    if "task_updates" in value:
+        normalized["task_updates"] = task_updates
+    return normalized
 
 
 def parse_profile_response(raw: Any, profile: str) -> Dict[str, Any]:

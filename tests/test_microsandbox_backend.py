@@ -9,9 +9,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-import eyle.core.microsandbox_backend as msb_mod
-import eyle.core.sandbox as sandbox_mod
-from eyle.core.execution_context import ExecutionContext, bind_execution, reset_execution
+import eyle.providers.standard_impl.microsandbox_backend as msb_mod
+import eyle.providers.standard_impl.sandbox as sandbox_mod
+from eyle.runtime.execution_context import ExecutionContext, bind_execution, reset_execution
 
 
 class FakeRlimit:
@@ -340,10 +340,11 @@ def test_run_command_reuses_one_microsandbox_session_per_execution(monkeypatch, 
         assert second["workspace_transport"] == "guest_fs_copy"
         assert Session.created == 1
         assert Session.commands == [("echo one", "."), ("echo two", ".")]
-        assert ctx.sandbox_microsandbox_session is not None
-        ctx.cleanup_sandbox()
+        state = ctx.provider_state_for("standard.sandbox")
+        assert state.get("microsandbox_session") is not None
+        ctx.cleanup()
         assert Session.closed == 1
-        assert ctx.sandbox_microsandbox_session is None
+        assert state.get("microsandbox_session") is None
     finally:
         reset_execution(token)
 
@@ -355,9 +356,11 @@ def test_execution_context_closes_microvm_before_snapshot_cleanup():
     class Temp:
         def cleanup(self): order.append("snapshot")
     ctx = ExecutionContext(0.0, 100.0, "task", 1, 1000)
-    ctx.sandbox_microsandbox_session = Session()
-    ctx.sandbox_tempdir = Temp()
-    ctx.cleanup_sandbox()
+    state = ctx.provider_state_for("standard.sandbox")
+    state["microsandbox_session"] = Session()
+    state["tempdir"] = Temp()
+    sandbox_mod._sandbox_state(ctx)  # registers provider-owned cleanup
+    ctx.cleanup()
     assert order == ["microvm", "snapshot"]
 
 

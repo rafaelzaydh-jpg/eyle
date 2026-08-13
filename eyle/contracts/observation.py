@@ -86,29 +86,29 @@ def snapshot_store(ledger: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
 
 
 def _register_handle_for_snapshot(
-    ledger: Dict[str, Any], *, snapshot_id: str, kind: str, workspace_epoch: int,
-    source_tool: str, description: str, page_size: int, offset: int,
+    ledger: Dict[str, Any], *, snapshot_id: str, kind: str, reality_epoch: int,
+    source_capability: str, description: str, page_size: int, offset: int,
 ) -> Dict[str, Any]:
     handles = handle_store(ledger)
     identity = {
-        "snapshot_id": str(snapshot_id), "workspace_epoch": int(workspace_epoch or 0),
+        "snapshot_id": str(snapshot_id), "reality_epoch": int(reality_epoch or 0),
         "offset": int(offset), "page_size": int(page_size),
     }
     handle_id = f"handle:{kind}:{_json_hash(identity)[:16]}"
     handles[handle_id] = {
         "id": handle_id, "kind": str(kind), "snapshot_id": str(snapshot_id),
-        "workspace_epoch": int(workspace_epoch or 0), "source_tool": str(source_tool or ""),
+        "reality_epoch": int(reality_epoch or 0), "source_capability": str(source_capability or ""),
         "description": str(description or "")[:240], "page_size": int(page_size), "offset": int(offset),
     }
     return {
-        "id": handle_id, "kind": str(kind), "source_tool": str(source_tool or ""),
+        "id": handle_id, "kind": str(kind), "source_capability": str(source_capability or ""),
         **({"description": str(description)[:240]} if description else {}),
     }
 
 
 def register_snapshot_handle(
     ledger: Dict[str, Any], *, kind: str, payload: Any,
-    workspace_epoch: int, source_tool: str, description: str = "",
+    reality_epoch: int, source_capability: str, description: str = "",
     page_size: int = 12, offset: int = 0,
 ) -> Dict[str, Any]:
     """Store one immutable snapshot payload and return a lightweight cursor handle."""
@@ -116,20 +116,20 @@ def register_snapshot_handle(
     page_size = max(1, min(100, int(page_size or 12)))
     offset = max(0, int(offset or 0))
     snapshot_identity = {
-        "kind": kind, "payload": payload, "workspace_epoch": int(workspace_epoch or 0),
-        "source_tool": str(source_tool or ""),
+        "kind": kind, "payload": payload, "reality_epoch": int(reality_epoch or 0),
+        "source_capability": str(source_capability or ""),
     }
     snapshot_id = f"snap:{kind}:{_json_hash(snapshot_identity)[:16]}"
     snapshots = snapshot_store(ledger)
     if snapshot_id not in snapshots:
         snapshots[snapshot_id] = {
             "id": snapshot_id, "kind": kind, "payload": copy.deepcopy(payload),
-            "workspace_epoch": int(workspace_epoch or 0), "source_tool": str(source_tool or ""),
+            "reality_epoch": int(reality_epoch or 0), "source_capability": str(source_capability or ""),
             "description": str(description or "")[:240],
         }
     return _register_handle_for_snapshot(
-        ledger, snapshot_id=snapshot_id, kind=kind, workspace_epoch=workspace_epoch,
-        source_tool=source_tool, description=description, page_size=page_size, offset=offset,
+        ledger, snapshot_id=snapshot_id, kind=kind, reality_epoch=reality_epoch,
+        source_capability=source_capability, description=description, page_size=page_size, offset=offset,
     )
 
 
@@ -152,18 +152,18 @@ def _paged_payload(payload: Any, *, offset: int, page_size: int) -> Tuple[Any, i
 
 
 def materialize_snapshot_handle(
-    ledger: Dict[str, Any], handle_id: str, *, workspace_epoch: int,
+    ledger: Dict[str, Any], handle_id: str, *, reality_epoch: int,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """Materialize one bounded page without copying the retained snapshot into the next handle."""
     handle = handle_store(ledger).get(str(handle_id or ""))
     if not isinstance(handle, dict):
         return None, "HANDLE_NOT_FOUND"
-    if int(handle.get("workspace_epoch") or 0) != int(workspace_epoch or 0):
+    if int(handle.get("reality_epoch") or 0) != int(reality_epoch or 0):
         return None, "HANDLE_STALE"
     snapshot = snapshot_store(ledger).get(str(handle.get("snapshot_id") or ""))
     if not isinstance(snapshot, dict):
         return None, "SNAPSHOT_NOT_FOUND"
-    if int(snapshot.get("workspace_epoch") or 0) != int(workspace_epoch or 0):
+    if int(snapshot.get("reality_epoch") or 0) != int(reality_epoch or 0):
         return None, "HANDLE_STALE"
 
     page_size = max(1, int(handle.get("page_size") or 12))
@@ -171,7 +171,7 @@ def materialize_snapshot_handle(
     payload, start, end, total = _paged_payload(snapshot.get("payload"), offset=offset, page_size=page_size)
     complete = end >= total
     coverage = {
-        "scope": {"kind": "snapshot_continuation", "source_capability": handle.get("source_tool")},
+        "scope": {"kind": "snapshot_continuation", "source_capability": handle.get("source_capability")},
         "examined": {"item_start": start, "item_end": end, "items": max(0, end - start)},
         "complete": bool(complete),
         "boundaries": [],
@@ -182,18 +182,18 @@ def materialize_snapshot_handle(
         },
     }
     result: Dict[str, Any] = {
-        "handle": str(handle_id), "kind": handle.get("kind"), "source_tool": handle.get("source_tool"),
+        "handle": str(handle_id), "kind": handle.get("kind"), "source_capability": handle.get("source_capability"),
         "payload": payload, "coverage": coverage, "frontiers": [],
     }
     if not complete:
         next_handle = _register_handle_for_snapshot(
             ledger, snapshot_id=str(handle.get("snapshot_id") or ""),
-            kind=str(handle.get("kind") or "continuation"), workspace_epoch=int(workspace_epoch or 0),
-            source_tool=str(handle.get("source_tool") or ""), description=str(handle.get("description") or ""),
+            kind=str(handle.get("kind") or "continuation"), reality_epoch=int(reality_epoch or 0),
+            source_capability=str(handle.get("source_capability") or ""), description=str(handle.get("description") or ""),
             page_size=page_size, offset=end,
         )
         result["frontiers"] = [{
-            "kind": "continuation_not_materialized", "at": str(handle.get("source_tool") or "continuation"),
+            "kind": "continuation_not_materialized", "at": str(handle.get("source_capability") or "continuation"),
             "count": max(0, total - end),
             "reason": f"{max(0, total - end)} item(s) remain behind a continuation handle",
             "handle": next_handle["id"],
@@ -219,7 +219,7 @@ def persisted_handles(ledger: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     return {
         str(key): {
             field: copy.deepcopy(value.get(field))
-            for field in ("id", "kind", "snapshot_id", "workspace_epoch", "source_tool", "description", "page_size", "offset")
+            for field in ("id", "kind", "snapshot_id", "reality_epoch", "source_capability", "description", "page_size", "offset")
             if value.get(field) is not None
         }
         for key, value in handle_store(ledger).items() if isinstance(value, dict)
@@ -230,7 +230,7 @@ def persisted_snapshots(ledger: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     return {
         str(key): {
             field: copy.deepcopy(value.get(field))
-            for field in ("id", "kind", "payload", "workspace_epoch", "source_tool", "description")
+            for field in ("id", "kind", "payload", "reality_epoch", "source_capability", "description")
             if value.get(field) is not None
         }
         for key, value in snapshot_store(ledger).items() if isinstance(value, dict)

@@ -81,12 +81,13 @@ def test_config_valida_stream_responses():
     import pytest
     from eyle.runtime.config import ConfigError, validar_config
     from tests.canonical import base_config
+    from tests.canonical import standard_registry
 
     cfg = base_config()
     cfg["llm"]["stream_responses"] = True
-    assert validar_config(cfg)["llm"]["stream_responses"] is True
+    assert validar_config(cfg, standard_registry())["llm"]["stream_responses"] is True
 
     cfg = base_config()
     cfg["llm"]["stream_responses"] = "sim"
     with pytest.raises(ConfigError, match="llm.stream_responses"):
-        validar_config(cfg)
+        validar_config(cfg, standard_registry())

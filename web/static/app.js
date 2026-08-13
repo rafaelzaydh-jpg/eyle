@@ -32,6 +32,7 @@
   let tokenPromptCancelado = false;
   let queueInstanceId = sessionStorage.getItem(INSTANCE_STORAGE_KEY) || "";
   let trackedJobs = carregarJobsAcompanhados();
+  let activeAwaitUser = null;
 
   function carregarJobsAcompanhados() {
     try {
@@ -221,11 +222,11 @@
     const summary = historySection("Execução");
     [
       historyLine("turnos", agent.turns),
-      historyLine("tools executadas", agent.tool_calls),
+      historyLine("capabilities executadas", agent.capability_calls),
       historyLine("groundings", agent.grounding_count_total),
       historyLine("observation ledger", agent.observation_ledger_size),
       historyLine("replays/rehydrations", agent.observation_replays),
-      historyLine("workspace epoch", agent.workspace_epoch),
+      historyLine("reality epoch", agent.reality_epoch),
       historyLine("duração", history.duration_seconds != null ? `${history.duration_seconds}s` : null),
       historyLine("falha", agent.failure_code),
     ].filter(Boolean).forEach((line) => summary.appendChild(line));
@@ -233,13 +234,13 @@
 
     const taskTotals = agent.task_totals || {};
     if (Object.keys(taskTotals).length && (
-      taskTotals.turns !== agent.turns || taskTotals.tool_calls !== agent.tool_calls ||
+      taskTotals.turns !== agent.turns || taskTotals.capability_calls !== agent.capability_calls ||
       taskTotals.grounding_count !== agent.grounding_count_total || taskTotals.observation_replays !== agent.observation_replays
     )) {
       const taskSection = historySection("Tarefa acumulada");
       [
         historyLine("turnos acumulados", taskTotals.turns),
-        historyLine("tools acumuladas", taskTotals.tool_calls),
+        historyLine("capabilities acumuladas", taskTotals.capability_calls),
         historyLine("groundings acumulados", taskTotals.grounding_count),
         historyLine("observações acumuladas", taskTotals.observation_events),
         historyLine("replays acumulados", taskTotals.observation_replays),
@@ -286,9 +287,9 @@
         historyLine("estado epistêmico", summaryData.epistemic_state_estimated_tokens),
         historyLine("estado intencional", summaryData.intentional_state_estimated_tokens),
         historyLine("grounding por observação", diagnostics.grounding_per_observation),
-        historyLine("taxa de replay", diagnostics.replay_request_rate),
+        historyLine("taxa de replay", diagnostics.replay_capability_rate),
         historyLine("grounding sem referência estrutural", diagnostics.unreferenced_grounding_count),
-        historyLine("tools sem referência estrutural", diagnostics.structurally_unreferenced_tool_actions),
+        historyLine("capabilities sem referência estrutural", diagnostics.structurally_unreferenced_capability_actions),
       ].filter(Boolean).forEach((line) => costSection.appendChild(line));
 
       const details = document.createElement("details");
@@ -348,18 +349,18 @@
       panel.appendChild(decisionSection);
     }
 
-    const tools = Array.isArray(history.tools) ? history.tools : [];
-    if (tools.length) {
-      const toolSection = historySection(`Ferramentas · ${tools.length} ação(ões)`);
-      tools.forEach((call) => {
+    const capabilities = Array.isArray(history.capabilities) ? history.capabilities : [];
+    if (capabilities.length) {
+      const capabilitySection = historySection(`Capabilities · ${capabilities.length} ação(ões)`);
+      capabilities.forEach((call) => {
         const details = document.createElement("details");
         details.className = "history-item";
         const summaryEl = document.createElement("summary");
         const statusText = call.status ? ` · ${call.status}` : "";
-        summaryEl.textContent = `${call.call}. ${call.tool || "tool"}${statusText}`;
+        summaryEl.textContent = `${call.call}. ${call.capability || "capability"}${statusText}`;
         details.appendChild(summaryEl);
-        const toolNameLine = historyLine("ferramenta", call.tool || "unknown_tool");
-        if (toolNameLine) details.appendChild(toolNameLine);
+        const capabilityNameLine = historyLine("capability", call.capability || "unknown_capability");
+        if (capabilityNameLine) details.appendChild(capabilityNameLine);
 
         const argsTitle = document.createElement("div");
         argsTitle.className = "history-subtitle";
@@ -369,9 +370,9 @@
         resultTitle.className = "history-subtitle";
         resultTitle.textContent = "resultado resumido";
         details.append(resultTitle, historyJsonBlock(call.result || {}));
-        toolSection.appendChild(details);
+        capabilitySection.appendChild(details);
       });
-      panel.appendChild(toolSection);
+      panel.appendChild(capabilitySection);
     }
 
     const validation = history.write_validation || {};
@@ -389,9 +390,9 @@
       panel.appendChild(writeSection);
     }
 
-    if (history.write_failure) {
-      const failSection = historySection("Falha de escrita");
-      failSection.appendChild(historyJsonBlock(history.write_failure));
+    if (history.execution_failure) {
+      const failSection = historySection("Falha de execução");
+      failSection.appendChild(historyJsonBlock(history.execution_failure));
       panel.appendChild(failSection);
     }
 
@@ -451,6 +452,98 @@
     wrap.classList.toggle("pending-delete", pendente);
   }
 
+  function syncAwaitUserPanels() {
+    Array.from(logEl.querySelectorAll(".await-user-panel[data-pending-id]")).forEach((panel) => {
+      const active = Boolean(activeAwaitUser && String(activeAwaitUser.id) === panel.dataset.pendingId);
+      panel.classList.toggle("inactive", !active);
+      panel.querySelectorAll("button, input").forEach((control) => {
+        control.disabled = !active;
+      });
+    });
+  }
+
+  async function submitText(texto) {
+    const value = String(texto || "").trim();
+    if (!value) return false;
+    sendBtn.disabled = true;
+    try {
+      const res = await apiFetch("/enviar", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ texto: value }),
+      });
+      if (!res.ok) throw new Error("falha ao enviar");
+      const data = await res.json();
+      acompanharJob(data.job_id, "pergunta", {
+        mensagem_id: data.mensagem_id,
+        texto_resumo: value,
+      });
+      activeAwaitUser = null;
+      syncAwaitUserPanels();
+      return true;
+    } finally {
+      sendBtn.disabled = false;
+      clearTimeout(conversaTimer);
+      fetchConversa();
+    }
+  }
+
+  function buildAwaitUserPanel(awaitUser) {
+    if (!awaitUser || !awaitUser.id) return null;
+    const panel = document.createElement("div");
+    panel.className = "await-user-panel";
+    panel.dataset.pendingId = String(awaitUser.id);
+
+    const choices = document.createElement("div");
+    choices.className = "await-user-choices";
+    (Array.isArray(awaitUser.options) ? awaitUser.options : []).forEach((option, index) => {
+      const label = String(option && option.label || "").trim();
+      if (!label) return;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "await-user-option";
+      button.textContent = `${index + 1}. ${label}`;
+      button.addEventListener("click", async () => {
+        try { await submitText(label); } catch (err) { /* permanece disponível */ }
+      });
+      choices.appendChild(button);
+    });
+    panel.appendChild(choices);
+
+    const custom = document.createElement("div");
+    custom.className = "await-user-custom";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.placeholder = "Outra instrução…";
+    const send = document.createElement("button");
+    send.type = "button";
+    send.textContent = "Enviar";
+    const submitCustom = async () => {
+      const value = input.value.trim();
+      if (!value) return;
+      try {
+        if (await submitText(value)) input.value = "";
+      } catch (err) { /* mantém o texto */ }
+    };
+    send.addEventListener("click", submitCustom);
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") { event.preventDefault(); submitCustom(); }
+    });
+    custom.appendChild(input);
+    custom.appendChild(send);
+    panel.appendChild(custom);
+
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "await-user-cancel";
+    cancel.textContent = "Cancelar tarefa";
+    cancel.addEventListener("click", async () => {
+      try { await submitText(`cancelar ${awaitUser.id}`); } catch (err) { /* permanece disponível */ }
+    });
+    panel.appendChild(cancel);
+    return panel;
+  }
+
   function buildMessageEl(msg) {
     const wrap = document.createElement("div");
     wrap.className = `msg ${msg.role === "user" ? "user" : "assistant"}`;
@@ -460,6 +553,11 @@
     bubble.className = "msg-bubble";
     renderMarkdownSafe(bubble, msg.text);
     wrap.appendChild(bubble);
+
+    if (msg.role === "assistant" && msg.await_user) {
+      const panel = buildAwaitUserPanel(msg.await_user);
+      if (panel) wrap.appendChild(panel);
+    }
 
     const meta = document.createElement("div");
     meta.className = "msg-meta";
@@ -527,6 +625,7 @@
       renderedIds.add(msg.id);
     });
 
+    syncAwaitUserPanels();
     if (atBottom) {
       logEl.scrollTop = logEl.scrollHeight;
     }
@@ -824,6 +923,8 @@
   }
 
   function renderProjectInfo(data) {
+    activeAwaitUser = data && data.await_user ? data.await_user : null;
+    syncAwaitUserPanels();
     const p = data.projeto;
     if (!p || !p.disponivel) {
       projectInfo.innerHTML = '<span class="pi-line">nenhum workspace aberto</span>';
@@ -854,61 +955,14 @@
 
     inputEl.value = "";
     autoGrow();
-    sendBtn.disabled = true;
-
     try {
-      const res = await apiFetch("/enviar", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ texto }),
-      });
-      if (!res.ok) throw new Error("falha ao enviar");
-      const data = await res.json();
-      acompanharJob(data.job_id, "pergunta", {
-        mensagem_id: data.mensagem_id,
-        texto_resumo: texto,
-      });
+      await submitText(texto);
     } catch (err) {
-      // devolve o texto pro usuário tentar de novo
       inputEl.value = texto;
     } finally {
-      sendBtn.disabled = false;
       inputEl.focus();
-      clearTimeout(conversaTimer);
-      fetchConversa();
     }
   }
-
-  async function deleteMessage(id) {
-    const el = logEl.querySelector(`.msg[data-id="${id}"]`);
-    const botao = el ? el.querySelector(".msg-del") : null;
-    if (botao) {
-      botao.disabled = true;
-      botao.textContent = "removendo...";
-    }
-    try {
-      const res = await apiFetch(`/mensagem/${id}`, { method: "DELETE" });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok && res.status !== 404) throw new Error("falha ao remover mensagem");
-
-      if (data.removed && el) {
-        el.remove();
-        renderedIds.delete(id);
-      } else if (data.status === "deferred" && botao) {
-        botao.textContent = "removendo após resposta";
-      }
-    } catch (err) {
-      if (botao) {
-        botao.disabled = false;
-        botao.textContent = "remover";
-      }
-    } finally {
-      clearTimeout(conversaTimer);
-      fetchConversa();
-    }
-  }
-
-  // ---------- composer UX ----------
 
   function autoGrow() {
     inputEl.style.height = "auto";

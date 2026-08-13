@@ -541,3 +541,46 @@ html, body {
 @media (max-width: 600px) {
   .execution-history { width: 92vw; }
 }
+
+/* ---------- supervised await_user ---------- */
+.await-user-panel {
+  width: min(520px, 100%);
+  margin-top: 7px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  background: var(--bg-raised);
+  display: grid;
+  gap: 7px;
+}
+
+.await-user-panel.inactive { opacity: 0.48; }
+.await-user-choices { display: grid; gap: 6px; }
+.await-user-option,
+.await-user-cancel,
+.await-user-custom button {
+  border: 1px solid var(--line);
+  background: var(--bg-panel);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 8px 10px;
+  text-align: left;
+  cursor: pointer;
+}
+.await-user-option:hover,
+.await-user-custom button:hover { border-color: var(--accent-dim); }
+.await-user-cancel { color: var(--muted); }
+.await-user-custom { display: flex; gap: 6px; }
+.await-user-custom input {
+  min-width: 0;
+  flex: 1;
+  border: 1px solid var(--line);
+  background: var(--bg-panel);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 8px 10px;
+}
+.await-user-custom input:focus { outline: none; border-color: var(--accent-dim); }
+.await-user-panel button:disabled,
+.await-user-panel input:disabled { cursor: default; }

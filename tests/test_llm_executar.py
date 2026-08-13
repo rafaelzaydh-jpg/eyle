@@ -60,7 +60,7 @@ def _capture(monkeypatch, response):
 
 def _agent_json(answer="ok"):
     return json.dumps({
-        "action": {"kind": "final", "answer": answer, "limitations": [], "grounding_ids": []},
+        "action": {"kind": "complete", "answer": answer, "limitations": [], "grounding_ids": [], "effect_ids": []},
         "investigation_updates": [],
         "task_updates": [],
     })
@@ -82,12 +82,12 @@ def test_structured_openai_uses_strict_profile_schema(monkeypatch):
     body = _agent_json()
     calls = _capture(monkeypatch, {"choices": [{"message": {"content": body}}]})
     parsed = llm_mod._chamar_llm("s", "u", _config(), perfil="agent")
-    assert parsed["action"]["kind"] == "final"
+    assert parsed["action"]["kind"] == "complete"
     assert parsed["action"]["answer"] == "ok"
     fmt = calls[0][1]["response_format"]
     assert fmt["type"] == "json_schema"
     assert fmt["json_schema"]["strict"] is True
-    assert set(fmt["json_schema"]["schema"]["required"]) == {"action", "investigation_updates", "task_updates"}
+    assert set(fmt["json_schema"]["schema"]["required"]) == {"action"}
     assert "anyOf" in fmt["json_schema"]["schema"]["properties"]["action"]
 
 
@@ -221,7 +221,7 @@ def test_connect_timeout_does_not_replace_read_timeout():
 
 def test_transport_timeout_is_recorded_as_started_physical_attempt_not_preflight(monkeypatch):
     import socket
-    from eyle.core.execution_context import ExecutionContext
+    from eyle.runtime.execution_context import ExecutionContext
     from eyle.runtime.history import build_execution_trace
     from tests.canonical import base_config
 
@@ -253,7 +253,7 @@ def test_transport_timeout_is_recorded_as_started_physical_attempt_not_preflight
 
 
 def test_true_preflight_rejection_has_no_physical_attempt(monkeypatch):
-    from eyle.core.execution_context import ExecutionContext
+    from eyle.runtime.execution_context import ExecutionContext
     from eyle.runtime.history import build_execution_trace
     from tests.canonical import base_config
 
@@ -284,7 +284,7 @@ def test_true_preflight_rejection_has_no_physical_attempt(monkeypatch):
 
 
 def test_unstructured_job_streaming_uses_execution_context_not_config_dict(monkeypatch):
-    from eyle.core.execution_context import ExecutionContext
+    from eyle.runtime.execution_context import ExecutionContext
     from tests.canonical import base_config
 
     cfg = base_config()
@@ -316,3 +316,27 @@ def test_unstructured_job_streaming_uses_execution_context_not_config_dict(monke
     monkeypatch.setattr(llm_mod, "_chamar_openai_compatible", fake_backend)
     assert llm_mod._chamar_llm("s", "u", cfg, execution) == "ok"
     assert callable(observed["on_chunk"])
+
+
+def test_transient_openai_http_error_retries_after_backend_translation(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise urllib.error.HTTPError(
+                req.full_url, 503, "Service Unavailable", {},
+                io.BytesIO(b'{"error":"temporary overload"}'),
+            )
+        return _FakeResponse({"choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
+    cfg = _config(
+        retry_max_attempts=2,
+        retry_base_seconds=0,
+        retry_max_seconds=0,
+        retry_jitter_seconds=0,
+        cooldown_seconds=0,
+    )
+    assert llm_mod._chamar_llm("s", "u", cfg) == "ok"
+    assert calls["n"] == 2

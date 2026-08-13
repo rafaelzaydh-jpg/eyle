@@ -5,8 +5,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import eyle.core.editing as codar_mod  # noqa: E402
-import eyle.core.sandbox as sandbox_mod  # noqa: E402
+import eyle.providers.standard_impl.editing as codar_mod  # noqa: E402
+import eyle.providers.standard_impl.sandbox as sandbox_mod  # noqa: E402
 
 
 def _cfg(**extras):
@@ -243,7 +243,7 @@ def test_docker_container_init_failure_is_fail_closed(monkeypatch, tmp_path):
 
 
 def test_execution_context_cleans_persistent_docker_and_snapshot(monkeypatch):
-    from eyle.core.execution_context import ExecutionContext
+    from eyle.runtime.execution_context import ExecutionContext
 
     calls = []
     class Temp:
@@ -255,14 +255,14 @@ def test_execution_context_cleans_persistent_docker_and_snapshot(monkeypatch):
     monkeypatch.setattr(sandbox_mod.subprocess, "run", lambda argv, **kwargs: calls.append(list(argv)))
     ctx = ExecutionContext(
         started_monotonic=0.0, deadline_monotonic=10.0, execution_id="t", source_job_id=1,
-        max_total_tokens=1000,
     )
-    ctx.sandbox_tempdir = temp
-    ctx.sandbox_workspace_path = "/tmp/fake-workspace"
-    ctx.sandbox_container_name = "eyle-sandbox-test"
-    ctx.sandbox_docker_binary = "/usr/bin/docker"
-    ctx.sandbox_backend = "docker"
-    ctx.cleanup_sandbox()
+    state = sandbox_mod._sandbox_state(ctx)
+    state["tempdir"] = temp
+    state["workspace_path"] = "/tmp/fake-workspace"
+    state["container_name"] = "eyle-sandbox-test"
+    state["docker_binary"] = "/usr/bin/docker"
+    state["backend"] = "docker"
+    ctx.cleanup()
     assert calls == [["/usr/bin/docker", "rm", "-f", "eyle-sandbox-test"]]
     assert temp.cleaned is True
-    assert ctx.sandbox_container_name is None and ctx.sandbox_workspace_path is None
+    assert state == {}

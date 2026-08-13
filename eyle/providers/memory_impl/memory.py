@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
-from eyle.core.memory_navigation import activate_memory, continue_memory_view
-from eyle.core.memory_store import (
+from eyle.providers.memory_impl.memory_navigation import activate_memory, continue_memory_view
+from eyle.providers.memory_impl.memory_store import (
     MEMORY_SCHEMA_VERSION,
     apply_operations,
     history_records,

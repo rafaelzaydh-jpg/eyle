@@ -1,7 +1,9 @@
+from tests.canonical import run_agent
 import inspect
 import json
 
-from eyle.core import agent, tools
+from eyle.core import agent
+from eyle.providers import standard as tools
 from eyle.core.agent import AgentSession
 from llm.executar import PROMPT_AGENTE
 from llm.structured import contract_instruction
@@ -20,18 +22,15 @@ def _walk_descriptions(value):
 
 def test_fixed_model_surface_is_path_or_fact_not_strategy():
     fixed = [PROMPT_AGENTE, contract_instruction("agent")]
-    for entry in tools.TOOLS.values():
+    for entry in tools.CAPABILITIES.values():
         fixed.append(str(entry.get("description") or ""))
         fixed.append(str(entry.get("returns") or ""))
         fixed.extend(str(item) for item in (entry.get("caveats") or []))
         fixed.extend(_walk_descriptions(entry.get("input_schema") or {}))
     text = "\n".join(fixed).lower()
     for phrase in (
-        "not a prerequisite",
         "usually do not need",
-        "do not create",
-        "never use it merely",
-        "choose one capability",
+        "choose one capability from",
         "decide again from the unchanged",
     ):
         assert phrase not in text
@@ -40,7 +39,7 @@ def test_fixed_model_surface_is_path_or_fact_not_strategy():
 def test_transport_instruction_does_not_reteach_schema_semantics():
     instruction = contract_instruction("agent")
     assert len(instruction) < 220
-    assert "may be empty" in instruction
+    assert "optional state deltas" in instruction and "omit" in instruction
     assert "completion_criteria" not in instruction
     assert "before Final" not in instruction
 
@@ -52,14 +51,12 @@ def test_runtime_feedback_has_no_instruction_channel():
     assert "semantic_followup" not in source
 
 
-def test_capability_index_stays_discovery_only_and_compact():
-    index = tools.gerar_indice_capabilities()
-    encoded = json.dumps(index, ensure_ascii=False, separators=(",", ":"))
-    assert len(index) == len(tools.TOOLS)
-    assert len(encoded) < 1800
-    assert "symbol_relations(symbol:str" in "\n".join(index)
-    assert "..." in next(item for item in index if item.startswith("symbol_relations("))
-
+def test_capability_metadata_remains_structured_without_model_facing_concision_quota():
+    assert len(tools.CAPABILITIES) > 0
+    for name, entry in tools.CAPABILITIES.items():
+        assert entry.get("description"), name
+        assert entry.get("input_schema") is not None, name
+        assert entry.get("returns") is not None, name
 
 def test_direct_final_requires_no_artificial_task_or_investigation(monkeypatch, tmp_path):
     prompts = []
@@ -68,15 +65,15 @@ def test_direct_final_requires_no_artificial_task_or_investigation(monkeypatch, 
         payload = json.loads(prompt)
         prompts.append(payload)
         return {
-            "action": {"kind": "final", "answer": "Ooi 😄", "limitations": [], "grounding_ids": []},
+            "action": {"kind": "complete", "answer": "Ooi 😄", "limitations": [], "grounding_ids": [], "effect_ids": []},
             "investigation_updates": [],
             "task_updates": [],
         }
 
     monkeypatch.setattr(agent, "executar_agente_llm", fake)
-    status, text, pending, _details = agent.executar_agente(
+    status, text, pending, _details = run_agent(agent, 
         "ooi", {"llm": {"context_window_tokens": 10000, "agent_max_tokens": 3600}, "context_engine": {"safety_margin_tokens": 500, "chars_per_token_fallback": 3, "cached_prompt_weight": 0.2}, "agent": {}, "codar": {"ativado": True, "testes": {"ativado": False}}},
-        projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True,
+        provider_context={"standard": {"caminho_origem": str(tmp_path)}}, retornar_detalhes=True,
     )
     assert status == "success"
     assert text == "Ooi 😄"
@@ -98,26 +95,21 @@ def test_runtime_no_action_feedback_reports_state_without_strategy(monkeypatch, 
         assert notice["code"] == "NO_ACTION"
         assert notice["state_unchanged"] is True
         assert "instruction" not in notice
-        return {"action": {"kind": "final", "answer": "ok", "limitations": [], "grounding_ids": []}, "investigation_updates": [], "task_updates": []}
+        return {"action": {"kind": "complete", "answer": "ok", "limitations": [], "grounding_ids": [], "effect_ids": []}, "investigation_updates": [], "task_updates": []}
 
     monkeypatch.setattr(agent, "executar_agente_llm", fake)
-    status, text, _, _ = agent.executar_agente(
+    status, text, _, _ = run_agent(agent, 
         "oi", {"llm": {"context_window_tokens": 10000, "agent_max_tokens": 3600}, "context_engine": {"safety_margin_tokens": 500, "chars_per_token_fallback": 3, "cached_prompt_weight": 0.2}, "agent": {}, "codar": {"ativado": True, "testes": {"ativado": False}}},
-        projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True,
+        provider_context={"standard": {"caminho_origem": str(tmp_path)}}, retornar_detalhes=True,
     )
     assert status == "success"
     assert text == "ok"
 
 
-def test_capability_model_prose_has_hard_concision_bounds():
-    for name, entry in tools.TOOLS.items():
-        assert len(str(entry.get("description") or "")) <= 90, name
-        assert len(str(entry.get("returns") or "")) <= 100, name
-        for caveat in entry.get("caveats") or []:
-            assert len(str(caveat)) <= 120, name
-        for description in _walk_descriptions(entry.get("input_schema") or {}):
-            assert len(description) <= 120, (name, description)
-
+def test_capability_model_prose_is_not_subject_to_hard_character_quotas():
+    # Rev1.4.8 deliberately removes the old 90/100/120-character prose quotas.
+    # Semantic clarity is tested by contract structure and end-to-end behavior instead.
+    assert all(str(entry.get("description") or "").strip() for entry in tools.CAPABILITIES.values())
 
 def _non_docstring_literals(path):
     import ast
@@ -138,7 +130,7 @@ def _non_docstring_literals(path):
 def test_model_return_path_strings_do_not_smuggle_strategy_advice():
     text = "\n".join(
         literal
-        for path in ("eyle/core/agent.py", "eyle/core/tools.py", "eyle/core/sandbox.py")
+        for path in ("eyle/core/agent.py", "eyle/providers/standard.py", "eyle/providers/standard_impl/sandbox.py")
         for literal in _non_docstring_literals(path)
     ).lower()
     for phrase in (

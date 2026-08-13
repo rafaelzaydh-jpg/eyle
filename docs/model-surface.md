@@ -1,30 +1,61 @@
-# Model-facing surface — Rev1.4.3
+# Model-facing surface — Rev1.5.1
 
-The Main LLM receives fixed guidance from four places only:
+Main sees a domain-neutral surface.
 
-1. `PROMPT_AGENTE`: semantic authority, epistemic source roles and physical boundaries.
-2. Structured response transport: one short reminder; JSON Schema owns field shape.
-3. Capability discovery/active contracts: factual purpose, inputs, effect, outputs and physical caveats.
-4. `runtime_feedback`: factual rejection/state/expectation data after an invalid physical/structural decision.
+## Fixed guidance
 
-## Laws
+The fixed prompt teaches physical distinctions, not domain workflows:
 
-Fixed text may expose **paths, provenance classes and physical facts**. It must not choose the semantic path for Main.
+- Main owns meaning;
+- capabilities come from independent providers and self-describe what they can do;
+- capability availability/request/planning is not execution;
+- Observation/Material/effects represent current physical results;
+- capabilities are optional resources;
+- if information sufficiency is uncertain, prefer observing before answering;
+- actions are `capability_calls`, `await_user`, `complete`;
+- Investigation/Task are optional and should be omitted when unused.
 
-- `prior_conversation` is retained context and may be incomplete or stale;
-- Memory is persistent prior cognition and may be stale;
-- `available_capabilities` describes invokable actions, not current workspace/implementation facts;
-- `runtime_observations` / `current_material` carry current physically observed state;
-- inference may be used, but it is not newly observed fact;
-- workspace presence/emptiness is context, not a task;
-- Task and Investigation are optional until Main creates them;
-- tool availability does not imply tool use;
-- direct Final is a first-class action.
+No bundled-provider capability name or keyword router belongs in the fixed prompt.
 
-`tests/test_rev142_epistemic_clarity.py` and the release verifier guard this surface.
+## Active task context
 
-## Semantic completion
+```text
+request            immutable task origin
+request_context    authoritative answers/refinements for this active task
+prior_conversation bounded background/reference context
+```
 
-The fixed prompt gives only the meaning of optional state fields: `Investigation.conclusion` is what Main says grounding establishes about its goal; `Task.result` is what Main says was achieved against `completion_criteria`. These statements do not require Main to create either object.
+`request_context` prevents a resumed task from remaining semantically frozen on the pre-clarification wording while preserving original-request provenance.
 
-Established Investigation Material is not pinned solely because it was once evidence. Open Investigation grounding is pinned while unresolved; after establishment, the conclusion is the semantic compression and the canonical Material remains Runtime-owned.
+## Dynamic capability catalog
+
+Every available capability is projected as:
+
+```text
+name = provider.local
+provider
+purpose
+effect
+inputs
+returns
+caveats
+limits
+confirmation
+```
+
+The provider contract is the authority for capability meaning.
+
+## Environment
+
+`environment.providers` is supplied by installed Providers. Core has no special `project` projection.
+
+## Epistemic coordinates
+
+- `runtime_observations`: compact current observations;
+- `current_material`: selected `mat-*` coordinates;
+- `runtime_effects`: executed `eff-*` coordinates;
+- `prior_conversation` and persistent Memory: context, not automatic current-world proof.
+
+## Completion
+
+`complete` carries `grounding_ids` and `effect_ids` as optional coordinates. Runtime validates coordinate identity/existence only; Main remains responsible for what its answer claims those coordinates establish.

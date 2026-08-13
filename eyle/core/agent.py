@@ -1,8 +1,6 @@
-"""Single-session LLM-first programming agent.
+"""Single-session domain-neutral LLM-first agent.
 
-There is one reasoning loop. The LLM decides what must be established, whether to answer, use a
-tool, ask a blocking question or propose a patch. The runtime only validates
-and executes concrete actions.
+There is one reasoning loop. Main decides what must be established, whether to call a capability, suspend for user input, or complete. Runtime only validates contracts and executes concrete actions.
 """
 from __future__ import annotations
 
@@ -15,18 +13,19 @@ from typing import Any, Dict, List, Optional, Tuple
 from llm.executar import ErroLLM, PROMPT_AGENTE, executar_agente as executar_agente_llm
 from .session import AgentSession
 from .continuation import PENDING_SCHEMA_VERSION, validate_pending_continuation
-from .execution_context import ExecutionContext, bind_execution, reset_execution, current_execution
+from eyle.runtime.execution_context import ExecutionContext, bind_execution, reset_execution, current_execution
 from .decision import (
     record as _decision_record, record_rejection as _decision_record_rejection,
-    requested_tool_names as _requested_tool_names,
+    requested_capability_names as _requested_capability_names,
 )
-from .observation import (
+from eyle.runtime.observation import (
     lookup as _lookup_observation, record as _record_observation,
     record_replay as _record_observation_replay, navigation_view as _observation_map,
     pending_results as _pending_observation_results, set_pending_results as _set_pending_observation_results,
-    clear_pending_results as _clear_pending_observation_results, event_history as _tool_history_view,
-    physical_tool_calls as _physical_tool_calls, replay_count as _observation_replay_count,
+    clear_pending_results as _clear_pending_observation_results, event_history as _capability_history_view,
+    physical_capability_calls as _physical_capability_calls, replay_count as _observation_replay_count,
     material_items as _grounding_items, register_material_candidates as _grounding_register,
+    physical_effect_items as _physical_effect_items, physical_effect_index_view as _physical_effect_index,
     freshest_material_for_locator as _grounding_freshest_for_locator,
     seed_runtime_failure as _seed_runtime_failure,
 )
@@ -34,37 +33,10 @@ from .investigation import (
     apply_investigation_updates, established_investigation_grounding_ids, investigation_grounding_ids, open_investigation_grounding_ids,
 )
 from .tasks import apply_task_updates, task_grounding_ids, task_state_view
-from .security import _resolver_caminho_seguro
-from .token_budget import (
-    available_user_prompt_tokens, estimate_tokens,
-    physical_user_prompt_tokens,
-)
-from .text_hash import hash_faixa
-from .post_write import (
-    expected_outputs_from_patches,
-    run_compileall_for_changes,
-    verify_expected_outputs,
-    verify_after_write as _verify_after_write,
-)
-from .tools import (
-    TOOLS, executar_tool,
-    gerar_catalogo_tools, gerar_indice_capabilities, validar_chamada_tool,
-    capability_observation_signature as _observation_signature,
-    capability_public_arguments as _observable_tool_arguments,
-    capability_public_result as _observable_tool_result,
-    capability_model_detail as _capability_model_detail,
-    capability_find_covering as _capability_find_covering,
-    capability_find_resource_failure as _capability_find_resource_failure,
-    capability_rehydrate_materials as _rehydrate_grounding,
-)
-from .transactions import (
-    dry_run_patch_set, apply_patch_set, rollback_patch_set,
-    begin as _begin_write_transaction, set_status as _set_write_status,
-    record_validation as _record_write_validation, increment_attempt as _increment_write_attempt,
-    record_failure as _record_write_failure, clear_failure as _clear_write_failure,
-    public_view as _write_transaction_view,
-)
-from .validation import validate_final
+from .token_budget import available_user_prompt_tokens, estimate_tokens
+from eyle.capabilities.registry import CapabilityRegistry
+from eyle.contracts.capability import physical_effect as _physical_effect
+from .validation import validate_complete
 
 def _return(status: str, text: str, pending: Any, details: Dict[str, Any], full: bool):
     return (status, text, pending, details) if full else (status, text, pending)
@@ -85,110 +57,84 @@ def _conversation_history(context: Any) -> Dict[str, Any]:
     return {"messages": normalized, "omitted_messages": 0}
 
 
-def _append_user_clarification(request: str, pending: Dict[str, Any], response: str) -> str:
-    """Evolve the one canonical task request with a blocking user clarification.
-
-    The clarification is task input, never a tool observation. Keeping it inside
-    session.request guarantees later Main turns see the same task even after pending tool results are replaced.
-    """
-    clarification = pending.get("clarification") if isinstance(pending, dict) else None
-    if not isinstance(clarification, dict):
-        raise ValueError("PENDING_CLARIFICATION_INVALID")
-    question = str(clarification.get("question") or "").strip()
-    missing = str(clarification.get("missing_information") or "").strip()
+def _await_user_resolution_text(pending: Dict[str, Any], response: str) -> str:
+    """Return compact retained context for a resolved human supervision gate."""
+    question = str((pending or {}).get("question") or "").strip()
     answer = str(response or "").strip()
-    if not question or not missing or not answer:
-        raise ValueError("PENDING_CLARIFICATION_INVALID")
-    base = str(request or "").rstrip()
-    block = (
-        "User clarification for the active request:\n"
-        f"Missing information: {missing}\n"
-        f"Question: {question}\n"
-        f"Answer: {answer}"
+    if not question or not answer:
+        raise ValueError("PENDING_USER_RESPONSE_INVALID")
+    selected = None
+    for option in list((pending or {}).get("options") or []):
+        if not isinstance(option, dict):
+            continue
+        option_id = str(option.get("id") or "").strip()
+        label = str(option.get("label") or "").strip()
+        if answer.casefold() in {option_id.casefold(), label.casefold()}:
+            selected = option_id or None
+            break
+    selected_text = f" [option={selected}]" if selected else ""
+    return f"Response to suspended question: {question} -> {answer}{selected_text}"
+
+
+def _record_user_resolution(session: AgentSession, pending: Dict[str, Any], response: str) -> None:
+    """Retain authoritative refinement of the active Request without rewriting its origin."""
+    question = str((pending or {}).get("question") or "").strip()
+    answer = str(response or "").strip()
+    if not question or not answer:
+        raise ValueError("PENDING_USER_RESPONSE_INVALID")
+    selected = None
+    for option in list((pending or {}).get("options") or []):
+        if not isinstance(option, dict):
+            continue
+        option_id = str(option.get("id") or "").strip()
+        label = str(option.get("label") or "").strip()
+        if answer.casefold() in {option_id.casefold(), label.casefold()}:
+            selected = option_id or None
+            break
+    item = {
+        "question": question,
+        "answer": answer,
+        "reason": str((pending or {}).get("reason") or "").strip(),
+    }
+    if selected:
+        item["selected_option"] = selected
+    session.request_context.append(item)
+    session.request_context = session.request_context[-12:]
+    _record_decision(
+        session, "await_user_resolution", "accepted",
+        reason=str((pending or {}).get("reason") or "").strip() or None,
+        facts={"response": str(response or "").strip()[:500]},
     )
-    return f"{base}\n\n{block}" if base else block
 
 
-def _project_descriptor(project: Dict[str, Any]) -> Dict[str, Any]:
-    root = (project or {}).get("caminho_origem")
-    self_root = (project or {}).get("eyle_root")
-    return {
-        "available": bool(root and os.path.isdir(root)),
-        "name": os.path.basename(os.path.realpath(root)) if root else None,
-        "discovery": (project or {}).get("discovery"),
-        "content_state": (project or {}).get("content_state"),
-        "self_source_available": bool(self_root and os.path.isdir(self_root)),
-    }
+def _available_capabilities(config: Dict[str, Any], provider_context: Dict[str, Any], registry: CapabilityRegistry) -> set[str]:
+    """Return capabilities physically exposed by their providers.
 
-
-def _physical_source_roots(project: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "workspace": (project or {}).get("caminho_origem"),
-        "eyle": (project or {}).get("eyle_root"),
-    }
-
-
-def _tests_enabled(config: Dict[str, Any]) -> bool:
-    return bool((((config or {}).get("codar") or {}).get("testes") or {}).get("ativado", False))
-
-
-def _allowed_tools(config: Dict[str, Any], project: Dict[str, Any]) -> set[str]:
-    """Return physical capabilities only; never classify the user request.
-
-    The Main LLM sees every capability that is objectively available in the
-    current environment and decides whether to use it.
+    Core never interprets provider domains or request meaning. Each provider
+    owns availability; Runtime contributes only generic terminal-capability
+    suppression for the current execution.
     """
-    root = (project or {}).get("caminho_origem")
-    project_available = bool(root and os.path.isdir(root))
-    tests_enabled = project_available and _tests_enabled(config)
-    names: set[str] = set()
     execution = current_execution()
     terminal = set(execution.terminal_capabilities) if execution is not None else set()
-    for name, spec in TOOLS.items():
-        if name in terminal:
-            continue
-        availability = str(spec.get("availability") or "workspace")
-        if availability == "global":
-            names.add(name)
-        elif availability == "workspace" and project_available:
-            names.add(name)
-        elif availability == "tests" and tests_enabled:
-            names.add(name)
-    return names
+    context = {"config": config or {}, "provider_context": provider_context or {}}
+    return registry.available_names(context, terminal=terminal)
 
 
-def _tool_views(
-    session: AgentSession, config: Dict[str, Any], project: Dict[str, Any],
-) -> Tuple[set[str], List[str], List[Dict[str, Any]]]:
-    """Return physical authority plus progressive model-facing capability views.
+def _capability_view(
+    session: AgentSession, config: Dict[str, Any], provider_context: Dict[str, Any], registry: CapabilityRegistry,
+) -> Tuple[set[str], List[Dict[str, Any]]]:
+    """Expose complete model-readable contracts for every physically available capability.
 
-    Every physically available tool is callable from the compact index on first
-    use. Expanded contracts are derived only for tools the Main LLM has actually
-    requested before; no selector, router or persisted activation state exists.
+    Rev1.5.1 does not hide semantics behind first-use activation or
+    tiny signatures. The executable registry remains authoritative, but Main sees
+    purpose, effect class, inputs, returns, caveats and physical limits before it
+    chooses. This spends prompt tokens for comprehension rather than routing.
     """
-    allowed = _allowed_tools(config, project)
+    allowed = _available_capabilities(config, provider_context, registry)
     if not allowed:
-        return set(), [], []
-    requested = [name for name in _requested_tool_names(session.decision_ledger) if name in allowed]
-    active_set = set(requested)
-    index = gerar_indice_capabilities(config=config, allowed_names=allowed - active_set)
-    # Expanded contracts are a hot working-set view, not
-    # permanent prompt baggage. Keep only the most recently requested distinct
-    # capabilities expanded; older capabilities return to the compact index and
-    # remain fully callable. This is recency, not semantic routing.
-    recent_limit = 2
-    recent: List[str] = []
-    for name in reversed(requested):
-        if name not in recent:
-            recent.append(name)
-        if len(recent) >= recent_limit:
-            break
-    recent.reverse()
-    active_set = set(recent)
-    index = gerar_indice_capabilities(config=config, allowed_names=allowed - active_set)
-    active = gerar_catalogo_tools(config=config, allowed_names=recent, compact=True) if recent else []
-    return allowed, index, active
-
+        return set(), []
+    catalog = registry.catalog(config=config, allowed_names=allowed)
+    return allowed, catalog
 
 def _project_grounding_index(
     session: AgentSession, *, recent_limit: int = 2, pending_limit: int = 6,
@@ -246,7 +192,7 @@ def _project_observation_map(session: AgentSession) -> List[Dict[str, Any]]:
     fresh_turn = max(0, int(getattr(session, "turn", 0) or 0) - 1)
 
     def key(item: Dict[str, Any]) -> Tuple[Any, Any, Any]:
-        return (item.get("turn"), item.get("observation_signature"), item.get("tool"))
+        return (item.get("turn"), item.get("observation_signature"), item.get("capability"))
 
     pinned: List[Dict[str, Any]] = []
     for item in full:
@@ -255,7 +201,7 @@ def _project_observation_map(session: AgentSession) -> List[Dict[str, Any]]:
         if pinned_ids.intersection(str(gid) for gid in item.get("grounding_ids") or []):
             clone = {
                 "turn": item.get("turn"),
-                "tool": item.get("tool"),
+                "capability": item.get("capability"),
                 "grounding_ids": list(item.get("grounding_ids") or []),
                 "observation_signature": item.get("observation_signature"),
                 "retained_for": "investigation_grounding",
@@ -281,7 +227,7 @@ def _project_observation_map(session: AgentSession) -> List[Dict[str, Any]]:
                 continue
             seen_frontiers.add(frontier_id)
             clone = copy.deepcopy(frontier)
-            clone.setdefault("source_tool", item.get("tool"))
+            clone.setdefault("source_capability", item.get("capability"))
             open_frontiers.append(clone)
 
     retained: List[Dict[str, Any]] = []
@@ -290,70 +236,15 @@ def _project_observation_map(session: AgentSession) -> List[Dict[str, Any]]:
     return pinned + retained + fresh
 
 def _project_pending_results(session: AgentSession, config: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-    """Project one bounded fresh delta; canonical bytes stay in ObservationLedger.
+    """Project the fresh capability delta without cost-driven token pressure.
 
-    Raw tool output is a bounded working set, not permission to
-    spend the remaining job budget.  Bounds tighten as the job gets older or
-    physical token headroom shrinks, while every result keeps status, grounding
-    refs and Frontier coordinates.
+    Capability implementations already bind their own physical outputs. Rev1.5.0
+    keeps the fresh semantic result intact and only permits the final per-call
+    context-window fitter to crop if the provider's real context ceiling requires it.
     """
-    turn = max(1, int(getattr(session, "turn", 1) or 1))
-    if turn <= 3:
-        total_limit, per_result_limit = 14000, 5000
-    elif turn <= 6:
-        total_limit, per_result_limit = 10000, 3800
-    else:
-        total_limit, per_result_limit = 7000, 2600
-    execution = current_execution()
-    remaining = execution.physical_tokens_remaining if execution is not None else None
-    if remaining is not None and remaining < 30000:
-        total_limit, per_result_limit = min(total_limit, 6000), min(per_result_limit, 2200)
-    if remaining is not None and remaining < 15000:
-        total_limit, per_result_limit = min(total_limit, 4200), min(per_result_limit, 1600)
+    return [copy.deepcopy(item) for item in _pending_observation_results(session) if isinstance(item, dict)]
 
-    projected: List[Dict[str, Any]] = []
-    for raw in _pending_observation_results(session):
-        if not isinstance(raw, dict):
-            continue
-        item = copy.deepcopy(raw)
-        for _ in range(64):
-            if len(json.dumps(item, ensure_ascii=False, default=str)) <= per_result_limit:
-                break
-            detail = item.get("detail")
-            if isinstance(detail, (dict, list)) and _shrink_structured_once(detail):
-                item["context_compacted"] = True
-                continue
-            if isinstance(detail, str) and len(detail) > 900:
-                item["detail"] = _bounded_context_text(detail, max(900, per_result_limit // 2))
-                item["context_compacted"] = True
-                continue
-            compact = _minimal_tool_context(item, detail_char_limit=max(700, per_result_limit // 2))
-            if len(json.dumps(compact, ensure_ascii=False, default=str)) < len(json.dumps(item, ensure_ascii=False, default=str)):
-                item = compact
-                continue
-            break
-        projected.append(item)
-
-    def size(value: Dict[str, Any]) -> int:
-        return len(json.dumps(value, ensure_ascii=False, default=str))
-
-    while projected and sum(size(item) for item in projected) > total_limit:
-        index = max(range(len(projected)), key=lambda idx: size(projected[idx]))
-        current = projected[index]
-        compact = _minimal_tool_context(current, detail_char_limit=900)
-        if size(compact) < size(current):
-            projected[index] = compact
-            continue
-        detail = current.get("detail")
-        if detail not in (None, {}, [], ""):
-            current["detail"] = {"context_compacted": True, "note": "full fresh result retained in Observation"}
-            current["context_compacted"] = True
-            continue
-        break
-    return projected
-
-
-def _compact_non_read_result(tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
+def _compact_non_read_result(capability: str, result: Dict[str, Any]) -> Dict[str, Any]:
     detail = result.get("detail")
     if isinstance(detail, dict):
         detail = {
@@ -363,7 +254,7 @@ def _compact_non_read_result(tool: str, result: Dict[str, Any]) -> Dict[str, Any
     elif isinstance(detail, str):
         detail = detail[:4000]
     return {
-        "tool": tool,
+        "capability": capability,
         "status": result.get("status"),
         "ok": result.get("ok"),
         "executed": result.get("executed"),
@@ -399,18 +290,19 @@ def _bounded_source_text(text: Any, max_chars: int, *, source_span: Optional[Tup
     return _bounded_context_text(value, max_chars, marker=marker)
 
 
-def _model_tool_result(session: AgentSession, tool: str, result: Dict[str, Any], config: Optional[Dict[str, Any]] = None, arguments: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _model_capability_result(session: AgentSession, capability: str, result: Dict[str, Any], registry: CapabilityRegistry, config: Optional[Dict[str, Any]] = None, arguments: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Project one capability result without interpreting the capability in Agent."""
-    produces_grounding = bool((TOOLS.get(tool) or {}).get("produces_grounding"))
+    produces_grounding = bool(registry.spec(capability).get("produces_grounding"))
     grounding_ids = _grounding_register(
         session.observation_ledger, result.get("observations") or []
     ) if produces_grounding else []
-    detail = _capability_model_detail(tool, result.get("detail"), grounding_ids, config or {})
+    detail = registry.model_detail(capability, result.get("detail"), grounding_ids, config or {})
     model_result = {
-        "tool": tool, "status": result.get("status"), "ok": result.get("ok"),
+        "capability": capability, "status": result.get("status"), "ok": result.get("ok"),
         "executed": result.get("executed"), "changed": result.get("changed"),
         "error_code": result.get("error_code"), "retryable": result.get("retryable"),
         "failure_scope": result.get("failure_scope"), "failure_resource": result.get("failure_resource"),
+        "physical_effect": copy.deepcopy(result.get("physical_effect")) if isinstance(result.get("physical_effect"), dict) else None,
         "detail": detail, "grounding_ids": grounding_ids,
     }
     for field in ("coverage", "frontiers"):
@@ -423,7 +315,7 @@ def _model_tool_result(session: AgentSession, tool: str, result: Dict[str, Any],
 def _shrink_structured_once(value: Any) -> bool:
     """Shrink one large nested value while preserving deterministic summaries.
 
-    Tool results are allowed to inspect a large project, but the LLM should not
+    Tool results are allowed to inspect a large provider_context, but the LLM should not
     receive every row of that inspection. This reducer is intentionally generic:
     it understands strings, lists and nested mappings instead of hard-coding
     every current tool field name. One reduction is made per call so
@@ -501,13 +393,13 @@ def _shrink_structured_once(value: Any) -> bool:
     return False
 
 
-def _minimal_tool_context(result: Dict[str, Any], *, detail_char_limit: int = 3000) -> Dict[str, Any]:
+def _minimal_capability_context(result: Dict[str, Any], *, detail_char_limit: int = 3000) -> Dict[str, Any]:
     """Last-resort bounded model view while preserving canonical grounding refs."""
     compact = {
         key: result.get(key)
         for key in (
-            "tool", "status", "ok", "executed", "changed", "error_code", "retryable",
-            "failure_scope", "failure_resource", "grounding_ids", "frontiers",
+            "capability", "status", "ok", "executed", "changed", "error_code", "retryable",
+            "failure_scope", "failure_resource", "physical_effect", "grounding_ids", "frontiers",
         )
         if result.get(key) is not None
     }
@@ -591,37 +483,11 @@ def _crop_payload(payload: Dict[str, Any], budget: int, chars_per_token: int) ->
         for index, result in enumerate(list(results)):
             if not isinstance(result, dict):
                 continue
-            compact = _minimal_tool_context(result)
+            compact = _minimal_capability_context(result)
             if len(json.dumps(compact, ensure_ascii=False, default=str)) < len(json.dumps(result, ensure_ascii=False, default=str)):
                 results[index] = compact
                 compacted_any = True
         if compacted_any:
-            continue
-
-        # Under physical headroom pressure keep tool callability while dropping
-        # explanatory repetition. Compact capability signatures remain enough
-        # for discovery; active contracts keep canonical input shape.
-        capability_index = payload.get("available_capabilities") or []
-        compact_index = [str(item).split(" — ", 1)[0] for item in capability_index]
-        if compact_index != capability_index:
-            payload["available_capabilities"] = compact_index
-            continue
-
-        active_tools = payload.get("active_tools") or []
-        compact_active = []
-        changed_active = False
-        for item in active_tools:
-            if not isinstance(item, dict):
-                compact_active.append(item)
-                continue
-            compact = {
-                key: copy.deepcopy(item.get(key))
-                for key in ("name", "effect", "inputs") if item.get(key) is not None
-            }
-            compact_active.append(compact)
-            changed_active = changed_active or compact != item
-        if changed_active:
-            payload["active_tools"] = compact_active
             continue
 
         # Finally drop unpinned Material directory rows. Fresh result payloads
@@ -638,7 +504,7 @@ def _crop_payload(payload: Dict[str, Any], budget: int, chars_per_token: int) ->
     return payload
 
 
-def _agent_config(config: Dict[str, Any], session: AgentSession, project: Dict[str, Any]) -> Dict[str, Any]:
+def _agent_config(config: Dict[str, Any], session: AgentSession, provider_context: Dict[str, Any]) -> Dict[str, Any]:
     """Return Main's physical LLM configuration without downstream token hostage-taking."""
     clone = dict(config)
     llm = dict(config.get("llm") or {})
@@ -693,6 +559,19 @@ def _merged_runtime_feedback(transient: str, persistent: str) -> Any:
     return json.dumps(base, ensure_ascii=False, separators=(",", ":"))
 
 
+def _project_request_context(session: AgentSession) -> List[Dict[str, Any]]:
+    """Project authoritative user refinements of the still-active immutable request."""
+    raw = [item for item in (session.request_context or []) if isinstance(item, dict)]
+    projected: List[Dict[str, Any]] = []
+    for item in raw[-6:]:
+        clone = copy.deepcopy(item)
+        for field in ("question", "answer", "reason"):
+            if isinstance(clone.get(field), str):
+                clone[field] = _bounded_context_text(clone[field], 900)
+        projected.append(clone)
+    return projected
+
+
 def _project_conversation_background(session: AgentSession) -> List[Dict[str, Any]]:
     """Keep enough prior conversation for continuity without replaying it forever."""
     raw = [item for item in (session.conversation_background or []) if isinstance(item, dict)]
@@ -710,9 +589,10 @@ def _project_conversation_background(session: AgentSession) -> List[Dict[str, An
 def _compile_prompt(
     session: AgentSession,
     config: Dict[str, Any],
-    project: Dict[str, Any],
+    provider_context: Dict[str, Any],
     conversation_context: Any,
     feedback: str,
+    registry: CapabilityRegistry,
 ) -> Tuple[str, set[str]]:
     context_cfg = config.get("context_engine") or {}
     chars_per_token = max(1, int(context_cfg.get("chars_per_token_fallback", 3) or 3))
@@ -725,23 +605,23 @@ def _compile_prompt(
         execution.history_messages_omitted = int(history_meta.get("omitted_messages", 0) or 0)
         execution.assert_canonical_request(session.request)
 
-    allowed, capability_index, active_tools = _tool_views(session, config, project)
-    token_remaining = execution.physical_tokens_remaining if execution is not None else None
+    allowed, capability_index = _capability_view(session, config, provider_context, registry)
     payload = {
         "request": session.request,
+        "request_context": _project_request_context(session),
         "turn": session.turn,
         "investigation": session.investigation,
-        "project": _project_descriptor(project),
+        "environment": registry.environment({"config": config or {}, "provider_context": provider_context or {}}),
         "prior_conversation": _project_conversation_background(session),
         "runtime_observations": _project_observation_map(session),
         "latest_capability_results": _project_pending_results(session, config),
         "current_material": _project_grounding_index(session),
+        "runtime_effects": _physical_effect_index(session.observation_ledger),
         "physical_limits": {
-            "physical_tokens_remaining": token_remaining,
+            "context_window_tokens": int(((config.get("llm") or {}).get("context_window_tokens", 38000) or 38000)),
             "terminal_capabilities": execution.terminal_capabilities_view() if execution is not None else {},
         },
         "available_capabilities": capability_index,
-        "active_tools": active_tools,
         "runtime_feedback": str(feedback or "").strip() or None,
     }
     if session.tasks:
@@ -755,17 +635,7 @@ def _compile_prompt(
         token_estimate_multiplier=calibration,
     )
     system_tokens = estimate_tokens(PROMPT_AGENTE, chars_per_token)
-    physical_prompt_budget = None
-    if execution is not None:
-        physical_prompt_budget = physical_user_prompt_tokens(
-            config,
-            PROMPT_AGENTE,
-            output_tokens=output_tokens,
-            physical_tokens_remaining=execution.physical_tokens_remaining,
-            protected_tokens=0,
-            token_estimate_multiplier=calibration,
-        )
-    prompt_budget = min(window_prompt_budget, physical_prompt_budget) if physical_prompt_budget is not None else window_prompt_budget
+    prompt_budget = window_prompt_budget
     components_before = _trace_prompt_components(payload, chars_per_token)
     pre_crop = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
     pre_crop_tokens = estimate_tokens(pre_crop, chars_per_token)
@@ -775,10 +645,8 @@ def _compile_prompt(
     post_crop_tokens = estimate_tokens(prompt, chars_per_token)
     if execution is not None:
         execution.begin_call(mode="agent", turn=session.turn, prompt={
-            "characters": len(prompt), "estimated_tokens": post_crop_tokens, "tool_count": len(allowed),
-            "active_tool_count": len(active_tools),
+            "characters": len(prompt), "estimated_tokens": post_crop_tokens, "capability_count": len(allowed),
             "prompt_budget_tokens": prompt_budget, "window_user_prompt_budget_tokens": window_prompt_budget,
-            "physical_user_prompt_budget_tokens": physical_prompt_budget,
             "output_tokens_requested": output_tokens_configured, "output_tokens_reserved": output_tokens,
             "completion_ceiling_clamped": output_tokens < output_tokens_configured,
             "system_prompt_characters": len(PROMPT_AGENTE),
@@ -791,12 +659,13 @@ def _compile_prompt(
 def _call_agent(
     session: AgentSession,
     config: Dict[str, Any],
-    project: Dict[str, Any],
+    provider_context: Dict[str, Any],
     conversation_context: Any,
     feedback: str = "",
+    registry: CapabilityRegistry = None,
 ) -> Tuple[Dict[str, Any], set[str]]:
-    call_config = _agent_config(config, session, project)
-    prompt, allowed = _compile_prompt(session, call_config, project, conversation_context, feedback)
+    call_config = _agent_config(config, session, provider_context)
+    prompt, allowed = _compile_prompt(session, call_config, provider_context, conversation_context, feedback, registry)
     decision = executar_agente_llm(prompt, call_config)
     if not isinstance(decision, dict):
         raise ValueError("agent structured response must be an object")
@@ -819,7 +688,7 @@ def _grounding_usage_metrics(session: AgentSession) -> Dict[str, int]:
     task_ids = set(task_grounding_ids(session.tasks))
     target_ids = investigation_ids | task_ids
     actions_with_grounding = sum(
-        1 for item in _tool_history_view(session, limit=200)
+        1 for item in _capability_history_view(session, limit=200)
         if isinstance(item, dict) and item.get("executed") is True and item.get("grounding_ids")
     )
     return {
@@ -828,7 +697,7 @@ def _grounding_usage_metrics(session: AgentSession) -> Dict[str, int]:
         "task_grounding_count": len(task_ids & all_ids),
         "completion_grounding_count": len(target_ids & all_ids),
         "unreferenced_grounding_count": len(all_ids - target_ids),
-        "tool_actions_with_grounding": actions_with_grounding,
+        "capability_actions_with_grounding": actions_with_grounding,
     }
 
 
@@ -837,23 +706,24 @@ def _details(
     limitations: Optional[List[str]] = None, failure_code: Optional[str] = None,
 ) -> Dict[str, Any]:
     execution = current_execution()
-    all_tool_events = list((session.observation_ledger or {}).get("events") or [])
+    all_capability_events = list((session.observation_ledger or {}).get("events") or [])
     all_decision_events = list((session.decision_ledger or {}).get("events") or [])
     obs_start = int(execution.observation_event_start or 0) if execution is not None else 0
     dec_start = int(execution.decision_event_start or 0) if execution is not None else 0
-    job_tool_events = all_tool_events[obs_start:]
+    job_capability_events = all_capability_events[obs_start:]
     job_decision_events = all_decision_events[dec_start:]
-    tool_history = [{
-        "turn": item.get("turn"), "tool": item.get("tool"), "status": item.get("status"),
+    capability_history = [{
+        "turn": item.get("turn"), "capability": item.get("capability"), "status": item.get("status"),
         "error_code": item.get("error_code"), "observation_signature": item.get("observation_signature"),
         "arguments": copy.deepcopy(item.get("arguments") or {}),
         "result": copy.deepcopy(item.get("result") or {}),
         "grounding_ids": list(item.get("grounding_ids") or []),
+        "effect_id": item.get("effect_id"),
         "frontier_ids": list(item.get("frontier_ids") or []),
         "replay_reason": item.get("replay_reason"),
-    } for item in job_tool_events[-50:] if isinstance(item, dict)]
+    } for item in job_capability_events[-50:] if isinstance(item, dict)]
     decision_history = [copy.deepcopy(item) for item in job_decision_events[-50:] if isinstance(item, dict)]
-    job_tool_calls = sum(1 for item in job_tool_events if isinstance(item, dict) and item.get("executed") is True)
+    job_capability_calls = sum(1 for item in job_capability_events if isinstance(item, dict) and item.get("executed") is True)
     total_replays = int(_observation_replay_count(session) or 0)
     replay_start = int(execution.observation_replay_start or 0) if execution is not None else 0
     job_replays = max(0, total_replays - replay_start)
@@ -863,408 +733,71 @@ def _details(
     return {
         "status": status, "execution_id": session.execution_id, "investigation": session.investigation, "tasks": session.tasks,
         "turns": int(execution.agent_turns if execution is not None else session.turn),
-        "tool_calls": job_tool_calls,
-        "workspace_epoch": int(session.workspace_epoch or 0),
+        "capability_calls": job_capability_calls,
+        "reality_epoch": int(session.reality_epoch or 0),
         "observation_replays": job_replays,
-        "observation_ledger_size": len(job_tool_events),
+        "observation_ledger_size": len(job_capability_events),
         "grounding_count_total": job_grounding_count,
         "grounding_usage": _grounding_usage_metrics(session),
         "task_totals": {
-            "turns": int(session.turn), "tool_calls": _physical_tool_calls(session),
+            "turns": int(session.turn), "capability_calls": _physical_capability_calls(session),
             "observation_replays": int(_observation_replay_count(session) or 0),
-            "observation_events": len(all_tool_events), "grounding_count": len(grounding),
+            "observation_events": len(all_capability_events), "grounding_count": len(grounding),
             "decision_events": len(all_decision_events),
         },
-        "tools_used": [item.get("tool") for item in tool_history if (item.get("result") or {}).get("executed") is True],
-        "tool_history": tool_history, "decision_history": decision_history,
+        "capabilities_used": [item.get("capability") for item in capability_history if (item.get("result") or {}).get("executed") is True],
+        "capability_history": capability_history, "decision_history": decision_history,
         "grounding": session.grounding_index(),
+        "physical_effects": _physical_effect_index(session.observation_ledger),
         "limitations": list(limitations or []), "failure_code": failure_code,
-        "write_failure": dict(session.write_transaction.get("failure") or {}) if isinstance(session.write_transaction, dict) and session.write_transaction.get("failure") else None,
         "llm_usage": execution.usage_view() if execution else {},
         "llm_calls": execution.ledger_view() if execution else [],
-        "write_transaction": _write_transaction_view(session.write_transaction),
+        "pending_capability": {k: session.pending_capability.get(k) for k in ("confirmation_id", "provider", "capability") if session.pending_capability.get(k)} if isinstance(session.pending_capability, dict) else {},
     }
 
 
-def _transaction_result(raw: Dict[str, Any], *, changed: bool = False) -> Dict[str, Any]:
-    raw = raw if isinstance(raw, dict) else {}
-    ok = raw.get("ok") is True
-    detail = {
-        key: raw.get(key) for key in ("message", "prepared_patches", "applied_patches", "files")
-        if raw.get(key) is not None
+def _advance_reality_epoch_if_needed(session: AgentSession, result: Dict[str, Any]) -> None:
+    """Invalidate reusable observations after a confirmed persistent mutation.
+
+    This is intentionally domain-neutral. Providers describe the physical effect;
+    Runtime only reacts to the universal changed+persistent contract.
+    """
+    effect = result.get("physical_effect") if isinstance(result, dict) else None
+    if (result.get("ok") is True and result.get("executed") is True and result.get("changed") is True
+            and isinstance(effect, dict) and effect.get("persistence") == "persistent"):
+        session.reality_epoch += 1
+
+
+def _resume(session: AgentSession, pending: Dict[str, Any], config: Dict[str, Any], provider_context: Dict[str, Any], full: bool, registry: CapabilityRegistry):
+    if pending.get("continuation_kind") != "capability_confirmation":
+        return _return("failed", "A pendência não corresponde a uma confirmação de capability válida.", None, _details(session, "failed", config, failure_code="CAPABILITY_PENDING_INVALID"), full)
+    state = session.pending_capability if isinstance(session.pending_capability, dict) else {}
+    capability = str(pending.get("capability") or "")
+    if (not state or capability != str(state.get("capability") or "")
+            or str(pending.get("provider") or "") != str(state.get("provider") or "")
+            or str(pending.get("confirmation_id") or "") != str(state.get("confirmation_id") or "")):
+        return _return("failed", "A pendência não corresponde ao estado preparado da capability.", None, _details(session, "failed", config, failure_code="CAPABILITY_PENDING_MISMATCH"), full)
+    context = {
+        "config": config, "provider_context": provider_context, "session": session,
+        "grounding": _grounding_items(session.observation_ledger),
+        "observation_ledger": session.observation_ledger,
+        "reality_epoch": int(session.reality_epoch),
     }
-    return {
-        "status": "success" if ok else "failed",
-        "ok": ok,
-        "executed": True,
-        "changed": bool(changed and ok),
-        "error_code": None if ok else str(raw.get("error_code") or "PATCH_TRANSACTION_FAILED"),
-        "detail": detail if ok else str(raw.get("message") or "transaction failed"),
-    }
-
-
-def _transaction_rollback_result(raw: Dict[str, Any]) -> Dict[str, Any]:
-    raw = raw if isinstance(raw, dict) else {}
-    ok = raw.get("ok") is True
-    return {
-        "status": "success" if ok else "failed",
-        "ok": ok,
-        "executed": True,
-        "changed": ok,
-        "error_code": None if ok else "ROLLBACK_FAILED",
-        "detail": {
-            "restored": list(raw.get("restored") or []),
-            "failures": list(raw.get("failures") or []),
-        },
-    }
-
-
-def _pending_patch_set(session: AgentSession):
-    tx = session.write_transaction
-    patches = tx.get("patches") if isinstance(tx, dict) else None
-    if not isinstance(patches, list) or not patches:
-        raise ValueError("WRITE_TRANSACTION_MISSING")
-    files = [str(patch.get("path") or "") for patch in patches]
-    text = (
-        f"Proposta transacional pronta para confirmação: {len(patches)} arquivo(s): "
-        f"{', '.join(files)}. Dry-run aprovado para o conjunto completo. "
-        "A aplicação exige confirmação do usuário."
+    result = registry.confirm(capability, state.get("state") or {}, context)
+    model_result = _model_capability_result(session, capability, result, registry, config, state.get("arguments") or {})
+    _record_observation(
+        session, None, capability, state.get("arguments") or {}, result, model_result,
+        public_arguments=registry.public_arguments(capability, state.get("arguments") or {}),
+        public_result=registry.public_result(capability, result),
     )
-    _set_write_status(tx, "awaiting_confirmation")
-    pending = {
-        "pending_schema_version": PENDING_SCHEMA_VERSION,
-        "continuation_kind": "write_confirmation",
-        "question": text,
-        "session": session.to_dict(),
-        "transaction_id": tx.get("transaction_id"),
-    }
-    validate_pending_continuation(pending)
-    return text, pending
-
-
-def _compile_after_write(config: Dict[str, Any], project: Dict[str, Any], paths: List[str]) -> Dict[str, Any]:
-    timeout = int(((((config or {}).get("codar") or {}).get("testes") or {}).get("timeout_segundos", 60)))
-    return run_compileall_for_changes(project.get("caminho_origem"), paths, timeout_seconds=timeout)
-
-
-def _rollback_failure_text(prefix: str, rollback: Dict[str, Any], restored_text: str) -> Tuple[str, str]:
-    if rollback.get("ok"):
-        return f"{prefix} {restored_text}", "ROLLED_BACK"
-    return f"{prefix} O rollback não pôde ser confirmado.", "ROLLBACK_FAILED"
-
-
-def _diagnostic_text(result: Dict[str, Any], max_chars: int = 4000) -> str:
-    """Return a readable bounded diagnostic without hiding the useful tail."""
-    detail = (result or {}).get("detail")
-    if isinstance(detail, (dict, list)):
-        text = json.dumps(detail, ensure_ascii=False, indent=2, default=str)
-    else:
-        text = str(detail or "").strip()
-    if not text:
-        return "Nenhum detalhe técnico foi retornado pela etapa de validação."
-    max_chars = max(800, int(max_chars))
-    if len(text) <= max_chars:
-        return text
-    head = max_chars // 3
-    tail = max_chars - head
-    return f"{text[:head]}\n... [diagnóstico truncado] ...\n{text[-tail:]}"
-
-
-def _write_failure_response(
-    prefix: str,
-    stage: str,
-    result: Dict[str, Any],
-    rollback: Dict[str, Any],
-    restored_text: str,
-    paths: List[str],
-) -> Tuple[str, str, Dict[str, Any]]:
-    """Build the user-visible and structured report for a failed confirmed write."""
-    base, suffix = _rollback_failure_text(prefix, rollback, restored_text)
-    diagnostic = _diagnostic_text(result)
-    error_code = str((result or {}).get("error_code") or f"{stage.upper()}_FAILED")
-    normalized_paths = [str(path) for path in paths or [] if str(path)]
-    report = {
-        "stage": stage,
-        "error_code": error_code,
-        "executed": bool((result or {}).get("executed")),
-        "detail": diagnostic,
-        "rollback_confirmed": bool((rollback or {}).get("ok")),
-        "rollback_error_code": (rollback or {}).get("error_code"),
-        "paths": normalized_paths,
-    }
-    text = (
-        f"{base}\n\nErro real da tentativa:\n"
-        f"- etapa: {stage};\n"
-        f"- código: {error_code};\n"
-        f"- arquivos envolvidos: {', '.join(normalized_paths) if normalized_paths else 'não informado'}.\n\n"
-        f"Saída da validação:\n{diagnostic}"
-    )
-    return text, suffix, report
-
-
-def _test_verification_line(tests: Dict[str, Any]) -> Tuple[str, List[str], bool]:
-    if tests.get("executed") and tests.get("ok") is True:
-        return "testes executados com sucesso", [], True
-    detail = str(tests.get("detail") or "Testes não executados.")
-    if tests.get("error_code") == "TESTS_NOT_FOUND":
-        return "nenhuma suíte de testes detectada", [detail], False
-    if tests.get("error_code") == "TESTS_DISABLED":
-        return "testes desativados; não houve verificação por testes", [detail], False
-    return "testes não executados", [detail], False
-
-
-def _clean_check_line(value: Any) -> str:
-    return str(value or "").strip().rstrip(".;")
-
-
-def _validation_step(result: Dict[str, Any], *, paths: Optional[List[str]] = None) -> Dict[str, Any]:
-    result = result if isinstance(result, dict) else {}
-    raw_detail = result.get("detail")
-    if isinstance(raw_detail, str):
-        public_detail = raw_detail[:1200]
-    elif isinstance(raw_detail, dict) and isinstance(raw_detail.get("detail"), str):
-        public_detail = raw_detail.get("detail")[:1200]
-    else:
-        public_detail = None
-    item = {
-        "ok": result.get("ok"),
-        "executed": result.get("executed"),
-        "error_code": result.get("error_code"),
-        "detail": public_detail,
-    }
-    if paths is not None:
-        item["paths"] = [str(path) for path in paths if str(path)]
-    detail = result.get("detail")
-    if isinstance(detail, dict):
-        for key in ("command", "returncode", "tests_detected", "files", "failures", "checked"):
-            if key in detail:
-                value = detail.get(key)
-                if isinstance(value, list):
-                    item[key] = value[:30]
-                elif isinstance(value, (str, int, float, bool)) or value is None:
-                    item[key] = value
-    if isinstance(result.get("files"), list):
-        item["files"] = list(result.get("files") or [])[:30]
-    return {key: value for key, value in item.items() if value is not None}
-
-
-def _record_rollback(session: AgentSession, rollback: Dict[str, Any], paths: List[str]) -> None:
-    _record_write_validation(session.write_transaction, "rollback", _validation_step(rollback, paths=paths))
-    _set_write_status(session.write_transaction, "rolled_back" if rollback.get("ok") else "rollback_failed")
-
-
-def _resume_set(session: AgentSession, pending: Dict[str, Any], config: Dict[str, Any], project: Dict[str, Any], full: bool):
-    context = {"config": config, "projeto": project, "grounding": _grounding_items(session.observation_ledger), "observation_ledger": session.observation_ledger}
-    transaction = session.write_transaction
-    _clear_write_failure(transaction)
-    patches = transaction.get("patches") if isinstance(transaction, dict) else None
-    if not isinstance(patches, list) or not patches:
-        text = "A transação confirmada ficou inválida."
-        return _return("failed", text, None, _details(session, "failed", config, failure_code="PATCH_RESPONSE_INVALID"), full)
-    raw_applied = apply_patch_set(project.get("caminho_origem"), patches)
-    applied = _transaction_result(raw_applied, changed=bool(raw_applied.get("ok")))
-    attempted_paths = [str(item.get("path") or "") for item in patches if isinstance(item, dict)]
-    _record_write_validation(transaction, "apply", _validation_step(applied, paths=attempted_paths))
-    _set_write_status(transaction, "applied" if applied.get("ok") else "apply_failed")
-    if not applied.get("ok"):
-        code = applied.get("error_code") or "PATCH_TRANSACTION_FAILED"
-        diagnostic = _diagnostic_text(applied)
-        report = {
-            "stage": "apply",
-            "error_code": code,
-            "executed": bool(applied.get("executed")),
-            "detail": diagnostic,
-            "rollback_confirmed": None,
-            "rollback_error_code": None,
-            "paths": [path for path in attempted_paths if path],
-        }
-        text = f"A transação não foi aplicada: {code}.\n\nErro real da tentativa:\n{diagnostic}"
-        _record_write_failure(transaction, report)
-        return _return("failed", text, None, _details(
-            session, "failed", config, failure_code=code,
-        ), full)
-
-    applied_patches = (applied.get("detail") or {}).get("applied_patches") or []
-    paths = [str(item.get("path") or "") for item in applied_patches]
-    compile_result = _compile_after_write(config, project, paths)
-    _record_write_validation(transaction, "compileall", _validation_step(compile_result, paths=paths))
-    if compile_result.get("ok") is not True:
-        rollback = _transaction_rollback_result(rollback_patch_set(applied_patches))
-        _record_rollback(session, rollback, paths)
-        text, suffix, report = _write_failure_response(
-            "compileall falhou após a transação.", "compileall", compile_result, rollback,
-            "Todos os arquivos foram restaurados.", paths,
-        )
-        _record_write_failure(transaction, report)
-        return _return("failed", text, None, _details(
-            session, "failed", config,
-            failure_code=f"{compile_result.get('error_code') or 'COMPILEALL_FAILED'}_{suffix}",
-            limitations=[str(compile_result.get("detail") or "compileall falhou")],
-        ), full)
-
-    tests = _verify_after_write(config, context)
-    _record_write_validation(transaction, "tests", _validation_step(tests, paths=paths))
-    if tests.get("ok") is not True:
-        rollback = _transaction_rollback_result(rollback_patch_set(applied_patches))
-        _record_rollback(session, rollback, paths)
-        text, suffix, report = _write_failure_response(
-            "A verificação por testes falhou após a transação.", "tests", tests, rollback,
-            "Todos os arquivos foram restaurados.", paths,
-        )
-        _record_write_failure(transaction, report)
-        return _return("failed", text, None, _details(
-            session, "failed", config,
-            failure_code=f"{tests.get('error_code') or 'TESTS_FAILED'}_{suffix}",
-            limitations=[str(tests.get("detail") or "testes falharam")],
-        ), full)
-
-    expected_outputs = expected_outputs_from_patches(applied_patches)
-    reread = verify_expected_outputs(project.get("caminho_origem"), expected_outputs)
-    _record_write_validation(transaction, "full_reread", _validation_step(reread, paths=paths))
-    if not reread.get("ok"):
-        rollback = _transaction_rollback_result(rollback_patch_set(applied_patches))
-        _record_rollback(session, rollback, paths)
-        reread_failure = dict(reread)
-        reread_failure.setdefault("error_code", "POST_WRITE_READ_FAILED")
-        text, suffix, report = _write_failure_response(
-            "A releitura integral da transação falhou.", "reread", reread_failure, rollback,
-            "Todos os arquivos foram restaurados.", paths,
-        )
-        _record_write_failure(transaction, report)
-        return _return("failed", text, None, _details(
-            session, "failed", config,
-            failure_code=f"POST_WRITE_READ_FAILED_{suffix}",
-            limitations=[str(reread_failure.get("detail") or "releitura falhou")],
-        ), full)
-
-    compile_line = (
-        _clean_check_line(compile_result.get("detail"))
-        if compile_result.get("executed") else
-        "compileall não era aplicável porque nenhum arquivo Python final foi alterado"
-    )
-    test_line, limitations, fully_verified = _test_verification_line(tests)
-    created = [str(item.get("path") or "") for item in applied_patches if item.get("operation") == "create"]
-    creation_line = (
-        f"arquivos prometidos criados e confirmados: {', '.join(created)}"
-        if created else
-        "nenhum arquivo novo foi prometido pela transação"
-    )
-    state_line = (
-        "Estado: transação verificada após escrita."
-        if fully_verified else
-        "Estado: transação aplicada com validação parcial; não foi chamada de verificada."
-    )
-    session.workspace_epoch += 1
-    _set_write_status(transaction, "verified" if fully_verified else "applied_partial")
-
-    text = (
-        f"Transação aplicada em {len(paths)} arquivo(s): {', '.join(paths)}.\n\nValidação pós-escrita:\n"
-        f"- {compile_line};\n- {test_line};\n"
-        f"- todos os arquivos alterados foram relidos integralmente;\n"
-        f"- {creation_line};\n- exclusões prometidas foram confirmadas;\n- {state_line}"
-    )
-    return _return("success", text, None, _details(session, "success", config, limitations=limitations), full)
-
-
-def _resume(session: AgentSession, pending: Dict[str, Any], config: Dict[str, Any], project: Dict[str, Any], full: bool):
-    if pending.get("continuation_kind") != "write_confirmation" or not session.write_transaction or pending.get("transaction_id") != session.write_transaction.get("transaction_id"):
-        text = "A pendência não corresponde a uma confirmação transacional válida."
-        return _return(
-            "failed", text, None,
-            _details(session, "failed", config, failure_code="WRITE_PENDING_INVALID"), full,
-        )
-    return _resume_set(session, pending, config, project, full)
-
-
-
-def _enrich_patch_set(session: AgentSession, project: Dict[str, Any], arguments: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[str]]:
-    """Attach deterministic freshness preconditions to canonical patch objects."""
-    raw_patches = arguments.get("patches")
-    if not isinstance(raw_patches, list) or not raw_patches:
-        return arguments, "patches must be a non-empty list"
-    root = project.get("caminho_origem")
-    enriched: List[Dict[str, Any]] = []
-    for raw in raw_patches:
-        if not isinstance(raw, dict):
-            return arguments, "each patch must be an object"
-        patch = dict(raw)
-        path = patch.get("path")
-        if not isinstance(path, str) or not path.strip():
-            return arguments, "each patch needs canonical path"
-        path = path.strip().replace("\\", "/")
-        patch["path"] = path
-        absolute = _resolver_caminho_seguro(root, path) if root else None
-        if absolute is None:
-            return arguments, f"unsafe patch path: {path}"
-        exists = os.path.isfile(absolute)
-        operation = str(patch.get("operation") or "").strip().lower()
-        if operation not in {"replace", "create", "delete", "update"}:
-            return arguments, f"patch operation must be replace|create|delete|update: {path}"
-        patch["operation"] = operation
-        material = _grounding_freshest_for_locator(
-            session.observation_ledger, {"kind": "file", "path": path}, match_fields=("kind", "path")
-        )
-
-        if operation in {"replace", "create"}:
-            if "content" not in patch or not isinstance(patch.get("content"), str):
-                return arguments, f"{operation} needs canonical string content: {path}"
-        if operation == "update":
-            if "new_code" not in patch or not isinstance(patch.get("new_code"), str):
-                return arguments, f"update needs canonical string new_code: {path}"
-            try:
-                start = int(patch.get("line_start"))
-                end = int(patch.get("line_end"))
-            except (TypeError, ValueError):
-                return arguments, f"update needs canonical line_start and line_end: {path}"
-            if start < 1 or end < start:
-                return arguments, f"invalid update range: {path}:{start}-{end}"
-            patch["line_start"], patch["line_end"] = start, end
-
-        locator = dict(material.get("locator") or {}) if isinstance(material, dict) and isinstance(material.get("locator"), dict) else {}
-        if operation in {"replace", "delete", "update"}:
-            if not exists:
-                return arguments, f"{operation} requires an existing file: {path}"
-            if not material or locator.get("kind") != "file" or not material.get("source_version"):
-                return arguments, f"read the existing file before {operation}: {path}"
-            if operation == "replace":
-                whole_file = (
-                    int(locator.get("line_start") or 0) == 1
-                    and int(locator.get("line_end") or 0) == int(locator.get("total_lines") or -1)
-                )
-                if not whole_file:
-                    return arguments, f"replace requires a fresh whole-file read: {path}"
-            patch["file_hash_expected"] = material["source_version"]
-        elif operation == "create":
-            if exists:
-                return arguments, f"create conflicts with an existing file: {path}; replace is the existing-file operation"
-
-        if operation == "update":
-            start, end = patch["line_start"], patch["line_end"]
-            if int(locator.get("line_start") or 0) == start and int(locator.get("line_end") or 0) == end:
-                patch["range_hash_expected"] = material.get("content_hash")
-            else:
-                content = material.get("content")
-                ev_start = int(locator.get("line_start") or 0)
-                ev_end = int(locator.get("line_end") or 0)
-                if isinstance(content, str) and ev_start == 1 and ev_end == int(locator.get("total_lines") or -1):
-                    patch["range_hash_expected"] = hash_faixa(content, start, end)
-            if not patch.get("range_hash_expected"):
-                return arguments, f"read the exact range before updating {path}:{start}-{end}"
-
-        allowed = {"operation", "path"}
-        if operation == "replace":
-            allowed.update({"content", "file_hash_expected"})
-        elif operation == "create":
-            allowed.add("content")
-        elif operation == "delete":
-            allowed.add("file_hash_expected")
-        elif operation == "update":
-            allowed.update({"line_start", "line_end", "new_code", "file_hash_expected", "range_hash_expected"})
-        unknown = sorted(set(patch) - allowed)
-        if unknown:
-            return arguments, f"unknown canonical patch field(s) for {path}: {', '.join(unknown)}"
-        enriched.append(patch)
-    return {"patches": enriched}, None
+    _record_decision(session, "capability_confirmation", "executed" if result.get("ok") is True else "failed", reason=result.get("error_code"), capabilities=[capability])
+    _advance_reality_epoch_if_needed(session, result)
+    session.pending_capability = {}
+    _set_pending_observation_results(session, [model_result])
+    # Confirmation is mechanical supervision, not semantic completion. The
+    # confirmed observation/effect returns to Main, which alone decides whether
+    # the task is complete, needs another capability, or should suspend again.
+    return _run(session, config, provider_context, full, conversation_context=None, registry=registry)
 
 
 def _normalized_path(value: Any) -> str:
@@ -1273,24 +806,24 @@ def _normalized_path(value: Any) -> str:
 
 def _record_decision(
     session: AgentSession, decision_type: str, outcome: str, *,
-    reason: Optional[str] = None, tools: Optional[List[str]] = None,
+    reason: Optional[str] = None, capabilities: Optional[List[str]] = None,
     facts: Optional[Dict[str, Any]] = None,
 ) -> None:
     _decision_record(
         session.decision_ledger, turn=session.turn, decision=decision_type,
-        outcome=outcome, reason=reason, tools=tools, facts=facts,
+        outcome=outcome, reason=reason, capabilities=capabilities, facts=facts,
     )
 
-def _action_signature(tool: str, arguments: Dict[str, Any]) -> str:
-    return json.dumps({"tool": tool, "arguments": arguments}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+def _action_signature(capability: str, arguments: Dict[str, Any]) -> str:
+    return json.dumps({"capability": capability, "arguments": arguments}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
 
 def _record_rejected_decision(
     session: AgentSession, code: str, payload: Any = None, *,
-    decision: Optional[str] = None, tools: Optional[List[str]] = None, reason: Optional[str] = None,
+    decision: Optional[str] = None, capabilities: Optional[List[str]] = None, reason: Optional[str] = None,
 ) -> None:
     _decision_record_rejection(
         session.decision_ledger, turn=session.turn, code=code,
-        decision=decision, tools=tools, reason=reason,
+        decision=decision, capabilities=capabilities, reason=reason,
     )
 
 
@@ -1299,12 +832,12 @@ def _rehydrate_observation(session: AgentSession, entry: Dict[str, Any], config:
     grounding = _grounding_items(session.observation_ledger)
     grounding_ids = [str(item) for item in entry.get("grounding_ids") or [] if str(item) in grounding]
     frontier_ids = [str(item) for item in entry.get("frontier_ids") or [] if str(item)]
-    tool = str(entry.get("tool") or "")
+    tool = str(entry.get("capability") or "")
     if replay is None and grounding_ids and any((grounding.get(gid) or {}).get("rehydration_error") for gid in grounding_ids):
         return None
     if replay is None and entry.get("failure_scope") in {"request", "resource"}:
         replay = {
-            "tool": tool, "status": "failed", "ok": False, "executed": False, "changed": False,
+            "capability": tool, "status": "failed", "ok": False, "executed": False, "changed": False,
             "error_code": entry.get("failure_error_code") or "STABLE_PHYSICAL_FAILURE",
             "retryable": False, "failure_scope": entry.get("failure_scope"),
             "failure_resource": entry.get("failure_resource"),
@@ -1313,7 +846,7 @@ def _rehydrate_observation(session: AgentSession, entry: Dict[str, Any], config:
         }
     if replay is None:
         replay = {
-            "tool": tool, "status": "success", "ok": True, "executed": False,
+            "capability": tool, "status": "success", "ok": True, "executed": False,
             "changed": False, "error_code": None,
             "grounding_ids": grounding_ids, "frontiers": frontier_ids,
         }
@@ -1345,9 +878,9 @@ def _rehydrate_observation(session: AgentSession, entry: Dict[str, Any], config:
         }
         replay["context_compacted"] = True
     else:
-        replay = _minimal_tool_context(replay, detail_char_limit=700)
+        replay = _minimal_capability_context(replay, detail_char_limit=700)
         replay["cached_observation"] = True
-    replay["tool"] = tool or replay.get("tool")
+    replay["capability"] = tool or replay.get("capability")
     replay["status"] = "replayed"
     replay["executed"] = False
     replay["changed"] = False
@@ -1357,8 +890,19 @@ def _rehydrate_observation(session: AgentSession, entry: Dict[str, Any], config:
     return replay
 
 
-def _final_validation_feedback(reason: str) -> str:
-    return json.dumps({"code": "FINAL_VALIDATION_ERROR", "detail": str(reason)}, ensure_ascii=False, separators=(",", ":"))
+def _complete_validation_feedback(reason: str) -> str:
+    """Return factual coordinate-contract feedback without semantic steering."""
+    detail = str(reason or "COMPLETE_INVALID")
+    code = detail.split(":", 1)[0]
+    explanations = {
+        "COMPLETE_UNKNOWN_GROUNDING": "Every grounding_id must name a current mat-* coordinate present in current_material.",
+        "COMPLETE_UNKNOWN_EFFECT": "Every effect_id must name an eff-* coordinate present in runtime_effects.",
+        "COMPLETE_REQUIRED_GROUNDING_MISSING": "Material previously committed by Main through Investigation/Tasks must remain cited at completion.",
+    }
+    payload = {"code": "COMPLETE_VALIDATION_ERROR", "detail": detail, "state_unchanged": True}
+    if code in explanations:
+        payload["contract"] = explanations[code]
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 def _deadline_exceeded(config: Dict[str, Any]) -> bool:
@@ -1369,9 +913,10 @@ def _deadline_exceeded(config: Dict[str, Any]) -> bool:
 def _run(
     session: AgentSession,
     config: Dict[str, Any],
-    project: Dict[str, Any],
+    provider_context: Dict[str, Any],
     full: bool,
     conversation_context: Any = None,
+    registry: CapabilityRegistry = None,
 ) -> tuple:
     feedback = ""
 
@@ -1390,7 +935,7 @@ def _run(
         call_feedback = feedback
         while True:
             try:
-                decision, allowed = _call_agent(session, config, project, conversation_context, call_feedback)
+                decision, allowed = _call_agent(session, config, provider_context, conversation_context, call_feedback, registry=registry)
                 break
             except ErroLLM as error:
                 if _is_structured_response_error(error, "agent"):
@@ -1425,185 +970,152 @@ def _run(
                     _details(session, "failed", config, limitations=[str(error)], failure_code="AGENT_RUNTIME_ERROR"), full,
                 )
 
-        raw_updates = decision.get("investigation_updates")
-        if raw_updates is None:
-            raw_updates = []
-        prospective_investigation, accepted_updates, rejected_updates = apply_investigation_updates(
-            raw_updates, previous=session.investigation,
-            grounding=_grounding_items(session.observation_ledger),
-        )
-        # Commit every structurally valid target update independently. Invalid
-        # siblings cannot roll back accepted work, and omitted targets remain in
-        # the canonical runtime-owned contract unchanged.
-        session.investigation = prospective_investigation
-        by_investigation_id = {
-            str(item.get("id") or ""): item
-            for item in session.investigation if isinstance(item, dict) and str(item.get("id") or "")
-        }
-        for item in accepted_updates:
-            current_target = by_investigation_id.get(str(item.get("id") or ""), {})
-            _record_decision(
-                session, "investigation_update",
-                "committed" if item.get("changed") else "unchanged",
-                reason=f"{item.get('id')}={item.get('status')}",
-                facts={
-                    "investigation_id": item.get("id"),
-                    "goal": current_target.get("goal"),
-                    "status": current_target.get("status"),
-                    "conclusion": current_target.get("conclusion"),
-                    "grounding_ids": list(current_target.get("grounding_ids") or []),
-                },
+        if "investigation_updates" in decision:
+            raw_updates = decision.get("investigation_updates")
+            if raw_updates is None:
+                raw_updates = []
+            prospective_investigation, accepted_updates, rejected_updates = apply_investigation_updates(
+                raw_updates, previous=session.investigation,
+                grounding=_grounding_items(session.observation_ledger),
             )
-        for item in rejected_updates:
-            reason = str(item.get("reason") or "INVESTIGATION_UPDATE_REJECTED")
-            code = reason.split(":", 1)[0]
-            _record_rejected_decision(session, code, decision="investigation_update", reason=reason)
-
-        target_state = ",".join(
-            f"{item.get('id')}={item.get('status')}"
-            for item in session.investigation if isinstance(item, dict)
-        )
-        _record_decision(
-            session, "investigation_contract", "accepted",
-            reason=target_state or "empty",
-        )
-
-        if rejected_updates:
-            # Investigation is Main-owned epistemic notebook state. Invalid notebook
-            # deltas are rejected independently and never cancel a valid action from
-            # the same turn. If another Agent turn occurs, the facts are available
-            # as protocol feedback; Runtime does not prescribe a correction.
-            feedback = json.dumps({
-                "code": "INVESTIGATION_UPDATES_PARTIALLY_REJECTED",
-                "accepted_updates": [
-                    {"id": item.get("id"), "changed": bool(item.get("changed"))}
-                    for item in accepted_updates
-                ],
-                "rejected_updates": rejected_updates,
-                "canonical_investigation": session.investigation,
-                "available_grounding_ids": sorted(_grounding_items(session.observation_ledger)),
-            }, ensure_ascii=False, separators=(",", ":"))
-
-        raw_task_updates = decision.get("task_updates")
-        if raw_task_updates is None:
-            raw_task_updates = []
-        prospective_tasks, accepted_task_updates, rejected_task_updates = apply_task_updates(
-            raw_task_updates, previous=session.tasks,
-            grounding=_grounding_items(session.observation_ledger),
-        )
-        session.tasks = prospective_tasks
-        by_task_id = {
-            str(item.get("id") or ""): item
-            for item in session.tasks if isinstance(item, dict) and str(item.get("id") or "")
-        }
-        for item in accepted_task_updates:
-            current_task = by_task_id.get(str(item.get("id") or ""), {})
-            _record_decision(
-                session, "task_update",
-                "committed" if item.get("changed") else "unchanged",
-                reason=f"{item.get('id')}={item.get('status')}",
-                facts={
-                    "task_id": item.get("id"),
-                    "parent_id": current_task.get("parent_id"),
-                    "description": current_task.get("description"),
-                    "status": current_task.get("status"),
-                    "completion_criteria": current_task.get("completion_criteria"),
-                    "result": current_task.get("result"),
-                },
-            )
-        for item in rejected_task_updates:
-            reason = str(item.get("reason") or "TASK_UPDATE_REJECTED")
-            code = reason.split(":", 1)[0]
-            _record_rejected_decision(session, code, decision="task_update", reason=reason)
-
-        task_contract_state = ",".join(
-            f"{item.get('id')}={item.get('status')}"
-            for item in session.tasks if isinstance(item, dict)
-        )
-        _record_decision(
-            session, "task_contract", "accepted",
-            reason=task_contract_state or "empty",
-        )
-
-        if rejected_task_updates:
-            task_feedback = {
-                "code": "TASK_UPDATES_PARTIALLY_REJECTED",
-                "accepted_updates": [
-                    {"id": item.get("id"), "changed": bool(item.get("changed"))}
-                    for item in accepted_task_updates
-                ],
-                "rejected_updates": rejected_task_updates,
-                "canonical_task_state": task_state_view(session.tasks),
+            # Commit every structurally valid target update independently. Invalid
+            # siblings cannot roll back accepted work, and omitted targets remain in
+            # the canonical runtime-owned contract unchanged.
+            session.investigation = prospective_investigation
+            by_investigation_id = {
+                str(item.get("id") or ""): item
+                for item in session.investigation if isinstance(item, dict) and str(item.get("id") or "")
             }
-            feedback = _merged_runtime_feedback(
-                feedback,
-                json.dumps(task_feedback, ensure_ascii=False, separators=(",", ":")),
+            for item in accepted_updates:
+                current_target = by_investigation_id.get(str(item.get("id") or ""), {})
+                _record_decision(
+                    session, "investigation_update",
+                    "committed" if item.get("changed") else "unchanged",
+                    reason=f"{item.get('id')}={item.get('status')}",
+                    facts={
+                        "investigation_id": item.get("id"),
+                        "goal": current_target.get("goal"),
+                        "status": current_target.get("status"),
+                        "conclusion": current_target.get("conclusion"),
+                        "grounding_ids": list(current_target.get("grounding_ids") or []),
+                    },
+                )
+            for item in rejected_updates:
+                reason = str(item.get("reason") or "INVESTIGATION_UPDATE_REJECTED")
+                code = reason.split(":", 1)[0]
+                _record_rejected_decision(session, code, decision="investigation_update", reason=reason)
+
+            target_state = ",".join(
+                f"{item.get('id')}={item.get('status')}"
+                for item in session.investigation if isinstance(item, dict)
             )
+            _record_decision(
+                session, "investigation_contract", "accepted",
+                reason=target_state or "empty",
+            )
+
+            if rejected_updates:
+                # Investigation is Main-owned epistemic notebook state. Invalid notebook
+                # deltas are rejected independently and never cancel a valid action from
+                # the same turn. If another Agent turn occurs, the facts are available
+                # as protocol feedback; Runtime does not prescribe a correction.
+                feedback = json.dumps({
+                    "code": "INVESTIGATION_UPDATES_PARTIALLY_REJECTED",
+                    "accepted_updates": [
+                        {"id": item.get("id"), "changed": bool(item.get("changed"))}
+                        for item in accepted_updates
+                    ],
+                    "rejected_updates": rejected_updates,
+                    "canonical_investigation": session.investigation,
+                    "available_grounding_ids": sorted(_grounding_items(session.observation_ledger)),
+                }, ensure_ascii=False, separators=(",", ":"))
+
+        if "task_updates" in decision:
+            raw_task_updates = decision.get("task_updates")
+            if raw_task_updates is None:
+                raw_task_updates = []
+            prospective_tasks, accepted_task_updates, rejected_task_updates = apply_task_updates(
+                raw_task_updates, previous=session.tasks,
+                grounding=_grounding_items(session.observation_ledger),
+            )
+            session.tasks = prospective_tasks
+            by_task_id = {
+                str(item.get("id") or ""): item
+                for item in session.tasks if isinstance(item, dict) and str(item.get("id") or "")
+            }
+            for item in accepted_task_updates:
+                current_task = by_task_id.get(str(item.get("id") or ""), {})
+                _record_decision(
+                    session, "task_update",
+                    "committed" if item.get("changed") else "unchanged",
+                    reason=f"{item.get('id')}={item.get('status')}",
+                    facts={
+                        "task_id": item.get("id"),
+                        "parent_id": current_task.get("parent_id"),
+                        "description": current_task.get("description"),
+                        "status": current_task.get("status"),
+                        "completion_criteria": current_task.get("completion_criteria"),
+                        "result": current_task.get("result"),
+                    },
+                )
+            for item in rejected_task_updates:
+                reason = str(item.get("reason") or "TASK_UPDATE_REJECTED")
+                code = reason.split(":", 1)[0]
+                _record_rejected_decision(session, code, decision="task_update", reason=reason)
+
+            task_contract_state = ",".join(
+                f"{item.get('id')}={item.get('status')}"
+                for item in session.tasks if isinstance(item, dict)
+            )
+            _record_decision(
+                session, "task_contract", "accepted",
+                reason=task_contract_state or "empty",
+            )
+
+            if rejected_task_updates:
+                task_feedback = {
+                    "code": "TASK_UPDATES_PARTIALLY_REJECTED",
+                    "accepted_updates": [
+                        {"id": item.get("id"), "changed": bool(item.get("changed"))}
+                        for item in accepted_task_updates
+                    ],
+                    "rejected_updates": rejected_task_updates,
+                    "canonical_task_state": task_state_view(session.tasks),
+                }
+                feedback = _merged_runtime_feedback(
+                    feedback,
+                    json.dumps(task_feedback, ensure_ascii=False, separators=(",", ":")),
+                )
 
         action = decision.get("action") if isinstance(decision.get("action"), dict) else {}
         action_kind = str(action.get("kind") or "")
 
-        if action_kind == "needs_user":
+        if action_kind == "await_user":
             question = str(action.get("question") or "").strip()
-            missing = str(action.get("missing_information") or "").strip()
-            if not question or not missing:
-                text = "A LLM produziu um pedido de informação incompleto."
+            reason = str(action.get("reason") or "").strip()
+            options = [dict(item) for item in list(action.get("options") or []) if isinstance(item, dict)]
+            if not question or not reason:
+                text = "A LLM produziu uma suspensão de usuário incompleta."
                 return _return(
                     "failed", text, None,
-                    _details(session, "failed", config, failure_code="AGENT_NEEDS_USER_INVALID"), full,
+                    _details(session, "failed", config, failure_code="AGENT_AWAIT_USER_INVALID"), full,
                 )
-            _record_decision(session, "needs_user", "accepted", reason=missing)
+            _record_decision(
+                session, "await_user", "accepted", reason=reason,
+                facts={"question": question, "options": options},
+            )
             pending = {
                 "pending_schema_version": PENDING_SCHEMA_VERSION,
-                "continuation_kind": "user_input",
+                "continuation_kind": "await_user",
                 "question": question,
                 "session": session.to_dict(),
-                "clarification": {"question": question, "missing_information": missing},
+                "reason": reason,
+                "options": options,
             }
             validate_pending_continuation(pending)
-            return _return("needs_user", question, pending, _details(session, "needs_user", config), full)
+            return _return("await_user", question, pending, _details(session, "await_user", config), full)
 
-        if action_kind == "patches":
-            patches = list(action.get("patches") or [])
-            _record_decision(session, "patches", "requested")
-            project_available = _project_descriptor(project)["available"]
-            write_enabled = bool(((config.get("codar") or {}).get("ativado", True)))
-            if not project_available:
-                text = "A escrita exige um workspace ativo."
-                return _return("failed", text, None, _details(session, "failed", config, failure_code="WORKSPACE_NOT_AVAILABLE"), full)
-            if not write_enabled:
-                _record_decision(session, "patches", "rejected", reason="WRITE_ACTION_NOT_ALLOWED")
-                feedback = json.dumps({"code": "WRITE_ACTION_NOT_ALLOWED", "workspace_mutation_enabled": False}, separators=(",", ":"))
-                continue
-            enriched, patch_error = _enrich_patch_set(session, project, {"patches": patches})
-            if patch_error:
-                _record_decision(session, "patch_validation", "rejected", reason="PATCH_SCHEMA_INVALID")
-                feedback = json.dumps({"code": "PATCH_SCHEMA_INVALID", "detail": str(patch_error)}, ensure_ascii=False, separators=(",", ":"))
-                continue
-
-            if not session.write_transaction or str(session.write_transaction.get("status") or "") in {"verified", "applied_partial", "rolled_back", "rollback_failed"}:
-                session.write_transaction = _begin_write_transaction(patches=enriched["patches"], turn=session.turn)
-            else:
-                session.write_transaction["patches"] = copy.deepcopy(enriched["patches"])
-            _increment_write_attempt(session.write_transaction)
-            raw_dry = dry_run_patch_set(project.get("caminho_origem"), enriched["patches"])
-            dry = _transaction_result(raw_dry, changed=False)
-            _record_write_validation(session.write_transaction, "dry_run", _validation_step(
-                dry, paths=[str(item.get("path") or "") for item in enriched["patches"]]
-            ))
-            if dry.get("ok") is not True:
-                code = str(dry.get("error_code") or "DRY_RUN_FAILED")
-                _set_write_status(session.write_transaction, "dry_run_failed")
-                _record_decision(session, "patch_validation", "rejected", reason=code)
-                feedback = json.dumps({"code": code, "detail": _diagnostic_text(dry)}, ensure_ascii=False, separators=(",", ":"))
-                continue
-
-            _record_decision(session, "patch_validation", "validated")
-            _set_write_status(session.write_transaction, "dry_run_valid")
-            text, pending = _pending_patch_set(session)
-            return _return("needs_user", text, pending, _details(session, "needs_user", config), full)
-
-        if action_kind == "final":
+        if action_kind == "complete":
             open_investigation = [
                 str(item.get("id") or "") for item in session.investigation
                 if isinstance(item, dict) and item.get("status") == "open"
@@ -1619,13 +1131,13 @@ def _run(
                 blockers["open_tasks"] = open_tasks
             if blockers:
                 _record_decision(
-                    session, "final", "rejected", reason="FINAL_COMMITMENTS_OPEN", facts=blockers,
+                    session, "complete", "rejected", reason="COMPLETE_COMMITMENTS_OPEN", facts=blockers,
                 )
                 feedback = json.dumps(
                     {
-                        "code": "FINAL_COMMITMENTS_OPEN",
+                        "code": "COMPLETE_COMMITMENTS_OPEN",
                         **blockers,
-                        "final_committed": False,
+                        "complete_committed": False,
                     },
                     ensure_ascii=False, separators=(",", ":"),
                 )
@@ -1635,23 +1147,26 @@ def _run(
                 established_investigation_grounding_ids(session.investigation)
                 + task_grounding_ids(session.tasks)
             ))
-            final_obj = {
+            complete_obj = {
                 "answer": action.get("answer"),
                 "limitations": list(action.get("limitations") or []),
                 "grounding_ids": list(action.get("grounding_ids") or []),
+                "effect_ids": list(action.get("effect_ids") or []),
             }
-            ok, reason, answer, limitations = validate_final(
-                final_obj,
+            ok, reason, answer, limitations = validate_complete(
+                complete_obj,
                 _grounding_items(session.observation_ledger),
+                _physical_effect_items(session.observation_ledger),
                 required_grounding_ids=required_grounding_ids,
             )
             if ok:
                 _record_decision(
-                    session, "final", "accepted",
+                    session, "complete", "accepted",
                     facts={
-                        "grounding_ids": list(dict.fromkeys(final_obj.get("grounding_ids") or [])),
+                        "grounding_ids": list(dict.fromkeys(complete_obj.get("grounding_ids") or [])),
+                        "effect_ids": list(dict.fromkeys(complete_obj.get("effect_ids") or [])),
                         "required_grounding_ids": required_grounding_ids,
-                        "workspace_epoch": int(session.workspace_epoch or 0),
+                        "reality_epoch": int(session.reality_epoch or 0),
                     },
                 )
                 return _return(
@@ -1660,29 +1175,29 @@ def _run(
                 )
 
             _record_rejected_decision(
-                session, "FINAL_VALIDATION_REJECTED", {"reason": reason, "final": final_obj},
-                decision="final", reason=reason,
+                session, "COMPLETE_VALIDATION_REJECTED", {"reason": reason, "complete": complete_obj},
+                decision="complete", reason=reason,
             )
-            feedback = _final_validation_feedback(reason)
+            feedback = _complete_validation_feedback(reason)
             continue
 
-        calls = list(action.get("calls") or []) if action_kind == "tool_calls" else []
-        calls = [call for call in calls if isinstance(call, dict) and call.get("tool")]
+        calls = list(action.get("calls") or []) if action_kind == "capability_calls" else []
+        calls = [call for call in calls if isinstance(call, dict) and call.get("capability")]
         if not calls:
             _record_rejected_decision(session, "NO_ACTION", {}, decision="empty")
-            feedback = json.dumps({"code": "NO_ACTION", "state_unchanged": True, "valid_action_kinds": ["tool_calls", "patches", "needs_user", "final"]}, separators=(",", ":"))
+            feedback = json.dumps({"code": "NO_ACTION", "state_unchanged": True, "valid_action_kinds": ["capability_calls", "await_user", "complete"]}, separators=(",", ":"))
             continue
 
         _record_decision(
             session,
-            "tool_calls" if len(calls) > 1 else "tool",
+            "capability_calls" if len(calls) > 1 else "capability",
             "requested",
-            tools=[str(call.get("tool") or "") for call in calls],
+            capabilities=[str(call.get("capability") or "") for call in calls],
         )
 
         # Unified physical preflight. Semantic freedom is untouched: the model
         # may request any available observation again. Runtime decides only
-        # whether that physical observation must be executed for this workspace
+        # whether that physical observation must be executed for the current reality
         # epoch, or whether retained reality can be replayed.
         next_results: List[Dict[str, Any]] = []
         novel_calls: List[Dict[str, Any]] = []
@@ -1691,33 +1206,89 @@ def _run(
         preflight_replays = 0
         replay_requests: List[Dict[str, Any]] = []
         for call in calls:
-            tool = str(call.get("tool") or "")
+            tool = str(call.get("capability") or "")
             arguments = call.get("arguments") or {}
             if tool not in allowed:
                 rejected = {
-                    "tool": tool, "status": "failed", "ok": False,
+                    "capability": tool, "status": "failed", "ok": False,
                     "executed": False, "changed": False,
-                    "error_code": "TOOL_NOT_AVAILABLE",
-                    "detail": "A ferramenta não está disponível neste workspace/configuração.",
+                    "error_code": "CAPABILITY_NOT_AVAILABLE",
+                    "detail": "A capability não está disponível no ambiente atual.",
                 }
                 preflight_invalid += 1
                 next_results.append(rejected)
-                _record_decision(session, "tool_validation", "rejected", reason=rejected["error_code"], tools=[tool])
+                _record_decision(session, "capability_validation", "rejected", reason=rejected["error_code"], capabilities=[tool])
                 continue
 
-            normalized, error = validar_chamada_tool(tool, arguments)
+            normalized, error = registry.validate(tool, arguments)
             if error:
                 rejected = _compact_non_read_result(tool, error)
                 preflight_invalid += 1
                 next_results.append(rejected)
-                _record_decision(session, "tool_validation", "rejected", reason=error.get("error_code") or "INVALID_ARGUMENT", tools=[tool])
+                _record_decision(session, "capability_validation", "rejected", reason=error.get("error_code") or "INVALID_ARGUMENT", capabilities=[tool])
                 continue
 
-            _record_decision(session, "tool_validation", "validated", tools=[tool])
-            observation_signature = _observation_signature(tool, normalized)
+            _record_decision(session, "capability_validation", "validated", capabilities=[tool])
+            if registry.requires_confirmation(tool):
+                if len(calls) != 1:
+                    preflight_invalid += 1
+                    rejected = {
+                        "capability": tool, "status": "failed", "ok": False, "executed": False, "changed": False,
+                        "error_code": "CONFIRMATION_CAPABILITY_MUST_BE_SINGLE",
+                        "detail": "A capability que exige confirmação deve ser chamada sozinha neste turno.",
+                    }
+                    next_results.append(rejected)
+                    _record_decision(session, "capability_confirmation", "rejected", reason=rejected["error_code"], capabilities=[tool])
+                    continue
+                context = {
+                    "config": config, "provider_context": provider_context, "session": session,
+                    "grounding": _grounding_items(session.observation_ledger),
+                    "observation_ledger": session.observation_ledger,
+                    "reality_epoch": int(session.reality_epoch),
+                }
+                prepared = registry.prepare_confirmation(tool, normalized, context)
+                if prepared.get("ok") is not True:
+                    error_result = prepared.get("error") if isinstance(prepared.get("error"), dict) else {
+                        "status": "failed", "ok": False, "executed": False, "changed": False,
+                        "error_code": "CAPABILITY_PREPARE_FAILED", "retryable": False,
+                        "failure_scope": None, "failure_resource": None, "detail": "Capability preparation failed.",
+                        "physical_effect": None, "observations": [], "coverage": {}, "frontiers": [],
+                    }
+                    model_result = _model_capability_result(session, tool, error_result, registry, config, normalized)
+                    _record_observation(
+                        session, None, tool, normalized, error_result, model_result,
+                        public_arguments=registry.public_arguments(tool, normalized),
+                        public_result=registry.public_result(tool, error_result),
+                    )
+                    next_results.append(model_result)
+                    preflight_invalid += 1
+                    _record_decision(session, "capability_confirmation", "rejected", reason=error_result.get("error_code") or "CAPABILITY_PREPARE_FAILED", capabilities=[tool])
+                    continue
+                confirmation_id = f"cap-{session.turn:04d}"
+                session.pending_capability = {
+                    "confirmation_id": confirmation_id,
+                    "provider": prepared.get("provider"),
+                    "capability": tool,
+                    "arguments": copy.deepcopy(normalized),
+                    "state": copy.deepcopy(prepared.get("state") or {}),
+                }
+                question = str(prepared.get("question") or "").strip()
+                pending = {
+                    "pending_schema_version": PENDING_SCHEMA_VERSION,
+                    "continuation_kind": "capability_confirmation",
+                    "question": question,
+                    "session": session.to_dict(),
+                    "capability": tool,
+                    "provider": str(prepared.get("provider") or ""),
+                    "confirmation_id": confirmation_id,
+                }
+                validate_pending_continuation(pending)
+                _record_decision(session, "capability_confirmation", "prepared", capabilities=[tool], facts={"provider": prepared.get("provider")})
+                return _return("await_user", question, pending, _details(session, "await_user", config), full)
+            observation_signature = registry.observation_signature(tool, normalized)
             if observation_signature and observation_signature in seen_batch_observations:
                 duplicate = {
-                    "tool": tool, "status": "replayed", "ok": True,
+                    "capability": tool, "status": "replayed", "ok": True,
                     "executed": False, "changed": False,
                     "error_code": "BATCH_DUPLICATE_SUPPRESSED",
                     "detail": "Duplicate observation in the same batch was suppressed before physical execution.",
@@ -1725,56 +1296,56 @@ def _run(
                 }
                 preflight_replays += 1
                 next_results.append(duplicate)
-                _record_decision(session, "tool_preflight", "batch_duplicate", reason="BATCH_DUPLICATE_SUPPRESSED", tools=[tool])
-                _record_observation_replay(session, {"tool": tool, "arguments": normalized, "public_arguments": _observable_tool_arguments(tool, normalized), "observation_signature": observation_signature}, duplicate, reason="BATCH_DUPLICATE_SUPPRESSED", public_result={"status":"replayed","ok":True,"executed":False,"changed":False})
+                _record_decision(session, "capability_preflight", "batch_duplicate", reason="BATCH_DUPLICATE_SUPPRESSED", capabilities=[tool])
+                _record_observation_replay(session, {"capability": tool, "arguments": normalized, "public_arguments": registry.public_arguments(tool, normalized), "observation_signature": observation_signature}, duplicate, reason="BATCH_DUPLICATE_SUPPRESSED", public_result={"status":"replayed","ok":True,"executed":False,"changed":False})
                 continue
             if observation_signature:
                 seen_batch_observations.add(observation_signature)
                 previous = _lookup_observation(session, observation_signature)
                 replay_reason = "OBSERVATION_REHYDRATED"
                 if previous is None:
-                    previous = _capability_find_covering(
-                        tool, normalized, (session.observation_ledger or {}).get("entries") or {}, session.workspace_epoch
+                    previous = registry.find_covering(
+                        tool, normalized, (session.observation_ledger or {}).get("entries") or {}, session.reality_epoch
                     )
                     if previous is not None:
                         replay_reason = "OBSERVATION_COVERAGE_REPLAYED"
                 if previous is None:
-                    previous = _capability_find_resource_failure(
-                        tool, normalized, (session.observation_ledger or {}).get("entries") or {}, session.workspace_epoch
+                    previous = registry.find_resource_failure(
+                        tool, normalized, (session.observation_ledger or {}).get("entries") or {}, session.reality_epoch
                     )
                     if previous is not None:
                         replay_reason = "RESOURCE_FAILURE_REHYDRATED"
                 if previous is not None:
                     replay = _rehydrate_observation(session, previous, config)
                     if replay is not None:
-                        replay["tool"] = tool
+                        replay["capability"] = tool
                         replay["replayed"] = True
                         if replay_reason == "OBSERVATION_COVERAGE_REPLAYED":
                             replay["coverage_replayed"] = True
-                            replay["source_observation_tool"] = previous.get("tool")
+                            replay["source_observation_capability"] = previous.get("capability")
                         preflight_replays += 1
                         _record_observation_replay(session, previous, replay, reason=replay_reason, public_result={"status":"replayed","ok":True,"executed":False,"changed":False})
-                        replay_requests.append({"tool": tool, "arguments": normalized})
+                        replay_requests.append({"capability": tool, "arguments": normalized})
                         next_results.append(replay)
-                        _record_decision(session, "tool_preflight", "replayed", reason=replay_reason, tools=[tool])
+                        _record_decision(session, "capability_preflight", "replayed", reason=replay_reason, capabilities=[tool])
                         continue
 
 
             novel_calls.append({
-                "tool": tool,
+                "capability": tool,
                 "arguments": normalized,
                 "observation_signature": observation_signature,
                 "action_signature": _action_signature(tool, normalized),
             })
 
-        # Tool calls are independent observations. A malformed sibling is
+        # Capability calls are independent observations. A malformed sibling is
         # returned as a physical validation result but cannot cancel valid
         # siblings in the same batch. This keeps Runtime authoritative over each
         # effect without turning validation into strategy steering.
         if preflight_invalid:
             invalid_results = [
                 {
-                    "tool": item.get("tool"),
+                    "capability": item.get("capability"),
                     "error_code": item.get("error_code"),
                     "detail": item.get("detail"),
                 }
@@ -1782,8 +1353,8 @@ def _run(
                 if isinstance(item, dict) and item.get("ok") is False
             ]
             _record_rejected_decision(
-                session, "TOOL_CALL_VALIDATION_FAILED", invalid_results,
-                objective_context={"invalid_calls": preflight_invalid}, decision="tool_preflight",
+                session, "CAPABILITY_CALL_VALIDATION_FAILED", invalid_results,
+                decision="capability_preflight",
                 reason=f"invalid={preflight_invalid};replayed={preflight_replays}",
             )
 
@@ -1791,8 +1362,8 @@ def _run(
         # Return the retained Observation view and let Main decide what it means.
         if calls and not novel_calls and preflight_replays == len(calls):
             _record_decision(
-                session, "tool_preflight", "cached", reason="OBSERVATION_CACHE_HIT",
-                tools=[str(item.get("tool") or "") for item in calls],
+                session, "capability_preflight", "cached", reason="OBSERVATION_CACHE_HIT",
+                capabilities=[str(item.get("capability") or "") for item in calls],
             )
             _set_pending_observation_results(session, next_results)
             feedback = ""
@@ -1801,7 +1372,7 @@ def _run(
         physical_cost = len(novel_calls)
 
         for item in novel_calls:
-            tool = item["tool"]
+            tool = item["capability"]
             normalized = item["arguments"]
             observation_signature = item["observation_signature"]
             execution = current_execution()
@@ -1812,18 +1383,18 @@ def _run(
                     "error_code": "CAPABILITY_TERMINALLY_UNAVAILABLE", "retryable": False,
                     "detail": terminal_failure,
                 }
-                _record_decision(session, "tool_execution", "blocked", reason=result["error_code"], tools=[tool])
-                model_result = _model_tool_result(session, tool, result, config, normalized)
-                _record_observation(session, observation_signature, tool, normalized, result, model_result, public_arguments=_observable_tool_arguments(tool, normalized), public_result=_observable_tool_result(tool, result))
+                _record_decision(session, "capability_execution", "blocked", reason=result["error_code"], capabilities=[tool])
+                model_result = _model_capability_result(session, tool, result, registry, config, normalized)
+                _record_observation(session, observation_signature, tool, normalized, result, model_result, public_arguments=registry.public_arguments(tool, normalized), public_result=registry.public_result(tool, result))
                 next_results.append(model_result)
                 continue
             context = {
-                "config": config, "projeto": project,
+                "config": config, "provider_context": provider_context, "session": session,
                 "grounding": _grounding_items(session.observation_ledger),
                 "observation_ledger": session.observation_ledger,
-                "workspace_epoch": int(session.workspace_epoch),
+                "reality_epoch": int(session.reality_epoch),
             }
-            result = executar_tool(tool, normalized, context)
+            result = registry.execute(tool, normalized, context)
             if result.get("executed") is True:
                 execution_outcome = "executed" if result.get("ok") is True else "failed"
             elif result.get("status") == "skipped":
@@ -1832,13 +1403,14 @@ def _run(
                 execution_outcome = "completed"
             else:
                 execution_outcome = "failed"
-            _record_decision(session, "tool_execution", execution_outcome, reason=result.get("error_code"), tools=[tool])
+            _record_decision(session, "capability_execution", execution_outcome, reason=result.get("error_code"), capabilities=[tool])
             execution = current_execution()
             if (execution is not None and result.get("ok") is False and result.get("retryable") is False
                     and result.get("failure_scope") not in {"request", "resource"}):
                 execution.mark_terminal_capability(tool, error_code=str(result.get("error_code") or "CAPABILITY_UNAVAILABLE"), detail=result.get("detail"))
-            model_result = _model_tool_result(session, tool, result, config, normalized)
-            _record_observation(session, observation_signature, tool, normalized, result, model_result, public_arguments=_observable_tool_arguments(tool, normalized), public_result=_observable_tool_result(tool, result))
+            model_result = _model_capability_result(session, tool, result, registry, config, normalized)
+            _record_observation(session, observation_signature, tool, normalized, result, model_result, public_arguments=registry.public_arguments(tool, normalized), public_result=registry.public_result(tool, result))
+            _advance_reality_epoch_if_needed(session, result)
             next_results.append(model_result)
 
         _set_pending_observation_results(session, next_results)
@@ -1849,16 +1421,19 @@ def _run(
 def _executar_agente_bound(
     objetivo: str,
     config: Dict[str, Any],
-    projeto: Optional[Dict[str, Any]] = None,
+    provider_context: Optional[Dict[str, Any]] = None,
     retomar: Optional[Dict[str, Any]] = None,
     retornar_detalhes: bool = False,
     execution_id: Optional[str] = None,
     conversation_context: Any = None,
     resposta_usuario: Optional[str] = None,
+    registry: CapabilityRegistry = None,
 ):
-    """Run or resume the single AgentSession."""
+    """Run or resume the single AgentSession with an explicitly injected capability body."""
+    if registry is None:
+        raise ValueError("CAPABILITY_REGISTRY_REQUIRED")
     full = bool(retornar_detalhes)
-    project = projeto or {}
+    provider_context = provider_context or {}
     if retomar:
         try:
             validate_pending_continuation(retomar, persisted=bool("id" in retomar))
@@ -1870,63 +1445,67 @@ def _executar_agente_bound(
                 details = {
                     "status": "failed",
                     "failure_code": code,
-                    "limitations": ["Eyle 2.7.5 Rev1.4.3 does not migrate or adapt pending continuations from older shapes."],
+                    "limitations": ["Eyle 2.7.5 Rev1.5.1 does not migrate or adapt pending continuations from older shapes."],
                 }
                 return _return("failed", text, None, details, full)
             if code == "SESSION_SCHEMA_INCOMPATIBLE":
-                text = "The persisted session belongs to a different contract and cannot be resumed in Eyle 2.7.5 Rev1.4.3."
+                text = "The persisted session belongs to a different contract and cannot be resumed in Eyle 2.7.5 Rev1.5.1."
                 details = {
                     "status": "failed",
                     "failure_code": "SESSION_SCHEMA_INCOMPATIBLE",
-                    "limitations": ["Eyle 2.7.5 Rev1.4.3 does not migrate or adapt sessions from earlier revisions."],
+                    "limitations": ["Eyle 2.7.5 Rev1.5.0 does not migrate or adapt sessions from earlier revisions."],
                 }
                 return _return("failed", text, None, details, full)
             raise
         execution = current_execution()
         if execution is not None:
             execution.bind_session_baseline(session)
-        _rehydrate_grounding(_grounding_items(session.observation_ledger), _physical_source_roots(project), max_lines=max(1, int(((config or {}).get("agent") or {}).get("max_file_read_lines", 400) or 400)))
-        if retomar.get("continuation_kind") == "user_input":
+        registry.rehydrate_materials(_grounding_items(session.observation_ledger), {"config": config or {}, "provider_context": provider_context or {}})
+        if retomar.get("continuation_kind") == "await_user":
             try:
-                session.request = _append_user_clarification(session.request, retomar, str(resposta_usuario or ""))
+                _record_user_resolution(session, retomar, str(resposta_usuario or ""))
             except ValueError as error:
-                text = "A pendência de clarificação não possui um contrato canônico válido."
+                text = "A resposta à suspensão do usuário não possui um contrato canônico válido."
                 return _return(
                     "failed", text, None,
                     _details(session, "failed", config, failure_code=str(error)), full,
                 )
-            # A clarification is canonical task input, not a transient observation.
+            # Human supervision refines the same immutable Request through
+            # request_context. Runtime persists facts; Main interprets their meaning.
             _clear_pending_observation_results(session)
             if execution is not None:
                 execution.bind_canonical_request(session.request)
-            return _run(session, config, project, full, conversation_context=None)
+            return _run(session, config, provider_context, full, conversation_context=None, registry=registry)
         if execution is not None:
             execution.bind_canonical_request(session.request)
-        return _resume(session, retomar, config, project, full)
+        return _resume(session, retomar, config, provider_context, full, registry)
     session = AgentSession(str(objetivo or ""), execution_id=execution_id)
     execution = current_execution()
     if execution is not None:
         execution.bind_session_baseline(session)
         execution.bind_canonical_request(session.request)
     _set_pending_observation_results(session, _seed_runtime_failure(session.observation_ledger, conversation_context))
-    return _run(session, config, project, full, conversation_context=conversation_context)
+    return _run(session, config, provider_context, full, conversation_context=conversation_context, registry=registry)
 
 
 def executar_agente(
-    objetivo: str, config: Dict[str, Any], projeto: Optional[Dict[str, Any]] = None,
+    objetivo: str, config: Dict[str, Any], provider_context: Optional[Dict[str, Any]] = None,
     retomar: Optional[Dict[str, Any]] = None, retornar_detalhes: bool = False,
     execution_id: Optional[str] = None, conversation_context: Any = None,
     resposta_usuario: Optional[str] = None, source_job_id: Optional[int] = None,
+    registry: CapabilityRegistry = None,
 ):
     """Run one canonical AgentSession inside one run-scoped ExecutionContext."""
+    if registry is None:
+        raise ValueError("CAPABILITY_REGISTRY_REQUIRED")
     execution = ExecutionContext.from_config(config, execution_id=execution_id, source_job_id=source_job_id)
     token = bind_execution(execution)
     try:
         return _executar_agente_bound(
-            objetivo, config, projeto=projeto, retomar=retomar,
+            objetivo, config, provider_context=provider_context, retomar=retomar,
             retornar_detalhes=retornar_detalhes, execution_id=execution_id,
-            conversation_context=conversation_context, resposta_usuario=resposta_usuario,
+            conversation_context=conversation_context, resposta_usuario=resposta_usuario, registry=registry,
         )
     finally:
-        execution.cleanup_sandbox()
+        execution.cleanup()
         reset_execution(token)

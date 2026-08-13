@@ -1,12 +1,87 @@
 # Eyle
 
-**Version:** 2.7.5 · **Schema:** 2.7.5-r1.4.3 · **Revision:** rev1.4.3-semantic-completion
+**Version:** 2.7.5 · **Schema:** 2.7.5-r1.5.1 · **Revision:** rev1.5.1-host-injected-universal-capabilities
 
-Eyle is a small universal agency kernel built around one Main LLM, deterministic capabilities, explicit physical Observation, Main-owned Investigation/Tasks, persistent bounded Memory and supervised mutation.
+Eyle is a domain-neutral agency kernel built around one Main LLM, a mechanical Runtime and Host-injected Capability Providers.
 
-The Core principle is simple:
+> **Main owns meaning. Runtime owns mechanics. Providers own the world. Host chooses the body.**
 
-> **Give Main observable tools and it can do the work; Runtime constrains physical reality, not thought.**
+## Rev1.5.1: Host-Injected Universal Capabilities
+
+Rev1.5.1 closes the provider boundary introduced in Rev1.5.0. Core has no default capability registry and Runtime service no longer discovers or imports the bundled workspace provider. A Host injects both the Registry and opaque provider context. The bundled Host chooses `standard + memory`; another product can choose PetBot, network, IoT or any other provider set without changing Core.
+
+```text
+User → Main → capability_calls / await_user / complete
+                ↓
+             Runtime
+                ↓
+       universal contracts
+                ↓
+       Host-injected Registry
+          ↓       ↓       ↓
+      workspace  memory  PetBot ...
+```
+
+Providers register **local** capability IDs; Registry publishes canonical `provider.capability` IDs automatically. Provider results are mechanically checked against their declared `observe | execute | mutate` effect class and the universal `{resource, operation, persistence, changed}` physical-effect contract. Providers/capabilities no longer import contracts from `eyle.core.*`; shared contracts live under `eyle/contracts/`.
+
+Confirmation is supervision, not completion. After a confirmed capability executes, its Observation/Material/effect is recorded and returned to Main, which alone decides the next action. `await_user` likewise preserves the immutable original `request` while user answers are stored separately in authoritative `request_context`; `request + request_context` define the active task. `prior_conversation` remains background rather than task authority.
+
+Investigation and Task deltas are optional fields rather than mandatory empty ceremony. Persistent cognitive Memory is its own `memory` provider, not part of the workspace/code provider. Transient OpenAI-compatible HTTP statuses retain retryability through backend translation instead of being flattened into a non-retryable generic HTTP error.
+
+The Main prompt stays deliberately non-prescriptive: no keyword router, no Direct/Observed/Effect phase, no “analyze → inspect” rule. Capabilities describe themselves; when Main is unsure whether it possesses enough information to answer reliably, it is generally encouraged to observe before answering.
+
+Historical sections below describe earlier revisions and may use contracts removed by Rev1.5.1.
+
+## Rev1.4.8: Completion Basis
+
+Rev1.4.8 restores an explicit bridge between Main's terminal claims and Runtime reality without bringing Claim or a semantic verifier back. `complete` now declares `completion_mode=direct|observed|effect`, `grounding_ids` and `effect_ids`. `direct` is for answers that claim no current physical observation/action; `observed` requires current `mat-*` Material; `effect` requires one or more current `eff-*` physical-effect coordinates produced by executed Observation events. Runtime validates only the coordinates and already-created commitments; Main still owns semantic truth.
+
+The Main prompt is intentionally more explanatory. Every physically available capability is exposed with purpose, effect class, inputs, returns, caveats and limits before selection, so weaker models do not have to infer tool meaning from tiny signatures. Cost-driven token pressure is removed: `agent.max_total_tokens`, cumulative `MAX_TOTAL_TOKENS_EXCEEDED` steering and turn/token-pressure shrinking of fresh results are gone. The physical per-call context window, deadline, sandbox/resource limits and context-window-only crop remain.
+
+Historical sections below may use **Final** when describing pre-Rev1.4.7 behavior; in the current protocol that terminal action is named **Complete**.
+
+## Rev1.4.6: Supported Final
+
+Rev1.4.6 strengthens the meaning of the terminal `final` action without adding a verifier or mandatory Investigation. Final now means Main considers the requested work complete — not merely planned — and considers its claims supported by its current basis. `grounding_ids` names current `mat-*` Materials that directly support Final claims; `limitations` records relevant remaining gaps. Runtime still validates only shape, references and commitments, never semantic truth.
+
+Executable/mutating capability results can now expose one normalized `physical_effect` record:
+
+```text
+target
+persistence = call | job | persistent
+real_workspace_changed
+real_eyle_changed
+```
+
+`run_command` explicitly reports `target=isolated_snapshot`, `persistence=job`, and both real-source change flags as false. `run_tests` reports an isolated test sandbox; `export_sandbox_zip` reports persistent artifact creation; `memory_store` reports persistent Memory Kernel mutation. Real workspace changes remain exclusive to confirmed patch transactions. The physical effect is also retained in produced Material where applicable, so a later grounded Final can distinguish snapshot effects from real-source effects.
+
+## Rev1.4.5: Self Source Identity
+
+The model-facing `project` projection now states the physical identity of the running system:
+
+```text
+project.identity.running_instance → Eyle Root
+project.identity.self_source      → eyle
+project.sources.workspace.kind    → user_workspace
+project.sources.eyle.kind         → running_eyle_root
+```
+
+`source=eyle` is therefore not an opaque tool enum: it is the inspectable source tree of the Eyle Root that is running the current instance. This exposes identity, not strategy; Main remains free to decide whether inspecting itself is relevant. Direct mutation of Eyle Root remains forbidden outside isolated self-sandbox experiments.
+
+## Rev1.4.4: Supervised Continuation
+
+Rev1.4.4 turns blocking human input into real suspended work. Main may return `await_user` with a question, reason and up to four Main-authored response options. Custom user input and cancel remain universally available at the Runtime/UI boundary. `await_user` is not Final: Runtime persists the complete open AgentSession, waits for a user resolution, then resumes the same canonical Request with Tasks, Investigations, Observation, Material and Memory continuity intact. Explicit cancel ends the suspended work.
+
+The old clarification path that appended question/answer blocks into `session.request` is removed. Human resolutions are retained as bounded conversation context instead, so repeated supervision does not inflate or mutate the original Request. Cognitive `await_user` has no one-hour expiry; transactional `write_confirmation` keeps its separate confirmation TTL. Pending continuation schema advances to `2`, while Session and Queue remain `2.7.5-r1.4.3` because their physical shapes did not change.
+
+The model-facing `project` projection now exposes distinct physical sources:
+
+```text
+project.sources.workspace → user work plane, including empty/nonempty state
+project.sources.eyle      → installed Eyle source, read-only or isolated-sandbox access
+```
+
+An empty workspace therefore no longer implies that Eyle has no source available to inspect. The web client renders Main-authored options, a custom-response field and an explicit cancel control for active `await_user` gates.
 
 ## Rev1.4.3: Semantic Completion
 
@@ -199,14 +274,13 @@ Main may inspect Eyle source and may experiment on a writable isolated sandbox c
 
 Eyle keeps physical containment rather than semantic quotas:
 
-- per-call model context ceiling;
-- task-wide physical token fuse (`max_total_tokens`, capped at 90,000);
+- per-call model context ceiling and safety margin;
 - task deadline;
 - sandbox CPU/memory/process/output/filesystem bounds;
 - strict structured-response validation;
 - transactional writes and post-write verification.
 
-There is no Claim reserve and no Claim call. There is no fixed semantic LLM-turn/tool-call stopping quota.
+Token accounting is telemetry only; it does not shrink the model surface to save cost. There is no Claim reserve/call and no fixed semantic LLM-turn/tool-call stopping quota.
 
 ## Public capability philosophy
 

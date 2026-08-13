@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from eyle.core import memory as project_memory
+from eyle.providers.memory_impl import memory as project_memory
 from eyle.core.session import AgentSession, SESSION_SCHEMA_VERSION
 from eyle.devtools.benchmark_schema import (
     BENCHMARK_SCHEMA_VERSION,
@@ -16,6 +16,7 @@ from eyle.devtools.coverage_compare import _case_ok, _cases
 from eyle.devtools.token_efficiency import compare_token_efficiency_reports
 from eyle.runtime.config import ConfigError, validar_config
 from tests.canonical import base_config
+from tests.canonical import standard_registry
 
 
 def _benchmark_report():
@@ -30,7 +31,7 @@ def _benchmark_report():
         "id": "greeting",
         "status": "success",
         "response": "hello",
-        "tools": [],
+        "capabilities": [],
         "read_ok": True,
         "factual_ok": True,
         "write_ok": True,
@@ -62,7 +63,7 @@ def _benchmark_report():
 
 def test_session_requires_exact_top_level_shape():
     state = AgentSession("x").to_dict()
-    assert state["session_schema_version"] == SESSION_SCHEMA_VERSION == "2.7.5-r1.4.3"
+    assert state["session_schema_version"] == SESSION_SCHEMA_VERSION == "2.7.5-r1.5.1"
 
     with_extra = copy.deepcopy(state)
     with_extra["mystery_compat_field"] = True
@@ -109,25 +110,25 @@ def test_memory_kernel_uses_one_sqlite_schema_and_rejects_legacy_json_shape(tmp_
 def test_sandbox_backend_has_one_english_vocabulary_and_is_validated_early():
     for alias in ("processo", "local_confiavel", "totally_unknown"):
         cfg = base_config()
-        cfg["agent"]["sandbox"] = {"backend": alias}
-        with pytest.raises(ConfigError, match="backend must be one of"):
-            validar_config(cfg)
+        cfg["providers"]["standard"]["sandbox"] = {"backend": alias}
+        with pytest.raises(ConfigError, match="STANDARD_PROVIDER_CONFIG_INVALID:standard.sandbox.backend"):
+            validar_config(cfg, standard_registry())
 
     for backend in ("auto", "microsandbox", "docker", "bwrap", "process", "trusted_local"):
         cfg = base_config()
-        cfg["agent"]["sandbox"] = {"backend": backend}
-        assert validar_config(cfg)["agent"]["sandbox"]["backend"] == backend
+        cfg["providers"]["standard"]["sandbox"] = {"backend": backend}
+        assert validar_config(cfg, standard_registry())["providers"]["standard"]["sandbox"]["backend"] == backend
 
 
 def test_sandbox_oci_image_is_current_and_docker_name_has_no_alias():
     cfg = base_config()
-    cfg["agent"]["sandbox"] = {"backend": "microsandbox", "imagem_oci": "python:3.12-slim"}
-    assert validar_config(cfg)["agent"]["sandbox"]["imagem_oci"] == "python:3.12-slim"
+    cfg["providers"]["standard"]["sandbox"] = {"backend": "microsandbox", "imagem_oci": "python:3.12-slim"}
+    assert validar_config(cfg, standard_registry())["providers"]["standard"]["sandbox"]["imagem_oci"] == "python:3.12-slim"
 
     legacy = base_config()
-    legacy["agent"]["sandbox"] = {"backend": "docker", "imagem_docker": "python:3.12-slim"}
-    with pytest.raises(ConfigError, match="UNKNOWN_CONFIG_FIELD:agent.sandbox:imagem_docker"):
-        validar_config(legacy)
+    legacy["providers"]["standard"]["sandbox"] = {"backend": "docker", "imagem_docker": "python:3.12-slim"}
+    with pytest.raises(ConfigError, match="STANDARD_PROVIDER_CONFIG_UNKNOWN:standard.sandbox:imagem_docker"):
+        validar_config(legacy, standard_registry())
 
 
 def test_benchmark_schema_rejects_language_aliases_and_missing_gates():
@@ -162,7 +163,7 @@ def test_benchmark_schema_version_and_token_shape_are_exact():
 
 
 def test_search_code_backends_share_one_canonical_order_and_truncation(monkeypatch, tmp_path):
-    from eyle.core import tools
+    from eyle.providers import standard as tools
 
     (tmp_path / "app.py").write_text("needle\n", encoding="utf-8")
     (tmp_path / "docs.md").write_text("needle\n", encoding="utf-8")
@@ -201,19 +202,20 @@ def test_conversation_message_has_one_core_shape():
 
 
 def test_diagnostic_helpers_are_not_public_main_tools():
-    from eyle.core import tools
-    assert "agent_info" not in tools.TOOLS
-    assert "execution_trace" not in tools.TOOLS
+    from eyle.providers import standard as tools
+    assert "agent_info" not in tools.CAPABILITIES
+    assert "execution_trace" not in tools.CAPABILITIES
 
 def test_pending_continuation_is_exact_versioned_english_contract():
     from eyle.core.continuation import PENDING_SCHEMA_VERSION, validate_pending_continuation
 
     canonical = {
         "pending_schema_version": PENDING_SCHEMA_VERSION,
-        "continuation_kind": "user_input",
-        "question": "Which class?",
+        "continuation_kind": "await_user",
+        "question": "Which source?",
         "session": {"request": "task"},
-        "clarification": {"question": "Which class?", "missing_information": "class name"},
+        "reason": "The source choice belongs to the user.",
+        "options": [{"id": "root", "label": "Eyle Root"}],
     }
     assert validate_pending_continuation(canonical) is canonical
 
@@ -233,7 +235,7 @@ def test_python_minimum_has_no_pre_38_shlex_or_process_kill_fallbacks():
 
     sources = "\n".join(
         Path(path).read_text(encoding="utf-8")
-        for path in ("eyle/core/editing.py", "eyle/core/sandbox.py", "eyle/runtime/worker.py")
+        for path in ("eyle/providers/standard_impl/editing.py", "eyle/providers/standard_impl/sandbox.py", "eyle/runtime/worker.py")
     )
     assert 'hasattr(shlex, "join")' not in sources
     assert 'hasattr(process, "kill")' not in sources

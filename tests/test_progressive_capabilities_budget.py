@@ -1,76 +1,70 @@
+from tests.canonical import run_agent
+from tests.canonical import standard_registry
 import json
 
 import pytest
 
 import eyle.core.agent as core_agent
 import llm.executar as llm_mod
-from eyle.core.execution_context import ExecutionContext
+from eyle.runtime.execution_context import ExecutionContext
 from eyle.core.token_budget import available_user_prompt_tokens, estimate_tokens
 from eyle.runtime.config import ConfigError, validar_config
-from tests.canonical import agent_final, agent_tools, agent_needs_user, base_config, tool_call
+from tests.canonical import agent_complete, agent_tools, base_config, tool_call
 
 
-def test_capability_index_is_small_and_first_use_expands_only_requested_tool(monkeypatch, tmp_path):
+def test_full_capability_contracts_are_visible_before_first_use(monkeypatch, tmp_path):
     (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
     prompts = []
 
     def fake(prompt, cfg):
         payload = json.loads(prompt)
         prompts.append(payload)
+        contracts = {item["name"]: item for item in payload["available_capabilities"]}
+        assert "standard.read_file" in contracts and "standard.search_code" in contracts
+        assert contracts["standard.read_file"]["purpose"]
+        assert contracts["standard.read_file"]["effect"] == "observe"
+        assert "path" in contracts["standard.read_file"]["inputs"]
+        assert contracts["standard.read_file"]["returns"]
         if len(prompts) == 1:
-            assert payload["active_tools"] == []
-            assert any(item.startswith("read_file(") for item in payload["available_capabilities"])
-            assert "available_tools" not in payload
-            assert "tool_taxonomy" not in payload
-            # The discovery view should stay far below the old ~2.2k-token full catalog.
-            assert len(json.dumps(payload["available_capabilities"], ensure_ascii=False)) < 2200
-            assert estimate_tokens(payload["available_capabilities"], 3) < 650
             return agent_tools(tool_call("read_file", {"path": "app.py"}))
-        active = {item["name"] for item in payload["active_tools"]}
-        assert active == {"read_file"}
-        assert not any(item.startswith("read_file(") for item in payload["available_capabilities"])
-        assert any(item.startswith("search_code(") for item in payload["available_capabilities"])
-        assert estimate_tokens(payload["available_capabilities"], 3) + estimate_tokens(payload["active_tools"], 3) < 1000
-        return agent_final("app.py foi observado.")
+        assert "standard.read_file" in contracts  # no first-use hiding/activation
+        return agent_complete({"answer": "app.py foi observado.", "grounding_ids": ["mat-0001"]})
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
-    status, text, _, details = core_agent.executar_agente(
+    status, text, _, details = run_agent(core_agent, 
         "Leia app.py", base_config(),
-        projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True,
+        provider_context={"standard": {"caminho_origem": str(tmp_path)}}, retornar_detalhes=True,
     )
     assert status == "success"
     assert "observado" in text
     assert len(prompts) == 2
-    assert details["tool_calls"] == 1
+    assert details["capability_calls"] == 1
 
 
 
 
 
-
-def test_rev123_uses_38k_physical_context_and_90k_task_fuse_without_cumulative_prompt_completion_fuses():
-    cfg=base_config(); validar_config(cfg); execution=ExecutionContext.from_config(cfg)
+def test_rev148_keeps_38k_physical_context_without_task_token_fuse():
+    cfg=base_config(); validar_config(cfg, standard_registry()); execution=ExecutionContext.from_config(cfg)
     assert not hasattr(execution,"max_prompt_tokens")
     assert not hasattr(execution,"max_completion_tokens")
-    assert execution.max_total_tokens==90000
+    assert not hasattr(execution,"max_total_tokens")
+    assert "max_total_tokens" not in cfg["agent"]
     assert cfg["llm"]["context_window_tokens"]==38000
     assert available_user_prompt_tokens(cfg, "", output_tokens=0) == 37500
-    assert "max_prompt_tokens" not in cfg["agent"] and "max_completion_tokens" not in cfg["agent"]
     assert all(key not in cfg["agent"] for key in ("max_llm_turns","max_llm_calls","max_tool_calls"))
     too_wide=base_config(); too_wide["llm"]["context_window_tokens"]=38001
     with pytest.raises(ConfigError,match="context_window_tokens"):
-        validar_config(too_wide)
+        validar_config(too_wide, standard_registry())
 
-def test_task_token_fuse_counts_physical_usage_not_cache_discount():
+def test_prior_task_token_spend_does_not_block_a_new_call():
     cfg = base_config()
     execution = ExecutionContext.from_config(cfg)
-    execution.max_total_tokens = 90000
     execution.prompt_tokens_budgeted_physical = 87000
     execution.prompt_tokens_effective = 1000
     execution.completion_tokens_actual = 1000
-    with pytest.raises(llm_mod.ErroLLM) as exc:
-        llm_mod._reservar_requisicao_llm(cfg, execution, "sys", "user", 3600)
-    assert exc.value.error_code == "MAX_TOTAL_TOKENS_EXCEEDED"
+    reservation = llm_mod._reservar_requisicao_llm(cfg, execution, "sys", "user", 3600)
+    assert reservation["budgeted_prompt_tokens"] > 0
 
 
 def test_provider_token_counts_calibrate_future_context_and_budget():
@@ -124,7 +118,9 @@ def test_repeated_provider_truth_reconciles_conservative_estimates_without_cumul
         llm_mod._finalizar_requisicao_llm(cfg,execution,reservation,{"prompt_tokens":actual,"cached_prompt_tokens":0})
     assert execution.prompt_tokens_actual>0
     assert execution.prompt_tokens_budgeted_physical==execution.prompt_tokens_actual
-    assert execution.physical_tokens_remaining>0
+    usage = execution.usage_view()
+    assert "physical_tokens_remaining" not in usage
+    assert "physical_tokens_limit" not in usage
 
 
 def test_cumulative_completion_budget_api_is_removed():

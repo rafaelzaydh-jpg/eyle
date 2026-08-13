@@ -3,22 +3,24 @@ from __future__ import annotations
 from pathlib import Path
 import pytest
 
-from eyle.core import memory as project_memory, tools
+from eyle.providers.memory_impl import memory as project_memory
+from eyle.providers import standard as tools
 from eyle.core.session import AgentSession, SESSION_SCHEMA_VERSION
-from eyle.core.validation import validate_final
+from eyle.core.validation import validate_complete
 from eyle.runtime import queue
 from eyle.runtime.config import ConfigError, validar_config
 from llm.structured import StructuredResponseError, parse_agent_response
 from tests.canonical import base_config
+from tests.canonical import standard_registry
 
 
 def test_rev1_session_schema_is_exact_and_old_state_is_not_migrated():
     current = AgentSession("x").to_dict()
-    assert current["session_schema_version"] == SESSION_SCHEMA_VERSION == "2.7.5-r1.4.3"
+    assert current["session_schema_version"] == SESSION_SCHEMA_VERSION == "2.7.5-r1.5.1"
     assert set(current) == {
-        "session_schema_version", "request", "execution_id", "turn", "workspace_epoch",
+        "session_schema_version", "request", "execution_id", "turn", "reality_epoch",
         "observation_ledger", "decision_ledger", "investigation", "tasks",
-        "conversation_background", "write_transaction",
+        "conversation_background", "request_context", "pending_capability",
     }
     for old_version in ("5.9.1", "5.9", "5.5", "5.4"):
         old = dict(current); old["session_schema_version"] = old_version
@@ -40,33 +42,46 @@ def test_removed_config_keys_are_errors_not_aliases():
     ):
         cfg = base_config(); cfg["agent"][key] = 1
         with pytest.raises(ConfigError, match="UNKNOWN_CONFIG_FIELD"):
-            validar_config(cfg)
+            validar_config(cfg, standard_registry())
 
 
 def test_removed_context_and_output_ceiling_keys_are_not_aliases():
     cfg = base_config(); cfg["agent"]["context_view"] = {"max_source_preview_chars": 3500}
     with pytest.raises(ConfigError, match="UNKNOWN_CONFIG_FIELD"):
-        validar_config(cfg)
+        validar_config(cfg, standard_registry())
     cfg = base_config(); cfg["context_engine"]["working_set_target_tokens"] = 12000
     with pytest.raises(ConfigError, match="UNKNOWN_CONFIG_FIELD"):
-        validar_config(cfg)
+        validar_config(cfg, standard_registry())
+    cfg = base_config(); cfg["agent"]["max_total_tokens"] = 90000
+    with pytest.raises(ConfigError, match="UNKNOWN_CONFIG_FIELD"):
+        validar_config(cfg, standard_registry())
     for key in ("agent_decision_max_tokens", "agent_analysis_max_tokens", "agent_patch_max_tokens"):
         cfg = base_config(); cfg["llm"][key] = 1000
         with pytest.raises(ConfigError, match="UNKNOWN_CONFIG_FIELD"):
-            validar_config(cfg)
+            validar_config(cfg, standard_registry())
 
 
-def test_final_has_one_canonical_grounding_shape_and_rejects_evidence_alias():
-    ok, reason, *_ = validate_final("legacy string final", {})
-    assert not ok and reason == "FINAL_INVALID"
-    ok, reason, answer, limitations = validate_final(
-        {"answer": "ok", "limitations": [], "grounding_ids": []}, {}
+def test_complete_has_one_canonical_basis_shape_and_rejects_legacy_aliases():
+    ok, reason, *_ = validate_complete("legacy string complete", {})
+    assert not ok and reason == "COMPLETE_INVALID"
+    ok, reason, *_ = validate_complete(
+        {"answer": "old", "limitations": [], "grounding_ids": []}, {}
+    )
+    assert not ok and reason.startswith("COMPLETE_MISSING_FIELDS")
+    ok, reason, answer, limitations = validate_complete(
+        {
+            "answer": "ok", "limitations": [],
+            "grounding_ids": [], "effect_ids": [],
+        }, {}, {}
     )
     assert ok and reason == "ok" and answer == "ok" and limitations == []
-    ok, reason, *_ = validate_final(
-        {"answer": "old", "limitations": [], "evidence_ids": []}, {}
+    ok, reason, *_ = validate_complete(
+        {
+            "answer": "old", "limitations": [],
+            "grounding_ids": [], "effect_ids": [], "evidence_ids": [],
+        }, {}, {}
     )
-    assert not ok and reason.startswith("FINAL_UNKNOWN_FIELDS")
+    assert not ok and reason.startswith("COMPLETE_UNKNOWN_FIELDS")
 
 
 def test_deleted_architecture_is_physically_absent_from_runtime_source():
@@ -96,7 +111,7 @@ def test_old_config_identity_is_rejected():
     ):
         cfg = base_config(); cfg["config_schema_version"] = schema; cfg["revision"] = revision
         with pytest.raises(ConfigError, match="CONFIG_IDENTITY_INCOMPATIBLE"):
-            validar_config(cfg)
+            validar_config(cfg, standard_registry())
 
 
 def test_old_project_memory_and_queue_are_not_migrated(monkeypatch, tmp_path):
@@ -116,22 +131,33 @@ def test_old_project_memory_and_queue_are_not_migrated(monkeypatch, tmp_path):
         queue.database_instance_id()
 
 
-def test_agent_contract_uses_grounding_ids_and_rejects_evidence_ids():
-    payload = {"action": {"kind": "final", "answer": "ok", "limitations": [], "grounding_ids": []}, "investigation_updates": [], "task_updates": []}
+def test_agent_contract_uses_complete_basis_and_rejects_legacy_final():
+    payload = {
+        "action": {
+            "kind": "complete", "answer": "ok", "limitations": [], "grounding_ids": [], "effect_ids": [],
+        },
+        "investigation_updates": [], "task_updates": [],
+    }
     assert parse_agent_response(payload)["action"]["answer"] == "ok"
+    with pytest.raises(StructuredResponseError) as exc:
+        parse_agent_response({"action": {"kind": "final", "answer": "legacy", "limitations": [], "grounding_ids": []}, "investigation_updates": [], "task_updates": []})
+    assert exc.value.code == "AGENT_ACTION_KIND_INVALID"
     with pytest.raises(StructuredResponseError):
-        parse_agent_response({"action": {"kind": "final", "answer": "old", "limitations": [], "evidence_ids": []}, "investigation_updates": [], "task_updates": []})
+        parse_agent_response({"action": {"kind": "complete", "answer": "old", "limitations": [], "evidence_ids": []}, "investigation_updates": [], "task_updates": []})
     with pytest.raises(StructuredResponseError):
         parse_agent_response({**payload, "workspace_scope": {"mode": "read"}})
 
 
 
 def test_tool_registry_has_one_contract_source_and_rev1_cuts():
-    assert "read_file" in tools.TOOLS and "read_range" not in tools.TOOLS
-    assert "continue_observation" in tools.TOOLS and "expand_observation" not in tools.TOOLS
-    assert "agent_info" not in tools.TOOLS and "execution_trace" not in tools.TOOLS
-    assert len(tools.TOOLS) == 17
-    for entry in tools.TOOLS.values():
+    assert "read_file" in tools.CAPABILITIES and "read_range" not in tools.CAPABILITIES
+    assert "continue_observation" in tools.CAPABILITIES and "expand_observation" not in tools.CAPABILITIES
+    assert "agent_info" not in tools.CAPABILITIES and "execution_trace" not in tools.CAPABILITIES
+    assert len(tools.CAPABILITIES) == 16
+    assert len(standard_registry().names()) == 18
+    assert {"memory.search", "memory.store"} <= set(standard_registry().names())
+    assert "workspace_transaction" in tools.CAPABILITIES
+    for entry in tools.CAPABILITIES.values():
         assert "category" not in entry
         assert "effects" not in entry
         assert entry.get("effect") in {"observe", "execute", "mutate"}

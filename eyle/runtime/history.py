@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, List, Optional
 
 _COMPONENT_GROUPS = {
-    "fixed_contract": {"available_capabilities", "active_tools"},
+    "fixed_contract": {"available_capabilities"},
     "request": {"request"},
     "fresh_observation": {"latest_capability_results"},
     "retained_context": {"prior_conversation"},
@@ -183,7 +183,6 @@ def build_prompt_cost_accounting(details: Dict[str, Any], *, limit: int = 20) ->
                 item["components"] = {str(name): _component_metrics(metric) for name, metric in components.items()}
             for key in (
                 "output_tokens_desired", "prompt_budget_tokens",
-                "physical_user_prompt_budget_tokens",
             ):
                 if snap.get(key) is not None: item[key] = snap.get(key)
             calls.append({key:value for key,value in item.items() if value is not None})
@@ -198,21 +197,21 @@ def build_prompt_cost_accounting(details: Dict[str, Any], *, limit: int = 20) ->
     observation_count=int(_number(details.get("observation_ledger_size")))
     grounding_count=int(_number(details.get("grounding_count_total")))
     replays=int(_number(details.get("observation_replays")))
-    tool_requests=len([item for item in (details.get("tool_history") or []) if isinstance(item,dict)])
+    capability_requests=len([item for item in (details.get("capability_history") or []) if isinstance(item,dict)])
     grounding_usage=details.get("grounding_usage") if isinstance(details.get("grounding_usage"),dict) else {}
     grounding_count = int(_number(grounding_usage.get("total_grounding_count"))) or grounding_count
     diagnostics={
         "observation_count":observation_count, "grounding_count":grounding_count,
-        "observation_replays":replays, "tool_requests_observed":tool_requests,
+        "observation_replays":replays, "capability_requests_observed":capability_requests,
     }
     grounding_per_observation=_round_ratio(float(grounding_count),float(observation_count))
     if grounding_per_observation is not None: diagnostics["grounding_per_observation"]=grounding_per_observation
-    replay_rate=_round_ratio(float(replays),float(tool_requests))
-    if replay_rate is not None: diagnostics["replay_request_rate"]=replay_rate
+    replay_rate=_round_ratio(float(replays),float(capability_requests))
+    if replay_rate is not None: diagnostics["replay_capability_rate"]=replay_rate
     for key in (
         "investigation_grounding_count", "task_grounding_count",
         "completion_grounding_count", "unreferenced_grounding_count",
-        "tool_actions_with_grounding",
+        "capability_actions_with_grounding",
     ):
         if grounding_usage.get(key) is not None: diagnostics[key]=grounding_usage.get(key)
 
@@ -267,9 +266,8 @@ def _safe_llm_calls(details: Dict[str, Any], limit: int) -> List[Dict[str, Any]]
                 "request_status": (str(attempt.get("request_status")) if attempt else "preflight_blocked"),
                 "prompt_estimated_tokens": prompt.get("estimated_tokens"), "prompt_characters": prompt.get("characters"),
                 "prompt_budget_tokens": prompt.get("prompt_budget_tokens"),
-                "physical_user_prompt_budget_tokens": prompt.get("physical_user_prompt_budget_tokens"),
                 "output_tokens_reserved": prompt.get("output_tokens_reserved"),
-                "tool_count_available": prompt.get("tool_count"), "prompt_tokens": prompt_tokens,
+                "capability_count_available": prompt.get("capability_count"), "prompt_tokens": prompt_tokens,
                 "cached_prompt_tokens": cached_tokens, "uncached_prompt_tokens": uncached_tokens,
                 "completion_tokens": attempt.get("completion_tokens"), "reasoning_tokens": attempt.get("reasoning_tokens"),
                 "finish_reason": attempt.get("finish_reason"), "provider_model": attempt.get("provider_model"),
@@ -299,8 +297,8 @@ def build_execution_trace(
     context = [{
         key: item.get(key)
         for key in (
-            "turn", "mode", "characters", "estimated_tokens", "tool_count", "active_tool_count",
-            "prompt_budget_tokens", "physical_user_prompt_budget_tokens",
+            "turn", "mode", "characters", "estimated_tokens", "capability_count",
+            "prompt_budget_tokens",
             "output_tokens_reserved", "system_prompt_characters",
             "system_prompt_estimated_tokens", "pre_crop_characters", "pre_crop_estimated_tokens",
             "crop_applied", "components_before", "components_after",
@@ -315,15 +313,15 @@ def build_execution_trace(
         "decision": item.get("decision"),
         "outcome": item.get("outcome"),
         "reason": item.get("reason"),
-        "tools": list(item.get("tools") or [])[:8],
+        "capabilities": list(item.get("capabilities") or [])[:8],
     } for index, item in enumerate(_bounded_list(details.get("decision_history"), limit))]
 
-    tools = []
-    for index, item in enumerate(_bounded_list(details.get("tool_history"), limit)):
+    capabilities = []
+    for index, item in enumerate(_bounded_list(details.get("capability_history"), limit)):
         result = item.get("result") if isinstance(item.get("result"), dict) else {}
-        tools.append({
+        capabilities.append({
             "event": index + 1,
-            "tool": item.get("tool") or result.get("tool") or "unknown_tool",
+            "capability": item.get("capability") or result.get("capability") or "unknown_capability",
             "turn": item.get("turn"),
             "status": item.get("status"),
             "error_code": item.get("error_code"),
@@ -340,8 +338,6 @@ def build_execution_trace(
         "reasoning": usage.get("reasoning_tokens_actual"),
         "effective_total": usage.get("total_tokens_effective"),
         "physical_estimated_total": usage.get("total_tokens_physical_estimated"),
-        "physical_remaining": usage.get("physical_tokens_remaining"),
-        "physical_limit": usage.get("physical_tokens_limit"),
     }
     tokens = {key: value for key, value in tokens.items() if value is not None}
 
@@ -354,7 +350,7 @@ def build_execution_trace(
             "completed_at": completed_at,
             "duration_seconds": duration_seconds,
             "turns": details.get("turns"),
-            "tool_calls": details.get("tool_calls"),
+            "capability_calls": details.get("capability_calls"),
             "failure_code": details.get("failure_code"),
             "task_totals": details.get("task_totals") if isinstance(details.get("task_totals"), dict) else {},
         },
@@ -363,10 +359,7 @@ def build_execution_trace(
         "context": context,
         "llm_calls": _safe_llm_calls(details, limit),
         "decisions": decisions,
-        "tools": tools,
-        "validation": {
-            "write_transaction": details.get("write_transaction") if isinstance(details.get("write_transaction"), dict) else {},
-        },
+        "capabilities": capabilities,
         "privacy": {
             "chain_of_thought_exposed": False,
             "raw_prompts_exposed": False,
@@ -409,8 +402,8 @@ def build_public_job_history(registro):
         "duration_seconds": summary.get("duration_seconds"),
         "agent": {
             "turns": summary.get("turns"),
-            "tool_calls": summary.get("tool_calls"),
-            "workspace_epoch": details.get("workspace_epoch"),
+            "capability_calls": summary.get("capability_calls"),
+            "reality_epoch": details.get("reality_epoch"),
             "grounding_count_total": details.get("grounding_count_total"),
             "observation_replays": details.get("observation_replays"),
             "observation_ledger_size": details.get("observation_ledger_size"),
@@ -430,7 +423,6 @@ def build_public_job_history(registro):
         },
         "llm_calls": llm_calls,
         "decisions": list(trace.get("decisions") or []),
-        "tools": list(trace.get("tools") or []),
-        "write_transaction": (trace.get("validation") or {}).get("write_transaction") or {},
+        "capabilities": list(trace.get("capabilities") or []),
         "privacy": dict(trace.get("privacy") or {}),
     }

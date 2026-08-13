@@ -33,83 +33,84 @@
       "window_seconds": 60
     }
   },
-  "codar": {
-    "ativado": true,
-    "testes": {
-      "ativado": true,
-      "comando_python": "python -m pytest -q",
-      "comando_node": "npm test --silent",
-      "timeout_segundos": 60,
+  "providers": {
+    "standard": {
+      "max_tree_entries": 200,
+      "max_tree_depth": 6,
+      "max_file_read_lines": 400,
+      "max_project_scan_entries": 20000,
+      "max_project_scan_depth": 32,
+      "max_project_file_bytes": 4194304,
+      "max_inspect_relation_edges": 60,
+      "max_git_diff_chars": 6000,
+      "max_search_matches": 40,
+      "max_search_ranges": 12,
+      "max_search_range_lines": 16,
       "sandbox": {
         "backend": "auto",
-        "bloquear_rede": true,
-        "comandos_permitidos": [
-          [
-            "pytest"
-          ],
-          [
-            "python",
-            "-m",
-            "pytest"
-          ],
-          [
-            "python3",
-            "-m",
-            "pytest"
-          ],
-          [
-            "npm",
-            "test"
-          ]
-        ],
-        "cpu_segundos": 60,
-        "memoria_mb": 1024,
-        "max_processos": 128,
-        "max_arquivos_abertos": 256,
-        "max_saida_kb": 1024,
-        "max_arquivo_mb": 64,
+        "bloquear_rede": false,
+        "timeout_segundos": 300,
+        "cpu_segundos": 300,
+        "memoria_mb": 2048,
+        "max_processos": 256,
+        "max_arquivos_abertos": 512,
+        "max_saida_kb": 2048,
+        "max_arquivo_mb": 512,
         "copiar_projeto": true,
         "max_arquivos_projeto": 100000,
-        "max_tamanho_projeto_mb": 2048,
-        "cpus": 1.0,
-        "allow_trusted_local": true
+        "max_tamanho_projeto_mb": 4096,
+        "cpus": 2.0,
+        "allow_trusted_local": false,
+        "imagem_oci": "python:3.12-slim"
+      },
+      "tests": {
+        "enabled": true,
+        "command_python": "python -m pytest -q",
+        "command_node": "npm test --silent",
+        "timeout_seconds": 60,
+        "sandbox": {
+          "backend": "auto",
+          "bloquear_rede": true,
+          "comandos_permitidos": [
+            [
+              "pytest"
+            ],
+            [
+              "python",
+              "-m",
+              "pytest"
+            ],
+            [
+              "python3",
+              "-m",
+              "pytest"
+            ],
+            [
+              "npm",
+              "test"
+            ]
+          ],
+          "cpu_segundos": 60,
+          "memoria_mb": 1024,
+          "max_processos": 128,
+          "max_arquivos_abertos": 256,
+          "max_saida_kb": 1024,
+          "max_arquivo_mb": 64,
+          "copiar_projeto": true,
+          "max_arquivos_projeto": 100000,
+          "max_tamanho_projeto_mb": 2048,
+          "cpus": 1.0,
+          "allow_trusted_local": true
+        }
       }
-    }
+    },
+    "memory": {}
   },
   "confirmacoes": {
     "expiracao_segundos": 3600
   },
   "agent": {
-    "max_tree_entries": 200,
-    "max_tree_depth": 6,
-    "max_file_read_lines": 400,
-    "task_deadline_seconds": 1800,
-    "max_total_tokens": 90000,
-    "max_project_scan_entries": 20000,
-    "max_project_scan_depth": 32,
-    "max_project_file_bytes": 4194304,
-    "max_inspect_relation_edges": 60,
-    "max_git_diff_chars": 6000,
-    "max_search_matches": 40,
-    "max_search_ranges": 12,
-    "max_search_range_lines": 16,
-    "sandbox": {
-      "backend": "auto",
-      "bloquear_rede": false,
-      "timeout_segundos": 300,
-      "cpu_segundos": 300,
-      "memoria_mb": 2048,
-      "max_processos": 256,
-      "max_arquivos_abertos": 512,
-      "max_saida_kb": 2048,
-      "max_arquivo_mb": 512,
-      "copiar_projeto": true,
-      "max_arquivos_projeto": 100000,
-      "max_tamanho_projeto_mb": 4096,
-      "cpus": 2.0,
-      "allow_trusted_local": false,
-      "imagem_oci": "python:3.12-slim"
-    }
+    "task_deadline_seconds": 1800
   },
   "worker": {
     "heartbeat_interval_seconds": 5,
@@ -126,6 +127,6 @@
     "window_seconds": 3600
   },
   "app_version": "2.7.5",
-  "config_schema_version": "2.7.5-r1.4.3",
-  "revision": "rev1.4.3-semantic-completion"
+  "config_schema_version": "2.7.5-r1.5.1",
+  "revision": "rev1.5.1-host-injected-universal-capabilities"
 }

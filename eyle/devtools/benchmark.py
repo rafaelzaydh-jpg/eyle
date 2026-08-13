@@ -84,22 +84,22 @@ def _run_case(config: Dict[str, Any], case_id: str) -> Dict[str, Any]:
         cfg = copy.deepcopy(config)
         started = time.perf_counter()
         status, text, pending, details = executar_agente(
-            request, cfg, projeto=project, retornar_detalhes=True,
+            request, cfg, provider_context={"standard": project}, retornar_detalhes=True,
         )
         after_proposal = _snapshot(root)
         wrote_before_confirmation = before != after_proposal
-        confirmation_requested = status == "needs_user" and bool(pending)
+        confirmation_requested = status == "await_user" and isinstance(pending, dict) and pending.get("continuation_kind") == "capability_confirmation"
         if confirmation_requested:
             status, text, pending, details = executar_agente(
-                request, cfg, projeto=project, retomar=pending,
+                request, cfg, provider_context={"standard": project}, retomar=pending,
                 resposta_usuario="confirm", retornar_detalhes=True,
             )
         elapsed = round((time.perf_counter() - started) * 1000, 2)
-        tools = list((details or {}).get("tools_used") or [])
+        capabilities = list((details or {}).get("capabilities_used") or [])
         expected_read = case_id != "greeting"
         read_ok = (not expected_read) or any(
-            tool in {"read_file", "search_code", "find_symbol", "list_tree"}
-            for tool in tools
+            capability in {"read_file", "search_code", "find_symbol", "list_tree"}
+            for capability in capabilities
         )
         grounding_count = int((details or {}).get("grounding_count_total") or 0)
         factual_ok = status == "success" and bool(str(text or "").strip()) and (
@@ -120,7 +120,7 @@ def _run_case(config: Dict[str, Any], case_id: str) -> Dict[str, Any]:
             "id": case_id,
             "status": str(status or ""),
             "response": str(text or ""),
-            "tools": [str(tool) for tool in tools],
+            "capabilities": [str(capability) for capability in capabilities],
             "read_ok": bool(read_ok),
             "factual_ok": bool(factual_ok),
             "write_ok": bool(write_ok),
@@ -135,7 +135,7 @@ def _run_case(config: Dict[str, Any], case_id: str) -> Dict[str, Any]:
 def _run_model(config: Dict[str, Any], model: str, role: str, cases: Iterable[str]) -> Dict[str, Any]:
     cfg = copy.deepcopy(config)
     cfg.setdefault("llm", {})["model"] = model
-    cfg.setdefault("codar", {}).setdefault("testes", {})["ativado"] = False
+    cfg.setdefault("providers", {}).setdefault("standard", {}).setdefault("tests", {})["enabled"] = False
     results = [_run_case(cfg, case_id) for case_id in cases]
     latencies = [float(item["latency_ms"]) for item in results]
     total = len(results)

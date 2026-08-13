@@ -1,16 +1,17 @@
+from tests.canonical import standard_registry
 from pathlib import Path
 
 import pytest
 
-from eyle.core import sandbox as sandbox_mod
-from eyle.core import tools
-from eyle.core.workspace_io import ErroLeituraProjeto, ler_faixa_projeto, listar_arvore_projeto
-from eyle.core.workspace_policy import _is_protected_resource_path
+from eyle.providers.standard_impl import sandbox as sandbox_mod
+from eyle.providers import standard as tools
+from eyle.providers.standard_impl.workspace_io import ErroLeituraProjeto, ler_faixa_projeto, listar_arvore_projeto
+from eyle.providers.standard_impl.workspace_policy import _is_protected_resource_path
 
 
 def _ctx(root):
     return {
-        "projeto": {"caminho_origem": str(root)},
+        "provider_context": {"standard": {"caminho_origem": str(root)}},
         "config": {"agent": {"max_file_read_lines": 400, "max_search_matches": 40, "max_search_ranges": 12, "max_search_range_lines": 16}},
     }
 
@@ -22,7 +23,7 @@ def test_normal_source_is_never_blocked_by_secret_like_content(tmp_path):
     result = ler_faixa_projeto(tmp_path, "agent.py", 1, 4, max_linhas=20)
     assert result["content"] == content
 
-    search = tools.executar_tool("search_code", {"query": "api_key"}, _ctx(tmp_path))
+    search = standard_registry().execute("search_code", {"query": "api_key"}, _ctx(tmp_path))
     assert search["ok"] is True
     assert search["detail"]["materialized_files"] == ["agent.py"]
     assert search["detail"]["protected_resources_excluded"] == 0
@@ -67,7 +68,7 @@ def test_search_excludes_protected_content_without_hiding_normal_matches(tmp_pat
     (tmp_path / ".env").write_text("needle=secret\n", encoding="utf-8")
     (tmp_path / "app.py").write_text("needle = 'visible'\n", encoding="utf-8")
 
-    result = tools.executar_tool("search_code", {"query": "needle"}, _ctx(tmp_path))
+    result = standard_registry().execute("search_code", {"query": "needle"}, _ctx(tmp_path))
     detail = result["detail"]
     assert result["ok"] is True
     assert detail["materialized_files"] == ["app.py"]
@@ -99,7 +100,7 @@ def test_symbol_relations_does_not_drop_normal_source_for_sensitive_words(tmp_pa
         "def target():\n    token = bind_execution(execution)\n\nif __name__ == '__main__':\n    target()\n",
         encoding="utf-8",
     )
-    result = tools.executar_tool(
+    result = standard_registry().execute(
         "symbol_relations",
         {"symbol": "target", "query": "reachability", "direction": "incoming", "include_text_references": False},
         _ctx(tmp_path),
@@ -114,7 +115,7 @@ def test_symbol_relations_does_not_drop_normal_source_for_sensitive_words(tmp_pa
 
 def test_git_status_shows_protected_path_but_git_diff_omits_its_content(tmp_path):
     import subprocess
-    from eyle.core.git_tools import git_diff, git_status
+    from eyle.providers.standard_impl.git_tools import git_diff, git_status
 
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
@@ -162,14 +163,14 @@ def test_symlink_and_hardlink_aliases_share_protected_physical_identity(tmp_path
         with pytest.raises(ErroLeituraProjeto) as exc:
             ler_faixa_projeto(tmp_path, name, 1, 1)
         assert exc.value.error_code == "PROTECTED_RESOURCE_READ_BLOCKED"
-        result = tools.executar_tool("search_code", {"query": "TOP_SECRET"}, _ctx(tmp_path))
+        result = standard_registry().execute("search_code", {"query": "TOP_SECRET"}, _ctx(tmp_path))
         assert result["ok"] is True
         assert name not in result["detail"]["materialized_files"]
 
 
 def test_search_negative_observation_preserves_protected_coverage_boundary(tmp_path):
     (tmp_path / ".env").write_text("needle=secret\n", encoding="utf-8")
-    result = tools.executar_tool("search_code", {"query": "needle"}, _ctx(tmp_path))
+    result = standard_registry().execute("search_code", {"query": "needle"}, _ctx(tmp_path))
     detail = result["detail"]
     assert detail["scope_complete"] is True
     assert detail["coverage_complete"] is False
@@ -203,7 +204,7 @@ def test_sandbox_omits_symlink_and_hardlink_aliases_of_protected_resource(tmp_pa
 
 def test_git_diff_omits_hardlink_alias_of_protected_resource(tmp_path):
     import subprocess
-    from eyle.core.git_tools import git_diff
+    from eyle.providers.standard_impl.git_tools import git_diff
 
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
@@ -223,8 +224,8 @@ def test_git_diff_omits_hardlink_alias_of_protected_resource(tmp_path):
 
 
 def test_patch_dry_run_does_not_read_protected_resource_or_alias(tmp_path):
-    from eyle.core.transactions import dry_run_patch_set
-    from eyle.core.text_hash import hash_texto
+    from eyle.providers.standard_impl.transactions import dry_run_patch_set
+    from eyle.providers.standard_impl.text_hash import hash_texto
 
     env = tmp_path / ".env"
     env.write_text("TOKEN=TOP_SECRET\n", encoding="utf-8")
@@ -242,12 +243,12 @@ def test_patch_dry_run_does_not_read_protected_resource_or_alias(tmp_path):
 
 def test_resource_scoped_block_is_reusable_across_read_ranges(tmp_path):
     from eyle.core.session import AgentSession
-    from eyle.core.observation import record
+    from eyle.runtime.observation import record
 
     (tmp_path / ".env").write_text("TOKEN=TOP_SECRET\n", encoding="utf-8")
     session = AgentSession(request="test")
     arguments = {"path": ".env", "line_start": 1, "line_end": 1}
-    result = tools.executar_tool("read_file", arguments, _ctx(tmp_path))
+    result = standard_registry().execute("read_file", arguments, _ctx(tmp_path))
     assert result["retryable"] is False
     assert result["failure_scope"] == "resource"
     model_result = {"tool": "read_file", **result, "grounding_ids": []}
@@ -256,7 +257,7 @@ def test_resource_scoped_block_is_reusable_across_read_ranges(tmp_path):
 
     replayable = tools.capability_find_resource_failure(
         "read_file", {"path": ".env", "line_start": 100, "line_end": 120},
-        session.observation_ledger["entries"], session.workspace_epoch,
+        session.observation_ledger["entries"], session.reality_epoch,
     )
     assert replayable is not None
     assert replayable["failure_scope"] == "resource"
@@ -265,13 +266,13 @@ def test_resource_scoped_block_is_reusable_across_read_ranges(tmp_path):
 
 def test_resource_scoped_block_survives_session_serialization(tmp_path):
     from eyle.core.session import AgentSession
-    from eyle.core.observation import record
+    from eyle.runtime.observation import record
     from eyle.core.agent import _rehydrate_observation
 
     (tmp_path / ".env").write_text("TOKEN=TOP_SECRET\n", encoding="utf-8")
     session = AgentSession(request="test")
     arguments = {"path": ".env", "line_start": 1, "line_end": 1}
-    result = tools.executar_tool("read_file", arguments, _ctx(tmp_path))
+    result = standard_registry().execute("read_file", arguments, _ctx(tmp_path))
     model_result = {"tool": "read_file", **result, "grounding_ids": []}
     signature = tools.capability_observation_signature("read_file", arguments)
     record(session, signature, "read_file", arguments, result, model_result)
@@ -279,7 +280,7 @@ def test_resource_scoped_block_survives_session_serialization(tmp_path):
     restored = AgentSession.from_dict(session.to_dict())
     entry = tools.capability_find_resource_failure(
         "read_file", {"path": ".env", "line_start": 20, "line_end": 30},
-        restored.observation_ledger["entries"], restored.workspace_epoch,
+        restored.observation_ledger["entries"], restored.reality_epoch,
     )
     assert entry is not None
     replay = _rehydrate_observation(restored, entry, _ctx(tmp_path)["config"])

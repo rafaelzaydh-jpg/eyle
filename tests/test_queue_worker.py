@@ -65,9 +65,9 @@ def test_job_usa_snapshot_e_nao_historico_futuro(monkeypatch):
     recebido = {}
 
     monkeypatch.setattr(service_mod, "carregar_config", lambda: {
-        "agent": {"task_deadline_seconds": 30, "max_total_tokens": 34000},
+        "agent": {"task_deadline_seconds": 30},
     })
-    monkeypatch.setattr(service_mod, "carregar_projeto", lambda: {})
+    monkeypatch.setattr(service_mod, "carregar_provider_context", lambda: {})
     monkeypatch.setattr(service_mod, "carregar_conversa", lambda: conversa_futura)
     monkeypatch.setattr(service_mod, "registrar_mensagem", lambda *args, **kwargs: None)
 
@@ -138,10 +138,9 @@ def test_queue_falhar_pode_preservar_resultado_estruturado(monkeypatch, tmp_path
 
 def test_service_result_has_no_router_layer(monkeypatch):
     monkeypatch.setattr(service_mod, "carregar_config", lambda: {
-        "agent": {"task_deadline_seconds": 30,
-                  "max_total_tokens": 12000},
+        "agent": {"task_deadline_seconds": 30},
     })
-    monkeypatch.setattr(service_mod, "carregar_projeto", lambda: {})
+    monkeypatch.setattr(service_mod, "carregar_provider_context", lambda: {})
     monkeypatch.setattr(service_mod, "carregar_conversa", lambda: [])
     monkeypatch.setattr(service_mod, "registrar_mensagem", lambda *args, **kwargs: None)
     monkeypatch.setattr(
@@ -159,14 +158,13 @@ def test_service_result_has_no_router_layer(monkeypatch):
 
 def test_natural_request_with_nao_is_not_treated_as_cancel(monkeypatch):
     monkeypatch.setattr(service_mod, "carregar_config", lambda: {
-        "agent": {"task_deadline_seconds": 30,
-                  "max_total_tokens": 12000},
+        "agent": {"task_deadline_seconds": 30},
     })
-    monkeypatch.setattr(service_mod, "carregar_projeto", lambda: {})
+    monkeypatch.setattr(service_mod, "carregar_provider_context", lambda: {})
     monkeypatch.setattr(service_mod, "carregar_conversa", lambda: [])
     monkeypatch.setattr(service_mod, "registrar_mensagem", lambda *args, **kwargs: None)
     monkeypatch.setattr(service_mod, "carregar_agent_pendente", lambda: {
-        "continuation_kind": "write_confirmation", "id": "ABCD",
+        "continuation_kind": "capability_confirmation", "id": "ABCD",
     })
     cleared = []
     monkeypatch.setattr(service_mod, "limpar_agent_pendente", lambda: cleared.append(True))
@@ -191,22 +189,24 @@ def test_runtime_assigns_confirmation_metadata_once(monkeypatch, tmp_path):
     monkeypatch.setattr(service_mod.secrets, "token_hex", lambda size: "a1b2")
 
     core_pending = {
-        "pending_schema_version": "1",
-        "continuation_kind": "write_confirmation",
+        "pending_schema_version": "4",
+        "continuation_kind": "capability_confirmation",
         "question": "Proposal ready.",
         "session": {"request": "change the file"},
-        "transaction_id": "tx-1",
+        "capability": "workspace_transaction",
+        "provider": "standard",
+        "confirmation_id": "tx-1",
     }
     saved = service_mod.salvar_agent_pendente(
         core_pending,
-        projeto={"caminho_origem": str(project)},
+        provider_context={"standard": {"caminho_origem": str(project)}},
         config={"confirmacoes": {"expiracao_segundos": 600}},
     )
 
     assert saved["id"] == "A1B2"
     assert saved["question"].count("Pending ID: A1B2") == 1
     assert saved["question"].count("confirmar A1B2") == 1
-    assert saved["project_hash"] == service_mod._hash_projeto(
-        {"caminho_origem": str(project)}
+    assert saved["provider_context_hash"] == service_mod._hash_provider_context(
+        {"standard": {"caminho_origem": str(project)}}
     )
     assert "id" not in core_pending

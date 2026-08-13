@@ -1,9 +1,14 @@
-"""Eyle 2.7.5 Rev1.4.3 strict physical configuration boundary."""
+"""Eyle Rev1.5 host configuration boundary.
+
+Core/Runtime validate only universal host mechanics. Domain configuration is
+opaque here and delegated to the capability provider that owns that domain.
+"""
 from __future__ import annotations
 
 import json
 
 from eyle import __revision__, __schema_version__, __version__
+from eyle.capabilities.registry import CapabilityRegistry
 
 
 class ConfigError(ValueError):
@@ -11,31 +16,19 @@ class ConfigError(ValueError):
 
 
 _TOP_LEVEL_FIELDS = {
-    "llm", "context_engine", "web", "codar", "confirmacoes", "agent",
+    "llm", "context_engine", "web", "confirmacoes", "agent", "providers",
     "worker", "telemetry", "app_version", "config_schema_version", "revision",
 }
 _LLM_FIELDS = {
     "base_url", "model", "openai_compatible", "temperature", "max_tokens",
     "context_window_tokens", "connect_timeout_seconds", "read_timeout_seconds",
     "model_discovery_timeout_seconds", "model_discovery_negative_ttl_seconds",
-    "retry_max_attempts", "retry_base_delay_seconds",
-    "retry_max_delay_seconds", "retry_jitter_seconds", "max_concurrent_requests",
-    "cooldown_seconds", "retry_read_timeouts", "stream_responses",
-    "agent_max_tokens",
+    "retry_max_attempts", "retry_base_delay_seconds", "retry_max_delay_seconds",
+    "retry_jitter_seconds", "max_concurrent_requests", "cooldown_seconds",
+    "retry_read_timeouts", "stream_responses", "agent_max_tokens",
 }
-_AGENT_FIELDS = {
-    "max_tree_entries", "max_tree_depth", "max_file_read_lines",
-    "task_deadline_seconds", "max_total_tokens",
-    "max_project_scan_entries",
-    "max_project_scan_depth", "max_project_file_bytes", "max_inspect_relation_edges",
-    "max_git_diff_chars", "max_search_matches", "max_search_ranges",
-    "max_search_range_lines", "sandbox",
-}
-_CONTEXT_FIELDS = {
-    "safety_margin_tokens", "chars_per_token_fallback", "cached_prompt_weight",
-}
-_CODAR_FIELDS = {"ativado", "testes"}
-
+_AGENT_FIELDS = {"task_deadline_seconds"}
+_CONTEXT_FIELDS = {"safety_margin_tokens", "chars_per_token_fallback", "cached_prompt_weight"}
 _WORKER_FIELDS = {
     "heartbeat_interval_seconds", "queue_error_backoff_seconds",
     "max_invalid_jobs_per_reservation", "max_parallel_jobs", "isolate_jobs",
@@ -45,38 +38,6 @@ _WEB_FIELDS = {"api_token", "rate_limit"}
 _WEB_RATE_LIMIT_FIELDS = {"requests", "auth_failures", "window_seconds"}
 _CONFIRMATION_FIELDS = {"expiracao_segundos"}
 _TELEMETRY_FIELDS = {"enabled", "window_seconds"}
-_TEST_FIELDS = {"ativado", "comando_python", "comando_node", "timeout_segundos", "sandbox"}
-_SANDBOX_FIELDS = {
-    "backend", "bloquear_rede", "comandos_permitidos", "cpu_segundos", "memoria_mb",
-    "max_processos", "max_arquivos_abertos", "max_saida_kb", "max_arquivo_mb",
-    "copiar_projeto", "max_arquivos_projeto", "max_tamanho_projeto_mb", "cpus",
-    "allow_trusted_local", "timeout_segundos", "imagem_oci",
-}
-_AGENT_POSITIVE_DEFAULTS = {
-    "max_project_scan_entries": 20000,
-    "max_project_scan_depth": 32,
-    "max_project_file_bytes": 4194304,
-    "max_inspect_relation_edges": 60,
-    "max_search_range_lines": 16,
-    "max_file_read_lines": 400,
-    "max_tree_entries": 200,
-    "max_tree_depth": 6,
-    "max_git_diff_chars": 6000,
-    "max_search_matches": 40,
-    "max_search_ranges": 12,
-    "task_deadline_seconds": 1800,
-    "max_total_tokens": 90000,
-}
-
-_SANDBOX_BACKENDS = {"auto", "microsandbox", "docker", "bwrap", "process", "trusted_local"}
-
-def _validate_sandbox_backend(container, prefix):
-    backend = container.get("backend", "auto")
-    if not isinstance(backend, str) or backend not in _SANDBOX_BACKENDS:
-        raise ConfigError(
-            f"{prefix}.backend must be one of: " + ", ".join(sorted(_SANDBOX_BACKENDS))
-        )
-
 
 
 def _validate_int(container, key, default, *, minimum, prefix):
@@ -98,10 +59,13 @@ def _reject_unknown(container, allowed, prefix):
         raise ConfigError(f"UNKNOWN_CONFIG_FIELD:{prefix}:" + ",".join(unknown))
 
 
-def validar_config(config):
+def validar_config(config, registry: CapabilityRegistry):
+    if registry is None:
+        raise ConfigError("CAPABILITY_REGISTRY_REQUIRED")
     if not isinstance(config, dict):
         raise ConfigError("config precisa ser um objeto")
     _reject_unknown(config, _TOP_LEVEL_FIELDS, "root")
+
     expected_identity = {
         "app_version": __version__,
         "config_schema_version": __schema_version__,
@@ -125,21 +89,10 @@ def validar_config(config):
         _validate_positive_number(llm, key, default, "llm")
     _validate_int(llm, "context_window_tokens", 38000, minimum=1, prefix="llm")
     if int(llm.get("context_window_tokens", 38000) or 38000) > 38000:
-        raise ConfigError("llm.context_window_tokens não pode exceder 38000 nesta instalação; o llama-server é iniciado com janela física de 38k")
-
-    codar = config.get("codar") or {}
-    if not isinstance(codar, dict):
-        raise ConfigError("codar precisa ser um objeto")
-    _reject_unknown(codar, _CODAR_FIELDS, "codar")
-    tests = codar.get("testes") or {}
-    if not isinstance(tests, dict):
-        raise ConfigError("codar.testes precisa ser um objeto")
-    _reject_unknown(tests, _TEST_FIELDS, "codar.testes")
-    sandbox = tests.get("sandbox") or {}
-    if not isinstance(sandbox, dict):
-        raise ConfigError("codar.testes.sandbox precisa ser um objeto")
-    _reject_unknown(sandbox, _SANDBOX_FIELDS, "codar.testes.sandbox")
-    _validate_sandbox_backend(sandbox, "codar.testes.sandbox")
+        raise ConfigError(
+            "llm.context_window_tokens não pode exceder 38000 nesta instalação; "
+            "o llama-server é iniciado com janela física de 38k"
+        )
 
     worker = config.get("worker") or {}
     if not isinstance(worker, dict):
@@ -169,18 +122,7 @@ def validar_config(config):
     if not isinstance(agent, dict):
         raise ConfigError("agent precisa ser um objeto")
     _reject_unknown(agent, _AGENT_FIELDS, "agent")
-    for key, default in _AGENT_POSITIVE_DEFAULTS.items():
-        minimum = 1
-        _validate_int(agent, key, default, minimum=minimum, prefix="agent")
-    if int(agent.get("max_total_tokens", 90000) or 90000) > 90000:
-        raise ConfigError("agent.max_total_tokens não pode exceder 90000")
-
-    agent_sandbox = agent.get("sandbox") or {}
-    if not isinstance(agent_sandbox, dict):
-        raise ConfigError("agent.sandbox precisa ser um objeto")
-    _reject_unknown(agent_sandbox, _SANDBOX_FIELDS, "agent.sandbox")
-    _validate_sandbox_backend(agent_sandbox, "agent.sandbox")
-
+    _validate_int(agent, "task_deadline_seconds", 1800, minimum=1, prefix="agent")
 
     context = config.get("context_engine") or {}
     if not isinstance(context, dict):
@@ -189,15 +131,20 @@ def validar_config(config):
     cached_weight = context.get("cached_prompt_weight", 0.2)
     if not isinstance(cached_weight, (int, float)) or isinstance(cached_weight, bool) or not 0 <= float(cached_weight) <= 1:
         raise ConfigError("context_engine.cached_prompt_weight precisa estar entre 0 e 1")
-    for key, default in (
-        ("safety_margin_tokens", 500),
-        ("chars_per_token_fallback", 3),
-    ):
+    for key, default in (("safety_margin_tokens", 500), ("chars_per_token_fallback", 3)):
         _validate_int(context, key, default, minimum=1, prefix="context_engine")
+
+    providers = config.get("providers") or {}
+    if not isinstance(providers, dict):
+        raise ConfigError("providers precisa ser um objeto")
+    try:
+        registry.validate_host_config(config)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
 
     return config
 
 
-def carregar_config_validada(path):
+def carregar_config_validada(path, registry: CapabilityRegistry):
     with open(path, "r", encoding="utf-8") as handle:
-        return validar_config(json.load(handle))
+        return validar_config(json.load(handle), registry)

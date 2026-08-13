@@ -1,9 +1,9 @@
 """Run-scoped physical execution state.
 
-Configuration is immutable input. This context owns deadlines, physical budgets
-and the canonical LLM call ledger for one execution/resume. Rev1.3.2 keeps only
-physical fuses. Cumulative prompt/completion budgets are intentionally absent;
-the per-call model window, 90k total-token fuse and deadline provide physical containment.
+Configuration is immutable input. This context owns deadlines and the canonical
+LLM call ledger for one execution/resume. Rev1.4.8 removes the task-wide token
+fuse: token usage is accounting only. Physical containment is the provider/model
+context window plus the wall-clock deadline and capability-specific limits.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
@@ -18,7 +18,6 @@ class ExecutionContext:
     deadline_monotonic: float
     execution_id: Optional[str]
     source_job_id: Optional[int]
-    max_total_tokens: int
     llm_calls: List[Dict[str, Any]] = field(default_factory=list)
     system_prompt_hashes: List[str] = field(default_factory=list)
     history_messages_omitted: int = 0
@@ -37,15 +36,8 @@ class ExecutionContext:
     prompt_tokens_effective: int = 0
     completion_tokens_actual: int = 0
     reasoning_tokens_actual: int = 0
-    sandbox_workspace_path: Optional[str] = None
-    sandbox_source_kind: Optional[str] = None
-    sandbox_source_root: Optional[str] = None
-    sandbox_backend: Optional[str] = None
-    sandbox_protected_resources_omitted: int = 0
-    sandbox_tempdir: Any = field(default=None, repr=False, compare=False)
-    sandbox_microsandbox_session: Any = field(default=None, repr=False, compare=False)
-    sandbox_container_name: Optional[str] = None
-    sandbox_docker_binary: Optional[str] = None
+    provider_state: Dict[str, Dict[str, Any]] = field(default_factory=dict, repr=False, compare=False)
+    provider_cleanup_callbacks: List[Any] = field(default_factory=list, repr=False, compare=False)
     terminal_capabilities: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     @classmethod
@@ -57,7 +49,6 @@ class ExecutionContext:
         return cls(
             started_monotonic=now, deadline_monotonic=now + deadline,
             execution_id=execution_id, source_job_id=source_job_id,
-            max_total_tokens=max(1, int(agent.get("max_total_tokens", 90000) or 90000)),
         )
 
     def bind_session_baseline(self, session: Any) -> None:
@@ -154,10 +145,6 @@ class ExecutionContext:
         prompt_used = max(int(self.prompt_tokens_budgeted_physical or 0), int(self.prompt_tokens_actual or 0))
         return prompt_used + int(self.completion_tokens_actual or 0)
 
-    @property
-    def physical_tokens_remaining(self) -> int:
-        return max(0, int(self.max_total_tokens or 0) - self.physical_tokens_used)
-
     def usage_view(self) -> Dict[str, Any]:
         effective_total = int(self.prompt_tokens_effective or 0) + int(self.completion_tokens_actual or 0)
         return {
@@ -174,8 +161,6 @@ class ExecutionContext:
             "reasoning_tokens_actual": int(self.reasoning_tokens_actual or 0),
             "total_tokens_effective": effective_total,
             "total_tokens_physical_estimated": self.physical_tokens_used,
-            "physical_tokens_remaining": self.physical_tokens_remaining,
-            "physical_tokens_limit": int(self.max_total_tokens or 0),
             "prompt_token_calibration": round(self.prompt_token_calibration, 4),
             "history_messages_omitted": int(self.history_messages_omitted or 0),
         }
@@ -183,37 +168,28 @@ class ExecutionContext:
     def ledger_view(self) -> List[Dict[str, Any]]:
         return copy.deepcopy(self.llm_calls)
 
-    def cleanup_sandbox(self) -> None:
-        tempdir = self.sandbox_tempdir
-        microsandbox_session = self.sandbox_microsandbox_session
-        docker = self.sandbox_docker_binary
-        container = self.sandbox_container_name
-        self.sandbox_tempdir = None
-        self.sandbox_workspace_path = None
-        self.sandbox_source_kind = None
-        self.sandbox_source_root = None
-        self.sandbox_backend = None
-        self.sandbox_protected_resources_omitted = 0
-        self.sandbox_microsandbox_session = None
-        self.sandbox_container_name = None
-        self.sandbox_docker_binary = None
-        # Release the microVM bind mount before deleting the disposable host snapshot.
-        if microsandbox_session is not None:
+    def provider_state_for(self, provider_key: str) -> Dict[str, Any]:
+        key = str(provider_key or "").strip()
+        if not key:
+            raise ValueError("PROVIDER_STATE_KEY_REQUIRED")
+        value = self.provider_state.setdefault(key, {})
+        if not isinstance(value, dict):
+            raise RuntimeError("PROVIDER_STATE_INVALID")
+        return value
+
+    def register_provider_cleanup(self, callback: Any) -> None:
+        if callable(callback) and callback not in self.provider_cleanup_callbacks:
+            self.provider_cleanup_callbacks.append(callback)
+
+    def cleanup(self) -> None:
+        callbacks = list(reversed(self.provider_cleanup_callbacks))
+        self.provider_cleanup_callbacks.clear()
+        for callback in callbacks:
             try:
-                microsandbox_session.close()
+                callback()
             except Exception:
                 pass
-        if docker and container:
-            try:
-                import subprocess
-                subprocess.run([docker, "rm", "-f", container], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15, check=False, shell=False)
-            except Exception:
-                pass
-        if tempdir is not None:
-            try:
-                tempdir.cleanup()
-            except Exception:
-                pass
+        self.provider_state.clear()
 
 
 _CURRENT_EXECUTION: ContextVar[ExecutionContext | None] = ContextVar("eyle_execution_context", default=None)

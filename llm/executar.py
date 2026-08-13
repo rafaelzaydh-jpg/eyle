@@ -15,7 +15,7 @@ import urllib.request
 import urllib.error
 from contextlib import contextmanager
 
-from eyle.core.execution_context import ExecutionContext, current_execution  # noqa: E402
+from eyle.runtime.execution_context import ExecutionContext, current_execution  # noqa: E402
 from eyle.core.token_budget import estimate_tokens as estimar_tokens  # noqa: E402
 from eyle.runtime import telemetry  # noqa: E402
 from eyle.runtime import limiter  # noqa: E402
@@ -610,17 +610,17 @@ def _chamar_openai_compatible(
                 corpo = bruto
     except urllib.error.HTTPError as exc:
         body = _ler_corpo_http_error(exc)
-        code = (
-            "LLM_STRUCTURED_OUTPUT_UNAVAILABLE"
-            if perfil is not None and getattr(exc, "code", None) in (400, 404, 422)
-            else "HTTP_ERROR"
-        )
-        raise ErroLLM(
-            _mensagem_http_error(base_url, exc, body),
-            transient=False,
-            status_code=getattr(exc, "code", None),
-            error_code=code,
-        ) from exc
+        if perfil is not None and getattr(exc, "code", None) in (400, 404, 422):
+            raise ErroLLM(
+                _mensagem_http_error(base_url, exc, body),
+                transient=False,
+                status_code=getattr(exc, "code", None),
+                error_code="LLM_STRUCTURED_OUTPUT_UNAVAILABLE",
+            ) from exc
+        # Preserve the canonical HTTP classification so transient statuses
+        # (408/425/429/5xx) can reach the outer retry policy instead of being
+        # flattened into a permanent HTTP_ERROR after one attempt.
+        raise _erro_http(base_url, exc, body) from exc
 
     try:
         normalized = normalize_openai_chat_response(corpo)
@@ -665,10 +665,10 @@ def _reservar_requisicao_llm(
 ):
     """Preflight and account one real backend request.
 
-    The provider still receives the complete prompt on every request, but the
-    task-wide budget does not charge an identical system prefix at full weight
-    forever. Real provider cache metadata replaces this estimate after the
-    response arrives. Context-window safety remains based on the full prompt.
+    The provider receives the complete prompt on every request. This function
+    records estimated/provider token usage for telemetry and cache accounting;
+    it does not enforce a task-wide token fuse. Context-window safety remains
+    based on the full prompt plus reserved output and safety margin.
     """
     if execution is None:
         return {"estimated_prompt_tokens": 0, "estimated_effective_tokens": 0}
@@ -702,16 +702,7 @@ def _reservar_requisicao_llm(
     current_prompt_physical = max(int(execution.prompt_tokens_budgeted_physical or 0), int(execution.prompt_tokens_actual or 0))
     current_prompt_estimated_raw = int(execution.prompt_tokens_estimated_raw or 0)
     reserved_prompt_tokens = calibrated_prompt_tokens
-    current_completion = int(execution.completion_tokens_actual or 0)
-    max_total = int(execution.max_total_tokens or 0)
     protected = 0
-    request_ceiling = max_total
-    if request_ceiling > 0 and current_prompt_physical + current_completion + reserved_prompt_tokens + response_reserved > request_ceiling:
-        raise ErroLLM(
-            "A próxima chamada ultrapassaria o orçamento físico disponível para este perfil.",
-            transient=False, error_code="MAX_TOTAL_TOKENS_EXCEEDED",
-        )
-
     execution.prompt_tokens_budgeted_physical = current_prompt_physical + reserved_prompt_tokens
     execution.prompt_tokens_estimated_raw = current_prompt_estimated_raw + prompt_tokens
     execution.prompt_tokens_effective = current_prompt_effective + effective_estimate
@@ -788,16 +779,6 @@ def _registrar_tokens_gerados(config, execution: ExecutionContext | None, respos
     ) // chars_por_token
     total = int(execution.completion_tokens_actual or 0) + estimativa
     execution.completion_tokens_actual = total
-    max_total = int(execution.max_total_tokens or 0)
-    # Cache discounts remain diagnostic only. The hard task-token fuse uses
-    # reconciled physical prompt usage (provider truth when available, otherwise
-    # the still-open local reservation) plus generated output.
-    physical_total = int(execution.physical_tokens_used)
-    if max_total > 0 and physical_total > max_total:
-        raise ErroLLM(
-            "O limite físico total de tokens da mensagem foi excedido.",
-            transient=False, error_code="MAX_TOTAL_TOKENS_EXCEEDED",
-        )
 
 
 def _max_tokens_da_chamada(cfg_llm, perfil):
@@ -1285,13 +1266,42 @@ def _chamar_llm(
 
 PROMPT_AGENTE = """You are Eyle Main. Return only the structured Agent response.
 
-You own semantic decisions. Freely choose direct Final, capabilities, Investigation, Tasks or needs_user. Use structure only when it helps. Conversation and simple requests may go straight to Final. Empty updates mean no new commitment. Ambient workspace state and capability availability are context, not tasks.
+ROLE
+You are the sole semantic authority. Understand the current request, use retained context when it helps resolve what the user means, choose useful capabilities, interpret observations, decide when user input is needed, and decide when the request is complete. Runtime never decides meaning or relevance for you.
 
-Know the basis of what you know. prior_conversation is retained context; Memory is persistent prior cognition. Both may be stale or incomplete. available_capabilities names invokable actions, not evidence of current workspace or implementation state. runtime_observations/current_material represent current physically observed state. Reason from any source, but do not present prior context, Memory, capability metadata or inference as newly observed fact. direct Final remains valid when context is sufficient.
+WORLD AND CAPABILITIES
+- available_capabilities is the capability surface physically available now. Capabilities come from independent providers. Eyle Core is not specialized in any provider domain.
+- Each capability describes its provider, purpose, inputs, returns, effects, caveats, limits and confirmation requirements. Those descriptions are the authority for what that capability can do.
+- Capabilities are resources, not mandatory steps. Use any capability when it produces useful information or effects for the current request; do not call capabilities merely because they exist.
+- If you are unsure whether you possess enough information to answer reliably, prefer observing before answering.
+- An available capability is not evidence that it was called. A requested call is not evidence that it executed. A plan is not an effect.
 
-Runtime owns physical schemas, permissions, budgets, transactions and commitments you create. Open commitments block Final. Investigation.conclusion states what grounding establishes about its goal; Task.result states what was achieved against completion_criteria. Runtime checks structure and references, not semantic truth. mat-* is Material; Coverage is examined scope; fr-* continues Observation; mf-* continues Memory.
+REALITY
+- runtime_observations and current_material contain observations produced by executed capabilities. mat-* coordinates identify Material. Material proves only the physical content it represents; interpretation remains yours.
+- runtime_effects contains eff-* coordinates for physical effects actually reported by executed capabilities. Provider effect records describe the affected resource, operation, persistence and whether state changed.
+- Persistent Memory and prior_conversation are context, not automatic proof that the current external world still matches them.
+- Never silently turn remembered, inferred, planned or generated content into a claim that the environment was observed or changed.
 
-Capability contracts state effects and limits. source=eyle is read-only outside isolated sandbox experiments; real workspace writes use patch transactions; sandbox changes never mutate installed Eyle or the real workspace.
+ACTIONS
+You may choose exactly one action per turn:
+1. capability_calls: call one or more provider capabilities. Read their contracts and choose freely. A capability whose contract says confirmation is required will be prepared by Runtime and suspended for user confirmation before its real effect occurs. After confirmation, its observation/effect returns to you; confirmation never completes the task on your behalf.
+2. await_user: suspend only when progress genuinely depends on user information, choice or supervision.
+3. complete: deliver the terminal answer.
+
+COMPLETE COORDINATES
+Complete carries grounding_ids and effect_ids as explicit coordinates, not as a required reasoning phase.
+- Cite mat-* IDs when observations materially support what you tell the user.
+- Cite eff-* IDs when you rely on a physical effect that actually occurred.
+- Leave those arrays empty when the answer genuinely relies only on the request, conversational context, stable knowledge or reasoning.
+Runtime validates coordinate existence and identity only; it does not read your prose and decide whether the cited basis semantically proves it. That responsibility is yours.
+
+OPTIONAL STATE
+Investigation is an optional Main-owned notebook for unresolved questions across turns. Task is an optional Main-owned commitment for work that benefits from explicit completion criteria. Do not create either merely because the structures exist. Omit investigation_updates/task_updates entirely when you are not changing those states. If present, they may be empty; when unused, omit them. If you create them, close or drop them before Complete.
+
+CONTEXT
+request is the immutable origin of the active task. request_context contains authoritative user answers supplied while that same task was suspended or refined; interpret request + request_context together as the active task. prior_conversation can resolve references, continuation cues and conversational context but must not replace the active task with an older task. environment contains provider/runtime facts about the connected world.
+
+Continuation coordinates such as fr-* and mf-* are provider/runtime navigation handles. Coverage reports physically examined scope, not semantic sufficiency.
 """
 
 

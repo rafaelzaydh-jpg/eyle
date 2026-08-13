@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from tests.canonical import run_agent
 import json
 
 import eyle.core.agent as core_agent
 from eyle.core.tasks import apply_task_updates, task_state_view
-from tests.canonical import agent_final, agent_tools, base_config, task_item, tool_call
+from tests.canonical import agent_complete, agent_tools, base_config, task_item, tool_call
 
 
 def test_task_is_durable_recursive_main_owned_state():
@@ -85,26 +86,26 @@ def test_closed_task_requires_result_but_runtime_does_not_auto_close_parent():
 
 def test_open_tasks_block_final_until_main_closes_the_commitment(monkeypatch, tmp_path):
     calls = {"n": 0}
-    def fake_call(session, config, project, conversation_context, feedback=""):
+    def fake_call(session, config, project, conversation_context, feedback="", registry=None):
         calls["n"] += 1
         if calls["n"] == 1:
-            return agent_final("too early", tasks=[task_item("work", description="Required work")]), set()
-        assert "FINAL_COMMITMENTS_OPEN" in feedback
-        return agent_final(
+            return agent_complete("too early", tasks=[task_item("work", description="Required work")]), set()
+        assert "COMPLETE_COMMITMENTS_OPEN" in feedback
+        return agent_complete(
             "done",
             tasks=[task_item("work", description="Required work", status="completed", result="Completed")],
         ), set()
     monkeypatch.setattr(core_agent, "_call_agent", fake_call)
-    status, text, _, details = core_agent.executar_agente(
+    status, text, _, details = run_agent(core_agent, 
         "Answer after the required work.", base_config(),
-        projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True,
+        provider_context={"standard": {"caminho_origem": str(tmp_path)}}, retornar_detalhes=True,
     )
     assert status == "success" and text == "done"
     assert calls["n"] == 2
     assert details["tasks"][0]["status"] == "completed"
     assert any(
-        item.get("decision") == "final" and item.get("outcome") == "rejected"
-        and item.get("reason") == "FINAL_COMMITMENTS_OPEN"
+        item.get("decision") == "complete" and item.get("outcome") == "rejected"
+        and item.get("reason") == "COMPLETE_COMMITMENTS_OPEN"
         for item in details["decision_history"]
     )
 
@@ -125,7 +126,7 @@ def test_task_state_is_visible_next_turn_and_main_can_close_it(monkeypatch, tmp_
             )
         assert payload["task_state"]["open_count"] == 2
         assert {item["id"] for item in payload["task_state"]["tasks"]} == {"root", "check"}
-        return agent_final(
+        return agent_complete(
             "2",
             tasks=[
                 task_item("check", parent_id="root", description="Check arithmetic", status="completed", result="1+1 evaluated to 2."),
@@ -134,10 +135,10 @@ def test_task_state_is_visible_next_turn_and_main_can_close_it(monkeypatch, tmp_
         )
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake_agent)
-    status, text, _, details = core_agent.executar_agente(
+    status, text, _, details = run_agent(core_agent, 
         "What is 1+1?",
         base_config(),
-        projeto={"caminho_origem": str(tmp_path)},
+        provider_context={"standard": {"caminho_origem": str(tmp_path)}},
         retornar_detalhes=True,
     )
     assert status == "success" and text == "2"

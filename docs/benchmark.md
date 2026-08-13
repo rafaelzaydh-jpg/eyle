@@ -1,4 +1,4 @@
-# Benchmarking — Eyle 2.7.5 Rev1.4.3
+# Benchmarking — Eyle 2.7.5 Rev1.4.8
 
 Benchmarks must measure capability, reliability and physical cost rather than only whether a final string was produced.
 
@@ -14,7 +14,7 @@ Benchmarks must measure capability, reliability and physical cost rather than on
 - Investigation transitions and conclusions;
 - Task transitions, completion criteria and results;
 - committed grounding count;
-- whether Final required a Grounded Completion correction;
+- whether Complete required a Grounded Completion correction;
 - wall-clock duration.
 
 Rev1.4 has no Claim outcome/call to record.
@@ -23,14 +23,14 @@ Rev1.4 has no Claim outcome/call to record.
 
 Canonical tests should cover:
 
-1. simple conversational Final requires no Task/Investigation;
-2. open Task blocks Final;
+1. simple conversational Complete requires no Task/Investigation;
+2. open Task blocks Complete;
 3. every Task requires explicit completion criteria;
 4. completed parent cannot retain an open direct child;
-5. open Investigation blocks Final;
+5. open Investigation blocks Complete;
 6. established Investigation requires real Material and a non-empty semantic conclusion;
 7. closed Task requires a result against its declared criteria;
-8. committed Investigation/Task Material cannot disappear from Final grounding;
+8. committed Investigation/Task Material cannot disappear from Complete grounding;
 9. Runtime does not infer semantic truth or relevance;
 10. capability failure/rollback remains observable rather than silently converted into success;
 11. removed Claim contracts cannot reappear.
@@ -49,7 +49,7 @@ Track separately:
 - MemoryView cost when memory is explicitly activated;
 - established Investigation raw grounding retained in prompt after semantic closure (expected: not pinned solely by established status).
 
-The expected Rev1.4 structural win is one fewer LLM request for every normally delivered Final because the universal Claim review no longer exists.
+The expected Rev1.4 structural win is one fewer LLM request for every normally delivered Complete because the universal Claim review no longer exists.
 
 ## Memory Kernel regressions
 

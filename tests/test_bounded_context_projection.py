@@ -1,8 +1,8 @@
 import pytest
 
 from eyle.core import agent as core_agent
-from eyle.core.execution_context import ExecutionContext, bind_execution, reset_execution
-from eyle.core.observation import register_material_candidates, set_pending_results
+from eyle.runtime.execution_context import ExecutionContext, bind_execution, reset_execution
+from eyle.runtime.observation import register_material_candidates, set_pending_results
 from eyle.core.session import AgentSession
 from llm import executar as llm_mod
 from tests.canonical import base_config
@@ -24,7 +24,7 @@ def test_observation_map_is_fresh_delta_not_recent_history():
         gid = _material(session, turn)
         session.observation_ledger["entries"][f"w0:sig-{turn}"] = {
             "turn": turn,
-            "tool": "read_file",
+            "capability": "read_file",
             "observation_signature": f"sig-{turn}",
             "grounding_ids": [gid],
             "frontier_ids": [],
@@ -32,7 +32,7 @@ def test_observation_map_is_fresh_delta_not_recent_history():
         }
     session.turn = 9
     projected = core_agent._project_observation_map(session)
-    rows = [item for item in projected if item.get("tool") == "read_file"]
+    rows = [item for item in projected if item.get("capability") == "read_file"]
     assert [item.get("turn") for item in rows] == [8]
 
 
@@ -40,7 +40,7 @@ def test_observation_map_keeps_old_investigation_coordinate_compactly():
     session = AgentSession("inspect")
     old_gid = _material(session, 1)
     session.observation_ledger["entries"]["w0:old"] = {
-        "turn": 1, "tool": "read_file", "observation_signature": "old",
+        "turn": 1, "capability": "read_file", "observation_signature": "old",
         "grounding_ids": [old_gid], "frontier_ids": [],
         "coverage": {"complete": True, "scope": {"kind": "file"}},
     }
@@ -78,11 +78,11 @@ def test_cached_replay_returns_coordinates_and_small_recall_excerpt():
     gid = _material(session, 1, text="x" * 5000)
     entry = {
         "turn": 1,
-        "tool": "read_file",
+        "capability": "read_file",
         "grounding_ids": [gid],
         "frontier_ids": [],
         "replay_result": {
-            "tool": "read_file", "status": "success", "ok": True, "executed": True,
+            "capability": "read_file", "status": "success", "ok": True, "executed": True,
             "changed": False, "detail": {"numbered_content": "x" * 5000},
             "grounding_ids": [gid],
         },
@@ -100,9 +100,8 @@ def test_claim_reserve_config_is_removed_from_canonical_agent_config():
     assert "claim_reserve_tokens" not in cfg["agent"]
 
 
-def test_agent_preflight_uses_shared_task_budget_without_claim_hostage():
+def test_agent_preflight_has_no_downstream_claim_reserve():
     cfg = base_config()
-    cfg["agent"]["max_total_tokens"] = 20000
     execution = ExecutionContext.from_config(cfg)
     execution.prompt_tokens_budgeted_physical = 7000
     reservation = llm_mod._reservar_requisicao_llm(
@@ -111,21 +110,19 @@ def test_agent_preflight_uses_shared_task_budget_without_claim_hostage():
     assert reservation["protected_tokens"] == 0
 
 
-def test_shared_task_budget_still_fails_closed_at_real_total_limit():
+def test_per_call_context_window_still_fails_closed():
     cfg = base_config()
-    cfg["agent"]["max_total_tokens"] = 8000
+    cfg["llm"]["context_window_tokens"] = 4000
     execution = ExecutionContext.from_config(cfg)
-    execution.prompt_tokens_budgeted_physical = 7600
     with pytest.raises(llm_mod.ErroLLM) as exc:
         llm_mod._reservar_requisicao_llm(
-            cfg, execution, "system", "user" * 200, 1000, profile="agent",
+            cfg, execution, "system", "user" * 5000, 1000, profile="agent",
         )
-    assert exc.value.error_code == "MAX_TOTAL_TOKENS_EXCEEDED"
+    assert exc.value.error_code == "PROMPT_CONTEXT_BUDGET_EXCEEDED"
 
 
 def test_agent_output_ceiling_is_not_clamped_for_a_future_claim():
     cfg = base_config()
-    cfg["agent"]["max_total_tokens"] = 20000
     execution = ExecutionContext.from_config(cfg)
     execution.prompt_tokens_budgeted_physical = 15000
     token = bind_execution(execution)

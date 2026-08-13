@@ -1,9 +1,11 @@
+from tests.canonical import run_agent
+from tests.canonical import standard_registry
 import json
 from pathlib import Path
 
 import eyle.core.agent as core_agent
-import eyle.core.tools as tools
-from tests.canonical import agent_final, agent_patches, agent_tools, base_config, investigation_target, tool_call
+import eyle.providers.standard as tools
+from tests.canonical import agent_complete, agent_patches, agent_tools, base_config, investigation_target, tool_call
 
 
 def config(tmp_path):
@@ -14,36 +16,36 @@ def test_greeting_is_written_by_same_agent(monkeypatch, tmp_path):
     prompts = []
     monkeypatch.setattr(
         core_agent, "executar_agente_llm",
-        lambda prompt, cfg: prompts.append(json.loads(prompt)) or agent_final("Oiii! Bora mexer em código? 😄"),
+        lambda prompt, cfg: prompts.append(json.loads(prompt)) or agent_complete("Oiii! Bora mexer em código? 😄"),
     )
-    status, text, pending, details = core_agent.executar_agente(
-        "Oiii Eyle", config(tmp_path), projeto={}, retornar_detalhes=True,
+    status, text, pending, details = run_agent(core_agent, 
+        "Oiii Eyle", config(tmp_path), provider_context={}, retornar_detalhes=True,
     )
     assert status == "success"
     assert text.startswith("Oiii")
     assert pending is None
     assert len(prompts) == 1
     index = prompts[0]["available_capabilities"]
-    assert any(item.startswith("calculate(") for item in index)
-    assert not any(item.startswith("agent_info(") for item in index)
-    assert not any(item.startswith("execution_trace(") for item in index)
-    assert prompts[0]["active_tools"] == []
-    assert details["tool_calls"] == 0
+    assert any(item.get("name") == "standard.calculate" for item in index)
+    assert not any(item.get("name") == "agent_info" for item in index)
+    assert not any(item.get("name") == "execution_trace" for item in index)
+    assert all({"name", "purpose", "effect", "inputs", "returns"}.issubset(item) for item in index)
+    assert details["capability_calls"] == 0
 
 
 def test_analysis_uses_one_agent_loop_and_retained_evidence(monkeypatch, tmp_path):
     (tmp_path / "app.py").write_text("def soma(a, b):\n    return a + b\n", encoding="utf-8")
     outputs = iter([
         agent_tools(tool_call("read_file", {"path": "app.py"}), investigation=[investigation_target(goal="Establish what app.py does")]),
-        agent_final(
+        agent_complete(
             {"answer": "A função soma retorna a adição dos argumentos.", "grounding_ids": ["mat-0001"]},
             investigation=[investigation_target(goal="Establish what app.py does", status="established", grounding_ids=["mat-0001"], reason="app.py was read")],
         ),
     ])
     prompts = []
     monkeypatch.setattr(core_agent, "executar_agente_llm", lambda prompt, cfg: prompts.append(json.loads(prompt)) or next(outputs))
-    status, text, _, details = core_agent.executar_agente(
-        "Analise o projeto", config(tmp_path), projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True,
+    status, text, _, details = run_agent(core_agent, 
+        "Analise o projeto", config(tmp_path), provider_context={"standard": {"caminho_origem": str(tmp_path)}}, retornar_detalhes=True,
     )
     assert status == "success"
     assert "adição" in text
@@ -61,30 +63,32 @@ def test_transactional_write_requires_confirmation_and_resume_is_deterministic(m
     outputs = iter([
         agent_tools(tool_call("read_file", {"path": "app.py"})),
         agent_patches([{"operation": "replace", "path": "app.py", "content": updated}]),
+        agent_complete("Alteração aplicada e o resultado confirmado foi interpretado pela Main."),
     ])
     monkeypatch.setattr(core_agent, "executar_agente_llm", lambda prompt, cfg: next(outputs))
 
-    status, _, pending, _ = core_agent.executar_agente(
+    status, _, pending, _ = run_agent(core_agent, 
         "Altere soma para adicionar um", config(tmp_path),
-        projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True,
+        provider_context={"standard": {"caminho_origem": str(tmp_path)}}, retornar_detalhes=True,
     )
-    assert status == "needs_user"
+    assert status == "await_user"
     assert app.read_text(encoding="utf-8") == original
-    assert pending["continuation_kind"] == "write_confirmation"
-    assert pending["transaction_id"] == pending["session"]["write_transaction"]["transaction_id"]
-    assert pending["session"]["write_transaction"]["patches"][0]["path"] == "app.py"
+    assert pending["continuation_kind"] == "capability_confirmation"
+    assert pending["confirmation_id"] == pending["session"]["pending_capability"]["confirmation_id"]
+    assert pending["session"]["pending_capability"]["state"]["patches"][0]["path"] == "app.py"
 
-    status, text, pending2, details = core_agent.executar_agente(
+    status, text, pending2, details = run_agent(core_agent, 
         pending["session"]["request"], config(tmp_path),
-        projeto={"caminho_origem": str(tmp_path)}, retomar=pending,
+        provider_context={"standard": {"caminho_origem": str(tmp_path)}}, retomar=pending,
         resposta_usuario="confirmar", retornar_detalhes=True,
     )
     assert status == "success"
     assert pending2 is None
     assert "+ 1" in app.read_text(encoding="utf-8")
-    assert "relidos integralmente" in text.lower()
-    assert details["write_transaction"]["validation"]["full_reread"]["ok"] is True
-    assert details["llm_usage"].get("llm_calls", 0) == 0
+    assert "interpretado pela main" in text.lower()
+    assert details["reality_epoch"] == 1
+    assert any(item.get("physical_effect", {}).get("resource") == "workspace" for item in details["physical_effects"])
+    assert details["llm_usage"].get("llm_calls", 0) >= 1
 
 
 def test_pending_transaction_does_not_duplicate_full_source(monkeypatch, tmp_path):
@@ -96,13 +100,13 @@ def test_pending_transaction_does_not_duplicate_full_source(monkeypatch, tmp_pat
         agent_patches([{"operation": "replace", "path": "app.py", "content": "TOKEN_DO_ARQUIVO = 'novo'\n"}]),
     ])
     monkeypatch.setattr(core_agent, "executar_agente_llm", lambda prompt, cfg: next(outputs))
-    status, _, pending, _ = core_agent.executar_agente(
-        "altere app.py", config(tmp_path), projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True,
+    status, _, pending, _ = run_agent(core_agent, 
+        "altere app.py", config(tmp_path), provider_context={"standard": {"caminho_origem": str(tmp_path)}}, retornar_detalhes=True,
     )
-    assert status == "needs_user"
+    assert status == "await_user"
     serialized = json.dumps(pending, ensure_ascii=False)
     assert source.strip() not in serialized
-    assert pending["session"]["write_transaction"]["patches"][0]["content"] == "TOKEN_DO_ARQUIVO = 'novo'\n"
+    assert pending["session"]["pending_capability"]["state"]["patches"][0]["content"] == "TOKEN_DO_ARQUIVO = 'novo'\n"
 
 
 def test_identical_reads_are_memoized_without_duplicate_observations_or_semantic_fatal(monkeypatch, tmp_path):
@@ -112,9 +116,9 @@ def test_identical_reads_are_memoized_without_duplicate_observations_or_semantic
         calls.append(json.loads(prompt))
         if len(calls) <= 5:
             return agent_tools(tool_call("read_file", {"path":"app.py"}))
-        return agent_final({"answer":"app.py foi observado.","grounding_ids":["mat-0001"]})
+        return agent_complete({"answer":"app.py foi observado.","grounding_ids":["mat-0001"]})
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
-    status,_,_,details=core_agent.executar_agente("analise",config(tmp_path),projeto={"caminho_origem":str(tmp_path)},retornar_detalhes=True)
+    status,_,_,details=run_agent(core_agent, "analise",config(tmp_path),provider_context={"standard":{"caminho_origem":str(tmp_path)}},retornar_detalhes=True)
     assert status=="success"
     assert len(calls)==6
     assert details["observation_replays"] >= 4
@@ -126,14 +130,14 @@ def test_disabled_tests_are_not_advertised(monkeypatch, tmp_path):
     prompts = []
     outputs = iter([
         agent_tools(tool_call("read_file", {"path": "app.py"})),
-        agent_final({"answer": "app.py foi lido.", "grounding_ids": ["mat-0001"]}),
+        agent_complete({"answer": "app.py foi lido.", "grounding_ids": ["mat-0001"]}),
     ])
     monkeypatch.setattr(core_agent, "executar_agente_llm", lambda prompt, cfg: prompts.append(json.loads(prompt)) or next(outputs))
-    status, *_ = core_agent.executar_agente(
-        "olhe o projeto", config(tmp_path), projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True,
+    status, *_ = run_agent(core_agent, 
+        "olhe o projeto", config(tmp_path), provider_context={"standard": {"caminho_origem": str(tmp_path)}}, retornar_detalhes=True,
     )
     assert status == "success"
-    assert not any(item.startswith("run_tests(") for item in prompts[0]["available_capabilities"])
+    assert not any(item.get("name") == "run_tests" for item in prompts[0]["available_capabilities"])
 
 
 def test_external_memory_only_moves_through_tools(monkeypatch, tmp_path):
@@ -142,11 +146,10 @@ def test_external_memory_only_moves_through_tools(monkeypatch, tmp_path):
     import hashlib
     file_hash = hashlib.sha256(app.read_bytes()).hexdigest()
     grounding = {"mat-0001": {"file": "app.py", "file_hash": file_hash}}
-    context = {"config": config(tmp_path), "projeto": {"caminho_origem": str(tmp_path)}, "grounding": grounding}
-    monkeypatch.setattr(tools, "MEMORY_DIR", str(tmp_path / "memory"))
-    stored = tools.executar_tool("memory_store", {"text": "app.py define VALUE", "meta": {"tags": ["code"], "grounding_ids": ["mat-0001"]}}, context)
+    context = {"config": config(tmp_path), "provider_context": {"standard": {"caminho_origem": str(tmp_path)}, "memory": {"storage_dir": str(tmp_path / "memory"), "scope_root": str(tmp_path)}}, "grounding": grounding}
+    stored = standard_registry().execute("memory_store", {"text": "app.py define VALUE", "meta": {"tags": ["code"], "grounding_ids": ["mat-0001"]}}, context)
     assert stored["ok"] is True
-    found = tools.executar_tool("memory_search", {"query": "VALUE"}, context)
+    found = standard_registry().execute("memory_search", {"query": "VALUE"}, context)
     assert found["detail"]["count"] == 1
     assert found["detail"]["view"]["memories"][0]["content"] == "app.py define VALUE"
     assert found["detail"]["view"]["memory_coverage"]["kind"] == "memory_navigation"

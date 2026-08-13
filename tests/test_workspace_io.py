@@ -6,7 +6,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from eyle.core.workspace_io import (  # noqa: E402
+from eyle.providers.standard_impl.workspace_io import (  # noqa: E402
     ErroLeituraProjeto,
     ler_faixa_projeto,
     listar_arvore_projeto,

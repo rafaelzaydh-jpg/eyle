@@ -4,7 +4,7 @@ A Task records work Main decided is required before delivery. Main owns the
 meaning of the objective and criteria; ``result`` records what Main considers
 achieved against those criteria, with optional selected Material grounding.
 Runtime owns only structural integrity and enforces the commitments Main
-explicitly created: open Tasks block Final, completed parents cannot retain open
+explicitly created: open Tasks block Complete, completed parents cannot retain open
 children, and referenced Material must physically exist.
 """
 from __future__ import annotations

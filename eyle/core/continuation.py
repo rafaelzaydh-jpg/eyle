@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Canonical pending-continuation contract.
+"""Canonical persisted continuation contract.
 
-Pending continuations are persisted Runtime/Core state, so they use one exact
-English schema. The Runtime may add security/lifetime metadata, but it never
-renames, aliases, defaults, or migrates Core continuation fields.
+Continuations preserve physical execution state across human supervision. Main
+owns when user input is required and what response choices mean. Runtime owns
+persistence, identity, lifetime and exact resumption mechanics.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Dict
 
-PENDING_SCHEMA_VERSION = "1"
+PENDING_SCHEMA_VERSION = "4"
 
 _BASE_FIELDS = {
     "pending_schema_version",
@@ -17,10 +18,10 @@ _BASE_FIELDS = {
     "question",
     "session",
 }
-_PERSISTED_FIELDS = {"id", "created_at", "expires_at", "project_hash"}
+_PERSISTED_FIELDS = {"id", "created_at", "expires_at", "provider_context_hash"}
 _KIND_FIELDS = {
-    "write_confirmation": {"transaction_id"},
-    "user_input": {"clarification"},
+    "capability_confirmation": {"capability", "provider", "confirmation_id"},
+    "await_user": {"reason", "options"},
 }
 
 
@@ -28,12 +29,34 @@ def _non_empty_text(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def _validate_options(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list) or len(value) > 4:
+        raise ValueError("PENDING_SCHEMA_INVALID")
+    seen: set[str] = set()
+    normalized: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"id", "label"}:
+            raise ValueError("PENDING_SCHEMA_INVALID")
+        option_id = item.get("id")
+        label = item.get("label")
+        if not _non_empty_text(option_id) or len(option_id.strip()) > 80:
+            raise ValueError("PENDING_SCHEMA_INVALID")
+        option_id = option_id.strip()
+        if re.fullmatch(r"[A-Za-z0-9._-]+", option_id) is None or option_id in seen:
+            raise ValueError("PENDING_SCHEMA_INVALID")
+        if not _non_empty_text(label) or len(label.strip()) > 200:
+            raise ValueError("PENDING_SCHEMA_INVALID")
+        seen.add(option_id)
+        normalized.append({"id": option_id, "label": label.strip()})
+    return normalized
+
+
 def validate_pending_continuation(value: Any, *, persisted: bool = False) -> Dict[str, Any]:
-    """Validate and return the one canonical pending-continuation object.
+    """Validate the one canonical pending-continuation object.
 
     ``persisted=False`` validates the Core-produced envelope. ``persisted=True``
-    additionally requires the Runtime-owned identity/lifetime metadata. Both
-    modes reject missing fields, unknown fields, aliases and old shapes.
+    additionally requires Runtime identity/lifetime metadata. No aliases or
+    migration from earlier pending shapes are accepted.
     """
     if not isinstance(value, dict):
         raise ValueError("PENDING_SCHEMA_INVALID")
@@ -52,24 +75,28 @@ def validate_pending_continuation(value: Any, *, persisted: bool = False) -> Dic
     if not isinstance(value.get("session"), dict):
         raise ValueError("PENDING_SCHEMA_INVALID")
 
-    if kind == "write_confirmation":
-        if not _non_empty_text(value.get("transaction_id")):
+    if kind == "capability_confirmation":
+        if not _non_empty_text(value.get("capability")) or not _non_empty_text(value.get("provider")) or not _non_empty_text(value.get("confirmation_id")):
             raise ValueError("PENDING_SCHEMA_INVALID")
     else:
-        clarification = value.get("clarification")
-        if not isinstance(clarification, dict) or set(clarification) != {"question", "missing_information"}:
+        reason = value.get("reason")
+        if not _non_empty_text(reason) or len(reason.strip()) > 500:
             raise ValueError("PENDING_SCHEMA_INVALID")
-        if not _non_empty_text(clarification.get("question")) or not _non_empty_text(clarification.get("missing_information")):
-            raise ValueError("PENDING_SCHEMA_INVALID")
+        _validate_options(value.get("options"))
 
     if persisted:
         if not isinstance(value.get("id"), str) or not value["id"].strip():
             raise ValueError("PENDING_SCHEMA_INVALID")
-        for field in ("created_at", "expires_at"):
-            if not _non_empty_text(value.get(field)):
+        if not _non_empty_text(value.get("created_at")):
+            raise ValueError("PENDING_SCHEMA_INVALID")
+        expires_at = value.get("expires_at")
+        if kind == "capability_confirmation":
+            if not _non_empty_text(expires_at):
                 raise ValueError("PENDING_SCHEMA_INVALID")
-        project_hash = value.get("project_hash")
-        if project_hash is not None and not _non_empty_text(project_hash):
+        elif expires_at is not None:
+            raise ValueError("PENDING_SCHEMA_INVALID")
+        context_hash = value.get("provider_context_hash")
+        if context_hash is not None and not _non_empty_text(context_hash):
             raise ValueError("PENDING_SCHEMA_INVALID")
 
     return value

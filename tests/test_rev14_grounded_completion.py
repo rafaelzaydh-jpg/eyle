@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.canonical import run_agent
+from tests.canonical import standard_registry
 import json
 from pathlib import Path
 
@@ -11,7 +13,7 @@ from eyle.core.tasks import apply_task_updates
 from eyle.runtime.config import ConfigError, validar_config
 from llm.structured import StructuredResponseError, schema_for_profile
 from tests.canonical import (
-    agent_final,
+    agent_complete,
     agent_tools,
     base_config,
     investigation_target,
@@ -34,7 +36,7 @@ def test_claim_config_is_rejected_as_removed_contract():
     cfg = base_config()
     cfg["agent"]["claims"] = {"mode": "fresh"}
     with pytest.raises(ConfigError, match="UNKNOWN_CONFIG_FIELD:agent:claims"):
-        validar_config(cfg)
+        validar_config(cfg, standard_registry())
 
 
 def test_simple_final_uses_one_main_call_and_no_second_llm(monkeypatch, tmp_path):
@@ -42,11 +44,11 @@ def test_simple_final_uses_one_main_call_and_no_second_llm(monkeypatch, tmp_path
 
     def fake_main(prompt, _config):
         calls.append(json.loads(prompt))
-        return agent_final("ok")
+        return agent_complete("ok")
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake_main)
-    status, text, _, details = core_agent.executar_agente(
-        "Say ok.", base_config(), projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True,
+    status, text, _, details = run_agent(core_agent, 
+        "Say ok.", base_config(), provider_context={"standard": {"caminho_origem": str(tmp_path)}}, retornar_detalhes=True,
     )
     assert status == "success" and text == "ok"
     assert len(calls) == 1
@@ -101,23 +103,23 @@ def test_committed_investigation_grounding_must_reach_final(monkeypatch, tmp_pat
                 investigation=[investigation_target("inv", goal="Read the fact")],
             )
         if calls["n"] == 2:
-            return agent_final(
+            return agent_complete(
                 {"answer": "alpha", "grounding_ids": []},
                 investigation=[investigation_target(
                     "inv", goal="Read the fact", status="established",
                     grounding_ids=["mat-0001"], reason="Observed fact.txt",
                 )],
             )
-        assert "FINAL_REQUIRED_GROUNDING_MISSING:mat-0001" in str(payload.get("runtime_feedback") or "")
-        return agent_final({"answer": "alpha", "grounding_ids": ["mat-0001"]})
+        assert "COMPLETE_REQUIRED_GROUNDING_MISSING:mat-0001" in str(payload.get("runtime_feedback") or "")
+        return agent_complete({"answer": "alpha", "grounding_ids": ["mat-0001"]})
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake_main)
-    status, text, _, details = core_agent.executar_agente(
-        "Read the fact.", base_config(), projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True,
+    status, text, _, details = run_agent(core_agent, 
+        "Read the fact.", base_config(), provider_context={"standard": {"caminho_origem": str(tmp_path)}}, retornar_detalhes=True,
     )
     assert status == "success" and text == "alpha"
     assert calls["n"] == 3
-    finals = [item for item in details["decision_history"] if item.get("decision") == "final"]
+    finals = [item for item in details["decision_history"] if item.get("decision") == "complete"]
     assert [item.get("outcome") for item in finals] == ["rejected", "accepted"]
 
 
@@ -134,19 +136,19 @@ def test_grounded_completed_task_contributes_required_final_material(monkeypatch
                 tasks=[task_item("read", description="Read fact")],
             )
         if calls["n"] == 2:
-            return agent_final(
+            return agent_complete(
                 {"answer": "beta", "grounding_ids": []},
                 tasks=[task_item(
                     "read", description="Read fact", status="completed", result="Read beta",
                     grounding_ids=["mat-0001"],
                 )],
             )
-        assert "FINAL_REQUIRED_GROUNDING_MISSING:mat-0001" in str(payload.get("runtime_feedback") or "")
-        return agent_final({"answer": "beta", "grounding_ids": ["mat-0001"]})
+        assert "COMPLETE_REQUIRED_GROUNDING_MISSING:mat-0001" in str(payload.get("runtime_feedback") or "")
+        return agent_complete({"answer": "beta", "grounding_ids": ["mat-0001"]})
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake_main)
-    status, text, _, details = core_agent.executar_agente(
-        "Read the fact.", base_config(), projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True,
+    status, text, _, details = run_agent(core_agent, 
+        "Read the fact.", base_config(), provider_context={"standard": {"caminho_origem": str(tmp_path)}}, retornar_detalhes=True,
     )
     assert status == "success" and text == "beta"
     assert calls["n"] == 3

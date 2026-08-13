@@ -1,6 +1,6 @@
-# Memory Kernel — Eyle 2.7.5 Rev1.4.3
+# Memory Kernel — Eyle 2.7.5 Rev1.5.1
 
-Rev1.3.6 introduced the first Memory Kernel directly in Eyle; Rev1.4 keeps that contract unchanged. It is deliberately small and does **not** merge Observation, Tasks or Investigation.
+Rev1.3.6 introduced the Memory Kernel. Rev1.5.1 keeps its storage semantics but moves it behind an independent `memory` Capability Provider. It remains deliberately separate from Observation, Tasks and Investigation.
 
 ## Law
 
@@ -10,13 +10,16 @@ Main decides what is worth remembering, region names, tags, relation labels, sup
 
 ## Physical shape
 
-Only three Core modules exist:
+The storage implementation is provider-owned:
 
 ```text
-eyle/core/memory.py             public kernel surface
-eyle/core/memory_store.py       SQLite state + ChangeSets + history
-eyle/core/memory_navigation.py  bounded activation + continuation
+eyle/providers/memory.py                    capability provider
+eyle/providers/memory_impl/memory.py        public kernel surface
+eyle/providers/memory_impl/memory_store.py  SQLite state + ChangeSets + history
+eyle/providers/memory_impl/memory_navigation.py bounded activation + continuation
 ```
+
+No Memory implementation module lives in Core.
 
 There is no backend interface, graph database, vector database, salience engine, planner, router, memory LLM, CLI or automatic consolidation.
 
@@ -94,20 +97,16 @@ memory_history(...)
 
 `memory_record(...)` is a physical inspection helper, not an additional semantic operation.
 
-## Agent tools
+## Memory Provider capabilities
 
-The existing public capabilities remain:
+Persistent Memory is an independent provider, not part of the workspace provider. Its canonical capabilities are:
 
 ```text
-memory_search
-memory_store
+memory.search
+memory.store
 ```
 
-They are adapters over the Kernel rather than a second memory system.
-
-`memory_search` activates or continues a bounded view. Its compact discovery contract keeps uncommon seeds nested so the global capability index does not grow with Memory Kernel features.
-
-`memory_store` creates one semantic node and may atomically add relations or supersede prior memories. Observation `grounding_ids` are optional provenance; they are not a truth gate. Memory may also represent decisions, preferences, intentions or semantic inferences that do not originate from Observation.
+They are adapters over the Kernel rather than a second memory system. `memory.search` activates or continues a bounded view. `memory.store` creates one semantic node and may atomically add relations or supersede prior memories. Observation `grounding_ids` are optional provenance; they are not a truth gate. Memory may also represent decisions, preferences, intentions or semantic inferences that do not originate from Observation.
 
 ## What was removed
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 
-BENCHMARK_SCHEMA_VERSION = "1"
+BENCHMARK_SCHEMA_VERSION = "2"
 TOKEN_USAGE_FIELDS = (
     "llm_calls",
     "llm_requests",
@@ -13,7 +13,7 @@ TOKEN_USAGE_FIELDS = (
     "total_tokens_effective",
 )
 CASE_FIELDS = {
-    "id", "status", "response", "tools", "read_ok", "factual_ok", "write_ok",
+    "id", "status", "response", "capabilities", "read_ok", "factual_ok", "write_ok",
     "confirmation_requested", "unauthorized_write", "latency_ms", "token_usage",
     "failure_code",
 }
@@ -102,8 +102,8 @@ def validate_report(report: Any) -> Dict[str, Any]:
                 raise BenchmarkSchemaError(f"BENCHMARK_SCHEMA_INVALID:{case_label}.id")
             if not isinstance(case["status"], str) or not isinstance(case["response"], str):
                 raise BenchmarkSchemaError(f"BENCHMARK_SCHEMA_INVALID:{case_label}.status_or_response")
-            if not isinstance(case["tools"], list) or not all(isinstance(tool, str) for tool in case["tools"]):
-                raise BenchmarkSchemaError(f"BENCHMARK_SCHEMA_INVALID:{case_label}.tools")
+            if not isinstance(case["capabilities"], list) or not all(isinstance(tool, str) for capability in case["capabilities"]):
+                raise BenchmarkSchemaError(f"BENCHMARK_SCHEMA_INVALID:{case_label}.capabilities")
             for field in ("read_ok", "factual_ok", "write_ok", "confirmation_requested", "unauthorized_write"):
                 if not isinstance(case[field], bool):
                     raise BenchmarkSchemaError(f"BENCHMARK_SCHEMA_INVALID:{case_label}.{field}")

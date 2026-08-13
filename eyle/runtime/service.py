@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eyle.core.agent import executar_agente
 from eyle.core.continuation import validate_pending_continuation
-from eyle.core.workspace import discover_project
+from eyle.host import build_bundled_host
 from eyle.runtime.config import carregar_config_validada
 from eyle.runtime.lock import lock_para
 from eyle.runtime.persistence import salvar_json_atomico
@@ -31,6 +31,7 @@ MEMORY_DIR = os.path.join(BASE_DIR, "memory")
 CONTEXT_DIR = os.path.join(BASE_DIR, "context")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 AGENT_PENDENTE_PATH = os.path.join(CONTEXT_DIR, "agent_pendente.json")
+HOST = build_bundled_host(BASE_DIR)
 _TTL_PENDENCIA_DEFAULT = 3600
 
 _JOB_ATUAL_ID = contextvars.ContextVar("eyle_source_job_id", default=None)
@@ -47,10 +48,10 @@ def _salvar_json(caminho, dados):
     salvar_json_atomico(caminho, dados)
 
 def carregar_config():
-    return carregar_config_validada(CONFIG_PATH)
+    return carregar_config_validada(CONFIG_PATH, HOST.registry)
 
-def carregar_projeto():
-    return discover_project(BASE_DIR)
+def carregar_provider_context():
+    return HOST.provider_context()
 
 def carregar_conversa():
     return _carregar_json(os.path.join(MEMORY_DIR, "conversa.json"), [])
@@ -246,12 +247,16 @@ def _parse_data_utc(valor):
         return None
 
 
-def _hash_projeto(projeto):
-    caminho = (projeto or {}).get("caminho_origem")
-    if not caminho:
-        return None
-    return hashlib.sha256(os.path.realpath(caminho).encode("utf-8")).hexdigest()
+def _hash_provider_context(provider_context):
+    """Return a stable identity hash for the opaque provider context.
 
+    Runtime does not interpret provider domains. It only binds a persisted
+    continuation to the same provider environment that prepared it.
+    """
+    if not isinstance(provider_context, dict) or not provider_context:
+        return None
+    encoded = json.dumps(provider_context, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 def _novo_id_pendencia():
     atual = _carregar_json(AGENT_PENDENTE_PATH, None)
@@ -262,24 +267,28 @@ def _novo_id_pendencia():
             return candidato
 
 
-def _preparar_pendencia(data, project, config=None):
+def _preparar_pendencia(data, provider_context, config=None):
     data = dict(data or {})
     validate_pending_continuation(data)
     cfg = (config or {}).get("confirmacoes") or {}
     ttl = max(60, int(cfg.get("expiracao_segundos", _TTL_PENDENCIA_DEFAULT)))
     now = _agora_utc()
-    project_hash = _hash_projeto(project)
+    provider_context_hash = _hash_provider_context(provider_context)
+    expires_at = (
+        _formatar_data_utc(now + timedelta(seconds=ttl))
+        if data.get("continuation_kind") == "capability_confirmation" else None
+    )
     data.update({
         "id": _novo_id_pendencia(),
         "created_at": _formatar_data_utc(now),
-        "expires_at": _formatar_data_utc(now + timedelta(seconds=ttl)),
-        "project_hash": project_hash,
+        "expires_at": expires_at,
+        "provider_context_hash": provider_context_hash,
     })
     validate_pending_continuation(data, persisted=True)
     return data
 
 
-def _validar_pendencia(pending, project, now=None):
+def _validar_pendencia(pending, provider_context, now=None):
     try:
         validate_pending_continuation(pending, persisted=True)
     except ValueError as error:
@@ -287,10 +296,13 @@ def _validar_pendencia(pending, project, now=None):
     if re.fullmatch(r"[0-9A-F]{4}", str(pending.get("id") or "").upper()) is None:
         return False, "PENDING_ID_INVALID"
     expiration = _parse_data_utc(pending.get("expires_at"))
-    if expiration is None or (now or _agora_utc()) >= expiration:
-        return False, "PENDING_EXPIRED"
-    if pending.get("project_hash") != _hash_projeto(project):
-        return False, "PENDING_PROJECT_MISMATCH"
+    if pending.get("continuation_kind") == "capability_confirmation":
+        if expiration is None or (now or _agora_utc()) >= expiration:
+            return False, "PENDING_EXPIRED"
+    elif pending.get("expires_at") is not None:
+        return False, "PENDING_SCHEMA_INVALID"
+    if pending.get("provider_context_hash") != _hash_provider_context(provider_context):
+        return False, "PENDING_PROVIDER_CONTEXT_MISMATCH"
     return True, None
 
 
@@ -309,19 +321,16 @@ def carregar_agent_pendente():
     return pending
 
 
-def salvar_agent_pendente(estado_pendente, projeto=None, config=None):
-    data = _preparar_pendencia(estado_pendente, projeto or carregar_projeto(), config)
+def salvar_agent_pendente(estado_pendente, provider_context=None, config=None):
+    context = provider_context if isinstance(provider_context, dict) else carregar_provider_context()
+    data = _preparar_pendencia(estado_pendente, context, config)
     question = str(data["question"]).rstrip()
-    confirmable = data.get("continuation_kind") == "write_confirmation"
-    instruction = (
-        f"To confirm: confirmar {data['id']}"
-        if confirmable else
-        f"Reply normally to resume; to cancel: cancelar {data['id']}"
-    )
-    marker = f"Pending ID: {data['id']}"
-    if marker not in question:
-        question = f"{question}\n{marker}. {instruction}"
-    data["question"] = question
+    if data.get("continuation_kind") == "capability_confirmation":
+        instruction = f"To confirm: confirmar {data['id']}; to cancel: cancelar {data['id']}"
+        marker = f"Pending ID: {data['id']}"
+        if marker not in question:
+            question = f"{question}\n{marker}. {instruction}"
+        data["question"] = question
     validate_pending_continuation(data, persisted=True)
     _salvar_json(AGENT_PENDENTE_PATH, data)
     return data
@@ -360,7 +369,7 @@ def _controle_pendencia(pergunta):
 
 def _selecionar_pendencia(pergunta, pendencia):
     if not pendencia:
-        return None, "Não existe alteração aguardando confirmação."
+        return None, "Não existe capability aguardando confirmação."
     codigo = str(pendencia.get("id") or "").upper()
     referencias = re.findall(r"\b[0-9A-Fa-f]{4}\b", pergunta or "")
     if referencias and codigo not in [item.upper() for item in referencias]:
@@ -383,7 +392,7 @@ def _historico_sem_erros_llm(mensagens):
         if isinstance(item, dict)
         and item.get("role") == "assistant"
         and item.get("agent_status") == "failed"
-        and not item.get("write_failure")
+        and not item.get("execution_failure")
         and item.get("reply_to_message_id") is not None
     }
     return [
@@ -393,7 +402,7 @@ def _historico_sem_erros_llm(mensagens):
         and not (
             item.get("role") == "assistant"
             and item.get("agent_status") == "failed"
-            and not item.get("write_failure")
+            and not item.get("execution_failure")
         )
         and item.get("id") not in failed_origin_ids
     ]
@@ -428,13 +437,63 @@ def _desempacotar_resultado_agente(resultado):
 
 
 
-def _metadata_resposta_agente(status, detalhes):
+def _public_await_user(pending):
+    if not isinstance(pending, dict) or pending.get("continuation_kind") != "await_user":
+        return None
+    return {
+        "id": str(pending.get("id") or ""),
+        "question": str(pending.get("question") or ""),
+        "reason": str(pending.get("reason") or ""),
+        "options": [
+            {"id": str(item.get("id") or ""), "label": str(item.get("label") or "")}
+            for item in list(pending.get("options") or []) if isinstance(item, dict)
+        ],
+    }
+
+
+def _execution_failure_from_details(details):
+    details = details if isinstance(details, dict) else {}
+    for event in reversed(list(details.get("capability_history") or [])):
+        if not isinstance(event, dict):
+            continue
+        result = event.get("result") if isinstance(event.get("result"), dict) else {}
+        if result.get("ok") is False:
+            failure = {
+                "capability": event.get("capability"),
+                "error_code": result.get("error_code") or event.get("error_code"),
+                "detail": result.get("detail"),
+                "retryable": result.get("retryable"),
+                "failure_scope": result.get("failure_scope"),
+                "failure_resource": result.get("failure_resource"),
+                "physical_effect": result.get("physical_effect"),
+            }
+            return {k: v for k, v in failure.items() if v not in (None, "", [], {})}
+    return None
+
+
+def _metadata_resposta_agente(status, detalhes, pending=None):
     detalhes = detalhes if isinstance(detalhes, dict) else {}
     metadata = {"agent_status": str(status or "unknown")}
-    falha = detalhes.get("write_failure")
-    if isinstance(falha, dict) and falha:
-        metadata["write_failure"] = falha
+    failure = _execution_failure_from_details(detalhes)
+    if failure:
+        metadata["execution_failure"] = failure
+    await_user = _public_await_user(pending)
+    if await_user:
+        metadata["await_user"] = await_user
     return metadata
+
+
+def carregar_await_user_publico():
+    """Return only safe UI metadata for the active human supervision gate."""
+    pending = carregar_agent_pendente()
+    if not pending or pending.get("continuation_kind") != "await_user":
+        return None
+    provider_context = carregar_provider_context()
+    valid, _ = _validar_pendencia(pending, provider_context)
+    if not valid:
+        return None
+    return _public_await_user(pending)
+
 def _resultado_agente(status, texto, detalhes):
     detalhes = detalhes if isinstance(detalhes, dict) else {}
     return {
@@ -445,7 +504,7 @@ def _resultado_agente(status, texto, detalhes):
     }
 
 
-def _processar_agente(pergunta, config, projeto, execution_id=None, conversation_context=None, source_job_id=None):
+def _processar_agente(pergunta, config, provider_context, execution_id=None, conversation_context=None, source_job_id=None):
     config_execucao = dict(config)
     if source_job_id is not None:
         job_progress.publicar_job(source_job_id, "agent", "Eyle iniciou a tarefa")
@@ -454,76 +513,79 @@ def _processar_agente(pergunta, config, projeto, execution_id=None, conversation
             executar_agente(
                 pergunta,
                 config_execucao,
-                projeto=projeto,
+                provider_context=provider_context,
                 retornar_detalhes=True,
                 execution_id=execution_id,
-                conversation_context=conversation_context, source_job_id=source_job_id,
+                conversation_context=conversation_context, source_job_id=source_job_id, registry=HOST.registry,
             )
         )
     except ErroLLM as erro:
         return _resultado_falha_llm(erro)
-    if status == "needs_user" and estado_pendente:
-        estado_pendente = salvar_agent_pendente(estado_pendente, projeto=projeto, config=config_execucao)
+    if status == "await_user" and estado_pendente:
+        estado_pendente = salvar_agent_pendente(estado_pendente, provider_context=provider_context, config=config_execucao)
         texto = estado_pendente["question"]
     if source_job_id is not None:
         job_progress.publicar_job(source_job_id, "finalizing", "Montando a resposta final", partial_text=texto[-16000:] if isinstance(texto, str) else None)
-    registrar_mensagem("assistant", texto, metadata=_metadata_resposta_agente(status, detalhes))
+    registrar_mensagem("assistant", texto, metadata=_metadata_resposta_agente(status, detalhes, estado_pendente))
     return _resultado_agente(status, texto, detalhes)
 
 
 def _retomar_agente_pendente(pendente, config, resposta_usuario=None, source_job_id=None, execution_id=None):
-    projeto = carregar_projeto()
+    provider_context = carregar_provider_context()
     try:
         status, texto, nova_pendencia, detalhes = _desempacotar_resultado_agente(
             executar_agente(
                 str((pendente.get("session") or {}).get("request") or ""),
                 dict(config),
-                projeto=projeto,
+                provider_context=provider_context,
                 retomar=pendente,
                 retornar_detalhes=True,
                 execution_id=execution_id or (pendente.get("session") or {}).get("execution_id"),
-                resposta_usuario=resposta_usuario, source_job_id=source_job_id,
+                resposta_usuario=resposta_usuario, source_job_id=source_job_id, registry=HOST.registry,
             )
         )
     except ErroLLM as erro:
         return _resultado_falha_llm(erro)
-    if status == "needs_user" and nova_pendencia:
-        nova_pendencia = salvar_agent_pendente(nova_pendencia, projeto=projeto, config=config)
+    if status == "await_user" and nova_pendencia:
+        nova_pendencia = salvar_agent_pendente(nova_pendencia, provider_context=provider_context, config=config)
         texto = nova_pendencia["question"]
     else:
         limpar_agent_pendente()
-    registrar_mensagem("assistant", texto, metadata=_metadata_resposta_agente(status, detalhes))
+    registrar_mensagem("assistant", texto, metadata=_metadata_resposta_agente(status, detalhes, nova_pendencia))
     return _resultado_agente(status, texto, detalhes)
 
 
 def _cancelar_agente_pendente(pendente):
     limpar_agent_pendente()
-    resposta = "Ok, cancelado. A alteração pendente não foi aplicada."
+    if (pendente or {}).get("continuation_kind") == "await_user":
+        resposta = "Tarefa suspensa cancelada."
+    else:
+        resposta = "Ok, cancelado. A alteração pendente não foi aplicada."
     registrar_mensagem("assistant", resposta)
-    detalhes = {"status": "blocked", "failure_code": "CANCELLED"}
-    return _resultado_agente("blocked", resposta, detalhes)
+    detalhes = {"status": "cancelled", "failure_code": "CANCELLED"}
+    return _resultado_agente("cancelled", resposta, detalhes)
 
 
 def processar(pergunta, registrar_pergunta=True, historico_snapshot=None,
               execution_id=None, source_job_id=None, source_message_id=None):
-    """Single public path: interface -> AgentSession -> LLM/tools -> response."""
+    """Single public path: interface -> AgentSession -> LLM/capabilities -> response."""
     _JOB_ATUAL_ID.set(source_job_id)
     _MENSAGEM_ORIGEM_ATUAL_ID.set(source_message_id)
     config = dict(carregar_config() or {})
-    projeto = carregar_projeto()
+    provider_context = carregar_provider_context()
     if registrar_pergunta:
         registrar_mensagem("user", pergunta)
 
     pendente = carregar_agent_pendente()
     if pendente:
-        valida, motivo = _validar_pendencia(pendente, projeto)
+        valida, motivo = _validar_pendencia(pendente, provider_context)
         if not valida:
             limpar_agent_pendente()
             pendente = None
 
     controle = _controle_pendencia(pergunta) if pendente else None
     if not pendente and _EXPLICIT_CONTROL.fullmatch(str(pergunta or "")):
-        return _resultado_controle_pendencia("Não existe alteração aguardando confirmação.")
+        return _resultado_controle_pendencia("Não existe capability aguardando confirmação.")
 
     if pendente and controle == "cancelar":
         selecionada, erro = _selecionar_pendencia(pergunta, pendente)
@@ -531,9 +593,9 @@ def processar(pergunta, registrar_pergunta=True, historico_snapshot=None,
             return _resultado_controle_pendencia(erro)
         return _cancelar_agente_pendente(selecionada)
 
-    if pendente and pendente.get("continuation_kind") == "user_input":
-        # Natural text, including a plain "sim", is the requested clarification.
-        # Only explicit cancel above is control authority for this continuation kind.
+    if pendente and pendente.get("continuation_kind") == "await_user":
+        # Any natural text is the human resolution. Only explicit cancel above
+        # is Runtime control authority for this continuation kind.
         return _retomar_agente_pendente(
             pendente, config, resposta_usuario=pergunta,
             source_job_id=source_job_id, execution_id=execution_id,
@@ -543,8 +605,8 @@ def processar(pergunta, registrar_pergunta=True, historico_snapshot=None,
         selecionada, erro = _selecionar_pendencia(pergunta, pendente)
         if erro:
             return _resultado_controle_pendencia(erro)
-        if selecionada.get("continuation_kind") != "write_confirmation":
-            return _resultado_controle_pendencia("Essa pendência não é uma confirmação de escrita.")
+        if selecionada.get("continuation_kind") != "capability_confirmation":
+            return _resultado_controle_pendencia("Essa pendência não é uma confirmação de capability.")
         return _retomar_agente_pendente(
             selecionada, config, resposta_usuario=pergunta,
             source_job_id=source_job_id, execution_id=execution_id,
@@ -564,13 +626,13 @@ def processar(pergunta, registrar_pergunta=True, historico_snapshot=None,
             "role": str(item.get("role") or ""),
             "content": str(item.get("text") or ""),
         }
-        write_failure = item.get("write_failure")
-        if isinstance(write_failure, dict) and write_failure:
-            message["write_failure"] = dict(write_failure)
+        execution_failure = item.get("execution_failure")
+        if isinstance(execution_failure, dict) and execution_failure:
+            message["execution_failure"] = dict(execution_failure)
         recent_messages.append(message)
     conversation_context = {"recent_messages": recent_messages}
     return _processar_agente(
-        pergunta, config, projeto, execution_id=execution_id,
+        pergunta, config, provider_context, execution_id=execution_id,
         conversation_context=conversation_context, source_job_id=source_job_id,
     )
 

@@ -1,17 +1,18 @@
 from __future__ import annotations
+from tests.canonical import standard_registry
 
 import sqlite3
 
 import pytest
 
-from eyle.core.memory import (
+from eyle.providers.memory_impl.memory import (
     activate_memory,
     apply_memory_changeset,
     continue_memory_view,
     memory_history,
     memory_record,
 )
-from eyle.core.memory_store import MEMORY_SCHEMA_VERSION, memory_db_path
+from eyle.providers.memory_impl.memory_store import MEMORY_SCHEMA_VERSION, memory_db_path
 
 
 def test_memory_kernel_atomic_changeset_relations_and_supersession(tmp_path):
@@ -137,14 +138,11 @@ def test_memory_kernel_rejects_incompatible_sqlite_schema(tmp_path):
 
 
 def test_memory_tools_allow_semantic_memory_without_grounding_and_continue_frontier(monkeypatch, tmp_path):
-    from eyle.core import tools
-
     root = tmp_path / "project"
     root.mkdir()
-    monkeypatch.setattr(tools, "MEMORY_DIR", str(tmp_path / "state"))
-    context = {"projeto": {"caminho_origem": str(root)}, "grounding": {}}
+    context = {"provider_context": {"memory": {"storage_dir": str(tmp_path / "state"), "scope_root": str(root)}}, "grounding": {}}
     for index in range(35):
-        stored = tools.executar_tool(
+        stored = standard_registry().execute(
             "memory_store",
             {
                 "text": f"decision {index}",
@@ -154,7 +152,7 @@ def test_memory_tools_allow_semantic_memory_without_grounding_and_continue_front
         )
         assert stored["ok"] is True
 
-    first = tools.executar_tool(
+    first = standard_registry().execute(
         "memory_search",
         {"seed": {"region": "project:test", "tags": ["decision"]}, "limit": 10},
         context,
@@ -165,7 +163,7 @@ def test_memory_tools_allow_semantic_memory_without_grounding_and_continue_front
     frontier = first_view["memory_frontier"]
     assert frontier and frontier["remaining_count"] == 25
 
-    second = tools.executar_tool("memory_search", {"frontier": frontier["id"], "limit": 10}, context)
+    second = standard_registry().execute("memory_search", {"frontier": frontier["id"], "limit": 10}, context)
     assert second["ok"] is True
     second_view = second["detail"]["view"]
     assert len(second_view["memories"]) == 10
@@ -175,13 +173,10 @@ def test_memory_tools_allow_semantic_memory_without_grounding_and_continue_front
 
 
 def test_memory_tool_nested_contract_is_validated(monkeypatch, tmp_path):
-    from eyle.core import tools
-
     root = tmp_path / "project"
     root.mkdir()
-    monkeypatch.setattr(tools, "MEMORY_DIR", str(tmp_path / "state"))
-    context = {"projeto": {"caminho_origem": str(root)}, "grounding": {}}
-    result = tools.executar_tool(
+    context = {"provider_context": {"memory": {"storage_dir": str(tmp_path / "state"), "scope_root": str(root)}}, "grounding": {}}
+    result = standard_registry().execute(
         "memory_store",
         {"text": "x", "meta": {"region": "project:test", "mystery": True}},
         context,

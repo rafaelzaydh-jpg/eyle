@@ -23,7 +23,7 @@ Everything else must justify Core membership.
 
 ## Completion rule
 
-Final is deliverable when the commitments Main chose to create are mechanically closed and their declared Material continuity is preserved. Runtime does not invent commitments and does not grade semantic truth.
+Complete is deliverable when the commitments Main chose to create are mechanically closed and their declared Material continuity is preserved. Runtime does not invent commitments and does not grade semantic truth.
 
 ## Capability boundary
 

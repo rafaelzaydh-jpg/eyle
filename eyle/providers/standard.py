@@ -1,65 +1,104 @@
 #!/usr/bin/env python3
-"""Executable tool registry for the LLM-first core.
+"""Bundled standard capability provider.
 
-The model chooses tools; this module validates arguments, executes live workspace
-operations, and always returns one standard result envelope. It contains no
-semantic routing or alternate reasoning path. READ/EXEC tools run directly.
-WRITE tools are invoked by the runtime only after a successful dry-run and an
-explicit user confirmation.
-
-``ctx`` supplies the validated config and the live project root. Indexed retrieval is not required.
+This module owns the domain mechanics shipped with the default distribution:
+workspace/source observation, isolated execution and related utilities. Eyle Core does not know these domains; it sees only provider-owned
+capability contracts through ``eyle.capabilities``.
 """
 import copy
 import json
 import os
 import re
 import subprocess
-import uuid
 
+from eyle.contracts.capability import RESULT_FIELDS, physical_effect as _universal_physical_effect
+from eyle.capabilities.registry import Provider
+from eyle.providers import workspace_transaction as _workspace_transaction
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-from eyle.core.workspace_io import (  # noqa: E402
+from eyle.providers.standard_impl.workspace_io import (  # noqa: E402
     ErroLeituraProjeto,
     ler_faixa_projeto,
     listar_arvore_projeto,
 )
-from eyle.core.editing import (  # noqa: E402
+from eyle.providers.standard_impl.editing import (  # noqa: E402
     localizar_simbolo,
     localizar_simbolo_no_projeto,
     rodar_testes_projeto,
 )
-from eyle.core.memory import (  # noqa: E402
-    activate_memory, continue_memory_view, apply_memory_changeset, memory_record,
-)
-from eyle.core.project_inspection import (  # noqa: E402
+from eyle.providers.standard_impl.project_inspection import (  # noqa: E402
     calculate as calculate_expression,
     count_tokens as count_project_tokens,
     inspect_project as inspect_project_signals,
     project_stats as measure_project_stats,
 )
-from eyle.core.git_tools import git_status as inspect_git_status, git_diff as inspect_git_diff  # noqa: E402
-from eyle.core.code_relations import analyze_symbol_relations  # noqa: E402
-from eyle.core.text_hash import hash_texto  # noqa: E402
-from eyle.core.observation_contract import (  # noqa: E402
+from eyle.providers.standard_impl.git_tools import git_status as inspect_git_status, git_diff as inspect_git_diff  # noqa: E402
+from eyle.providers.standard_impl.code_relations import analyze_symbol_relations  # noqa: E402
+from eyle.providers.standard_impl.text_hash import hash_texto  # noqa: E402
+from eyle.contracts.observation import (  # noqa: E402
     CoverageContractError, materialize_snapshot_handle, normalize_coverage, normalize_effect, register_snapshot_handle, result_observation_fields,
 )
-from eyle.core.observation import resolve_frontier, consume_frontier  # noqa: E402
-from eyle.core.sandbox import executar_comando_livre_no_sandbox, export_active_sandbox_zip, ErroSandbox  # noqa: E402
-from eyle.core.workspace_policy import (  # noqa: E402
+from eyle.runtime.observation import resolve_frontier, consume_frontier  # noqa: E402
+from eyle.providers.standard_impl.sandbox import executar_comando_livre_no_sandbox, export_active_sandbox_zip, ErroSandbox  # noqa: E402
+from eyle.providers.standard_impl.workspace_policy import (  # noqa: E402
     build_protected_resource_index, is_protected_workspace_resource, protected_resource_info,
 )
-from eyle.core.objective_scope import (  # noqa: E402
+from eyle.providers.standard_impl.objective_scope import (  # noqa: E402
     ObjectiveScopeError, normalize_scope_selectors, resolve_objective_file_scope,
 )
 
 PROJECT_BASE_DIR = os.path.dirname(BASE_DIR)
-MEMORY_DIR = os.path.join(PROJECT_BASE_DIR, "memory")
 
-_CAMPOS_RESULTADO = ("status", "ok", "executed", "changed", "error_code", "detail", "retryable", "failure_scope", "failure_resource", "observations", "coverage", "frontiers")
+
+def _standard_context(ctx):
+    provider_context = (ctx or {}).get("provider_context") or {}
+    value = provider_context.get("standard") or {} if isinstance(provider_context, dict) else {}
+    return value if isinstance(value, dict) else {}
+
+
+def _standard_config(config):
+    providers = (config or {}).get("providers") or {}
+    value = providers.get("standard") or {} if isinstance(providers, dict) else {}
+    return value if isinstance(value, dict) else {}
+
+
+def _standard_tests_config(config):
+    value = _standard_config(config).get("tests") or {}
+    return value if isinstance(value, dict) else {}
+
+_CAMPOS_RESULTADO = RESULT_FIELDS
+
+
+def physical_effect(resource, persistence, *, operation="capability", changed=False, real_workspace_changed=False, real_eyle_changed=False):
+    """Provider-local convenience wrapper over the universal effect contract.
+
+    Legacy boolean inputs are accepted only inside this provider so its domain
+    implementation can migrate independently; they are collapsed into the
+    universal ``changed`` fact before the effect reaches Core.
+    """
+    changed = bool(changed or real_workspace_changed or real_eyle_changed)
+    return _universal_physical_effect(resource, operation, persistence, changed=changed)
+
+
+def _normalize_physical_effect(value):
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("PHYSICAL_EFFECT_INVALID")
+    if set(value) == {"resource", "operation", "persistence", "changed"}:
+        return _universal_physical_effect(value.get("resource"), value.get("operation"), value.get("persistence"), changed=value.get("changed", False))
+    # Provider-internal migration tolerance; never exposed as the public shape.
+    return physical_effect(
+        value.get("target"), value.get("persistence"),
+        operation=value.get("operation") or "capability",
+        real_workspace_changed=value.get("real_workspace_changed", False),
+        real_eyle_changed=value.get("real_eyle_changed", False),
+        changed=value.get("changed", False),
+    )
 
 
 def _resultado(status, ok, executed, changed=False, error_code=None, detail=None, retryable=None,
-               failure_scope=None, failure_resource=None, observations=None, coverage=None, frontiers=None):
+               failure_scope=None, failure_resource=None, observations=None, coverage=None, frontiers=None, physical_effect=None):
     """Canonical current tool result envelope.
 
     The physical status fields remain mandatory. Objective observation fields are
@@ -75,37 +114,38 @@ def _resultado(status, ok, executed, changed=False, error_code=None, detail=None
         "retryable": None if retryable is None else bool(retryable),
         "failure_scope": str(failure_scope) if failure_scope else None,
         "failure_resource": str(failure_resource) if failure_resource else None,
+        "physical_effect": _normalize_physical_effect(physical_effect),
         **observation_fields,
     }
 
 
-def _sucesso(detail=None, changed=False, *, observations=None, coverage=None, frontiers=None):
+def _sucesso(detail=None, changed=False, *, observations=None, coverage=None, frontiers=None, physical_effect=None):
     if isinstance(detail, dict):
         if observations is None: observations = detail.get("observations")
         if coverage is None: coverage = detail.get("coverage")
         if frontiers is None: frontiers = detail.get("frontiers")
     return _resultado(
         "success", True, True, changed=changed, detail=detail,
-        observations=observations, coverage=coverage, frontiers=frontiers,
+        observations=observations, coverage=coverage, frontiers=frontiers, physical_effect=physical_effect,
     )
 
 
-def _falha(error_code, detail, executed=False, changed=False, retryable=None, *, failure_scope=None, failure_resource=None, observations=None, coverage=None, frontiers=None):
+def _falha(error_code, detail, executed=False, changed=False, retryable=None, *, failure_scope=None, failure_resource=None, observations=None, coverage=None, frontiers=None, physical_effect=None):
     return _resultado(
         "failed", False, executed, changed=changed,
         error_code=error_code, detail=detail, retryable=retryable,
         failure_scope=failure_scope, failure_resource=failure_resource,
-        observations=observations, coverage=coverage, frontiers=frontiers,
+        observations=observations, coverage=coverage, frontiers=frontiers, physical_effect=physical_effect,
     )
 
 
-def _pulado(detail, error_code=None):
-    return _resultado("skipped", True, False, error_code=error_code, detail=detail)
+def _pulado(detail, error_code=None, *, physical_effect=None):
+    return _resultado("skipped", True, False, error_code=error_code, detail=detail, physical_effect=physical_effect)
 
 
 def _caminho_projeto(ctx):
     """Return the dedicated user-workspace root. Writes always use this root."""
-    projeto = (ctx or {}).get("projeto") or {}
+    projeto = _standard_context(ctx)
     return projeto.get("caminho_origem")
 
 
@@ -116,7 +156,7 @@ def _source_name(arguments):
 
 def _caminho_fonte(ctx, arguments):
     """Resolve an observation/sandbox source without granting real self-write authority."""
-    projeto = (ctx or {}).get("projeto") or {}
+    projeto = _standard_context(ctx)
     source = _source_name(arguments)
     if source == "eyle":
         root = projeto.get("eyle_root")
@@ -446,7 +486,7 @@ def _tool_search_code(arguments, ctx):
     if not root:
         return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
     config = (ctx or {}).get("config") or {}
-    agent_cfg = config.get("agent", {})
+    agent_cfg = _standard_config(config)
     max_lines = max(7, int(agent_cfg.get("max_search_range_lines", 16) or 16))
     max_matches = max(1, int(agent_cfg.get("max_search_matches", 40) or 40))
     max_ranges = max(1, int(agent_cfg.get("max_search_ranges", 12) or 12))
@@ -516,8 +556,8 @@ def _tool_search_code(arguments, ctx):
                 ledger,
                 kind="search_code.ranges",
                 payload=payload,
-                workspace_epoch=int((ctx or {}).get("workspace_epoch") or 0),
-                source_tool="search_code",
+                reality_epoch=int((ctx or {}).get("reality_epoch") or 0),
+                source_capability="search_code",
                 description=f"Remaining objective source ranges for literal search {query!r}",
                 page_size=max_ranges,
             )
@@ -604,7 +644,7 @@ def _tool_symbol_relations(arguments, ctx):
     if path and is_protected_workspace_resource(root, str(path), index=build_protected_resource_index(root)):
         return _protected_resource_failure(root, str(path))
     config = (ctx or {}).get("config") or {}
-    agent_cfg = config.get("agent") or {}
+    agent_cfg = _standard_config(config)
     query = str(arguments.get("query") or "relations")
     # Reachability depth is Runtime-owned in Eyle 2.7.5 Rev1.4.3. The resolved graph is
     # exhausted mechanically; only local relation queries honor max_depth.
@@ -630,8 +670,8 @@ def _tool_symbol_relations(arguments, ctx):
                 summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
                 handle = register_snapshot_handle(
                     ledger, kind=f"symbol_relations.{payload.get('frontier_kind') or 'continuation'}",
-                    payload=payload, workspace_epoch=int((ctx or {}).get("workspace_epoch") or 0),
-                    source_tool="symbol_relations",
+                    payload=payload, reality_epoch=int((ctx or {}).get("reality_epoch") or 0),
+                    source_capability="symbol_relations",
                     description=f"Continuation from symbol_relations for {arguments.get('symbol')}",
                     page_size=12,
                 )
@@ -659,7 +699,7 @@ def _continue_search_code_page(payload, ctx):
     if not root:
         return {}
     query = str(payload.get("query") or "")
-    cfg = ((ctx or {}).get("config") or {}).get("agent", {})
+    cfg = _standard_config((ctx or {}).get("config") or {})
     max_lines = max(7, int(cfg.get("max_search_range_lines", 16) or 16))
     material_candidates = []
     projected = []
@@ -752,8 +792,8 @@ def _continue_structured_page(payload, ctx):
     return {}
 
 
-def _continue_source_projection(source_tool, payload, ctx):
-    entry = TOOLS.get(str(source_tool or "")) or {}
+def _continue_source_projection(source_capability, payload, ctx):
+    entry = CAPABILITIES.get(str(source_capability or "")) or {}
     continuation = entry.get("continue")
     return continuation(payload, ctx or {}) if callable(continuation) else {}
 
@@ -764,21 +804,21 @@ def _tool_continue_observation(arguments, ctx):
         return _falha("OBSERVATION_STATE_UNAVAILABLE", "observation state unavailable", executed=False, retryable=False)
     frontier_id = str(arguments.get("frontier") or "")
     handle_id, frontier_error = resolve_frontier(
-        ledger, frontier_id, workspace_epoch=int((ctx or {}).get("workspace_epoch") or 0),
+        ledger, frontier_id, reality_epoch=int((ctx or {}).get("reality_epoch") or 0),
     )
     if frontier_error:
         return _falha(frontier_error, "expected an open fr-* Observation Frontier", executed=False, retryable=True)
     if not isinstance(ledger.get("handles"), dict):
         return _falha("HANDLE_STORE_UNAVAILABLE", "internal continuation store unavailable", executed=False, retryable=False)
     materialized, error = materialize_snapshot_handle(
-        ledger, str(handle_id or ""), workspace_epoch=int((ctx or {}).get("workspace_epoch") or 0),
+        ledger, str(handle_id or ""), reality_epoch=int((ctx or {}).get("reality_epoch") or 0),
     )
     if error:
         return _falha(error, "the Runtime continuation behind this Frontier is unavailable", executed=True, retryable=True)
 
     payload = materialized.get("payload") if isinstance(materialized, dict) else None
-    source_tool = str((materialized or {}).get("source_tool") or "")
-    projection = _continue_source_projection(source_tool, payload, ctx)
+    source_capability = str((materialized or {}).get("source_capability") or "")
+    projection = _continue_source_projection(source_capability, payload, ctx)
     observations = [copy.deepcopy(item) for item in (projection.get("observations") or []) if isinstance(item, dict)] if isinstance(projection, dict) else []
     if not observations:
         if isinstance(payload, dict) and isinstance(payload.get("items"), list):
@@ -793,7 +833,7 @@ def _tool_continue_observation(arguments, ctx):
     detail.pop("handle", None)
     detail.pop("payload", None)
     detail["continued_frontier"] = frontier_id
-    detail["source_capability"] = source_tool
+    detail["source_capability"] = source_capability
     if isinstance(projection, dict) and isinstance(projection.get("detail"), dict):
         detail["materialized"] = copy.deepcopy(projection.get("detail"))
     else:
@@ -811,7 +851,7 @@ def _tool_continue_observation(arguments, ctx):
     if projection_coverage:
         combined_boundaries.extend(copy.deepcopy(projection_coverage.get("boundaries") or []))
     combined_coverage = _coverage_record(
-        scope={"kind": "frontier_continuation", "frontier": frontier_id, "source_capability": source_tool},
+        scope={"kind": "frontier_continuation", "frontier": frontier_id, "source_capability": source_capability},
         examined={
             **copy.deepcopy(snapshot_coverage.get("examined") or {}),
             **({f"source_{key}": copy.deepcopy(value) for key, value in (projection_coverage.get("examined") or {}).items()} if projection_coverage else {}),
@@ -884,7 +924,7 @@ def _tool_find_symbol(arguments, ctx):
             try:
                 reading = ler_faixa_projeto(
                     root, str(only.get("file") or ""), int(only.get("line_start") or 1), int(only.get("line_end") or int(only.get("line_start") or 1)),
-                    max_linhas=((ctx or {}).get("config") or {}).get("agent", {}).get("max_file_read_lines", 400),
+                    max_linhas=_standard_config((ctx or {}).get("config") or {}).get("max_file_read_lines", 400),
                 )
                 only.update(reading)
             except (ErroLeituraProjeto, TypeError, ValueError):
@@ -913,8 +953,8 @@ def _tool_find_symbol(arguments, ctx):
             handle = register_snapshot_handle(
                 ledger, kind="find_symbol.matches",
                 payload={"kind": "find_symbol_locator", "symbol": symbol, "items": remaining, "source": _source_name(arguments)},
-                workspace_epoch=int((ctx or {}).get("workspace_epoch") or 0),
-                source_tool="find_symbol",
+                reality_epoch=int((ctx or {}).get("reality_epoch") or 0),
+                source_capability="find_symbol",
                 description=f"Remaining objective locations for symbol {symbol!r}",
                 page_size=page_size,
             )
@@ -951,7 +991,7 @@ def _tool_find_symbol(arguments, ctx):
     try:
         reading = ler_faixa_projeto(
             root, rel, int(result["line_start"]), int(result["line_end"]),
-            max_linhas=((ctx or {}).get("config") or {}).get("agent", {}).get("max_file_read_lines", 400),
+            max_linhas=_standard_config((ctx or {}).get("config") or {}).get("max_file_read_lines", 400),
         )
         result.update(reading); result["simbolo"] = symbol
     except ErroLeituraProjeto as erro:
@@ -971,7 +1011,7 @@ def _tool_read_file(arguments, ctx):
     if _self_runtime_path_blocked(arguments, caminho_relativo):
         return _falha("SELF_RUNTIME_STATE_READ_BLOCKED", "self analysis cannot read live workspace/memory/context runtime state", retryable=False, failure_scope="resource", failure_resource=str(caminho_relativo))
     config = (ctx or {}).get("config") or {}
-    max_linhas = config.get("agent", {}).get("max_file_read_lines", 400)
+    max_linhas = _standard_config(config).get("max_file_read_lines", 400)
     has_start = arguments.get("line_start") is not None
     has_end = arguments.get("line_end") is not None
     if has_start != has_end:
@@ -1004,7 +1044,7 @@ def _tool_list_tree(arguments, ctx):
     caminho_projeto = _caminho_fonte(ctx, arguments)
     if not caminho_projeto:
         return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
-    cfg_agente = ((ctx or {}).get("config") or {}).get("agent", {})
+    cfg_agente = _standard_config((ctx or {}).get("config") or {})
     max_entradas = cfg_agente.get("max_tree_entries", 200)
     max_profundidade = cfg_agente.get("max_tree_depth", 6)
     limite = arguments.get("limit", max_entradas)
@@ -1012,7 +1052,7 @@ def _tool_list_tree(arguments, ctx):
     if limite > max_entradas:
         return _falha(
             "INVALID_ARGUMENT",
-            f"limite={limite} excede agent.max_tree_entries={max_entradas}",
+            f"limite={limite} excede providers.standard.max_tree_entries={max_entradas}",
         )
     if profundidade > max_profundidade:
         return _falha(
@@ -1098,13 +1138,20 @@ def _tool_run_tests(arguments, ctx):
     caminho_projeto = _caminho_projeto(ctx)
     if not caminho_projeto:
         return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
-    cfg_testes = ((ctx or {}).get("config") or {}).get("codar", {}).get("testes", {})
-    if not cfg_testes.get("ativado", False):
+    cfg_testes = _standard_tests_config((ctx or {}).get("config") or {})
+    if not cfg_testes.get("enabled", False):
         return _pulado(
-            "A execução de testes está desativada em config['codar']['testes']['ativado'].",
+            "Test execution is disabled by the standard provider configuration.",
             error_code="TESTS_DISABLED",
         )
-    resultado = rodar_testes_projeto(caminho_projeto, cfg_testes, scope=arguments.get("scope"))
+    legacy_tests = {
+        "ativado": True,
+        "comando_python": cfg_testes.get("command_python", "python -m pytest -q"),
+        "comando_node": cfg_testes.get("command_node", "npm test --silent"),
+        "timeout_segundos": cfg_testes.get("timeout_seconds", 60),
+        "sandbox": copy.deepcopy(cfg_testes.get("sandbox") or {}),
+    }
+    resultado = rodar_testes_projeto(caminho_projeto, legacy_tests, scope=arguments.get("scope"))
     output = str(resultado.get("saida_resumida") or "")
     detail = {
         "command": resultado.get("comando"),
@@ -1118,13 +1165,15 @@ def _tool_run_tests(arguments, ctx):
     }
     if resultado.get("executado") is not True and resultado.get("ok") is True:
         return _pulado(detail, error_code="TESTS_NOT_FOUND")
+    execution_effect = physical_effect("isolated_test_sandbox", "call", operation="run_tests")
     if resultado.get("ok") is True:
-        return _sucesso(detail)
+        return _sucesso(detail, physical_effect=execution_effect)
     error_code = resultado.get("error_code") or (
         "TESTS_REFUSED" if resultado.get("recusado") else "TESTS_FAILED"
     )
     return _falha(
         error_code, detail, executed=resultado.get("executado") is True,
+        physical_effect=execution_effect if resultado.get("executado") is True else None,
     )
 
 
@@ -1146,7 +1195,7 @@ def _tool_git_diff(arguments, ctx):
     root = _caminho_fonte(ctx, arguments)
     if not root:
         return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
-    cfg_agent = ((ctx or {}).get("config") or {}).get("agent", {})
+    cfg_agent = _standard_config((ctx or {}).get("config") or {})
     result = inspect_git_diff(
         root,
         path=arguments.get("path"),
@@ -1165,7 +1214,7 @@ def _tool_run_command(arguments, ctx):
     if not root:
         return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
     config = (ctx or {}).get("config") or {}
-    sandbox_cfg = dict(((config.get("agent") or {}).get("sandbox") or {}))
+    sandbox_cfg = dict((_standard_config(config).get("sandbox") or {}))
     result = executar_comando_livre_no_sandbox(
         root, arguments["command"], sandbox_cfg, cwd=arguments.get("cwd") or ".",
         source_kind=_source_name(arguments),
@@ -1185,15 +1234,16 @@ def _tool_run_command(arguments, ctx):
         "protected_resources_omitted": int(result.get("protected_resources_omitted") or 0),
         "real_workspace_changed": False,
     }
+    effect = physical_effect("isolated_snapshot", "job", operation="run_command")
     if result.get("ok") is True:
-        return _sucesso(detail, changed=False)
+        return _sucesso(detail, changed=False, physical_effect=effect)
     detail["error"] = result.get("erro")
-    return _falha("SANDBOX_COMMAND_FAILED", detail, executed=True, changed=False)
+    return _falha("SANDBOX_COMMAND_FAILED", detail, executed=True, changed=False, physical_effect=effect)
 
 
 def _tool_export_sandbox_zip(arguments, ctx):
     """Export the current isolated snapshot as one inert ZIP beside Eyle."""
-    projeto = (ctx or {}).get("projeto") or {}
+    projeto = _standard_context(ctx)
     eyle_root = projeto.get("eyle_root")
     if not eyle_root or not os.path.isdir(eyle_root):
         return _falha("EYLE_ROOT_UNAVAILABLE", "raiz fisica da Eyle indisponivel", retryable=False)
@@ -1210,75 +1260,12 @@ def _tool_export_sandbox_zip(arguments, ctx):
         if detail.startswith("ARTIFACT_ALREADY_EXISTS"):
             return _falha("ARTIFACT_ALREADY_EXISTS", detail, retryable=False, failure_scope="resource", failure_resource=arguments.get("filename"))
         return _falha("SANDBOX_EXPORT_FAILED", detail, retryable=False)
-    return _sucesso(detail, changed=True)
+    return _sucesso(
+        detail, changed=True,
+        physical_effect=physical_effect("artifact", "persistent", operation="export", changed=True),
+    )
 
 
-def _tool_memory_search(arguments, ctx):
-    """Activate or continue one bounded Memory Kernel view on explicit request."""
-    root = _caminho_projeto(ctx)
-    if not root:
-        return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
-    limit = int(arguments.get("limit") or 12)
-    seed = arguments.get("seed") if isinstance(arguments.get("seed"), dict) else {}
-    try:
-        frontier = str(arguments.get("frontier") or "").strip()
-        if frontier:
-            view = continue_memory_view(MEMORY_DIR, root, frontier, limit=limit)
-        else:
-            view = activate_memory(
-                MEMORY_DIR, root,
-                ids=[],
-                region=str(seed.get("region") or "").strip() or None,
-                tags=seed.get("tags") or [],
-                text=str(arguments.get("query") or ""),
-                related_to=seed.get("related_to") or [],
-                limit=limit,
-                include_inactive=False,
-            )
-    except (OSError, ValueError) as error:
-        return _falha("MEMORY_READ_FAILED", str(error), executed=True)
-    return _sucesso({"view": view, "count": len(view.get("memories") or [])})
-
-
-def _tool_memory_store(arguments, ctx):
-    """Create one semantic memory node plus optional relations/supersession atomically."""
-    root = _caminho_projeto(ctx)
-    if not root:
-        return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
-    grounding = (ctx or {}).get("grounding") or {}
-    meta = arguments.get("meta") if isinstance(arguments.get("meta"), dict) else {}
-    grounding_ids = [str(item) for item in meta.get("grounding_ids") or []]
-    missing = [item for item in grounding_ids if item not in grounding]
-    if missing:
-        return _falha("MEMORY_UNKNOWN_GROUNDING", ", ".join(missing))
-    provenance = {"kind": "observation", "refs": grounding_ids} if grounding_ids else {"kind": "main"}
-    memory_id = f"mem-{uuid.uuid4().hex[:16]}"
-    region = str(meta.get("region") or "").strip() or f"project:{os.path.basename(os.path.realpath(root)) or 'active'}"
-    operations = [{
-        "op": "create_memory", "id": memory_id, "region": region,
-        "content": str(arguments.get("text") or ""),
-        "tags": meta.get("tags") or [], "provenance": provenance,
-    }]
-    try:
-        for old_id in meta.get("supersedes") or []:
-            old = memory_record(MEMORY_DIR, root, str(old_id))
-            operations.append({
-                "op": "supersede_memory", "id": old["id"],
-                "expected_revision": old["revision"], "superseded_by": memory_id,
-            })
-        for relation in meta.get("relations") or []:
-            if not isinstance(relation, dict):
-                continue
-            operations.append({
-                "op": "create_relation", "source": memory_id,
-                "label": relation.get("label"), "target": relation.get("target"),
-                "provenance": provenance,
-            })
-        change = apply_memory_changeset(MEMORY_DIR, root, operations)
-        entry = memory_record(MEMORY_DIR, root, memory_id)
-    except (OSError, ValueError) as error:
-        return _falha("MEMORY_WRITE_FAILED", str(error), executed=True)
-    return _sucesso({"memory": entry, "changeset_id": change["changeset_id"], "affected": change["count"]})
 
 
 # ---------------------------------------------------------------------------
@@ -1367,7 +1354,7 @@ def _sig_git_diff(arguments):
 
 
 def capability_observation_signature(name, arguments):
-    entry = TOOLS.get(str(name or "")) or {}
+    entry = CAPABILITIES.get(str(name or "")) or {}
     fn = entry.get("signature")
     return fn(arguments or {}) if callable(fn) else None
 
@@ -1480,7 +1467,12 @@ def _observe_tree(arguments, result):
 def _observe_json(name):
     def observe(arguments, result):
         detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
-        return _json_material(name, name, detail, source=_source_name(arguments)) if detail else []
+        if not detail:
+            return []
+        payload = copy.deepcopy(detail)
+        if isinstance(result.get("physical_effect"), dict):
+            payload["physical_effect"] = copy.deepcopy(result.get("physical_effect"))
+        return _json_material(name, name, payload, source=_source_name(arguments))
     return observe
 
 
@@ -1491,31 +1483,6 @@ def _observe_none(arguments, result):
     return []
 
 
-def _coverage_memory_search(arguments, result):
-    detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
-    view = detail.get("view") if isinstance(detail.get("view"), dict) else {}
-    memory_coverage = view.get("memory_coverage") if isinstance(view.get("memory_coverage"), dict) else {}
-    if result.get("executed") is not True:
-        return {}
-    frontier = view.get("memory_frontier") if isinstance(view.get("memory_frontier"), dict) else None
-    return _coverage_record(
-        scope={"kind": "memory_kernel_view", "frontier": str(arguments.get("frontier") or "") or None},
-        examined={"memories_materialized": len(view.get("memories") or [])},
-        complete=bool(result.get("ok") is True and memory_coverage.get("complete") is True),
-        boundaries=([{"kind": "memory_frontier", "remaining": int(frontier.get("remaining_count") or 0)}] if frontier else []),
-    )
-
-
-def _coverage_memory_store(arguments, result):
-    detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
-    memory = detail.get("memory") if isinstance(detail.get("memory"), dict) else {}
-    if result.get("executed") is not True:
-        return {}
-    return _coverage_record(
-        scope={"kind": "memory_kernel_changeset"},
-        examined={"memories_written": 1 if memory else 0, "entities_affected": int(detail.get("affected") or 0)},
-        complete=bool(result.get("ok") is True),
-    )
 
 
 def _observe_passthrough(arguments, result):
@@ -1535,7 +1502,7 @@ def _observe_continue(arguments, result):
 
 
 def _capability_observations(name, arguments, result):
-    entry = TOOLS.get(str(name or "")) or {}
+    entry = CAPABILITIES.get(str(name or "")) or {}
     observer = entry.get("observe")
     values = observer(arguments or {}, result or {}) if callable(observer) else []
     out = []
@@ -1567,7 +1534,7 @@ def _coverage_record(*, scope, examined=None, complete=False, boundaries=None, f
 
 
 def _capability_coverage(name, arguments, result):
-    entry = TOOLS.get(str(name or "")) or {}
+    entry = CAPABILITIES.get(str(name or "")) or {}
     coverage = entry.get("coverage")
     if callable(coverage):
         value = coverage(arguments or {}, result or {})
@@ -1577,7 +1544,7 @@ def _capability_coverage(name, arguments, result):
 
 
 def _capability_frontiers(name, arguments, result):
-    entry = TOOLS.get(str(name or "")) or {}
+    entry = CAPABILITIES.get(str(name or "")) or {}
     projector = entry.get("frontier")
     if callable(projector):
         value = projector(arguments or {}, result or {})
@@ -1813,7 +1780,7 @@ def capability_validate_material_freshness(materials, material_ids, source_roots
         if not isinstance(material, dict):
             continue
         owner = str(material.get("source_capability") or "")
-        checker = (TOOLS.get(owner) or {}).get("freshness")
+        checker = (CAPABILITIES.get(owner.split(".", 1)[-1]) or {}).get("freshness")
         if not callable(checker):
             continue
         root = _material_source_root(material, source_roots)
@@ -1832,7 +1799,7 @@ def capability_rehydrate_materials(materials, source_roots, *, max_lines):
         if not isinstance(material, dict) or material.get("content") or material.get("numbered_content"):
             continue
         owner = str(material.get("source_capability") or "")
-        rehydrator = (TOOLS.get(owner) or {}).get("rehydrate")
+        rehydrator = (CAPABILITIES.get(owner.split(".", 1)[-1]) or {}).get("rehydrate")
         if not callable(rehydrator):
             material["rehydration_error"] = "OBSERVATION_REEXECUTION_REQUIRED"
             continue
@@ -1881,22 +1848,11 @@ def _public_arguments_command(arguments):
     return out
 
 
-def _public_arguments_memory(arguments):
-    out = {}
-    for key in ("query", "frontier"):
-        if arguments.get(key) is not None:
-            out[key] = str(arguments.get(key))[:160]
-    for key in ("seed", "meta"):
-        if isinstance(arguments.get(key), dict):
-            out[key] = copy.deepcopy(arguments.get(key))
-    if arguments.get("limit") is not None:
-        out["limit"] = int(arguments.get("limit"))
-    return out
 
 
 def capability_public_arguments(name, arguments):
     """User-visible bounded arguments projected by the capability registry."""
-    entry = TOOLS.get(str(name or "")) or {}
+    entry = CAPABILITIES.get(str(name or "")) or {}
     projector = entry.get("public_arguments")
     return projector(arguments or {}) if callable(projector) else _public_arguments_default(arguments or {})
 
@@ -1914,6 +1870,8 @@ def _public_result_base(result):
         public["retryable"] = bool(result.get("retryable"))
     if result.get("coverage"):
         public["coverage"] = copy.deepcopy(result.get("coverage"))
+    if isinstance(result.get("physical_effect"), dict):
+        public["physical_effect"] = copy.deepcopy(result.get("physical_effect"))
     if result.get("frontiers"):
         public["frontiers"] = [
             {key: value for key, value in item.items() if key != "handle"}
@@ -2002,7 +1960,7 @@ def capability_public_result(name, result):
     if isinstance(detail, str):
         public["detail"] = detail[:500]
         return public
-    entry = TOOLS.get(str(name or "")) or {}
+    entry = CAPABILITIES.get(str(name or "")) or {}
     projector = entry.get("public_result")
     if callable(projector):
         extra = projector(result)
@@ -2096,12 +2054,12 @@ def _model_projection_command(detail, grounding_ids, config):
 
 def capability_model_detail(name, detail, grounding_ids, config):
     """Compact model projection dispatched only through capability-owned hooks."""
-    entry = TOOLS.get(str(name or "")) or {}
+    entry = CAPABILITIES.get(str(name or "")) or {}
     projector = entry.get("model_projection")
     return projector(detail, grounding_ids, config or {}) if callable(projector) else _model_projection_default(detail, grounding_ids, config or {})
 
 
-def _covering_read_file(arguments, entries, workspace_epoch):
+def _covering_read_file(arguments, entries, reality_epoch):
     if arguments.get("line_start") is None or arguments.get("line_end") is None:
         return None
     path = _norm_capability_path(arguments.get("path"))
@@ -2112,8 +2070,8 @@ def _covering_read_file(arguments, entries, workspace_epoch):
         return None
     candidates = []
     for item in (entries or {}).values():
-        if not isinstance(item, dict) or int(item.get("workspace_epoch", -1)) != int(workspace_epoch or 0): continue
-        if str(item.get("tool") or "") != "read_file": continue
+        if not isinstance(item, dict) or int(item.get("reality_epoch", -1)) != int(reality_epoch or 0): continue
+        if str(item.get("capability") or "") not in {"read_file", "standard.read_file"}: continue
         item_args = item.get("arguments") or {}
         if _source_name(item_args) != source: continue
         if _norm_capability_path(item_args.get("path")) != path: continue
@@ -2126,14 +2084,14 @@ def _covering_read_file(arguments, entries, workspace_epoch):
 
 
 def _resource_failure_by_path(owner):
-    def find(arguments, entries, workspace_epoch):
+    def find(arguments, entries, reality_epoch):
         path = _norm_capability_path(arguments.get("path"))
         source = _source_name(arguments)
         if not path: return None
         candidates = []
         for item in (entries or {}).values():
-            if not isinstance(item, dict) or int(item.get("workspace_epoch", -1)) != int(workspace_epoch or 0): continue
-            if str(item.get("tool") or "") != str(owner or ""): continue
+            if not isinstance(item, dict) or int(item.get("reality_epoch", -1)) != int(reality_epoch or 0): continue
+            if str(item.get("capability") or "") not in {str(owner or ""), f"standard.{owner}"}: continue
             if item.get("failure_scope") != "resource": continue
             item_args = item.get("arguments") or {}
             if _source_name(item_args) != source: continue
@@ -2143,16 +2101,16 @@ def _resource_failure_by_path(owner):
     return find
 
 
-def capability_find_covering(name, arguments, entries, workspace_epoch):
-    entry = TOOLS.get(str(name or "")) or {}
+def capability_find_covering(name, arguments, entries, reality_epoch):
+    entry = CAPABILITIES.get(str(name or "")) or {}
     hook = entry.get("covers")
-    return hook(arguments or {}, entries or {}, workspace_epoch) if callable(hook) else None
+    return hook(arguments or {}, entries or {}, reality_epoch) if callable(hook) else None
 
 
-def capability_find_resource_failure(name, arguments, entries, workspace_epoch):
-    entry = TOOLS.get(str(name or "")) or {}
+def capability_find_resource_failure(name, arguments, entries, reality_epoch):
+    entry = CAPABILITIES.get(str(name or "")) or {}
     hook = entry.get("resource_failure")
-    return hook(arguments or {}, entries or {}, workspace_epoch) if callable(hook) else None
+    return hook(arguments or {}, entries or {}, reality_epoch) if callable(hook) else None
 
 def _normalize_symbol_relations_arguments(arguments):
     normalized = dict(arguments or {})
@@ -2181,7 +2139,7 @@ _SOURCE = {
     "description": "workspace=user workspace; eyle=Eyle source (read-only except isolated command snapshots).",
 }
 
-TOOLS = {
+CAPABILITIES = {
     "calculate": {
         "description": "Evaluate an arithmetic expression deterministically.",
         "availability": "global",
@@ -2348,47 +2306,6 @@ TOOLS = {
         }, ["filename"]),
         "fn": _tool_export_sandbox_zip,
     },
-    "memory_search": {
-        "description": "Navigate bounded persistent Memory.",
-        "availability": "workspace",
-        "produces_grounding": False,
-        "effect": "observe",
-        "returns": "Bounded Memory Nodes, MemoryCoverage and optional MemoryFrontier.",
-        "caveats": ["Memory is prior cognitive context, not proof of current external state."],
-        "input_schema": _schema_objeto({
-            "query": {"type": "string", "maxLength": 1000, "description": "Optional lexical Memory seed."},
-            "seed": {"type": "object", "additionalProperties": False, "properties": {
-                "region": {"type": "string", "minLength": 1, "maxLength": 240},
-                "tags": {"type": "array", "maxItems": 20, "items": {"type": "string", "minLength": 1, "maxLength": 96}},
-                "related_to": {"type": "array", "maxItems": 20, "items": {"type": "string", "pattern": r"^mem-[A-Za-z0-9._-]+$"}},
-            }, "description": "Optional region, tag and relation seeds."},
-            "frontier": {"type": "string", "pattern": r"^mf-[A-Za-z0-9._-]+$", "description": "MemoryFrontier id to continue."},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 30, "description": "Maximum materialized Memory Nodes."},
-        }),
-        "fn": _tool_memory_search,
-    },
-    "memory_store": {
-        "description": "Persist one Memory Node with optional links.",
-        "availability": "workspace",
-        "produces_grounding": False,
-        "effect": "mutate",
-        "returns": "Created Memory Node and ChangeSet metadata.",
-        "caveats": ["Kernel validates structure; Main owns Memory meaning."],
-        "input_schema": _schema_objeto({
-            "text": {"type": "string", "minLength": 1, "maxLength": 8000, "description": "Memory content."},
-            "meta": {"type": "object", "additionalProperties": False, "properties": {
-                "region": {"type": "string", "minLength": 1, "maxLength": 240},
-                "tags": {"type": "array", "maxItems": 30, "items": {"type": "string", "minLength": 1, "maxLength": 96}},
-                "grounding_ids": {"type": "array", "maxItems": 30, "items": {"type": "string", "pattern": r"^mat-[0-9]+$"}},
-                "supersedes": {"type": "array", "maxItems": 20, "items": {"type": "string", "pattern": r"^mem-[A-Za-z0-9._-]+$"}},
-                "relations": {"type": "array", "maxItems": 30, "items": {"type": "object", "additionalProperties": False, "required": ["label", "target"], "properties": {
-                    "label": {"type": "string", "minLength": 1, "maxLength": 120},
-                    "target": {"type": "string", "pattern": r"^mem-[A-Za-z0-9._-]+$"},
-                }}},
-            }, "description": "Optional Memory metadata and links."},
-        }, ["text"]),
-        "fn": _tool_memory_store,
-    },
     "run_tests": {
         "description": "Run detected tests in the isolated sandbox.",
         "availability": "tests",
@@ -2434,82 +2351,98 @@ TOOLS = {
 # Capability-owned physical observation hooks. Agent/Observation consume only
 # this registry contract; adding a new observational capability must not require
 # capability-name branches in either core module.
-TOOLS["list_tree"].update(signature=_sig_list_tree, observe=_observe_tree, coverage=_coverage_tree)
-TOOLS["search_code"].update(signature=_sig_search_code, observe=_observe_search, coverage=_coverage_search)
-TOOLS["search_code"]["continue"] = _continue_search_code_page
-TOOLS["find_symbol"].update(signature=_sig_find_symbol, observe=_observe_find_symbol, coverage=_coverage_find_symbol)
-TOOLS["find_symbol"]["continue"] = _continue_find_symbol_page
-TOOLS["symbol_relations"].update(signature=_sig_symbol_relations, observe=_observe_json("symbol_relations"), coverage=_coverage_relations)
-TOOLS["symbol_relations"]["continue"] = _continue_structured_page
-TOOLS["read_file"].update(signature=_sig_read_file, observe=_observe_file("read_file"), coverage=_coverage_file)
-TOOLS["project_stats"].update(signature=lambda arguments: f"project_stats:{_source_name(arguments)}:root", observe=_observe_json("project_stats"), coverage=_coverage_project_stats)
-TOOLS["inspect_project"].update(signature=lambda arguments: f"inspect_project:{_source_name(arguments)}:root", observe=_observe_json("inspect_project"), coverage=_coverage_inspect_project)
-TOOLS["count_tokens"].update(signature=_sig_count_tokens, observe=_observe_json("count_tokens"), coverage=_coverage_count_tokens)
-TOOLS["run_tests"].update(signature=_sig_run_tests, observe=_observe_json("run_tests"), coverage=_coverage_atomic("test_execution", lambda a, d: {"kind":"test_execution", "scope": d.get("scope") or a.get("scope") or "."}, lambda a, d: {"returncode": d.get("returncode")}))
-TOOLS["git_status"].update(signature=lambda arguments: f"git_status:{_source_name(arguments)}:root", observe=_observe_json("git_status"), coverage=_coverage_git_status)
-TOOLS["git_diff"].update(signature=_sig_git_diff, observe=_observe_json("git_diff"), coverage=_coverage_git_diff)
-TOOLS["continue_observation"].update(observe=_observe_continue, coverage=_coverage_continue)
-TOOLS["calculate"].update(observe=_observe_json("calculate"), coverage=_coverage_atomic("calculation", lambda a, d: {"kind":"calculation", "expression": a.get("expression")}))
-TOOLS["run_command"].update(observe=_observe_json("run_command"), coverage=_coverage_atomic("sandbox_command", lambda a, d: {"kind":"sandbox_command", "source": _source_name(a), "cwd": a.get("cwd") or "."}, lambda a, d: {"returncode": d.get("returncode")}))
-TOOLS["export_sandbox_zip"].update(observe=_observe_json("export_sandbox_zip"), coverage=_coverage_atomic("sandbox_export", lambda a, d: {"kind":"sandbox_export", "artifact": d.get("artifact") or a.get("filename")}, lambda a, d: {"bytes": d.get("bytes")}))
-TOOLS["memory_search"].update(observe=_observe_none, coverage=_coverage_memory_search)
-TOOLS["memory_store"].update(observe=_observe_none, coverage=_coverage_memory_store)
+CAPABILITIES["list_tree"].update(signature=_sig_list_tree, observe=_observe_tree, coverage=_coverage_tree)
+CAPABILITIES["search_code"].update(signature=_sig_search_code, observe=_observe_search, coverage=_coverage_search)
+CAPABILITIES["search_code"]["continue"] = _continue_search_code_page
+CAPABILITIES["find_symbol"].update(signature=_sig_find_symbol, observe=_observe_find_symbol, coverage=_coverage_find_symbol)
+CAPABILITIES["find_symbol"]["continue"] = _continue_find_symbol_page
+CAPABILITIES["symbol_relations"].update(signature=_sig_symbol_relations, observe=_observe_json("symbol_relations"), coverage=_coverage_relations)
+CAPABILITIES["symbol_relations"]["continue"] = _continue_structured_page
+CAPABILITIES["read_file"].update(signature=_sig_read_file, observe=_observe_file("read_file"), coverage=_coverage_file)
+CAPABILITIES["project_stats"].update(signature=lambda arguments: f"project_stats:{_source_name(arguments)}:root", observe=_observe_json("project_stats"), coverage=_coverage_project_stats)
+CAPABILITIES["inspect_project"].update(signature=lambda arguments: f"inspect_project:{_source_name(arguments)}:root", observe=_observe_json("inspect_project"), coverage=_coverage_inspect_project)
+CAPABILITIES["count_tokens"].update(signature=_sig_count_tokens, observe=_observe_json("count_tokens"), coverage=_coverage_count_tokens)
+CAPABILITIES["run_tests"].update(signature=_sig_run_tests, observe=_observe_json("run_tests"), coverage=_coverage_atomic("test_execution", lambda a, d: {"kind":"test_execution", "scope": d.get("scope") or a.get("scope") or "."}, lambda a, d: {"returncode": d.get("returncode")}))
+CAPABILITIES["git_status"].update(signature=lambda arguments: f"git_status:{_source_name(arguments)}:root", observe=_observe_json("git_status"), coverage=_coverage_git_status)
+CAPABILITIES["git_diff"].update(signature=_sig_git_diff, observe=_observe_json("git_diff"), coverage=_coverage_git_diff)
+CAPABILITIES["continue_observation"].update(observe=_observe_continue, coverage=_coverage_continue)
+CAPABILITIES["calculate"].update(observe=_observe_json("calculate"), coverage=_coverage_atomic("calculation", lambda a, d: {"kind":"calculation", "expression": a.get("expression")}))
+CAPABILITIES["run_command"].update(observe=_observe_json("run_command"), coverage=_coverage_atomic("sandbox_command", lambda a, d: {"kind":"sandbox_command", "source": _source_name(a), "cwd": a.get("cwd") or "."}, lambda a, d: {"returncode": d.get("returncode")}))
+CAPABILITIES["export_sandbox_zip"].update(observe=_observe_json("export_sandbox_zip"), coverage=_coverage_atomic("sandbox_export", lambda a, d: {"kind":"sandbox_export", "artifact": d.get("artifact") or a.get("filename")}, lambda a, d: {"bytes": d.get("bytes")}))
 
 # Capability-owned presentation, normalization and memoization hooks. Generic
 # dispatch functions above never branch on capability names.
-TOOLS["read_file"].update(
+CAPABILITIES["read_file"].update(
     public_arguments=_public_arguments_read_file, public_result=_public_result_file,
     model_projection=_model_projection_read_file, covers=_covering_read_file,
     resource_failure=_resource_failure_by_path("read_file"),
 )
-TOOLS["list_tree"].update(
+CAPABILITIES["list_tree"].update(
     public_arguments=_public_arguments_keys("source", "limit", "depth", "filter"), public_result=_public_result_tree,
 )
-TOOLS["search_code"].update(
+CAPABILITIES["search_code"].update(
     public_arguments=_public_arguments_search, public_result=_public_result_search,
     model_projection=_model_projection_search,
 )
-TOOLS["find_symbol"].update(
+CAPABILITIES["find_symbol"].update(
     public_arguments=_public_arguments_keys("source", "symbol", "path"), public_result=_public_result_find_symbol,
     model_projection=_model_projection_find_symbol, resource_failure=_resource_failure_by_path("find_symbol"),
 )
-TOOLS["symbol_relations"].update(
+CAPABILITIES["symbol_relations"].update(
     public_arguments=_public_arguments_keys("source", "symbol", "query", "path", "roots", "direction", "include_text_references", "max_depth", "max_edges"),
     public_result=_public_result_relations, model_projection=_model_projection_relations,
     normalize=_normalize_symbol_relations_arguments, resource_failure=_resource_failure_by_path("symbol_relations"),
 )
-TOOLS["continue_observation"].update(public_arguments=lambda arguments: {"frontier": str(arguments.get("frontier") or "")[:80]})
-TOOLS["calculate"].update(
+CAPABILITIES["continue_observation"].update(public_arguments=lambda arguments: {"frontier": str(arguments.get("frontier") or "")[:80]})
+CAPABILITIES["calculate"].update(
     public_arguments=lambda arguments: {"expression": str(arguments.get("expression") or "")[:240]},
     public_result=_public_result_fields("result", "resultado", "exact", "expression"),
 )
-TOOLS["count_tokens"].update(
+CAPABILITIES["count_tokens"].update(
     public_arguments=_public_arguments_keys("source", "path", "tokenizer"),
     public_result=_public_result_fields("file_count", "files", "directories", "lines", "characters", "bytes", "estimated_tokens", "tokens", "exact", "method", "characters_per_token", "languages"),
 )
-TOOLS["project_stats"].update(
+CAPABILITIES["project_stats"].update(
     public_arguments=_public_arguments_keys("source"),
     public_result=_public_result_fields("file_count", "files", "directories", "lines", "characters", "bytes", "estimated_tokens", "tokens", "exact", "method", "characters_per_token", "languages"),
 )
-TOOLS["inspect_project"].update(public_arguments=_public_arguments_keys("source"), public_result=_public_result_inspect, model_projection=_model_projection_inspect)
-TOOLS["run_tests"].update(
+CAPABILITIES["inspect_project"].update(public_arguments=_public_arguments_keys("source"), public_result=_public_result_inspect, model_projection=_model_projection_inspect)
+CAPABILITIES["run_tests"].update(
     public_arguments=lambda arguments: {"scope": arguments.get("scope")} if arguments.get("scope") else {},
     public_result=_public_result_fields("command", "returncode", "scope", "backend", "tests_detected", "summary"),
 )
-TOOLS["run_command"].update(public_arguments=_public_arguments_command, public_result=_public_result_command, model_projection=_model_projection_command)
-TOOLS["export_sandbox_zip"].update(
+CAPABILITIES["run_command"].update(public_arguments=_public_arguments_command, public_result=_public_result_command, model_projection=_model_projection_command)
+CAPABILITIES["export_sandbox_zip"].update(
     public_arguments=_public_arguments_keys("filename", "archive_root", "timeout_seconds"),
     public_result=_public_result_fields("artifact", "bytes", "sha256", "sandbox_source", "real_source_modified"),
 )
-TOOLS["git_status"].update(
+CAPABILITIES["git_status"].update(
     public_arguments=_public_arguments_keys("source", "max_entries"),
     public_result=_public_result_git_status,
 )
-TOOLS["git_diff"].update(public_arguments=_public_arguments_keys("source", "path", "staged", "context_lines"), public_result=_public_result_git_diff, resource_failure=_resource_failure_by_path("git_diff"))
-TOOLS["memory_search"].update(public_arguments=_public_arguments_memory)
-TOOLS["memory_store"].update(public_arguments=_public_arguments_memory)
+CAPABILITIES["git_diff"].update(public_arguments=_public_arguments_keys("source", "path", "staged", "context_lines"), public_result=_public_result_git_diff, resource_failure=_resource_failure_by_path("git_diff"))
 
-for _capability_entry in TOOLS.values():
+
+# Workspace mutation is a provider capability, not an Agent action. The generic
+# Runtime only sees confirmation=required and delegates prepare/confirm here.
+CAPABILITIES["workspace_transaction"] = {
+    "description": "Apply an atomic set of file changes to the real user workspace after deterministic dry-run and explicit user confirmation.",
+    "availability": "workspace",
+    "produces_grounding": False,
+    "effect": "mutate",
+    "returns": "Applied files, compile/test/reread verification state, rollback diagnostics and a persistent workspace effect.",
+    "caveats": [
+        "Existing files must be observed first so freshness preconditions can be attached.",
+        "Confirmation is required before real workspace mutation.",
+        "Verification policy belongs to this provider; Core does not know file or code semantics.",
+    ],
+    "confirmation": "required",
+    "input_schema": _workspace_transaction.schema(),
+    "prepare": _workspace_transaction.prepare,
+    "confirm": _workspace_transaction.confirm,
+}
+
+for _capability_entry in CAPABILITIES.values():
     # Every capability owns the same physical hook surface. Generic Runtime
     # dispatch never grows capability-name branches; unsupported hooks are
     # explicit ``None`` rather than implicit central behavior.
@@ -2524,330 +2457,142 @@ for _capability_entry in TOOLS.values():
         _capability_entry.setdefault(_hook_name, None)
 
 for _file_capability in ("read_file", "search_code", "find_symbol"):
-    TOOLS[_file_capability]["freshness"] = _validate_file_material_freshness
-    TOOLS[_file_capability]["rehydrate"] = _rehydrate_file_material
+    CAPABILITIES[_file_capability]["freshness"] = _validate_file_material_freshness
+    CAPABILITIES[_file_capability]["rehydrate"] = _rehydrate_file_material
 
 # Limites ficam no proprio registro. O catalogo resolve as chaves de
 # configuracao para valores numericos antes de chegar ao modelo.
-for _entrada_tool in TOOLS.values():
+for _entrada_tool in CAPABILITIES.values():
     _entrada_tool.setdefault("limits", {})
     _entrada_tool["effect"] = normalize_effect(_entrada_tool.get("effect"))
-TOOLS["list_tree"]["limits"] = {
-    "max_entradas": {"config_key": "agent.max_tree_entries", "default": 200},
-    "max_profundidade": {"config_key": "agent.max_tree_depth", "default": 6},
+CAPABILITIES["list_tree"]["limits"] = {
+    "max_entradas": {"config_key": "providers.standard.max_tree_entries", "default": 200},
+    "max_profundidade": {"config_key": "providers.standard.max_tree_depth", "default": 6},
 }
-TOOLS["search_code"]["limits"] = {
-    "max_linhas_por_resultado": {"config_key": "agent.max_search_range_lines", "default": 16},
-    "max_matches": {"config_key": "agent.max_search_matches", "default": 40},
-    "max_ranges": {"config_key": "agent.max_search_ranges", "default": 12},
+CAPABILITIES["search_code"]["limits"] = {
+    "max_linhas_por_resultado": {"config_key": "providers.standard.max_search_range_lines", "default": 16},
+    "max_matches": {"config_key": "providers.standard.max_search_matches", "default": 40},
+    "max_ranges": {"config_key": "providers.standard.max_search_ranges", "default": 12},
 }
-TOOLS["read_file"]["limits"] = {
-    "max_linhas": {"config_key": "agent.max_file_read_lines", "default": 400},
+CAPABILITIES["read_file"]["limits"] = {
+    "max_linhas": {"config_key": "providers.standard.max_file_read_lines", "default": 400},
 }
 
-def _ler_config_key(config, caminho, default):
-    valor = config or {}
-    for parte in caminho.split("."):
-        if not isinstance(valor, dict) or parte not in valor:
-            return default
-        valor = valor[parte]
-    return valor
 
 
-def _compact_arg_description(text):
-    text = str(text or "").strip()
-    replacements = {
-        "Relative path inside the project root.": "project-relative path",
-        "1-based line number inside the selected project file.": "1-based line",
-        "Hexadecimal SHA-256 returned by a fresh read.": "fresh-read SHA-256",
-        "Replacement code. Empty string is valid for deletion.": "replacement code; empty=delete",
-        "Exact original source text expected before a confirmed replacement.": "exact original source expected before replacement",
-    }
-    return replacements.get(text, text)[:110]
-
-
-def _compact_input_contract(schema):
-    """Compact JSON-schema arguments into model-readable signatures.
-
-    The executable schema remains authoritative for validation. The model only
-    needs type, required/optional state, numeric bounds and the tool-specific
-    meaning of each argument.
-    """
-    schema = schema if isinstance(schema, dict) else _schema_objeto()
-    required = set(schema.get("required") or [])
-    type_labels = {
-        "string": "str", "integer": "int", "number": "num",
-        "boolean": "bool", "object": "obj", "array": "list",
-    }
-    inputs = {}
-    for name, spec in (schema.get("properties") or {}).items():
-        spec = spec if isinstance(spec, dict) else {}
-        kind = type_labels.get(spec.get("type", "any"), spec.get("type", "any"))
-        if name not in required:
-            kind += "?"
-        bounds = []
-        if spec.get("minimum") is not None:
-            bounds.append(f">={spec.get('minimum')}")
-        if spec.get("maximum") is not None:
-            bounds.append(f"<={spec.get('maximum')}")
-        enum_values = [str(value) for value in (spec.get("enum") or [])]
-        if enum_values and len(enum_values) <= 6:
-            head = "|".join(enum_values) + ("?" if name not in required else "")
-        else:
-            head = kind + ((" " + " ".join(bounds)) if bounds else "")
-        description = _compact_arg_description(spec.get("description"))
-        inputs[name] = f"{head} | {description}" if description else head
-    return inputs
-
-
-def _minimal_tool_signature(name, schema):
-    """Return one compact model-facing capability signature from the canonical schema."""
-    schema = schema if isinstance(schema, dict) else _schema_objeto()
-    required = set(schema.get("required") or [])
-    type_labels = {
-        "string": "str", "integer": "int", "number": "num",
-        "boolean": "bool", "object": "obj", "array": "list",
-    }
-    properties = list((schema.get("properties") or {}).items())
-    required_items = [(arg_name, spec) for arg_name, spec in properties if arg_name in required]
-    optional_items = [(arg_name, spec) for arg_name, spec in properties if arg_name not in required]
-    enum_optionals = [(arg_name, spec) for arg_name, spec in optional_items if isinstance(spec, dict) and spec.get("enum")]
-    other_optionals = [(arg_name, spec) for arg_name, spec in optional_items if (arg_name, spec) not in enum_optionals]
-    selected = required_items + (enum_optionals + other_optionals)[:max(0, 4 - len(required_items))]
-    args = []
-    for arg_name, spec in selected:
-        spec = spec if isinstance(spec, dict) else {}
-        enum_values = [str(value) for value in (spec.get("enum") or [])]
-        optional = "" if arg_name in required else "?"
-        kind = "|".join(enum_values) if enum_values and len(enum_values) <= 6 else type_labels.get(spec.get("type", "any"), spec.get("type", "any"))
-        args.append(f"{arg_name}{optional}:{kind}")
-    if len(selected) < len(properties):
-        args.append("...")
-    return f"{name}({','.join(args)})"
-
-
-def gerar_indice_capabilities(config=None, allowed_names=None):
-    """Project the executable registry into the tiny index shown on every Agent call.
-
-    The index is discovery, not a second schema. The Runtime still validates the
-    first use against TOOLS[name].input_schema. Expanded contracts are shown only
-    after the Main LLM has actually requested that tool.
-    """
-    allowed = None if allowed_names is None else {str(name) for name in allowed_names}
-    result = []
-    for name, entry in TOOLS.items():
-        if allowed is not None and name not in allowed:
-            continue
-        signature = _minimal_tool_signature(name, entry.get("input_schema", _schema_objeto()))
-        purpose = " ".join(str(entry.get("description") or "").split())
-        if len(purpose) > 46:
-            purpose = purpose[:43].rstrip() + "..."
-        result.append(f"{signature} — {purpose}" if purpose else signature)
-    return result
-
-
-def gerar_catalogo_tools(config=None, allowed_names=None, compact=False):
-    """Generate the public catalog from the executable registry.
-
-    ``allowed_names`` only filters actions that are impossible in the current
-    runtime state. ``compact`` keeps each tool's canonical semantic contract
-    while removing implementation-only schema detail.
-    """
-    catalogo = []
-    fonte = TOOLS
-    allowed = None if allowed_names is None else {str(name) for name in allowed_names}
-    for chave, entrada in fonte.items():
-        public_name = chave
-        if allowed is not None and public_name not in allowed:
-            continue
-        limites = {}
-        for nome_limite, origem in (entrada.get("limits") or {}).items():
-            limites[nome_limite] = _ler_config_key(
-                config, origem["config_key"], origem["default"],
-            )
-        schema = entrada.get("input_schema", _schema_objeto())
-        if compact:
-            item = {
-                "name": public_name,
-                "purpose": entrada.get("description", "")[:200],
-                "effect": normalize_effect(entrada.get("effect")),
-                "inputs": _compact_input_contract(schema),
-                "returns": str(entrada.get("returns") or "")[:220],
-            }
-            caveats = [str(value)[:150] for value in (entrada.get("caveats") or [])[:4]]
-            if caveats:
-                item["caveats"] = caveats
-            if limites:
-                item["limits"] = limites
-            catalogo.append(item)
-        else:
-            item = {
-                "name": public_name,
-                "description": entrada.get("description", ""),
-                "effect": normalize_effect(entrada.get("effect")),
-                "input_schema": schema,
-                "returns": entrada.get("returns", ""),
-                "limits": limites,
-            }
-            if entrada.get("caveats"):
-                item["caveats"] = list(entrada.get("caveats") or [])
-            catalogo.append(item)
-    return catalogo
-
-
-def _tipo_json_valido(valor, tipo):
-    if tipo == "integer":
-        return isinstance(valor, int) and not isinstance(valor, bool)
-    if tipo == "number":
-        return isinstance(valor, (int, float)) and not isinstance(valor, bool)
-    if tipo == "string":
-        return isinstance(valor, str)
-    if tipo == "boolean":
-        return isinstance(valor, bool)
-    if tipo == "object":
-        return isinstance(valor, dict)
-    if tipo == "array":
-        return isinstance(valor, list)
+def _provider_available(name, spec, ctx):
+    """Provider-owned physical availability; Core never interprets domain labels."""
+    availability = str((spec or {}).get("availability") or "workspace")
+    project = _standard_context(ctx)
+    config = (ctx or {}).get("config") or {}
+    workspace_root = project.get("caminho_origem")
+    workspace_available = bool(workspace_root and os.path.isdir(workspace_root))
+    if availability == "global":
+        return True
+    if availability == "workspace":
+        return workspace_available
+    if availability == "tests":
+        tests_enabled = bool(_standard_tests_config(config).get("enabled", False))
+        return workspace_available and tests_enabled
     return False
 
 
-def _validar_valor_schema(valor, regra, caminho):
-    """Validate the JSON-Schema subset used by canonical tool inputs."""
-    regra = regra if isinstance(regra, dict) else {}
-    tipo = regra.get("type")
-    if tipo and not _tipo_json_valido(valor, tipo):
-        return f"argumento '{caminho}' precisa ser do tipo {tipo}"
-    if "enum" in regra and valor not in list(regra.get("enum") or []):
-        permitidos = ", ".join(str(item) for item in (regra.get("enum") or []))
-        return f"argumento '{caminho}' precisa ser um de: {permitidos}"
-    if tipo == "string":
-        if len(valor.strip()) < int(regra.get("minLength", 0) or 0):
-            return f"argumento '{caminho}' nao pode ser vazio"
-        if "maxLength" in regra and len(valor) > int(regra["maxLength"]):
-            return f"argumento '{caminho}' precisa ter no maximo {regra['maxLength']} caracteres"
-        if regra.get("pattern") and not re.fullmatch(str(regra["pattern"]), valor):
-            return f"argumento '{caminho}' nao corresponde ao formato esperado"
-    if tipo in ("integer", "number"):
-        if "minimum" in regra and valor < regra["minimum"]:
-            return f"argumento '{caminho}' precisa ser >= {regra['minimum']}"
-        if "maximum" in regra and valor > regra["maximum"]:
-            return f"argumento '{caminho}' precisa ser <= {regra['maximum']}"
-    if tipo == "object":
-        properties = regra.get("properties") if isinstance(regra.get("properties"), dict) else {}
-        if regra.get("additionalProperties") is False:
-            unknown = sorted(set(valor) - set(properties))
-            if unknown:
-                return f"argumento '{caminho}' possui campo(s) desconhecido(s): " + ", ".join(unknown)
-        missing = [name for name in regra.get("required", []) if name not in valor]
-        if missing:
-            return f"argumento '{caminho}' exige campo(s): " + ", ".join(missing)
-        for child_name, child_value in valor.items():
-            child_rule = properties.get(child_name)
-            if isinstance(child_rule, dict):
-                error = _validar_valor_schema(child_value, child_rule, f"{caminho}.{child_name}")
-                if error:
-                    return error
-    if tipo == "array":
-        if "minItems" in regra and len(valor) < int(regra["minItems"]):
-            return f"argumento '{caminho}' precisa ter pelo menos {regra['minItems']} item(ns)"
-        if "maxItems" in regra and len(valor) > int(regra["maxItems"]):
-            return f"argumento '{caminho}' precisa ter no maximo {regra['maxItems']} item(ns)"
-        item_schema = regra.get("items")
-        if isinstance(item_schema, dict):
-            for index, item in enumerate(valor):
-                error = _validar_valor_schema(item, item_schema, f"{caminho}[{index}]")
-                if error:
-                    return error
-    return None
+def _provider_description(ctx):
+    project = _standard_context(ctx)
+    workspace = project.get("caminho_origem")
+    eyle_root = project.get("eyle_root")
+    return {
+        "connected": True,
+        "resources": {
+            "workspace": {
+                "available": bool(workspace and os.path.isdir(workspace)),
+                "kind": "user_workspace",
+                "access": "provider_managed",
+                "content_state": project.get("content_state"),
+            },
+            "eyle_source": {
+                "available": bool(eyle_root and os.path.isdir(eyle_root)),
+                "kind": "running_eyle_source",
+                "access": "read_only_or_isolated_snapshot",
+            },
+        },
+    }
 
 
-def validar_chamada_tool(nome, arguments):
-    """Validate one canonical tool call before execution; aliases are not accepted."""
-    entrada = TOOLS.get(nome)
-    if entrada is None:
-        conhecidas = ", ".join(sorted(TOOLS))
-        return None, _falha(
-            "TOOL_NOT_FOUND",
-            f"tool '{nome}' nao existe. Ferramentas disponiveis: {conhecidas}",
-        )
-    if not isinstance(arguments, dict):
-        return None, _falha("INVALID_ARGUMENT", "arguments precisa ser um objeto JSON")
-
-    schema = entrada.get("input_schema")
-    if not isinstance(schema, dict):
-        return None, _falha("INVALID_TOOL_SCHEMA", f"tool '{nome}' nao possui input_schema canonico")
-    normalizados = dict(arguments)
-
-    propriedades = schema.get("properties") or {}
-    if schema.get("additionalProperties") is False:
-        desconhecidas = sorted(set(normalizados) - set(propriedades))
-        if desconhecidas:
-            return None, _falha(
-                "INVALID_ARGUMENT",
-                "argumento(s) desconhecido(s): " + ", ".join(desconhecidas),
-            )
-
-    faltando = [nome_campo for nome_campo in schema.get("required", []) if nome_campo not in normalizados]
-    if faltando:
-        return None, _falha(
-            "INVALID_ARGUMENT",
-            "argumento(s) obrigatorio(s) faltando: " + ", ".join(faltando),
-        )
-
-    for nome_campo, valor in normalizados.items():
-        regra = propriedades.get(nome_campo)
-        if regra is None:
-            continue
-        erro = _validar_valor_schema(valor, regra, nome_campo)
-        if erro:
-            return None, _falha("INVALID_ARGUMENT", erro)
-    if "line_start" in normalizados and "line_end" in normalizados:
-        if normalizados["line_end"] < normalizados["line_start"]:
-            return None, _falha(
-                "INVALID_ARGUMENT",
-                "argument 'line_end' must be >= line_start",
-            )
-    normalizer = (TOOLS.get(nome) or {}).get("normalize")
-    if callable(normalizer):
-        normalized_by_capability = normalizer(normalizados)
-        if not isinstance(normalized_by_capability, dict):
-            return None, _falha("INVALID_CAPABILITY_NORMALIZATION", f"capability '{nome}' returned invalid normalized arguments")
-        normalizados = normalized_by_capability
-    return normalizados, None
+def _provider_rehydrate(materials, ctx):
+    project = _standard_context(ctx)
+    roots = {"workspace": project.get("caminho_origem"), "eyle": project.get("eyle_root")}
+    config = (ctx or {}).get("config") or {}
+    max_lines = max(1, int(_standard_config(config).get("max_file_read_lines", 400) or 400))
+    capability_rehydrate_materials(materials, roots, max_lines=max_lines)
 
 
-def executar_tool(nome, arguments, ctx):
-    """
-    Single execution entry point used by ``eyle.core.agent``. Tool
-    exceptions become a standard ``TOOL_EXECUTION_ERROR`` result instead of
-    bypassing the task state machine.
-    """
-    arguments, erro_validacao = validar_chamada_tool(nome, arguments)
-    if erro_validacao is not None:
-        return erro_validacao
-    entrada = TOOLS[nome]
-    try:
-        resultado = entrada["fn"](arguments, ctx or {})
-        if not isinstance(resultado, dict) or set(resultado) != set(_CAMPOS_RESULTADO):
-            return _falha(
-                "INVALID_TOOL_RESULT",
-                f"tool '{nome}' devolveu um resultado fora do contrato padrao",
-                executed=True,
-            )
-        observations = _capability_observations(nome, arguments, resultado)
-        if observations:
-            resultado["observations"] = observations
-        try:
-            coverage = _capability_coverage(nome, arguments, resultado)
-        except CoverageContractError as error:
-            return _falha(
-                "CAPABILITY_COVERAGE_INVALID",
-                f"capability '{nome}' violated Coverage contract: {error}",
-                executed=bool(resultado.get("executed")), changed=bool(resultado.get("changed")),
-                retryable=False,
-            )
-        resultado["coverage"] = coverage
-        resultado["frontiers"] = _capability_frontiers(nome, arguments, resultado)
-        return resultado
-    except Exception as e:
-        return _falha("TOOL_EXECUTION_ERROR", f"tool '{nome}' falhou ao executar: {e}", executed=True)
+_STANDARD_CONFIG_FIELDS = {
+    "max_tree_entries", "max_tree_depth", "max_file_read_lines",
+    "max_project_scan_entries", "max_project_scan_depth", "max_project_file_bytes",
+    "max_inspect_relation_edges", "max_git_diff_chars", "max_search_matches",
+    "max_search_ranges", "max_search_range_lines", "sandbox", "tests",
+}
+_STANDARD_TEST_FIELDS = {"enabled", "command_python", "command_node", "timeout_seconds", "sandbox"}
+_STANDARD_SANDBOX_FIELDS = {
+    "backend", "bloquear_rede", "comandos_permitidos", "cpu_segundos", "memoria_mb",
+    "max_processos", "max_arquivos_abertos", "max_saida_kb", "max_arquivo_mb",
+    "copiar_projeto", "max_arquivos_projeto", "max_tamanho_projeto_mb", "cpus",
+    "allow_trusted_local", "timeout_segundos", "imagem_oci",
+}
+_STANDARD_SANDBOX_BACKENDS = {"auto", "microsandbox", "docker", "bwrap", "process", "trusted_local"}
+_STANDARD_LIMIT_DEFAULTS = {
+    "max_tree_entries": 200, "max_tree_depth": 6, "max_file_read_lines": 400,
+    "max_project_scan_entries": 20000, "max_project_scan_depth": 32,
+    "max_project_file_bytes": 4194304, "max_inspect_relation_edges": 60,
+    "max_git_diff_chars": 6000, "max_search_matches": 40,
+    "max_search_ranges": 12, "max_search_range_lines": 16,
+}
+
+def _reject_provider_unknown(container, allowed, prefix):
+    unknown = sorted(set(container) - set(allowed))
+    if unknown:
+        raise ValueError(f"STANDARD_PROVIDER_CONFIG_UNKNOWN:{prefix}:" + ",".join(unknown))
+
+def _validate_provider_sandbox(value, prefix):
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise ValueError(f"STANDARD_PROVIDER_CONFIG_INVALID:{prefix}:object_required")
+    _reject_provider_unknown(value, _STANDARD_SANDBOX_FIELDS, prefix)
+    backend = value.get("backend", "auto")
+    if not isinstance(backend, str) or backend not in _STANDARD_SANDBOX_BACKENDS:
+        raise ValueError(f"STANDARD_PROVIDER_CONFIG_INVALID:{prefix}.backend")
+
+def _validate_provider_config(value):
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        raise ValueError("STANDARD_PROVIDER_CONFIG_INVALID:object_required")
+    _reject_provider_unknown(value, _STANDARD_CONFIG_FIELDS, "standard")
+    for key, default in _STANDARD_LIMIT_DEFAULTS.items():
+        item = value.get(key, default)
+        if not isinstance(item, int) or isinstance(item, bool) or item < 1:
+            raise ValueError(f"STANDARD_PROVIDER_CONFIG_INVALID:standard.{key}")
+    _validate_provider_sandbox(value.get("sandbox") or {}, "standard.sandbox")
+    tests = value.get("tests") or {}
+    if not isinstance(tests, dict):
+        raise ValueError("STANDARD_PROVIDER_CONFIG_INVALID:standard.tests")
+    _reject_provider_unknown(tests, _STANDARD_TEST_FIELDS, "standard.tests")
+    if "enabled" in tests and not isinstance(tests.get("enabled"), bool):
+        raise ValueError("STANDARD_PROVIDER_CONFIG_INVALID:standard.tests.enabled")
+    timeout = tests.get("timeout_seconds", 60)
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout < 1:
+        raise ValueError("STANDARD_PROVIDER_CONFIG_INVALID:standard.tests.timeout_seconds")
+    for key in ("command_python", "command_node"):
+        if key in tests and not isinstance(tests.get(key), str):
+            raise ValueError(f"STANDARD_PROVIDER_CONFIG_INVALID:standard.tests.{key}")
+    _validate_provider_sandbox(tests.get("sandbox") or {}, "standard.tests.sandbox")
+
+
+def get_provider():
+    return Provider(
+        provider_id="standard", capabilities=CAPABILITIES, available=_provider_available,
+        describe=_provider_description, rehydrate=_provider_rehydrate,
+        validate_config=_validate_provider_config,
+    )

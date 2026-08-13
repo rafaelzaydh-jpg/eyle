@@ -1,14 +1,16 @@
 from __future__ import annotations
+from tests.canonical import run_agent
+from tests.canonical import standard_registry
 
 import json
 from pathlib import Path
 
 import eyle.core.agent as core_agent
-import eyle.core.sandbox as sandbox_mod
-import eyle.core.tools as tools
-from eyle.core.code_relations import analyze_symbol_relations
-from eyle.core.execution_context import ExecutionContext, bind_execution, reset_execution
-from tests.canonical import agent_final, agent_tools, base_config, tool_call
+import eyle.providers.standard_impl.sandbox as sandbox_mod
+import eyle.providers.standard as tools
+from eyle.providers.standard_impl.code_relations import analyze_symbol_relations
+from eyle.runtime.execution_context import ExecutionContext, bind_execution, reset_execution
+from tests.canonical import agent_complete, agent_tools, base_config, tool_call
 
 
 
@@ -18,12 +20,12 @@ from tests.canonical import agent_final, agent_tools, base_config, tool_call
 
 
 def test_nonretryable_tool_failure_becomes_runtime_fact_and_main_remains_free(monkeypatch, tmp_path):
-    prompts=[]; outputs=iter([agent_tools(tool_call("run_command", {"command":"echo ok"})), agent_final("Não consegui executar porque o sandbox está indisponível.")])
+    prompts=[]; outputs=iter([agent_tools(tool_call("run_command", {"command":"echo ok"})), agent_complete("Não consegui executar porque o sandbox está indisponível.")])
     monkeypatch.setattr(core_agent,"executar_agente_llm",lambda prompt,_config:(prompts.append(json.loads(prompt)) or next(outputs)))
     def fake_tool(name, arguments, context):
         return {"status":"failed","ok":False,"executed":False,"changed":False,"error_code":"SANDBOX_UNAVAILABLE","retryable":False,"detail":"unavailable"}
-    monkeypatch.setattr(core_agent,"executar_tool",fake_tool)
-    status,text,_,details=core_agent.executar_agente("Execute no sandbox.",base_config(),projeto={"caminho_origem":str(tmp_path)},retornar_detalhes=True)
+    monkeypatch.setattr(standard_registry(),"execute",fake_tool)
+    status,text,_,details=run_agent(core_agent, "Execute no sandbox.",base_config(),provider_context={"standard":{"caminho_origem":str(tmp_path)}},retornar_detalhes=True)
     assert status=="success" and "sandbox" in text.lower()
     assert len(prompts)==2
 
@@ -32,10 +34,10 @@ def test_symbol_relations_reports_registry_binding_and_root_reachability(tmp_pat
         "def target():\n    return 1\n\nTOOLS = {'x': {'fn': target}}\n",
         encoding="utf-8",
     )
-    result = tools.executar_tool(
+    result = standard_registry().execute(
         "symbol_relations",
         {"symbol": "target", "roots": ["tools.py"], "direction": "incoming", "include_text_references": False},
-        {"projeto": {"caminho_origem": str(tmp_path)}, "config": base_config()},
+        {"provider_context": {"standard": {"caminho_origem": str(tmp_path)}}, "config": base_config()},
     )
     assert result["ok"] is True
     detail = result["detail"]
@@ -75,14 +77,15 @@ def test_docker_backend_reuses_one_container_per_job(monkeypatch, tmp_path):
         assert cleanup1 is None and cleanup2 is None
         assert first[0:2] == ["/usr/bin/docker", "exec"]
         assert second[0:2] == ["/usr/bin/docker", "exec"]
-        assert first[4] == second[4] == execution.sandbox_container_name
+        state = execution.provider_state_for("standard.sandbox")
+        assert first[4] == second[4] == state["container_name"]
         docker_runs = [call for call in calls if call[:2] == ["/usr/bin/docker", "run"]]
         assert len(docker_runs) == 1
         assert "--pull" in docker_runs[0] and "missing" in docker_runs[0]
         assert "--read-only" not in docker_runs[0]
         assert "--network" in docker_runs[0] and "bridge" in docker_runs[0]
     finally:
-        execution.cleanup_sandbox()
+        execution.cleanup()
         reset_execution(token)
 
 

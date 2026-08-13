@@ -20,8 +20,42 @@ import zipfile
 
 DEFAULT_OCI_IMAGE = "python:3.12-slim"
 
-from .execution_context import current_execution
+from eyle.runtime.execution_context import current_execution
 from .workspace_policy import build_protected_resource_index, is_protected_workspace_resource
+
+
+def _cleanup_sandbox_state(state):
+    session = state.get("microsandbox_session")
+    docker = state.get("docker_binary")
+    container = state.get("container_name")
+    tempdir = state.get("tempdir")
+    state.clear()
+    if session is not None:
+        try:
+            session.close()
+        except Exception:
+            pass
+    if docker and container:
+        try:
+            subprocess.run([docker, "rm", "-f", container], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15, check=False, shell=False)
+        except Exception:
+            pass
+    if tempdir is not None:
+        try:
+            tempdir.cleanup()
+        except Exception:
+            pass
+
+
+def _sandbox_state(execution=None):
+    execution = execution or current_execution()
+    if execution is None:
+        return None
+    state = execution.provider_state_for("standard.sandbox")
+    if not state.get("cleanup_registered"):
+        state["cleanup_registered"] = True
+        execution.register_provider_cleanup(lambda state=state: _cleanup_sandbox_state(state))
+    return state
 
 
 class ErroSandbox(ValueError):
@@ -270,8 +304,9 @@ def _ensure_microsandbox_session(caminho_projeto, cfg, limites, *, bloquear_rede
     from .microsandbox_backend import MicrosandboxBackendError, MicrosandboxSession
 
     execution = current_execution()
-    if execution is not None and execution.sandbox_microsandbox_session is not None:
-        return execution.sandbox_microsandbox_session, False
+    state = _sandbox_state(execution)
+    if execution is not None and state.get("microsandbox_session") is not None:
+        return state.get("microsandbox_session"), False
     try:
         session = MicrosandboxSession(
             caminho_projeto, cfg, limites, block_network=bloquear_rede,
@@ -279,8 +314,8 @@ def _ensure_microsandbox_session(caminho_projeto, cfg, limites, *, bloquear_rede
     except MicrosandboxBackendError as exc:
         raise ErroSandbox(str(exc)) from exc
     if execution is not None:
-        execution.sandbox_microsandbox_session = session
-        execution.sandbox_backend = "microsandbox"
+        state["microsandbox_session"] = session
+        state["backend"] = "microsandbox"
         return session, False
     return session, True
 
@@ -297,8 +332,9 @@ def _ensure_docker_container(caminho_projeto, cfg, limites):
     if not docker:
         raise ErroSandbox("Docker was not found")
     execution = current_execution()
-    if execution is not None and execution.sandbox_container_name:
-        return docker, execution.sandbox_container_name, False
+    state = _sandbox_state(execution)
+    if execution is not None and state.get("container_name"):
+        return docker, state.get("container_name"), False
 
     image = _oci_image(cfg)
     name = f"eyle-sandbox-{uuid.uuid4().hex[:12]}"
@@ -331,9 +367,9 @@ def _ensure_docker_container(caminho_projeto, cfg, limites):
         detail = (completed.stderr or completed.stdout or "docker run falhou").strip()[-1200:]
         raise ErroSandbox(f"Docker sandbox indisponivel: {detail}")
     if execution is not None:
-        execution.sandbox_container_name = name
-        execution.sandbox_docker_binary = docker
-        execution.sandbox_backend = "docker"
+        state["container_name"] = name
+        state["docker_binary"] = docker
+        state["backend"] = "docker"
     return docker, name, execution is None
 
 
@@ -430,21 +466,22 @@ def _safe_sandbox_cwd(workspace, cwd):
 def _agent_sandbox_workspace(caminho_projeto, cfg, limites, *, source_kind="workspace"):
     """Return one writable snapshot, bound to one explicit physical source per job."""
     execution = current_execution()
+    state = _sandbox_state(execution)
     source_root = os.path.realpath(caminho_projeto)
     source_kind = str(source_kind or "workspace")
-    if execution is not None and execution.sandbox_workspace_path and os.path.isdir(execution.sandbox_workspace_path):
-        if execution.sandbox_source_root != source_root or execution.sandbox_source_kind != source_kind:
+    if execution is not None and state.get("workspace_path") and os.path.isdir(state.get("workspace_path")):
+        if state.get("source_root") != source_root or state.get("source_kind") != source_kind:
             raise ErroSandbox(
-                f"SANDBOX_SOURCE_CONFLICT: active={execution.sandbox_source_kind or 'unknown'}; requested={source_kind}"
+                f"SANDBOX_SOURCE_CONFLICT: active={state.get("source_kind") or 'unknown'}; requested={source_kind}"
             )
-        return execution.sandbox_workspace_path, execution.sandbox_tempdir
+        return state.get("workspace_path"), state.get("tempdir")
     workspace, tempdir = _copiar_projeto(source_root, limites, source_kind=source_kind)
     if execution is not None:
-        execution.sandbox_workspace_path = workspace
-        execution.sandbox_source_root = source_root
-        execution.sandbox_source_kind = source_kind
-        execution.sandbox_tempdir = tempdir
-        execution.sandbox_protected_resources_omitted = len(getattr(tempdir, "protected_resources_omitted", []) or [])
+        state["workspace_path"] = workspace
+        state["source_root"] = source_root
+        state["source_kind"] = source_kind
+        state["tempdir"] = tempdir
+        state["protected_resources_omitted"] = len(getattr(tempdir, "protected_resources_omitted", []) or [])
     return workspace, tempdir
 
 
@@ -479,8 +516,9 @@ def executar_comando_livre_no_sandbox(caminho_projeto, comando, cfg_sandbox=None
             raise ErroSandbox("command vazio ou invalido")
         argv = ["/bin/sh", "-lc", shell_command]
         execution = current_execution()
+        state = _sandbox_state(execution)
         if execution is not None:
-            execution.sandbox_backend = backend
+            state["backend"] = backend
 
         if backend == "microsandbox":
             from .microsandbox_backend import MicrosandboxBackendError
@@ -518,7 +556,7 @@ def executar_comando_livre_no_sandbox(caminho_projeto, comando, cfg_sandbox=None
                 "workspace_transport": getattr(session, "workspace_transport", "unknown"),
                 "snapshot_persists_for_job": execution is not None,
                 "protected_resources_omitted": int(
-                    getattr(execution, "sandbox_protected_resources_omitted", 0) or 0
+                    state.get("protected_resources_omitted", 0) or 0
                 ) if execution is not None else len(
                     getattr(tempdir, "protected_resources_omitted", []) or []
                 ),
@@ -570,7 +608,7 @@ def executar_comando_livre_no_sandbox(caminho_projeto, comando, cfg_sandbox=None
         "executado": True, "ok": (code == 0 and not timed_out), "codigo": code, "saida": output,
         "erro": f"timeout de {timeout}s excedido" if timed_out else None, "backend": backend,
         "network_enabled": True, "workspace_isolated": True, "snapshot_persists_for_job": True,
-        "protected_resources_omitted": int(getattr(current_execution(), "sandbox_protected_resources_omitted", 0) or 0),
+        "protected_resources_omitted": int((_sandbox_state(current_execution()) or {}).get("protected_resources_omitted", 0) or 0),
         "real_workspace_changed": False, "cwd": rel_cwd,
     }
 
@@ -613,7 +651,8 @@ def _write_snapshot_zip_host(workspace, destination, archive_root):
 def export_active_sandbox_zip(destination_dir, filename, *, archive_root=None, timeout_seconds=120):
     """Package the current isolated snapshot and export only an inert ZIP artifact."""
     execution = current_execution()
-    if execution is None or not execution.sandbox_workspace_path:
+    state = _sandbox_state(execution)
+    if execution is None or not state.get("workspace_path"):
         raise ErroSandbox("SANDBOX_NOT_INITIALIZED")
     destination_dir = os.path.realpath(destination_dir)
     if not os.path.isdir(destination_dir):
@@ -627,9 +666,9 @@ def export_active_sandbox_zip(destination_dir, filename, *, archive_root=None, t
     root_name = _safe_archive_root(archive_root, os.path.splitext(filename)[0])
     temp_destination = destination + f".tmp-{uuid.uuid4().hex[:10]}"
     try:
-        session = execution.sandbox_microsandbox_session
+        session = state.get("microsandbox_session")
         if (
-            execution.sandbox_backend == "microsandbox"
+            state.get("backend") == "microsandbox"
             and session is not None
             and getattr(session, "workspace_transport", "") == "guest_fs_copy"
         ):
@@ -658,7 +697,7 @@ def export_active_sandbox_zip(destination_dir, filename, *, archive_root=None, t
                 raise ErroSandbox(f"falha ao empacotar snapshot na microVM: {result.error or result.output}")
             session.copy_to_host(guest_zip, temp_destination, timeout=max(30, float(timeout_seconds) + 30.0))
         else:
-            _write_snapshot_zip_host(execution.sandbox_workspace_path, temp_destination, root_name)
+            _write_snapshot_zip_host(state.get("workspace_path"), temp_destination, root_name)
         if not os.path.isfile(temp_destination):
             raise ErroSandbox("exportacao nao produziu arquivo")
         os.replace(temp_destination, destination)
@@ -670,7 +709,7 @@ def export_active_sandbox_zip(destination_dir, filename, *, archive_root=None, t
             "artifact": os.path.basename(destination),
             "bytes": os.path.getsize(destination),
             "sha256": digest.hexdigest(),
-            "sandbox_source": execution.sandbox_source_kind,
+            "sandbox_source": state.get("source_kind"),
             "real_source_modified": False,
         }
     finally:
