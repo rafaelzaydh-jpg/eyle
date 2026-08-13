@@ -1,10 +1,9 @@
-"""Eyle 2.7.5 Rev1.3.4 strict physical configuration boundary."""
+"""Eyle 2.7.5 Rev1.4.1 strict physical configuration boundary."""
 from __future__ import annotations
 
 import json
 
 from eyle import __revision__, __schema_version__, __version__
-from eyle.core.claim_review import ClaimConfigError, claim_config
 
 
 class ConfigError(ValueError):
@@ -29,7 +28,7 @@ _AGENT_FIELDS = {
     "task_deadline_seconds", "max_total_tokens",
     "max_project_scan_entries",
     "max_project_scan_depth", "max_project_file_bytes", "max_inspect_relation_edges",
-    "max_git_diff_chars", "max_search_matches", "max_search_ranges", "claims",
+    "max_git_diff_chars", "max_search_matches", "max_search_ranges",
     "max_search_range_lines", "sandbox",
 }
 _CONTEXT_FIELDS = {
@@ -196,10 +195,6 @@ def validar_config(config):
     ):
         _validate_int(context, key, default, minimum=1, prefix="context_engine")
 
-    try:
-        claim_config(config)
-    except ClaimConfigError as error:
-        raise ConfigError(str(error)) from error
     return config
 
 

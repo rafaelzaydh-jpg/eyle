@@ -3,9 +3,8 @@ from __future__ import annotations
 import json
 
 import eyle.core.tools as tools
-from eyle.core.claim_review import compact_grounding, review_prompt
 from eyle.core.tools import capability_observation_signature as observation_signature
-from tests.canonical import base_config, review, issue
+from tests.canonical import base_config
 
 
 def _ctx(root):
@@ -44,42 +43,10 @@ def test_capability_index_exposes_small_enums_without_full_catalog():
     assert "direction?:incoming|outgoing|both" in index[0]
 
 
-def test_claim_packet_is_fresh_and_contains_only_request_answer_and_selected_material():
-    grounding = {"mat-0001": {"locator": {"kind":"file","path":"x.py","line_start":1,"line_end":1}, "content_hash":"h", "content": "x=1"}}
-    view = compact_grounding(grounding, ["mat-0001"], max_chars_per_item=200)
-    packet = json.loads(review_prompt("Alpha. Beta.", view, "Do it"))
-    assert set(packet) == {"request", "candidate_answer", "observed_material"}
-    assert packet["request"] == "Do it"
-    assert packet["candidate_answer"] == "Alpha. Beta."
-    assert packet["observed_material"][0]["ref"] == "observation:mat-0001"
-    for dead in ("investigation", "task_state", "runtime_facts", "request_anchors", "answer_anchors", "evidence"):
-        assert dead not in packet
 
 
-def test_claim_parser_rejects_unprefixed_grounding_ref_locally():
-    from llm.structured import StructuredResponseError, parse_claim_review_response
-    raw = review(issues=[issue(grounding_refs=["a1"])])
-    try:
-        parse_claim_review_response(raw)
-    except StructuredResponseError as error:
-        assert error.code == "CLAIM_REVIEW_GROUNDING_REF_FORMAT_INVALID"
-    else:
-        raise AssertionError("local Claim parser must reject noncanonical refs")
 
 
-def test_claim_parser_rejects_removed_answer_and_target_coordinates():
-    from llm.structured import StructuredResponseError, parse_claim_review_response
-    canonical = {"kind":"unsupported","grounding_refs":["request"],"reason":"x"}
-    for legacy in (
-        {**canonical, "answer_ref":"answer:a1"},
-        {**canonical, "target_id":"investigation:T1"},
-    ):
-        try:
-            parse_claim_review_response({"verdict":"challenge","issues":[legacy]})
-        except StructuredResponseError as error:
-            assert error.code == "CLAIM_REVIEW_ISSUE_SHAPE_INVALID"
-        else:
-            raise AssertionError("fresh Claim must reject removed Main-state coordinates")
 
 
 def test_symbol_relations_model_view_is_bounded_but_preserves_full_counts():

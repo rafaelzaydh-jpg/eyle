@@ -3,7 +3,6 @@ from __future__ import annotations
 import eyle.core.agent as core_agent
 import eyle.core.tools as tools
 from eyle.core.tools import capability_observation_signature as observation_signature
-from eyle.core.claim_review import normalize_claim_review
 from eyle.core.investigation import apply_investigation_updates
 from eyle.core.observation import (
     material_items,
@@ -11,7 +10,7 @@ from eyle.core.observation import (
 )
 from eyle.core.session import AgentSession
 from llm.structured import contract_instruction, schema_for_profile
-from tests.canonical import base_config, review, issue
+from tests.canonical import base_config
 
 
 def _ctx(root, *, session=None, max_ranges=3, max_matches=3):
@@ -108,59 +107,12 @@ def test_investigation_grounding_points_directly_to_observed_material(tmp_path):
     assert updated[0]["grounding_ids"] == ["mat-0001"]
 
 
-def test_claim_contract_instruction_matches_fresh_schema_shape():
-    instruction = contract_instruction("claim_verifier")
-    assert "{verdict,issues}" in instruction
-    assert "accept|challenge" in instruction
-    assert "{kind,grounding_refs,reason}" in instruction
-    assert "request or observation:mat-*" in instruction
-    assert "answer_ref" not in instruction
-    assert "runtime:" not in instruction
 
 
-def test_claim_accept_cannot_carry_issues():
-    from llm.structured import StructuredResponseError, parse_claim_review_response
-    raw = {"verdict":"accept","issues":[{"kind":"omission","grounding_refs":["request"],"reason":"B is omitted."}]}
-    try:
-        parse_claim_review_response(raw)
-    except StructuredResponseError as error:
-        assert error.code == "CLAIM_REVIEW_ACCEPT_WITH_ISSUES"
-    else:
-        raise AssertionError("accept with blockers must be rejected")
 
 
-def test_claim_challenge_requires_concrete_issue():
-    from llm.structured import StructuredResponseError, parse_claim_review_response
-    try:
-        parse_claim_review_response({"verdict":"challenge","issues":[]})
-    except StructuredResponseError as error:
-        assert error.code == "CLAIM_REVIEW_CHALLENGE_REQUIRES_ISSUE"
-    else:
-        raise AssertionError("challenge without blocker must be rejected")
 
 
-def test_claim_issue_accepts_request_coordinate_and_rejects_unknown_prefix():
-    from llm.structured import StructuredResponseError, parse_claim_review_response
-    ok={"verdict":"challenge","issues":[{"kind":"unsupported","grounding_refs":["request"],"reason":"x"}]}
-    assert parse_claim_review_response(ok)["issues"][0]["grounding_refs"]==["request"]
-    bad={"verdict":"challenge","issues":[{**ok["issues"][0],"grounding_refs":["mystery:x"]}]}
-    try:
-        parse_claim_review_response(bad)
-    except StructuredResponseError as error:
-        assert error.code=="CLAIM_REVIEW_GROUNDING_REF_FORMAT_INVALID"
-    else:
-        raise AssertionError("unknown coordinate prefix must fail")
-
-
-def test_claim_schema_has_protocol_shape_without_semantic_quotas():
-    schema = schema_for_profile("claim_verifier")
-    issues = schema["properties"]["issues"]
-    issue_schema = issues["items"]
-    assert "maxItems" not in issues
-    assert "maxItems" not in issue_schema["properties"]["grounding_refs"]
-    assert "maxLength" not in issue_schema["properties"]["reason"]
-    assert set(issue_schema["properties"]) == {"kind", "grounding_refs", "reason"}
-    assert "unsafe" in issue_schema["properties"]["kind"]["enum"]
 
 
 def test_agent_prompt_exposes_physical_frontier_without_prescribing_tool_strategy():
@@ -211,37 +163,7 @@ def test_old_open_frontier_remains_in_main_navigation_after_recency_compaction(t
     assert any(item.get("retained_for") == "open_frontiers" for item in projected)
 
 
-def test_claim_local_validation_does_not_impose_semantic_blocker_quota():
-    from llm.structured import parse_claim_review_response
-    many = [
-        {"kind": "unsupported", "grounding_refs": ["request"], "reason": f"blocker {index}"}
-        for index in range(8)
-    ]
-    parsed = parse_claim_review_response({"verdict": "challenge", "issues": many})
-    assert len(parsed["issues"]) == 8
 
 
-def test_claim_normalizer_validates_coordinates_not_reason_length():
-    from eyle.core.claim_review import normalize_claim_review
-    raw = {
-        "verdict": "challenge",
-        "issues": [{
-            "kind": "unsupported",
-            "grounding_refs": ["request"],
-            "reason": "x" * 1200,
-        }],
-    }
-    ok, reason, normalized = normalize_claim_review(raw, {}, visible_grounding_ids=[])
-    assert ok is True and reason == "ok"
-    assert len(normalized["issues"][0]["reason"]) == 1200
 
 
-def test_claim_normalizer_rejects_material_not_supplied_to_fresh_call():
-    from eyle.core.claim_review import normalize_claim_review
-    raw = {
-        "verdict": "challenge",
-        "issues": [{"kind": "unsupported", "grounding_refs": ["observation:mat-9999"], "reason": "x"}],
-    }
-    ok, reason, _ = normalize_claim_review(raw, {}, visible_grounding_ids=[])
-    assert ok is False
-    assert reason.startswith("CLAIM_REVIEW_GROUNDING_OBSERVATION_NOT_VISIBLE")

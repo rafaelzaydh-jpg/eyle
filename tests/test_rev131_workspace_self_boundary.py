@@ -175,14 +175,13 @@ def test_export_packages_only_active_snapshot_and_never_overwrites(tmp_path):
         reset_execution(token)
 
 
-def test_prompt_explains_task_activation_and_self_boundary_without_forcing_tasks():
+def test_prompt_keeps_self_boundary_without_turning_workspace_into_a_task():
     lowered = PROMPT_AGENTE.lower()
-    assert "across multiple actions or turns" in lowered
-    assert "trivial single-step work" in lowered
     assert "source=eyle" in lowered
-    assert "isolated self snapshot" in lowered
-    assert "export_sandbox_zip" in lowered
-    assert "the user's message does not need to be a task" in lowered
+    assert "isolated sandbox" in lowered
+    assert "real workspace writes use patch transactions" in lowered
+    assert "workspace state is context, not a task" in lowered
+    assert "trivial single-step" not in lowered
 
 
 def test_run_command_source_conflict_is_request_scoped_not_terminal(monkeypatch, tmp_path):

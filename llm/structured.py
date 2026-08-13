@@ -72,10 +72,21 @@ _TASK_SCHEMA = {
         "id": deepcopy(_TASK_ID_SCHEMA),
         "parent_id": deepcopy(_TASK_PARENT_SCHEMA),
         "description": deepcopy(_TASK_DESCRIPTION_SCHEMA),
+        "completion_criteria": {
+            "type": "array", "minItems": 1, "maxItems": 12,
+            "items": {"type": "string", "minLength": 1, "maxLength": 400},
+        },
         "status": {"type": "string", "enum": ["open", "completed", "dropped"]},
         "result": {"type": "string", "maxLength": 1200},
+        "grounding_ids": {
+            "type": "array",
+            "items": deepcopy(_INVESTIGATION_GROUNDING_ITEM_SCHEMA),
+        },
     },
-    "required": ["id", "parent_id", "description", "status", "result"],
+    "required": [
+        "id", "parent_id", "description", "completion_criteria",
+        "status", "result", "grounding_ids",
+    ],
     "additionalProperties": False,
 }
 
@@ -145,53 +156,17 @@ _AGENT_SCHEMA = {
     "additionalProperties": False,
 }
 
-_GROUNDING_REF_PATTERN = r"^(?:request|observation:mat-[0-9]+)$"
-
-# Claim has only a protocol shape, not semantic quotas. Runtime validates the
-# coordinates it understands; the fresh critic decides how many blockers are
-# necessary. Physical output/context ceilings still apply at the LLM boundary.
-_CLAIM_ISSUE_KINDS = ["unsupported", "contradicted", "scope", "omission", "inconsistent", "unsafe"]
-_CLAIM_REVIEW_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "verdict": {"type": "string", "enum": ["accept", "challenge"]},
-        "issues": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "kind": {"type": "string", "enum": _CLAIM_ISSUE_KINDS},
-                    "grounding_refs": {
-                        "type": "array",
-                        "items": {"type": "string", "minLength": 1, "pattern": _GROUNDING_REF_PATTERN},
-                    },
-                    "reason": {"type": "string", "minLength": 1},
-                },
-                "required": ["kind", "grounding_refs", "reason"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    "required": ["verdict", "issues"],
-    "additionalProperties": False,
-}
-
-
 _PROFILE_SCHEMAS = {
     "agent": _AGENT_SCHEMA,
-    "claim_verifier": _CLAIM_REVIEW_SCHEMA,
 }
 
 _PROFILE_NAMES = {
     "agent": "eyle_agent_decision",
-    "claim_verifier": "eyle_claim_review",
 }
 
 _PROFILE_TOP_LEVEL = {
     "agent": ("action", "investigation_updates", "task_updates"),
-    "claim_verifier": ("verdict", "issues"),
 }
-
 
 def schema_for_profile(profile: str) -> Dict[str, Any]:
     try:
@@ -223,23 +198,11 @@ def mandatory_top_level_keys(profile: str) -> tuple[str, ...]:
 
 
 def contract_instruction(profile: str) -> str:
-    keys = mandatory_top_level_keys(profile)
-    if profile == "claim_verifier":
-        return (
-            "Top-level JSON contract: return exactly {verdict,issues}. verdict=accept|challenge. "
-            "issues is [] when accepted; otherwise include the smallest sufficient blocker set. "
-            "Each issue is exactly {kind,grounding_refs,reason}; "
-            "kind=unsupported|contradicted|scope|omission|inconsistent|unsafe. "
-            "Grounding refs use request or observation:mat-* and may be empty for answer-internal defects. "
-            "Never add alternate fields or prose."
-        )
+    mandatory_top_level_keys(profile)
     return (
-        "Top-level JSON contract: return exactly {action,investigation_updates,task_updates}. action is one discriminated object "
-        "with exactly one kind: tool_calls={kind,calls}, patches={kind,patches}, "
-        "needs_user={kind,question,missing_information}, or final={kind,answer,limitations,grounding_ids}. "
-        "Investigation is only what you are trying to understand. Tasks are what you decided you need to do. "
-        "Each task update is exactly {id,parent_id,description,status,result}, status=open|completed|dropped; "
-        "closed tasks require a concise non-empty result. Never emit legacy nullable top-level action slots or combine action kinds."
+        "Return only the JSON object required by the schema. "
+        "investigation_updates and task_updates are state deltas and may be empty. "
+        "action contains exactly one action kind."
     )
 
 
@@ -326,12 +289,12 @@ def parse_agent_response(raw: Any) -> Dict[str, Any]:
     task_updates = value.get("task_updates")
     if not isinstance(task_updates, list):
         raise StructuredResponseError("AGENT_TASK_UPDATES_INVALID", "task_updates must be an array")
-    task_keys = {"id", "parent_id", "description", "status", "result"}
+    task_keys = {"id", "parent_id", "description", "completion_criteria", "status", "result", "grounding_ids"}
     for index, item in enumerate(task_updates, start=1):
         item = _exact_item(
             item, task_keys,
             code="AGENT_TASK_SHAPE_INVALID",
-            detail=f"task_updates[{index}] must contain exactly id, parent_id, description, status and result",
+            detail=f"task_updates[{index}] must contain exactly id, parent_id, description, completion_criteria, status, result and grounding_ids",
         )
         task_id = _string(item["id"], code="AGENT_TASK_ID_INVALID", detail=f"task_updates[{index}].id must be non-empty").strip()
         if len(task_id) > 80 or re.fullmatch(r"[A-Za-z0-9._-]+", task_id) is None:
@@ -344,6 +307,9 @@ def parse_agent_response(raw: Any) -> Dict[str, Any]:
         description = _string(item["description"], code="AGENT_TASK_DESCRIPTION_INVALID", detail=f"task_updates[{index}].description must be non-empty")
         if len(description) > 500:
             raise StructuredResponseError("AGENT_TASK_DESCRIPTION_INVALID", f"task_updates[{index}].description is too long")
+        criteria = _string_list(item["completion_criteria"], code="AGENT_TASK_COMPLETION_CRITERIA_INVALID", detail=f"task_updates[{index}].completion_criteria must be a non-empty array of strings")
+        if not criteria or len(criteria) > 12 or any(len(value.strip()) > 400 for value in criteria):
+            raise StructuredResponseError("AGENT_TASK_COMPLETION_CRITERIA_INVALID", f"task_updates[{index}].completion_criteria is invalid")
         status = item["status"]
         if status not in {"open", "completed", "dropped"}:
             raise StructuredResponseError("AGENT_TASK_STATUS_INVALID", f"task_updates[{index}].status is invalid")
@@ -352,6 +318,9 @@ def parse_agent_response(raw: Any) -> Dict[str, Any]:
             raise StructuredResponseError("AGENT_TASK_RESULT_INVALID", f"task_updates[{index}].result is too long")
         if status in {"completed", "dropped"} and not result.strip():
             raise StructuredResponseError("AGENT_TASK_CLOSED_RESULT_REQUIRED", f"task_updates[{index}].result is required when status is {status}")
+        grounding_ids = _string_list(item["grounding_ids"], code="AGENT_TASK_GROUNDING_INVALID", detail=f"task_updates[{index}].grounding_ids must be an array of canonical mat-* grounding IDs")
+        if any(re.fullmatch(r"mat-[0-9]+", ref) is None for ref in grounding_ids):
+            raise StructuredResponseError("AGENT_TASK_GROUNDING_INVALID", f"task_updates[{index}].grounding_ids contains a noncanonical grounding ID")
 
     action = value.get("action")
     if not isinstance(action, dict):
@@ -433,43 +402,7 @@ def parse_agent_response(raw: Any) -> Dict[str, Any]:
     return {"action": normalized_action, "investigation_updates": value["investigation_updates"], "task_updates": value["task_updates"]}
 
 
-def _claim_grounding_refs(value: Any, *, detail: str) -> None:
-    _string_list(value, code="CLAIM_REVIEW_GROUNDING_REFS_INVALID", detail=detail)
-    invalid = next((item for item in value if re.fullmatch(_GROUNDING_REF_PATTERN, item) is None), None)
-    if invalid is not None:
-        raise StructuredResponseError("CLAIM_REVIEW_GROUNDING_REF_FORMAT_INVALID", f"noncanonical grounding ref: {invalid}")
-
-
-def parse_claim_review_response(raw: Any) -> Dict[str, Any]:
-    value = _object(raw)
-    top = set(mandatory_top_level_keys("claim_verifier"))
-    _exact_keys(value, required=top, allowed=top, profile="claim_review")
-    if value["verdict"] not in {"accept", "challenge"}:
-        raise StructuredResponseError("CLAIM_REVIEW_VERDICT_INVALID", "verdict must be accept or challenge")
-    if not isinstance(value["issues"], list):
-        raise StructuredResponseError("CLAIM_REVIEW_ISSUES_LIST_REQUIRED", "issues must be an array")
-    issue_keys = {"kind", "grounding_refs", "reason"}
-    for index, item in enumerate(value["issues"], start=1):
-        item = _exact_item(
-            item, issue_keys,
-            code="CLAIM_REVIEW_ISSUE_SHAPE_INVALID",
-            detail=f"issues[{index}] must contain exactly the canonical issue fields",
-        )
-        if item["kind"] not in set(_CLAIM_ISSUE_KINDS):
-            raise StructuredResponseError("CLAIM_REVIEW_ISSUE_KIND_INVALID", f"issues[{index}].kind is invalid")
-        _claim_grounding_refs(item["grounding_refs"], detail=f"issues[{index}].grounding_refs must be a canonical-ref array")
-        _string(item["reason"], code="CLAIM_REVIEW_REASON_INVALID", detail=f"issues[{index}].reason must be non-empty")
-    if value["verdict"] == "accept" and value["issues"]:
-        raise StructuredResponseError("CLAIM_REVIEW_ACCEPT_WITH_ISSUES", "accept requires issues=[]")
-    if value["verdict"] == "challenge" and not value["issues"]:
-        raise StructuredResponseError("CLAIM_REVIEW_CHALLENGE_REQUIRES_ISSUE", "challenge requires at least one issue")
-    return value
-
-
-
 def parse_profile_response(raw: Any, profile: str) -> Dict[str, Any]:
     if profile == "agent":
         return parse_agent_response(raw)
-    if profile == "claim_verifier":
-        return parse_claim_review_response(raw)
     raise StructuredResponseError("STRUCTURED_PROFILE_UNKNOWN", f"unknown structured profile: {profile}")

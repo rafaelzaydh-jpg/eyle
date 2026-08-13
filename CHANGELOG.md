@@ -1,3 +1,51 @@
+## 2.7.5 Rev1.4.1 — Semantic Freedom — 2026-08-12
+
+- **Freedom is explicit:** Main may Final directly, use capabilities, keep optional Investigation/Tasks or ask for blocking input. Ambient workspace state is context, not a task.
+- **Prompt surface cut:** `PROMPT_AGENTE` was reduced to authority, paths and physical boundaries; the structured transport instruction no longer reteaches the JSON schema in prose.
+- **Runtime stops coaching:** retry/open-commitment/no-action/write-disabled feedback now reports factual codes/state/expectations without `instruction` prose or strategy suggestions.
+- **Tool prose cut:** all public capability descriptions/returns/caveats/input descriptions were reviewed and reduced to factual capability contracts; discovery text no longer advises when Main should use a tool.
+- **Conversation continuation wording:** user clarification is attached to the active request, not automatically labeled as a Task.
+- **Capability discovery stays progressive:** first-turn index remains a compact discovery surface; long signatures are bounded and full working contracts appear only for recently requested tools.
+- **No state-schema churn:** Session and Queue remain `2.7.5-r1.4` because their data shape did not change. Config/release identity advances to `2.7.5-r1.4.1` / `rev1.4.1-semantic-freedom`.
+- **Release guard:** artifact verification now rejects reintroduced prescriptive model-surface phrases and instruction-bearing Runtime feedback.
+- **Measured fixed surface:** system + structured reminder + capability index fell from ~1,770 to ~1,171 locally estimated tokens per first-turn Main call (~33.8% reduction).
+- Deterministic suite during implementation: **304 passed, 1 Flask-dependent skip**.
+
+## 2.7.5 Rev1.4 — Grounded Completion — 2026-08-12
+
+- **CORDA total no Claim:** deleted `eyle/core/claim_review.py`, the Claim LLM call/prompt/structured profile, `agent.claims`, Claim session/history/telemetry state, provisional Final and the Main↔Claim challenge loop. Normal delivery now uses only Main LLM calls.
+- **Task becomes an explicit commitment:** exact Task state is now `id,parent_id,description,completion_criteria,status,result,grounding_ids`. Every Task declares completion criteria; closed Tasks require a result; a completed parent cannot retain an open direct child; any open Task blocks Final.
+- **Investigation becomes an explicit epistemic commitment:** open Investigation blocks Final; `established` requires at least one real `mat-*` Material coordinate; `dismissed` records Main's explicit decision not to pursue it.
+- **Grounding continuity at Final:** Runtime gathers Material IDs explicitly committed by established Investigations and grounded completed Tasks. Final must include those IDs or is rejected as `FINAL_REQUIRED_GROUNDING_MISSING`. Runtime checks continuity/existence only and never judges whether Material semantically proves the conclusion.
+- **No semantic grader replacement:** conversational/single-step requests may Final directly without Tasks/Investigation. Main remains sole semantic authority; Runtime owns only physical/contract state.
+- **Future validators consolidated, not implemented:** domain/capability-owned deterministic or specialist-LLM validators may later evaluate explicit criteria and return findings through normal Observation. Rev1.4 adds no validator registry, risk classifier or universal replacement gate.
+- **Memory Kernel preserved:** Rev1.3.6 bounded SQLite Memory remains separate from Observation, Tasks and Investigation. No shared Coverage/Frontier abstraction is introduced.
+- Clean-break identity advances to `2.7.5-r1.4` / `rev1.4-grounded-completion`; prior Claim-bearing config/session/queue state is rejected rather than migrated.
+
+## 2.7.5 Rev1.3.6 — Memory Kernel — 2026-08-12
+
+- **Memory Kernel integrated directly into Eyle:** replaced the legacy bounded JSON project-memory list with SQLite persistent Memory Nodes, tags, semantic relations, revisions, provenance metadata, atomic ChangeSets and append-only memory history.
+- **Bounded memory navigation:** added `MemoryCoverage`, opaque `MemoryFrontier (mf-*)`, `activate_memory()` and `continue_memory_view()` without reusing Observation contract types. A deterministic 10,000-node test materializes at most 30 nodes and continues without replaying the first page.
+- **No premature merger:** Observation, Tasks and Investigation remain separate semantic systems. Rev1.3.6 copies the proven bounded-navigation principle but creates no shared generic Coverage/Frontier abstraction.
+- **CORDA on memory scaffolding:** no Region service/table, salience engine, backend interface, graph/vector DB, memory LLM, planner, CLI or automatic consolidation. Region is an indexed string; tags are an index; hierarchy is a relation; supersession is status + relation; provenance is opaque metadata.
+- **Legacy memory removed:** deleted the old `search_memory()`/`store_memory()` JSON implementation, 200-entry cap, `kind/text/files/created_at` envelope and mandatory Observation grounding for every memory write. No migration/compatibility bridge is provided.
+- **Existing public tools preserved:** `memory_search`/`memory_store` now adapt to the Kernel. Their discovery signatures remain compact; uncommon Memory Kernel options stay behind activated tool contracts rather than inflating every Main turn.
+- **Atomicity/conflicts:** stale `expected_revision` fails the entire ChangeSet with `MEMORY_CONFLICT`; no partial semantic mutation is committed.
+- Clean-break identity advances to `2.7.5-r1.3.6` / `rev1.3.6-memory-kernel`; Memory Kernel physical schema is `2.7.5-r1.3.6-memory-kernel-v1`.
+- Deterministic suite during implementation: **328 passed, 1 Flask-dependent skip**.
+
+## 2.7.5 Rev1.3.5 — Request Gate — 2026-08-12
+
+- **Claim corrected to its universal role:** fresh Claim now receives exactly original Request + Candidate Final and answers only whether the answer is adequate to deliver for that Request.
+- **CORDA on pseudo-verification:** removed Claim `observed_material`, grounding coordinates, evidence-reference protocol, issue-kind taxonomy (`unsupported`, `contradicted`, `scope`, `omission`, `inconsistent`, `unsafe`), Claim-grounding telemetry and `agent.claims.grounding`. Claim no longer pretends to certify truth, Investigation sufficiency, tool sufficiency or domain safety/correctness without criteria.
+- **Protocol simplified:** Claim response is exactly `{verdict: accept|challenge, reasons:[...]}`. Accept requires no reasons; challenge requires concrete Request-fit blockers. No semantic count/length quota is added.
+- **Fresh isolation preserved:** default `fresh` still uses a separate LLM request on Main's transport/model with no Main history; `verified` may use a distinct verifier transport/model.
+- **Loop closure preserved:** one challenge may return to Main for one Candidate revision; a second challenge fails explicitly as `CLAIM_CHALLENGE_UNRESOLVED`. One structured-protocol retry remains.
+- **Token reduction:** Claim no longer serializes selected Material. The Claim JSON schema drops from the Rev1.3.4 issue/coordinate structure to the two-field verdict/reasons contract.
+- **Future validation direction consolidated, not implemented:** domain validators should be capability-owned, use explicit objective/rubric criteria, and return results through normal Observation. Core/Claim must not acquire profession-specific safety logic. See `docs/verification.md`.
+- Clean-break identity advances to `2.7.5-r1.3.5` / `rev1.3.5-request-gate`; config, Session, queue and project-memory identities advance together.
+- Deterministic suite during implementation: **320 passed, 1 Flask-dependent skip**.
+
 ## 2.7.5 Rev1.3.4 — Fresh Claim & Token Cleanup — 2026-08-12
 
 - **Fresh Claim restored:** default Claim mode is now `fresh`: a separate LLM request using Main's transport/model but no Main conversation/history. Its semantic packet is exactly original Request + Candidate Final + Main-selected observed Material. `verified` remains available for a distinct verifier transport/model.

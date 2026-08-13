@@ -1,46 +1,43 @@
 # Architectural direction
 
-> **Eyle constrains effects, not thought.**
+> **Eyle constrains effects and declared commitments, not thought.**
 
-Main is free to reason. Runtime constrains only physically decidable effects; Claim challenges conclusions without becoming a planner.
-
-Eyle should become a small universal agency kernel whose domain power comes from well-designed capabilities, not domain semantics welded into Core.
+Main is the sole task-semantic authority. Runtime constrains physically decidable effects/state. Eyle should remain a small universal agency kernel whose domain power comes from well-designed capabilities rather than domain semantics welded into Core.
 
 ## Target law
 
 > LLM cost should scale mainly with semantic complexity and materially observed information; external-state size should scale mainly in deterministic machine work.
 
-## Universal Core candidates
-
-The concepts currently justified as domain-neutral are:
+## Current universal Core concepts
 
 - Main semantic authority;
 - Runtime physical authority;
-- Observation;
-- Coverage;
-- Frontier;
-- Investigation;
-- Claim;
+- Observation / Material / Coverage / Frontier;
+- Investigation as explicit epistemic commitment;
+- Tasks as explicit intentional commitment;
+- Memory Kernel as bounded persistent cognitive state;
 - supervised mutation/transactions;
 - physical containment and safety.
 
 Everything else must justify Core membership.
 
+## Completion rule
+
+Final is deliverable when the commitments Main chose to create are mechanically closed and their declared Material continuity is preserved. Runtime does not invent commitments and does not grade semantic truth.
+
 ## Capability boundary
 
-A capability may know how to inspect or operate its domain. Core must not know that “security tasks need these files,” “home automation needs these devices,” or “code analysis should prefer these modules.” Main chooses semantic direction; capabilities expose physical contracts.
+A capability may know how to inspect or operate its domain. Core must not know that security tasks need particular checks, home automation needs particular devices or code analysis prefers particular modules.
 
-`ObjectiveScope` is the reference implementation style: it resolves literal files/directories/globs mechanically, reports exactly what was resolved/scanned, and never decides whether that scope is semantically relevant. Capability-specific observation identity, Material extraction, Coverage and bounded presentation should follow the same pattern and stay beside the capability rather than leaking into Agent/Observation.
+Future validators should therefore be capability-owned and return physical findings through Observation.
 
 ## Frontier rule
 
-A Frontier describes **available continuation**, not an instruction to continue. Runtime never says “this is relevant, expand me.” Main decides whether the unresolved reality matters.
-
-Opaque cursors remain capability/Runtime implementation detail.
+A Frontier describes **available continuation**, not an instruction to continue. Main decides whether unresolved reality matters. Opaque cursors remain capability/Runtime implementation detail.
 
 ## No universal framework before need
 
-Do not invent generic Planner, Router, Mutation Framework, semantic ranker or adapter hierarchy in anticipation of future domains. Add a universal abstraction only after at least two real domains demonstrate the same invariant.
+Do not invent generic Planner, Router, Validator Framework, semantic ranker or adapter hierarchy in anticipation of future domains. Add a universal abstraction only after at least two real domains demonstrate the same invariant.
 
 ## Removal rule
 

@@ -1,8 +1,9 @@
-"""Main-owned semantic notebook for Eyle 2.7.5 Rev1.3.4.
+"""Main-owned grounded Investigation notebook for Eyle 2.7.5 Rev1.4.1.
 
-Runtime validates only shape and physical grounding references. Goals, status,
-reasons and whether grounding is semantically needed belong entirely to Main.
-Claim may challenge a final answer but never mutates this notebook.
+Investigation records questions Main decided must be resolved before delivery.
+Main owns their meaning; Runtime owns only shape and physical Material
+references. An established target therefore requires at least one real mat-*;
+an open target is an explicit unresolved commitment and blocks Final.
 """
 from __future__ import annotations
 
@@ -97,6 +98,9 @@ def apply_investigation_updates(
         for grounding_id in incoming:
             if grounding_id not in grounding_ids:
                 grounding_ids.append(grounding_id)
+        if status == "established" and not grounding_ids:
+            reject(f"INVESTIGATION_ESTABLISHED_GROUNDING_REQUIRED:{target_id}")
+            continue
 
         if len(reason) > 500:
             reject(f"INVESTIGATION_TARGET_REASON_TOO_LONG:{target_id}")

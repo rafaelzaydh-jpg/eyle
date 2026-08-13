@@ -6,38 +6,15 @@ from pathlib import Path
 import eyle.core.agent as core_agent
 import eyle.core.sandbox as sandbox_mod
 import eyle.core.tools as tools
-from eyle.core.claim_review import normalize_claim_review
 from eyle.core.code_relations import analyze_symbol_relations
 from eyle.core.execution_context import ExecutionContext, bind_execution, reset_execution
-from llm.structured import StructuredResponseError, parse_claim_review_response
-from tests.canonical import agent_final, agent_tools, base_config, review, issue, tool_call
+from tests.canonical import agent_final, agent_tools, base_config, tool_call
 
 
-def test_material_omission_can_be_grounded_by_request_without_source_evidence():
-    raw = review(issues=[issue(kind="omission", grounding_refs=["request"], reason="The answer omits a requested result.")])
-    parsed = parse_claim_review_response(raw)
-    ok, reason, normalized = normalize_claim_review(parsed, {}, visible_grounding_ids=[])
-    assert ok is True and reason == "ok"
-    assert normalized["verdict"] == "challenge"
-    assert normalized["issues"][0]["grounding_ids"] == []
 
 
-def test_fresh_claim_rejects_runtime_coordinates_from_old_architecture():
-    raw = review(issues=[issue(kind="unsupported", grounding_refs=["runtime:r1"], reason="Runtime says unavailable.")])
-    try:
-        parse_claim_review_response(raw)
-    except StructuredResponseError as error:
-        assert error.code == "CLAIM_REVIEW_GROUNDING_REF_FORMAT_INVALID"
-    else:
-        raise AssertionError("fresh Claim must not receive Runtime-event coordinates")
 
 
-def test_claim_allows_empty_refs_for_answer_internal_defect():
-    raw = review(issues=[issue(kind="inconsistent", grounding_refs=[], reason="The candidate contradicts itself.")])
-    parsed = parse_claim_review_response(raw)
-    ok, reason, normalized = normalize_claim_review(parsed, {}, visible_grounding_ids=[])
-    assert ok is True and reason == "ok"
-    assert normalized["issues"][0]["grounding_refs"] == []
 
 
 def test_nonretryable_tool_failure_becomes_runtime_fact_and_main_remains_free(monkeypatch, tmp_path):
@@ -46,16 +23,9 @@ def test_nonretryable_tool_failure_becomes_runtime_fact_and_main_remains_free(mo
     def fake_tool(name, arguments, context):
         return {"status":"failed","ok":False,"executed":False,"changed":False,"error_code":"SANDBOX_UNAVAILABLE","retryable":False,"detail":"unavailable"}
     monkeypatch.setattr(core_agent,"executar_tool",fake_tool)
-    packets=[]
-    def fake_claim(prompt,_config):
-        packet=json.loads(prompt); packets.append(packet)
-        assert set(packet) == {"request", "candidate_answer", "observed_material"}
-        assert packet["observed_material"] == []
-        return review(verdict="accept")
-    monkeypatch.setattr(core_agent,"executar_verificador_claims",fake_claim)
-    status,text,_,details=core_agent.executar_agente("Execute no sandbox.",base_config(claims_mode="fresh"),projeto={"caminho_origem":str(tmp_path)},retornar_detalhes=True)
+    status,text,_,details=core_agent.executar_agente("Execute no sandbox.",base_config(),projeto={"caminho_origem":str(tmp_path)},retornar_detalhes=True)
     assert status=="success" and "sandbox" in text.lower()
-    assert len(prompts)==2 and len(packets)==1
+    assert len(prompts)==2
 
 def test_symbol_relations_reports_registry_binding_and_root_reachability(tmp_path):
     (tmp_path / "tools.py").write_text(

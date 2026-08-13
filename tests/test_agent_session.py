@@ -6,8 +6,8 @@ import eyle.core.tools as tools
 from tests.canonical import agent_final, agent_patches, agent_tools, base_config, investigation_target, tool_call
 
 
-def config(tmp_path, *, claims_mode="off"):
-    return base_config(claims_mode=claims_mode, tests_enabled=False)
+def config(tmp_path):
+    return base_config(tests_enabled=False)
 
 
 def test_greeting_is_written_by_same_agent(monkeypatch, tmp_path):
@@ -144,10 +144,12 @@ def test_external_memory_only_moves_through_tools(monkeypatch, tmp_path):
     grounding = {"mat-0001": {"file": "app.py", "file_hash": file_hash}}
     context = {"config": config(tmp_path), "projeto": {"caminho_origem": str(tmp_path)}, "grounding": grounding}
     monkeypatch.setattr(tools, "MEMORY_DIR", str(tmp_path / "memory"))
-    stored = tools.executar_tool("memory_store", {"text": "app.py define VALUE", "kind": "fact", "grounding_ids": ["mat-0001"]}, context)
+    stored = tools.executar_tool("memory_store", {"text": "app.py define VALUE", "meta": {"tags": ["code"], "grounding_ids": ["mat-0001"]}}, context)
     assert stored["ok"] is True
     found = tools.executar_tool("memory_search", {"query": "VALUE"}, context)
     assert found["detail"]["count"] == 1
+    assert found["detail"]["view"]["memories"][0]["content"] == "app.py define VALUE"
+    assert found["detail"]["view"]["memory_coverage"]["kind"] == "memory_navigation"
 
 
 def test_removed_reasoning_modules_are_physically_absent():

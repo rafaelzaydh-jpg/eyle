@@ -22,6 +22,25 @@ _REMOVED_CORE_FILES = (
     "eyle/core/operational_feedback.py",
 )
 
+_REQUIRED_MEMORY_KERNEL_FILES = (
+    "eyle/core/memory.py",
+    "eyle/core/memory_store.py",
+    "eyle/core/memory_navigation.py",
+)
+_REMOVED_MEMORY_CONTRACT_TERMS = {
+    "eyle/core/memory.py": ("def search_memory(", "def store_memory(", "def _load(", "entries[-200:]"),
+}
+
+_REMOVED_CLAIM_FILES = ("eyle/core/claim_review.py",)
+_REMOVED_CLAIM_CONTRACT_TERMS = {
+    "eyle/core/agent.py": ("claim_review", "_run_claim_verification", "executar_verificador_claims"),
+    "eyle/runtime/config.py": ("claims", "claim_config", "ClaimConfigError"),
+    "eyle/runtime/history.py": ("claim_packet", "claim_review"),
+    "llm/structured.py": ("claim_verifier", "CLAIM_REVIEW"),
+    "llm/executar.py": ("PROMPT_CLAIM", "executar_verificador_claims", "claim_verifier"),
+}
+
+
 
 class ReleaseIdentityError(ValueError):
     """The declared release identity or artifact shape is invalid."""
@@ -90,6 +109,38 @@ def _removed_contract_violations(base: Path) -> List[str]:
     return [rel for rel in _REMOVED_CORE_FILES if (base / rel).exists()]
 
 
+
+def _removed_claim_contract_violations(base: Path) -> List[str]:
+    violations: List[str] = []
+    for rel in _REMOVED_CLAIM_FILES:
+        if (base / rel).exists():
+            violations.append(f"arquivo removido reapareceu:{rel}")
+    for rel, terms in _REMOVED_CLAIM_CONTRACT_TERMS.items():
+        path = base / rel
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        for term in terms:
+            if term in text:
+                violations.append(f"{rel}:{term}")
+    return violations
+
+def _memory_kernel_contract_violations(base: Path) -> List[str]:
+    violations: List[str] = []
+    for rel in _REQUIRED_MEMORY_KERNEL_FILES:
+        if not (base / rel).is_file():
+            violations.append(f"Memory Kernel ausente: {rel}")
+    for rel, terms in _REMOVED_MEMORY_CONTRACT_TERMS.items():
+        path = base / rel
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        for term in terms:
+            if term in text:
+                violations.append(f"contrato de memoria legado reapareceu: {rel}:{term}")
+    return violations
+
+
 def _public_tool_violations(base: Path, manifesto: Dict[str, Any]) -> List[str]:
     # Import only after the Python floor has been checked. The registry itself is
     # the source of truth; the manifest must match it exactly and in order.
@@ -116,6 +167,74 @@ def _public_tool_violations(base: Path, manifesto: Dict[str, Any]) -> List[str]:
     return []
 
 
+
+def _model_surface_violations(base: Path) -> List[str]:
+    violations: List[str] = []
+    base_text = str(base.resolve())
+    inserted = False
+    if base_text not in sys.path:
+        sys.path.insert(0, base_text)
+        inserted = True
+    try:
+        from llm.executar import PROMPT_AGENTE
+        from llm.structured import contract_instruction
+        from eyle.core.tools import TOOLS
+
+        if len(PROMPT_AGENTE) >= 2000:
+            violations.append(f"PROMPT_AGENTE excessivo:{len(PROMPT_AGENTE)} chars")
+        instruction = contract_instruction("agent")
+        if len(instruction) >= 220:
+            violations.append(f"contract_instruction excessivo:{len(instruction)} chars")
+
+        fixed = [PROMPT_AGENTE, instruction]
+        def collect_descriptions(value):
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if key == "description" and isinstance(item, str):
+                        fixed.append(item)
+                    collect_descriptions(item)
+            elif isinstance(value, list):
+                for item in value:
+                    collect_descriptions(item)
+
+        for name, entry in TOOLS.items():
+            description = str(entry.get("description") or "")
+            returns = str(entry.get("returns") or "")
+            caveats = [str(item) for item in (entry.get("caveats") or [])]
+            if len(description) > 90:
+                violations.append(f"tool description excessiva:{name}:{len(description)}")
+            if len(returns) > 100:
+                violations.append(f"tool returns excessivo:{name}:{len(returns)}")
+            for caveat in caveats:
+                if len(caveat) > 120:
+                    violations.append(f"tool caveat excessiva:{name}:{len(caveat)}")
+            fixed.append(description)
+            fixed.append(returns)
+            fixed.extend(caveats)
+            collect_descriptions(entry.get("input_schema") or {})
+        surface = "\n".join(fixed).lower()
+        for phrase in (
+            "not a prerequisite", "usually do not need", "do not create",
+            "never use it merely", "choose one capability",
+            "decide again from the unchanged",
+        ):
+            if phrase in surface:
+                violations.append(f"model surface prescritiva:{phrase}")
+    finally:
+        if inserted:
+            try:
+                sys.path.remove(base_text)
+            except ValueError:
+                pass
+
+    agent_path = base / "eyle/core/agent.py"
+    if agent_path.is_file():
+        agent_text = agent_path.read_text(encoding="utf-8")
+        for term in ('"instruction"', "semantic_followup", "Choose one capability from capability_index"):
+            if term in agent_text:
+                violations.append(f"runtime feedback prescritivo:{term}")
+    return violations
+
 def validar_artefato_release(base_dir: os.PathLike[str] | str, manifesto: Dict[str, Any] | None = None) -> None:
     base = Path(base_dir)
     manifest = manifesto if isinstance(manifesto, dict) else _carregar_json(base / "release_manifest.json")
@@ -123,7 +242,10 @@ def validar_artefato_release(base_dir: os.PathLike[str] | str, manifesto: Dict[s
     violations.extend(f"estado Runtime proibido: {item}" for item in _runtime_state_violations(base))
     violations.extend(f"artefato gerado proibido: {item}" for item in _generated_artifact_violations(base))
     violations.extend(f"contrato removido reapareceu: {item}" for item in _removed_contract_violations(base))
+    violations.extend(f"contrato Claim removido reapareceu: {item}" for item in _removed_claim_contract_violations(base))
+    violations.extend(_memory_kernel_contract_violations(base))
     violations.extend(_public_tool_violations(base, manifest))
+    violations.extend(_model_surface_violations(base))
 
     publication = manifest.get("publication") if isinstance(manifest.get("publication"), dict) else {}
     if publication.get("requires_extracted_artifact_verification") is not True:

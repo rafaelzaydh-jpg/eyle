@@ -48,10 +48,9 @@ def test_unknown_parent_self_parent_and_cycles_are_rejected_structurally():
     assert state == []
     assert rejected[0]["reason"].startswith("TASK_PARENT_UNKNOWN")
 
-    state, _, rejected = apply_task_updates([{
-        "id": "self", "parent_id": "self", "description": "Self",
-        "status": "open", "result": "",
-    }])
+    state, _, rejected = apply_task_updates([
+        task_item("self", parent_id="self", description="Self")
+    ])
     assert state == []
     assert rejected[0]["reason"].startswith("TASK_PARENT_SELF_REFERENCE")
 
@@ -73,35 +72,41 @@ def test_closed_task_requires_result_but_runtime_does_not_auto_close_parent():
     view = task_state_view(state)
     assert view["open_count"] == 1
     assert view["closed_count"] == 1
-    assert view["all_known_tasks_closed"] is False
+    assert view["ready_for_final"] is False
     assert state[0]["status"] == "open"
 
-    unchanged, accepted, rejected = apply_task_updates([{
-        "id": "root", "parent_id": None, "description": "Root",
-        "status": "completed", "result": "",
-    }], previous=state)
+    unchanged, accepted, rejected = apply_task_updates([
+        task_item("root", description="Root", status="completed", result="")
+    ], previous=state)
     assert unchanged == state
     assert accepted == []
     assert rejected[0]["reason"].startswith("TASK_CLOSED_RESULT_REQUIRED")
 
 
-def test_open_tasks_do_not_block_final(monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        core_agent,
-        "_call_agent",
-        lambda session, config, project, conversation_context, feedback="": (
-            agent_final("done", tasks=[task_item("later", description="Optional later work")]),
-            set(),
-        ),
-    )
+def test_open_tasks_block_final_until_main_closes_the_commitment(monkeypatch, tmp_path):
+    calls = {"n": 0}
+    def fake_call(session, config, project, conversation_context, feedback=""):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return agent_final("too early", tasks=[task_item("work", description="Required work")]), set()
+        assert "FINAL_COMMITMENTS_OPEN" in feedback
+        return agent_final(
+            "done",
+            tasks=[task_item("work", description="Required work", status="completed", result="Completed")],
+        ), set()
+    monkeypatch.setattr(core_agent, "_call_agent", fake_call)
     status, text, _, details = core_agent.executar_agente(
-        "Answer now.",
-        base_config(claims_mode="off"),
-        projeto={"caminho_origem": str(tmp_path)},
-        retornar_detalhes=True,
+        "Answer after the required work.", base_config(),
+        projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True,
     )
     assert status == "success" and text == "done"
-    assert details["tasks"][0]["status"] == "open"
+    assert calls["n"] == 2
+    assert details["tasks"][0]["status"] == "completed"
+    assert any(
+        item.get("decision") == "final" and item.get("outcome") == "rejected"
+        and item.get("reason") == "FINAL_COMMITMENTS_OPEN"
+        for item in details["decision_history"]
+    )
 
 
 def test_task_state_is_visible_next_turn_and_main_can_close_it(monkeypatch, tmp_path):
@@ -131,7 +136,7 @@ def test_task_state_is_visible_next_turn_and_main_can_close_it(monkeypatch, tmp_
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake_agent)
     status, text, _, details = core_agent.executar_agente(
         "What is 1+1?",
-        base_config(claims_mode="off"),
+        base_config(),
         projeto={"caminho_origem": str(tmp_path)},
         retornar_detalhes=True,
     )

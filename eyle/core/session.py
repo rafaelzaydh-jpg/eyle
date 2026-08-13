@@ -1,8 +1,8 @@
-"""One active Eyle 2.7.5 Rev1.3.4 agent session.
+"""One active Eyle 2.7.5 Rev1.4 agent session.
 
-Observation owns physical history, grounding material and continuation state.
-Investigation is Main-owned epistemic state. Tasks are separate Main-owned
-intentional state. Runtime persists both contracts without semantic inference.
+Observation owns physical history and Material. Investigation records unresolved
+epistemic commitments; Tasks record intentional completion commitments. Runtime
+persists and validates their physical contracts without semantic inference.
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from .observation import empty_ledger as empty_observation_ledger, material_inde
 from .transactions import empty_transaction
 from .tasks import validate_task_state
 
-SESSION_SCHEMA_VERSION = "2.7.5-r1.3.4"
+SESSION_SCHEMA_VERSION = "2.7.5-r1.4"
 
 
 @dataclass
@@ -27,7 +27,6 @@ class AgentSession:
     decision_ledger: Dict[str, Any] = field(default_factory=empty_decision_ledger)
     investigation: List[Dict[str, Any]] = field(default_factory=list)
     tasks: List[Dict[str, Any]] = field(default_factory=list)
-    claim_review: Dict[str, Any] = field(default_factory=dict)
     conversation_background: List[Dict[str, Any]] = field(default_factory=list)
     write_transaction: Dict[str, Any] = field(default_factory=empty_transaction)
 
@@ -45,7 +44,6 @@ class AgentSession:
             "decision_ledger": persisted_decisions(self.decision_ledger),
             "investigation": [dict(item) for item in self.investigation if isinstance(item, dict)],
             "tasks": [dict(item) for item in self.tasks if isinstance(item, dict)],
-            "claim_review": dict(self.claim_review or {}),
             "conversation_background": [dict(item) for item in self.conversation_background if isinstance(item, dict)],
             "write_transaction": dict(self.write_transaction or {}),
         }
@@ -55,7 +53,7 @@ class AgentSession:
         expected_top_level = {
             "session_schema_version", "request", "execution_id", "turn", "workspace_epoch",
             "observation_ledger", "decision_ledger", "investigation", "tasks",
-            "claim_review", "conversation_background", "write_transaction",
+            "conversation_background", "write_transaction",
         }
         if not isinstance(data, dict) or data.get("session_schema_version") != SESSION_SCHEMA_VERSION:
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
@@ -92,8 +90,6 @@ class AgentSession:
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
         if not isinstance(data["tasks"], list) or not all(isinstance(item, dict) for item in data["tasks"]):
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-        if not isinstance(data["claim_review"], dict):
-            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
         if not isinstance(data["conversation_background"], list) or not all(isinstance(item, dict) for item in data["conversation_background"]):
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
         if not isinstance(data["write_transaction"], dict):
@@ -118,7 +114,6 @@ class AgentSession:
             session.tasks = validate_task_state(data["tasks"])
         except ValueError as error:
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE") from error
-        session.claim_review = dict(data["claim_review"])
         session.conversation_background = [dict(item) for item in data["conversation_background"]]
         session.write_transaction = dict(data["write_transaction"])
         return session

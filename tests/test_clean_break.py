@@ -8,16 +8,16 @@ from eyle.core.session import AgentSession, SESSION_SCHEMA_VERSION
 from eyle.core.validation import validate_final
 from eyle.runtime import queue
 from eyle.runtime.config import ConfigError, validar_config
-from llm.structured import StructuredResponseError, parse_agent_response, parse_claim_review_response
+from llm.structured import StructuredResponseError, parse_agent_response
 from tests.canonical import base_config
 
 
 def test_rev1_session_schema_is_exact_and_old_state_is_not_migrated():
     current = AgentSession("x").to_dict()
-    assert current["session_schema_version"] == SESSION_SCHEMA_VERSION == "2.7.5-r1.3.4"
+    assert current["session_schema_version"] == SESSION_SCHEMA_VERSION == "2.7.5-r1.4"
     assert set(current) == {
         "session_schema_version", "request", "execution_id", "turn", "workspace_epoch",
-        "observation_ledger", "decision_ledger", "investigation", "tasks", "claim_review",
+        "observation_ledger", "decision_ledger", "investigation", "tasks",
         "conversation_background", "write_transaction",
     }
     for old_version in ("5.9.1", "5.9", "5.5", "5.4"):
@@ -100,10 +100,9 @@ def test_old_config_identity_is_rejected():
 
 
 def test_old_project_memory_and_queue_are_not_migrated(monkeypatch, tmp_path):
-    path = tmp_path / "memory.json"
-    path.write_text('{"entries":[{"id":"old"}]}', encoding="utf-8")
-    with pytest.raises(ValueError, match="MEMORY_SCHEMA_INCOMPATIBLE"):
-        project_memory._load(str(path))
+    assert not hasattr(project_memory, "_load")
+    assert not hasattr(project_memory, "search_memory")
+    assert not hasattr(project_memory, "store_memory")
 
     import sqlite3
     db = tmp_path / "fila.sqlite3"
@@ -126,12 +125,6 @@ def test_agent_contract_uses_grounding_ids_and_rejects_evidence_ids():
         parse_agent_response({**payload, "workspace_scope": {"mode": "read"}})
 
 
-def test_claim_contract_is_small_and_uses_canonical_coordinates():
-    payload={"verdict":"challenge","issues":[{"kind":"unsupported","grounding_refs":["observation:mat-0001"],"reason":"not established"}]}
-    parsed=parse_claim_review_response(payload)
-    assert parsed["verdict"]=="challenge"
-    assert parsed["issues"][0]["grounding_refs"]==["observation:mat-0001"]
-    assert set(parsed)=={"verdict","issues"}
 
 def test_tool_registry_has_one_contract_source_and_rev1_cuts():
     assert "read_file" in tools.TOOLS and "read_range" not in tools.TOOLS
@@ -148,8 +141,3 @@ def test_tool_registry_has_one_contract_source_and_rev1_cuts():
         assert "produces_evidence" not in entry
 
 
-def test_claim_output_budget_is_contract_owned_not_user_configurable():
-    cfg = base_config()
-    cfg["agent"]["claims"]["verifier"]["max_tokens"] = 520
-    with pytest.raises(ConfigError, match="UNKNOWN_CONFIG_FIELD:agent.claims.verifier:max_tokens"):
-        validar_config(cfg)

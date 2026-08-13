@@ -12,11 +12,11 @@ from tests.canonical import base_config
 
 def test_session_persists_only_canonical_state_owners():
     state = AgentSession("x").to_dict()
-    assert state["session_schema_version"] == SESSION_SCHEMA_VERSION == "2.7.5-r1.3.4"
+    assert state["session_schema_version"] == SESSION_SCHEMA_VERSION == "2.7.5-r1.4"
     assert set(state) == {
         "session_schema_version", "request", "execution_id", "turn", "workspace_epoch",
         "observation_ledger", "decision_ledger", "investigation", "tasks",
-        "claim_review", "conversation_background", "write_transaction",
+        "conversation_background", "write_transaction",
     }
     for removed in (
         "tool_history", "latest_tool_results", "decision_history", "prompt_snapshots",

@@ -7,7 +7,7 @@ import llm.executar as llm_mod
 from eyle.core.execution_context import ExecutionContext
 from eyle.core.token_budget import available_user_prompt_tokens, estimate_tokens
 from eyle.runtime.config import ConfigError, validar_config
-from tests.canonical import agent_final, agent_tools, agent_needs_user, base_config, review, issue, tool_call
+from tests.canonical import agent_final, agent_tools, agent_needs_user, base_config, tool_call
 
 
 def test_capability_index_is_small_and_first_use_expands_only_requested_tool(monkeypatch, tmp_path):
@@ -35,7 +35,7 @@ def test_capability_index_is_small_and_first_use_expands_only_requested_tool(mon
 
     monkeypatch.setattr(core_agent, "executar_agente_llm", fake)
     status, text, _, details = core_agent.executar_agente(
-        "Leia app.py", base_config(claims_mode="off"),
+        "Leia app.py", base_config(),
         projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True,
     )
     assert status == "success"
@@ -44,31 +44,9 @@ def test_capability_index_is_small_and_first_use_expands_only_requested_tool(mon
     assert details["tool_calls"] == 1
 
 
-def test_ungrounded_final_is_claim_audited_instead_of_auto_accepted(monkeypatch):
-    agent_calls=[]; claim_calls=[]
-    def fake_agent(prompt,cfg):
-        payload=json.loads(prompt); agent_calls.append(payload)
-        if len(agent_calls)==1:
-            return agent_final("O workspace atual possui exatamente 16 tools públicas.")
-        assert "CLAIM_CHALLENGE" in payload["runtime_feedback"]
-        return agent_needs_user("Preciso de uma informação do usuário para continuar.")
-    def fake_claim(prompt,cfg):
-        payload=json.loads(prompt); claim_calls.append(payload); assert payload["observed_material"]==[]
-        return review(issues=[issue(kind="scope", grounding_refs=["request"], reason="Current workspace state was not observed.")])
-    monkeypatch.setattr(core_agent,"executar_agente_llm",fake_agent); monkeypatch.setattr(core_agent,"executar_verificador_claims",fake_claim)
-    status,_,_,details=core_agent.executar_agente("Audite as tools públicas atuais.",base_config(claims_mode="fresh"),projeto={},retornar_detalhes=True)
-    assert status=="needs_user" and len(claim_calls)==1
-    assert any(x.get("decision")=="claim_review" and x.get("outcome")=="challenge" for x in details["decision_history"])
 
-def test_pure_ungrounded_answer_can_still_pass_claim(monkeypatch):
-    calls=[]
-    monkeypatch.setattr(core_agent,"executar_agente_llm",lambda prompt,cfg:agent_final("Oi! Como posso ajudar?"))
-    def fake_claim(prompt,cfg):
-        payload=json.loads(prompt); calls.append(payload); assert payload["observed_material"]==[]; return review(verdict="accept")
-    monkeypatch.setattr(core_agent,"executar_verificador_claims",fake_claim)
-    status,text,_,details=core_agent.executar_agente("oi",base_config(claims_mode="fresh"),projeto={},retornar_detalhes=True)
-    assert status=="success" and text.startswith("Oi") and len(calls)==1
-    assert any(x.get("decision")=="claim_review" and x.get("outcome")=="accepted" for x in details["decision_history"])
+
+
 
 def test_rev123_uses_38k_physical_context_and_90k_task_fuse_without_cumulative_prompt_completion_fuses():
     cfg=base_config(); validar_config(cfg); execution=ExecutionContext.from_config(cfg)
@@ -148,12 +126,6 @@ def test_repeated_provider_truth_reconciles_conservative_estimates_without_cumul
     assert execution.prompt_tokens_budgeted_physical==execution.prompt_tokens_actual
     assert execution.physical_tokens_remaining>0
 
-def test_agent_config_preserves_configured_ceiling_when_claim_headroom_is_ample():
-    cfg=base_config(claims_mode="fresh")
-    from eyle.core.session import AgentSession
-    agent_cfg=core_agent._agent_config(cfg,AgentSession("x"),{})
-    assert agent_cfg["llm"]["agent_max_tokens"]==3600
-    assert "downstream_completion_reserve_tokens" not in agent_cfg["llm"]
 
 def test_cumulative_completion_budget_api_is_removed():
     assert not hasattr(llm_mod,"_completion_budget_remaining")

@@ -28,7 +28,7 @@ def test_workspace_fact_needs_no_investigation(monkeypatch, tmp_path):
     (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")
     status, text, pending, details = core_agent.executar_agente(
         "quantos tokens tem o projeto?",
-        base_config(claims_mode="off"),
+        base_config(),
         projeto={"caminho_origem": str(tmp_path)},
         retornar_detalhes=True,
     )
@@ -41,12 +41,22 @@ def test_workspace_fact_needs_no_investigation(monkeypatch, tmp_path):
     assert all(item.get("reason") != "INVESTIGATION_REQUIRED" for item in details["decision_history"])
 
 
-def test_declared_open_debt_does_not_block_main_final(monkeypatch, tmp_path):
-    monkeypatch.setattr(core_agent,"executar_agente_llm",lambda _p,_c:agent_final("Prematuro.",investigation=[{"id":"T1","goal":"Maybe inspect runtime flow","status":"open","grounding_ids":[],"reason":""}]))
-    cfg=base_config(claims_mode="off")
-    status,text,_,details=core_agent.executar_agente("Isso é legado?",cfg,projeto={"caminho_origem":str(tmp_path)},retornar_detalhes=True)
-    assert status=="success" and text=="Prematuro."
-    assert details["investigation"][0]["status"]=="open"
+def test_declared_open_investigation_blocks_final_until_resolved(monkeypatch, tmp_path):
+    calls={"n":0}
+    def fake(prompt,_config):
+        calls["n"]+=1
+        if calls["n"]==1:
+            return agent_final("Prematuro.",investigation=[{"id":"T1","goal":"Inspect runtime flow","status":"open","grounding_ids":[],"reason":""}])
+        payload=json.loads(prompt)
+        if calls["n"]==2:
+            assert "FINAL_COMMITMENTS_OPEN" in str(payload.get("runtime_feedback") or "")
+        return agent_tools(tool_call("read_file", {"path":"note.txt"}), investigation=[{"id":"T1","goal":"Inspect runtime flow","status":"open","grounding_ids":[],"reason":""}]) if calls["n"]==2 else agent_final({"answer":"Resolvido.","grounding_ids":["mat-0001"]}, investigation=[{"id":"T1","goal":"Inspect runtime flow","status":"established","grounding_ids":["mat-0001"],"reason":"Observed note.txt"}])
+    (tmp_path / "note.txt").write_text("ok\n",encoding="utf-8")
+    monkeypatch.setattr(core_agent,"executar_agente_llm",fake)
+    status,text,_,details=core_agent.executar_agente("Isso é legado?",base_config(),projeto={"caminho_origem":str(tmp_path)},retornar_detalhes=True)
+    assert status=="success" and text=="Resolvido."
+    assert details["investigation"][0]["status"]=="established"
+    assert calls["n"]==3
 
 def test_runtime_has_no_semantic_task_router_symbols():
     source = Path(core_agent.__file__).read_text(encoding="utf-8")

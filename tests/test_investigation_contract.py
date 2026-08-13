@@ -21,11 +21,12 @@ def test_declared_target_is_durable_and_main_can_revise_goal():
     assert not rejected3 and accepted3[0]["changed"] is True
     assert revised[0]["goal"]=="Different goal"
 
-def test_established_is_main_owned_and_optional_grounding_remains_validated_additive():
+def test_established_requires_real_grounding_and_grounding_remains_additive():
     grounding={"mat-0001":{"id":"mat-0001"},"mat-0002":{"id":"mat-0002"}}
     state,_,_=apply_investigation_updates([target()],grounding=grounding)
-    state,accepted,rejected=apply_investigation_updates([target(status="established",reason="Decided")],previous=state,grounding=grounding)
-    assert not rejected and state[0]["status"]=="established"
+    unchanged,_,rejected=apply_investigation_updates([target(status="established",reason="Decided")],previous=state,grounding=grounding)
+    assert unchanged == state
+    assert rejected[0]["reason"].startswith("INVESTIGATION_ESTABLISHED_GROUNDING_REQUIRED")
     state,_,rejected=apply_investigation_updates([target(status="established",grounding_ids=["mat-0001"],reason="Decided")],previous=state,grounding=grounding)
     assert not rejected
     state,_,rejected=apply_investigation_updates([target(status="established",grounding_ids=["mat-0002"],reason="Still decided")],previous=state,grounding=grounding)

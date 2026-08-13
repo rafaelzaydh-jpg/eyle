@@ -14,13 +14,18 @@ def investigation_target(
     }
 
 
-def task_item(task_id="task-1", *, parent_id=None, description="Complete the required work", status="open", result=""):
+def task_item(
+    task_id="task-1", *, parent_id=None, description="Complete the required work",
+    completion_criteria=None, status="open", result="", grounding_ids=None,
+):
     return {
         "id": str(task_id),
         "parent_id": None if parent_id is None else str(parent_id),
         "description": str(description),
+        "completion_criteria": list(completion_criteria or ["The described work is complete"]),
         "status": str(status),
         "result": str(result),
+        "grounding_ids": list(grounding_ids or []),
     }
 
 
@@ -72,35 +77,11 @@ def agent_needs_user(message, investigation=None, tasks=None, *, missing_informa
     }
 
 
-def issue(
-    *, kind="unsupported", grounding_ids=None, grounding_refs=None,
-    reason="Material support is insufficient.",
-):
-    if grounding_refs is None:
-        refs = [f"observation:{item}" for item in (grounding_ids or [])]
-        if not refs:
-            refs = ["request"]
-    else:
-        refs = list(grounding_refs)
-    return {
-        "kind": str(kind),
-        "grounding_refs": refs,
-        "reason": str(reason),
-    }
-
-
-def review(*, verdict="accept", issues=None):
-    items = list(issues or [])
-    if items and verdict == "accept":
-        verdict = "challenge"
-    return {"verdict": str(verdict), "issues": items}
-
-
-def base_config(*, claims_mode="off", tests_enabled=False):
+def base_config(*, tests_enabled=False):
     return {
         "app_version": "2.7.5",
-        "config_schema_version": "2.7.5-r1.3.4",
-        "revision": "rev1.3.4-fresh-claim-token-cleanup",
+        "config_schema_version": "2.7.5-r1.4.1",
+        "revision": "rev1.4.1-semantic-freedom",
         "llm": {
             "context_window_tokens": 38000,
             "agent_max_tokens": 3600,
@@ -120,11 +101,6 @@ def base_config(*, claims_mode="off", tests_enabled=False):
             "max_search_range_lines": 16,
             "max_search_matches": 40,
             "max_search_ranges": 12,
-            "claims": {
-                "mode": claims_mode,
-                "verifier": {"temperature": 0.0},
-                "grounding": {"max_chars_per_item": 1400},
-            },
         },
         "codar": {"ativado": True, "testes": {"ativado": bool(tests_enabled)}},
     }

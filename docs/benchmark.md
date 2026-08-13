@@ -1,85 +1,68 @@
-# Benchmark and regression contract
+# Benchmarking — Eyle 2.7.5 Rev1.4.1
 
-Benchmarks detect loss of truth, physical safety or useful agency. Lower token use is not an improvement if it hides objective reality; more semantic gates are not an improvement if Main could safely decide for itself.
+Benchmarks must measure capability, reliability and physical cost rather than only whether a final string was produced.
 
-## Rev1.3.4 deterministic gate
+## Record at minimum
 
-```bash
-python -B -m eyle.devtools.release_identity
-python -B -m pytest -q
-python -B -m compileall -q eyle llm web main.py
-node --check web/static/app.js
-```
+- task outcome / failure code;
+- Main LLM calls and physical attempts;
+- provider prompt/cache/output tokens;
+- tool requests and executions;
+- Observation count and replay rate;
+- Material/grounding count;
+- Coverage/Frontier behavior;
+- Investigation transitions;
+- Task transitions and completion criteria;
+- committed grounding count;
+- whether Final required a Grounded Completion correction;
+- wall-clock duration.
 
-`release_identity` is intentionally run before commands that generate bytecode/cache state; those generated artifacts must be removed before release packaging.
+Rev1.4 has no Claim outcome/call to record.
 
-Rev1.2.3.1 preserves the physical-contract and operational-self-observation regressions and adds Claim-contract/transport regressions:
+## Reliability regressions
 
-- zero-grounding Final is Claim-reviewed instead of blindly bypassing review;
-- Main is not given domain-specific audit/search strategy by Core;
-- Investigation state does not block Final or an otherwise valid write;
-- an invalid Investigation update does not cancel an independent valid action;
-- repeated observation is memoized rather than duplicated or converted into `OBSERVATION_REPLAY_LOOP`;
-- one invalid tool sibling does not cancel valid independent siblings;
-- recoverable capability failures return to Main instead of semantically killing the task;
-- Claim stays a compact `accept|challenge` critic;
-- continuation never exposes Runtime-private `handle:*` coordinates;
-- the model-call context ceiling is exactly 38,000 tokens across configuration/budget code;
-- cumulative prompt/completion budgets and fixed turn/call/tool quotas are absent; the 90k total-token fuse and deadline remain physical containment.
-- old unrelated Observation rows are omitted from later Main prompts while immediately fresh rows remain visible;
-- Investigation-pinned Material and every open Frontier survive delta projection;
-- the Main-facing Material directory is bounded to pinned/pending/recent coordinates instead of replaying the whole ledger;
-- memoized replays return coordinates plus bounded recall excerpts rather than full prior payloads;
-- Main has no fixed Claim reserve; Claim review fits its fresh packet to actual physical headroom after Candidate Final;
-- Observation contains no public-capability-specific extraction/signature branches;
-- grounding-producing capabilities own their Material extraction;
-- non-file `locator` Material registers canonically;
-- Claim has no Investigation coordinate or filesystem freshness implementation;
-- DecisionLedger has no rejection fingerprint/count/prescriptive property protocol;
-- one large continuation snapshot is reused across multiple Frontier cursors and garbage-collected after the final cursor;
-- a complete physical search Coverage may coexist with an open materialization Frontier;
-- continuing a search Frontier materializes real source-capability Material;
-- every public capability explicitly owns execution/signature/observation/Coverage/Frontier hooks;
-- Observation contains neither public capability names nor file/filesystem primitives;
-- Sandbox snapshots omit repository symlinks and enforce cwd/timeout/output boundaries;
-- multi-file transactions prove rollback or explicitly report rollback failure.
+Canonical tests should cover:
 
-Current deterministic suite in this build: **316 passed, 1 Flask-dependent skip** in the available offline build environment. `web/` is still Python-compiled and `web/static/app.js` is checked by Node.
+1. simple conversational Final requires no Task/Investigation;
+2. open Task blocks Final;
+3. every Task requires explicit completion criteria;
+4. completed parent cannot retain an open direct child;
+5. open Investigation blocks Final;
+6. established Investigation requires real Material;
+7. committed Investigation/Task Material cannot disappear from Final grounding;
+8. Runtime does not infer semantic truth or relevance;
+9. capability failure/rollback remains observable rather than silently converted into success;
+10. removed Claim contracts cannot reappear.
 
-## What to report for live runs
+## Token regressions
 
-At minimum record task outcome, Main turns, physical tool calls, LLM calls, physical token accounting, Observation/material count, cache/replay count, material Coverage/Frontier behavior, Claim outcome and failure code when applicable.
+Track separately:
 
-## Historical lesson
+- fixed repeated contract tax;
+- active capability schema/index cost;
+- fresh tool-result cost;
+- observation-map cost;
+- grounding-index cost;
+- epistemic/intentional state cost;
+- retained conversation context;
+- MemoryView cost when memory is explicitly activated.
 
-Rev5.x repeatedly converted model mistakes into new semantic machinery. Later clean breaks repeatedly removed that machinery. Rev1.1 made the semantic boundary explicit; Rev1.2 cut capability knowledge out of Core; Rev1.2.3 keeps the mature physical observation contract and adds bounded factual self-observation:
+The expected Rev1.4 structural win is one fewer LLM request for every normally delivered Final because the universal Claim review no longer exists.
 
-> **Eyle constrains effects, not thought.**
+## Memory Kernel regressions
 
-Physical invariants belong in Runtime. Semantic recovery belongs to Main. Claim challenges conclusions but does not become another planner.
+Keep the Rev1.3.6 proofs:
 
-## Release policy
+- 10,000 stored memories with <=30 materialized per view;
+- correct MemoryFrontier continuation;
+- cross-region relation traversal;
+- atomic ChangeSet rollback on revision conflict;
+- persistent append-only history;
+- restart recovery without transcript;
+- incompatible memory schema fails closed.
 
-Deterministic tests and extracted-artifact verification are blockers. Live-provider runs are additional evidence, not a reason to add compatibility or semantic cages to Core.
+## Benchmark law
 
-### Current Claim closure regressions
+> Physical invariants belong in Runtime; semantic recovery and completion meaning belong to Main.
 
-- Fresh Claim receives only Request, Candidate Final and selected observed Material; no Main history/Investigation/Tasks/runtime event packet is exposed.
-- Claim schema has strict shape/coordinate validation but no semantic issue/reference/reason quotas.
-- There is no fixed Claim token reserve or configurable verifier `max_tokens` field.
-- A second semantic challenge after one Main revision fails as `CLAIM_CHALLENGE_UNRESOLVED` instead of looping.
-- One `MODEL_OUTPUT_TRUNCATED`/structured-protocol recovery is allowed; a second failure stays fail-closed.
-- Interaction prompt explicitly permits ordinary conversation to return `final` without fabricating a formal task.
-- Transport timeouts are recorded as physical attempts rather than `preflight_blocked`.
-
-
-- page materialization must not deepcopy unselected snapshot items;
-- malformed Coverage must fail the capability contract;
-- >32 identical symbol definitions must produce exhaustive Coverage plus Frontier;
-- snapshot exhaustion must not imply source-materialization completeness;
-- generic capability dispatch must use registry hooks rather than tool-name branches;
-- Claim has no Runtime-event compaction layer;
-- Sandbox timeout must kill child process trees and container/backend lifecycle must fail closed.
-
-- canonical Main projections expose physical facts directly; `operational_feedback` remains removed;
-- task-wide physical token fuse defaults to and is capped at 90,000.
+A benchmark should flag any optimization that reduces tokens by hiding required reality or that increases reliability only by adding another unconstrained semantic judge.

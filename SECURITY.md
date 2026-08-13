@@ -25,9 +25,11 @@ A network-enabled sandbox protects host/workspace integrity, **not confidentiali
 
 Observed `mat-*` material may contain source excerpts required for a task. Runtime keeps provenance/freshness and Main decides whether that material grounds a conclusion. There is no second Evidence store to bypass the physical Observation boundary.
 
-## Claim boundary
+## Grounded Completion boundary
 
-Claim is semantic review only. It receives bounded request/answer coordinates, Main-selected Observation material and compact Runtime facts. Investigation is deliberately absent. Claim cannot call tools, write, or mutate Investigation. Deterministic path/hash/write/test/rollback controls remain Runtime-enforced.
+Rev1.4.1 has no Claim or second delivery LLM. Runtime improves reliability only through physically decidable checks: open Main-owned commitments block Final, established Investigation/grounded completed Tasks must reference real Material, and committed Material coordinates must survive into Final grounding. Runtime does not certify semantic truth or domain safety.
+
+Domain-specific security validation requires explicit criteria owned by the relevant capability/policy layer. A future specialist LLM validator may be used behind such a capability when given a concrete rubric, but it must return findings through normal Observation rather than become universal Core authority.
 
 ## Diagnostic history
 
@@ -36,3 +38,8 @@ Execution trace is an internal diagnostic projection over canonical runtime hist
 ## Compatibility
 
 Reintroducing a removed Core contract requires a concrete current failure and a regression test/metric demonstrating the need. Git and `CHANGELOG.md` are the historical archive.
+
+
+## Rev1.4.1 model-facing safety boundary
+
+Safety-critical physical restrictions remain Runtime-owned even though semantic strategy is free. The prompt cleanup does not weaken path protection, sandbox isolation, write confirmation, schema validation, budgets or transaction rollback. Runtime feedback reports these physical facts without choosing the Main LLM's next reasoning step.

@@ -17,7 +17,6 @@ def _config(tests_enabled=True):
         "context_engine": {"safety_margin_tokens": 500, "chars_per_token_fallback": 3},
         "agent": {
             "max_file_read_lines": 400,
-            "claims": {"mode": "off"},
         },
         "codar": {
             "ativado": True,

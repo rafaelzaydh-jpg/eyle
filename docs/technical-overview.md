@@ -1,141 +1,81 @@
-# Technical overview — Eyle 2.7.5 Rev1.3.4
+# Technical overview — Eyle 2.7.5 Rev1.4.1
 
-## Rev1.3.4 fresh Claim and token cleanup
+## Grounded Completion
 
-Claim is now a genuinely fresh Final gate. In default `fresh` mode Runtime starts a separate LLM request using Main's transport/model but sends no Main history or semantic state. The review packet contains only the original Request, Candidate Final and Main-selected observed Material. `verified` may use a distinct verifier. Claim returns only `accept|challenge` plus concrete issues and has no tool/planning/state-mutation authority.
+Rev1.4.1 adds no planner/router. It reduces the fixed model-facing surface so Main chooses naturally among direct Final, capabilities, optional Investigation/Tasks and blocking user input. Workspace metadata is ambient context, not an implicit assignment.
 
-Token cleanup removes the fixed 12k Claim reserve, request/answer anchors, Claim runtime-event compaction, hard semantic issue quotas, the duplicated `operational_feedback` projection and empty Task projection. Main's fixed prompt is shorter and status-variant duplication is removed from Investigation/Task JSON schema. A first challenge permits one Main revision; a second semantic challenge ends as `CLAIM_CHALLENGE_UNRESOLVED`.
-
-## Rev1.3.3 ownership cleanup
-
-Rev1.3.3 removes dead contracts rather than adding machinery. Internal trace/accounting is part of Runtime history, write-transaction bookkeeping is part of transaction mechanics, the unused `agent.context_view` knobs are gone, and capability results no longer carry a redundant `handles` slot. Prompt accounting separately measures Investigation (epistemic state) and Tasks (intentional state).
-
-## Rev1.3.2 bounded model view
-
-Rev1.3.2 separates **canonical observation size** from **prompt projection size**. Fresh tool results are still delivered immediately, but old unrelated Observation navigation and Material-directory rows are not replayed on every Main turn. Investigation-pinned Material and all open Frontiers remain visible. Memoized observation replays return references plus short recall excerpts instead of the original full payload.
-
-Rev1.3.2 introduced a default 12k Claim reserve inside the 90k task fuse. Rev1.3.4 removes that standing reservation: Main uses the shared physical envelope, and a fresh Claim fits to the actual headroom remaining only after a Candidate Final exists.
-
-## Request path
-
-A large task normally loops freely:
+Rev1.4 removes the Claim subsystem and makes Main the only LLM in the normal decision loop.
 
 ```text
-Main → Runtime capability → Observation → Main
+Main call
+  ↓
+optional tool calls
+  ↓
+Observation
+  ↓
+Main updates Investigation / Tasks
+  ↓
+Final preflight
+  ├─ open commitments? → reject to Main
+  ├─ required committed Material missing? → reject to Main
+  └─ structurally valid → accept and deliver
 ```
 
-When Main chooses to conclude and Claim is enabled:
+There is no provisional Final or second LLM review.
+
+## Task state
+
+Tasks are recursive Main-owned intentional commitments. Each Task has exactly:
 
 ```text
-Main → Candidate Final → fresh Claim → accept → User
-                           └→ challenge → Main revision → fresh Claim
-                                                      ├→ accept → User
-                                                      └→ challenge → CLAIM_CHALLENGE_UNRESOLVED
+id
+parent_id
+description
+completion_criteria
+status
+result
+grounding_ids
 ```
 
-Claim also reviews a zero-grounding Final. It may accept pure reasoning/writing where observation is unnecessary or challenge unsupported current/external assertions. It judges only the supplied Request, Candidate Final and selected observed Material.
+Runtime validates IDs, parent references, cycles, closure shape, Material references and that a completed Task has no open direct child. Any remaining open Task rejects Final as `FINAL_COMMITMENTS_OPEN`.
 
-## Canonical owners
+## Investigation state
 
-```text
-AgentSession
-├─ ObservationLedger  physical material/Coverage/Frontier
-├─ Investigation      Main-owned epistemic notebook
-├─ Tasks              Main-owned recursive intentional state
-├─ DecisionLedger     observable decision history
-├─ ClaimReview        latest compact critique
-├─ WriteTransaction   supervised real-workspace mutation
-└─ conversation background
-```
+Investigation is a Main-owned epistemic commitment. An open Investigation also blocks Final. `established` requires real Material grounding; `dismissed` records an explicit semantic decision to stop pursuing it.
 
-`ExecutionContext` owns physical deadline/call/tool/turn/total-token containment and transport accounting. It does not own semantic progress.
+## Final grounding continuity
 
-## Capability result
+`validate_final()` accepts a mechanically computed `required_grounding_ids` set. It checks that every committed Material coordinate appears in Final `grounding_ids`.
 
-Capabilities return one canonical physical envelope containing status plus `observations`, `coverage` and `frontiers` slots. Every registry entry explicitly owns the hook surface that produces those fields, even when a capability intentionally returns no Material or Frontier.
+Runtime does not decide whether those materials semantically prove the answer. It prevents Main from silently dropping its own declared evidence during synthesis.
 
-Capabilities emit generic observation candidates. Observation registers them as `mat-*` using `locator + content_hash` plus optional opaque `source_version`; file-specific extraction, freshness and rehydration stay in the file capabilities.
+## Observation projection
 
-Coverage uses `scope/examined/complete` with optional physical `boundaries/facts`. Frontier is orthogonal: a scan may be physically complete while materialization still has a continuation.
+Canonical Observation remains Runtime-owned while the prompt receives bounded projections:
 
-Large Frontier payloads are stored exactly once in Runtime-private snapshots. Public `fr-*` refs resolve to lightweight handles/cursors, and source capabilities materialize continuation pages.
+- `latest_tool_results` for fresh physical results;
+- `observation_map` for compact observed-state coordinates;
+- `grounding_index` for selected Material coordinates;
+- open Frontiers/committed coordinates as needed.
 
-## Cached observation
+Coverage and Frontier remain physical facts. Main decides whether continuation matters.
 
-Repeated objective work at the same physical state can be rehydrated from canonical Observation. A cache hit increments replay telemetry but does not append a duplicate physical Observation and does not create a specialized semantic-loop fatal.
+## Memory Kernel
 
-## Investigation
+Persistent cognitive memory uses SQLite with revisioned Memory Nodes, tags, relations, atomic ChangeSets, append-only events and bounded navigation.
 
-Main may create, revise, establish, dismiss or ignore Investigation entries. Runtime checks shape and any supplied `mat-*` identities; it does not use Investigation status as a permission gate for Final or writes.
+`MemoryCoverage`/`MemoryFrontier` intentionally remain distinct from Observation Coverage/Frontier. Memory content is loaded only through explicit memory tools; store size does not imply prompt size.
 
-If an Investigation update is invalid but the same model turn also contains an independent valid capability action, Runtime rejects only the invalid update and continues the valid action.
+## LLM transport
 
-## Claim
+Main uses the configured OpenAI-compatible/Ollama transport through the structured `agent` profile. Provider variability stays behind adapters. Structured parsing is fail-closed.
 
-Claim receives a bounded packet of request coordinates, provisional-answer anchors, selected Observation material and compact physical Runtime facts. Investigation is deliberately absent.
+Rev1.4 deletes the old `claim_verifier` structured profile and Claim transport path.
 
-Its contract is deliberately small:
+## Physical containment
 
-```json
-{
-  "verdict": "accept | challenge",
-  "issues": []
-}
-```
+Runtime enforces per-call context, task-wide physical token fuse, task deadline and sandbox/resource limits. There is no Claim reserve or fixed Claim output budget.
 
-A challenge contains only blocking issues. Claim cannot call tools, prescribe which tool Main should use, or mutate Main state. The protocol is physically bounded to 3 independent issues, 4 coordinates per issue and one concise reason; the budget is derived from that contract rather than user configuration.
+## Future validators
 
-## Search and relations
-
-`search_code`, `find_symbol`, `symbol_relations`, `read_file` and other capabilities expose deterministic physical contracts. Core does not encode an audit/search recipe. Main chooses and composes capabilities from their schemas and descriptions.
-
-A Frontier is available continuation, never an instruction to continue.
-
-## Tool failures
-
-Schema rejection, protected-resource denial, sandbox failure and other physical capability failures are surfaced as factual results when safe continuation is possible. Runtime prevents the prohibited effect; it does not infer that the whole task has semantically failed.
-
-## Model window
-
-The current llama-server deployment is physically limited to **38,000 context tokens per call**.
-
-Runtime compiles each Main/Claim request inside that window, reserving output/safety headroom. The old cumulative `max_prompt_tokens` and `max_completion_tokens` controls are absent. A task-wide `max_total_tokens=90,000` fuse and deadline provide runaway containment. Rev1.3.2 adds a protected Claim reserve inside that same physical envelope; it does not create a semantic stop rule or a fixed LLM-turn, LLM-call or tool-call quota.
-
-## Diagnostics
-
-Execution trace is an internal projection built from observable canonical state. It is not a Main capability and does not expose chain-of-thought, raw prompts or raw model responses.
-
-## Providers
-
-Provider variability stays behind adapters. OpenAI-compatible and Ollama transports normalize into the same current Agent/Claim contracts. Core contains no compatibility downgrade chain.
-
-## Rev1.3 intentional-state closure
-
-Main now returns `{action,investigation_updates,task_updates}`. Tasks are persisted in `AgentSession.tasks` and validated by `eyle/core/tasks.py`. The contract is intentionally narrow: recursive parent relation, `open|completed|dropped`, and a result for closed tasks. Runtime validates shape/parent/cycle integrity only. There is no task scheduler, auto-completion, Final gate, priority, focus model or generic memory graph.
-
-The former physical run identifier `task_id` is renamed `execution_id` in AgentSession/ExecutionContext/service boundaries so semantic Tasks have one unambiguous meaning.
-
-The Rev1.2.3.2.2 Microsandbox physical closure remains unchanged beneath this semantic addition.
-
-- Main receives canonical `latest_tool_results`, `observation_map`, `grounding_index` and `physical_limits` directly; the duplicative `operational_feedback` layer is removed.
-- Runtime never prescribes retry/stop/replan; Main remains sole task-semantic authority.
-- `max_total_tokens` defaults to and is capped at 90,000; there is no fixed Claim reserve.
-
-- Coverage is normalized and validated at the capability execution boundary; arbitrary parallel Coverage dialects are rejected.
-- Frontier pagination retains a single snapshot and copies only the requested page slice.
-- `find_symbol` exhausts its safe source scope, reports files/matches examined, and exposes excess observed locations through Frontier instead of silently stopping at 32.
-- Continuation Coverage separately reports snapshot exhaustion and source materialization success.
-- Capability-specific normalization, memoization containment, public/model projection, continuation and freshness are owned by registry hooks; generic dispatch contains no capability-name branches.
-- Claim compacts Runtime facts from the universal envelope/Coverage/Frontier shape rather than code/file-specific field names.
-- `backend=auto` prefers Microsandbox before Docker/Bubblewrap. One Microsandbox microVM persists per unrestricted command job. Supervised tests use a separate one-off Microsandbox VM only when that backend is explicitly configured with a test-capable OCI image. Eyle always starts from a disposable snapshot: Linux/macOS bind-mount it at `/workspace`; native Windows copies it into the VM-private rootfs with `Sandbox.fs.copy_from_host`, avoiding the Microsandbox 0.6.8 Windows passthrough-fs EACCES/ELOOP defects. The real workspace is never a writable guest mount.
-- Sandbox regression coverage includes Microsandbox bind and Windows guest-staging transports, network/rlimit/lifecycle behavior, child-process cleanup, explicit backend fallback, Docker initialization failure and persistent-container cleanup.
-
-
-### Microsandbox 0.6.8 API closure
-
-The Runtime targets the pinned Python SDK contract directly: it bootstraps the local runtime with `is_installed()`/`await install()`, uses `Network.from_profiles("public")` for ordinary `run_command`, and `Network.none()` only for explicitly network-isolated supervised execution. The removed/historical `Network.public_only()` helper is not part of the active integration.
-
-
-## Rev1.3.1 workspace and self-source
-
-The automatic project root is always the dedicated `workspace/`. Empty is a valid physical state. Self-analysis is explicit through `source=eyle`; direct writes remain workspace-only. Self-change experiments use the persistent per-job sandbox snapshot and can be exported only through `export_sandbox_zip`, which produces an inert ZIP artifact without promoting modified files into the installation.
+Capability-owned validators are a documented future extension, not an active framework. A validator must evaluate explicit criteria that its domain can actually inspect and return results through normal Observation. A specialist LLM may be one implementation when supplied with explicit criteria, but it is not a universal judge or second Main.

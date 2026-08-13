@@ -92,15 +92,6 @@
     "max_git_diff_chars": 6000,
     "max_search_matches": 40,
     "max_search_ranges": 12,
-    "claims": {
-      "mode": "fresh",
-      "verifier": {
-        "temperature": 0.0
-      },
-      "grounding": {
-        "max_chars_per_item": 1400
-      }
-    },
     "max_search_range_lines": 16,
     "sandbox": {
       "backend": "auto",
@@ -135,6 +126,6 @@
     "window_seconds": 3600
   },
   "app_version": "2.7.5",
-  "config_schema_version": "2.7.5-r1.3.4",
-  "revision": "rev1.3.4-fresh-claim-token-cleanup"
+  "config_schema_version": "2.7.5-r1.4.1",
+  "revision": "rev1.4.1-semantic-freedom"
 }

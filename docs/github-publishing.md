@@ -1,50 +1,32 @@
-# Publishing Eyle 2.7.5 Rev1.3.4
+# Publishing Eyle 2.7.5 Rev1.4.1
 
-Target release identity:
+Canonical identity:
 
 ```text
-app version  2.7.5
-schema       2.7.5-r1.3.4
-revision     rev1.3.4-fresh-claim-token-cleanup
-tag          v2.7.5-rev1.3.4
+app          2.7.5
+schema       2.7.5-r1.4.1
+revision     rev1.4.1-semantic-freedom
+tag          v2.7.5-rev1.4.1
 ```
 
-## Public tag rules
-
-- never reuse, move or rewrite a published tag;
-- never mass-delete tags through a broad inverse filter;
-- obsolete pre-public tags, when necessary, must be explicit reviewed exact names;
-- development milestones belong in commits/branches and `CHANGELOG.md`;
-- create the public tag only after verifying the extracted artifact.
-
-## Artifact verification
-
-Validate the extracted artifact, not only the development tree:
+Before publishing, validate the extracted artifact rather than only the working directory:
 
 ```bash
-python -B -m eyle.devtools.release_identity
-python -B -m compileall -q eyle llm web main.py
-python -B -m pytest -q
+python -m pytest -q
+python -m compileall -q eyle llm main.py
 node --check web/static/app.js
+python -m eyle.devtools.release_identity
 ```
 
-Generated/runtime state must be absent:
+Remove generated caches before packaging (`__pycache__`, `.pytest_cache`, `.coverage`, `*.pyc`). The release verifier rejects generated artifacts and removed-contract zombies.
 
-- `.git/`, `.pytest_cache/`, `__pycache__/`, `*.pyc`, `.coverage`;
-- Runtime SQLite databases and locks;
-- transient pending/session files produced by local execution.
-
-## Documentation verification
-
-Before publication, README/config/manifest identities must agree; current docs must describe Rev1.3 semantics; removed contracts/gates must not be presented as active; historical behavior belongs in `CHANGELOG.md`.
-
-## Create the tag
-
-After extracted-artifact verification:
+Publish:
 
 ```bash
-git tag -a v2.7.5-rev1.3.4 -m "Eyle 2.7.5 Rev1.3.4 — Fresh Claim & Token Cleanup"
-git push origin v2.7.5-rev1.3.4
-```
+git add .
+git commit -m "Eyle 2.7.5 Rev1.4.1 - Semantic Freedom"
+git push
 
-Rev1.3 never resumes or migrates incompatible older Core state.
+git tag -a v2.7.5-rev1.4.1 -m "Eyle 2.7.5 Rev1.4.1 — Semantic Freedom"
+git push origin v2.7.5-rev1.4.1
+```

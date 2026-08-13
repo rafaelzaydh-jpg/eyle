@@ -12,10 +12,7 @@ import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from llm.executar import (
-    ErroLLM, PROMPT_AGENTE, PROMPT_CLAIM_VERIFIER,
-    executar_agente as executar_agente_llm, executar_verificador_claims,
-)
+from llm.executar import ErroLLM, PROMPT_AGENTE, executar_agente as executar_agente_llm
 from .session import AgentSession
 from .continuation import PENDING_SCHEMA_VERSION, validate_pending_continuation
 from .execution_context import ExecutionContext, bind_execution, reset_execution, current_execution
@@ -36,7 +33,7 @@ from .observation import (
 from .investigation import (
     apply_investigation_updates, investigation_grounding_ids,
 )
-from .tasks import apply_task_updates, task_state_view
+from .tasks import apply_task_updates, task_grounding_ids, task_state_view
 from .security import _resolver_caminho_seguro
 from .token_budget import (
     available_user_prompt_tokens, estimate_tokens,
@@ -58,7 +55,6 @@ from .tools import (
     capability_model_detail as _capability_model_detail,
     capability_find_covering as _capability_find_covering,
     capability_find_resource_failure as _capability_find_resource_failure,
-    capability_validate_material_freshness as _validate_material_freshness,
     capability_rehydrate_materials as _rehydrate_grounding,
 )
 from .transactions import (
@@ -69,10 +65,6 @@ from .transactions import (
     public_view as _write_transaction_view,
 )
 from .validation import validate_final
-from .claim_review import (
-    claim_config, claim_grounding_ledger, compact_grounding,
-    review_followup_feedback, normalize_claim_review, review_prompt,
-)
 
 def _return(status: str, text: str, pending: Any, details: Dict[str, Any], full: bool):
     return (status, text, pending, details) if full else (status, text, pending)
@@ -97,8 +89,7 @@ def _append_user_clarification(request: str, pending: Dict[str, Any], response: 
     """Evolve the one canonical task request with a blocking user clarification.
 
     The clarification is task input, never a tool observation. Keeping it inside
-    session.request guarantees the Main LLM, later turns and Claim review see
-    the same task even after pending tool results are replaced.
+    session.request guarantees later Main turns see the same task even after pending tool results are replaced.
     """
     clarification = pending.get("clarification") if isinstance(pending, dict) else None
     if not isinstance(clarification, dict):
@@ -110,10 +101,10 @@ def _append_user_clarification(request: str, pending: Dict[str, Any], response: 
         raise ValueError("PENDING_CLARIFICATION_INVALID")
     base = str(request or "").rstrip()
     block = (
-        "User clarification for the active task:\n"
-        f"Blocking information requested: {missing}\n"
-        f"Eyle asked: {question}\n"
-        f"User answered: {answer}"
+        "User clarification for the active request:\n"
+        f"Missing information: {missing}\n"
+        f"Question: {question}\n"
+        f"Answer: {answer}"
     )
     return f"{base}\n\n{block}" if base else block
 
@@ -208,7 +199,7 @@ def _project_grounding_index(
     does not need that directory replayed on every turn.  Investigation-pinned
     Material is always retained, fresh pending Material is surfaced in a small
     window, and a tiny recency tail preserves navigation continuity.  Full
-    Material remains canonical in Observation and Claim can still address it by
+    Material remains canonical in Observation and Main can still address it by
     selected ``mat-*`` id.
     """
     full = [item for item in session.grounding_index() if isinstance(item, dict)]
@@ -647,30 +638,6 @@ def _crop_payload(payload: Dict[str, Any], budget: int, chars_per_token: int) ->
     return payload
 
 
-def _claim_review_has_debt(review: Dict[str, Any]) -> bool:
-    return str((review or {}).get("verdict") or "") == "challenge"
-
-
-def _claim_challenge_count(session: AgentSession) -> int:
-    """Count Claim challenges in the current execution only."""
-    ledger = session.decision_ledger if isinstance(session.decision_ledger, dict) else {}
-    events = list(ledger.get("events") or [])
-    execution = current_execution()
-    start = int(execution.decision_event_start or 0) if execution is not None else 0
-    return sum(
-        1 for item in events[start:]
-        if isinstance(item, dict)
-        and item.get("decision") == "claim_review"
-        and item.get("outcome") == "challenge"
-    )
-
-
-def _persistent_claim_feedback(session: AgentSession, config: Dict[str, Any]) -> str:
-    if claim_config(config)["mode"] == "off" or not _claim_review_has_debt(session.claim_review):
-        return ""
-    return review_followup_feedback(session.claim_review)
-
-
 def _agent_config(config: Dict[str, Any], session: AgentSession, project: Dict[str, Any]) -> Dict[str, Any]:
     """Return Main's physical LLM configuration without downstream token hostage-taking."""
     clone = dict(config)
@@ -705,11 +672,7 @@ def _trace_prompt_components(payload: Dict[str, Any], chars_per_token: int) -> D
 
 
 def _merged_runtime_feedback(transient: str, persistent: str) -> Any:
-    """Preserve persisted Claim feedback while attaching transient Runtime notices.
-
-    Runtime stores the critic's blocker set but does not own its semantics. A
-    physical/validation notice must not hide that feedback before Main revises.
-    """
+    """Merge independent Runtime notices without assigning semantic meaning."""
     transient = str(transient or "").strip()
     persistent = str(persistent or "").strip()
     if not persistent:
@@ -719,14 +682,14 @@ def _merged_runtime_feedback(transient: str, persistent: str) -> Any:
     try:
         base = json.loads(persistent)
     except Exception:
-        base = {"semantic_followup": persistent}
+        base = {"runtime_notice": persistent}
     if not isinstance(base, dict):
-        base = {"semantic_followup": base}
+        base = {"runtime_notice": base}
     try:
         notice: Any = json.loads(transient)
     except Exception:
         notice = transient
-    base["runtime_notice"] = notice
+    base["runtime_notice_secondary"] = notice
     return json.dumps(base, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -779,11 +742,10 @@ def _compile_prompt(
         },
         "capability_index": capability_index,
         "active_tools": active_tools,
-        "runtime_feedback": _merged_runtime_feedback(feedback, _persistent_claim_feedback(session, config)),
+        "runtime_feedback": str(feedback or "").strip() or None,
     }
     if session.tasks:
         payload["task_state"] = task_state_view(session.tasks)
-    claim_config(config)
     llm_cfg = config.get("llm") or {}
     output_tokens = int(llm_cfg.get("agent_max_tokens", 3600) or 3600)
     output_tokens_configured = int(llm_cfg.get("agent_max_tokens_configured", output_tokens) or output_tokens)
@@ -841,153 +803,6 @@ def _call_agent(
     return decision, allowed
 
 
-def _claim_llm_config(config: Dict[str, Any], mode: str) -> Dict[str, Any]:
-    cfg = claim_config(config)
-    clone = dict(config)
-    llm = dict((config or {}).get("llm") or {})
-    verifier = cfg["verifier"]
-    llm["temperature"] = verifier["temperature"]
-    if mode == "verified":
-        for key in ("base_url", "model", "openai_compatible"):
-            llm[key] = verifier[key]
-    clone["llm"] = llm
-    return clone
-
-
-def _record_aux_prompt(
-    session: AgentSession, config: Dict[str, Any], *, mode: str, prompt: str,
-    system_prompt: str, output_tokens: int, metadata: Optional[Dict[str, Any]] = None,
-) -> None:
-    chars_per_token = max(1, int(((config or {}).get("context_engine") or {}).get("chars_per_token_fallback", 3) or 3))
-    prompt_meta = {
-        "output_tokens_reserved": int(output_tokens),
-        "system_prompt_characters": len(system_prompt),
-        "system_prompt_estimated_tokens": estimate_tokens(system_prompt, chars_per_token),
-        "auxiliary_llm_call": True,
-    }
-    # Auxiliary semantic-review prompts are JSON packets. Record only bounded
-    # component sizes so Claim cost can be audited without exposing the packet.
-    try:
-        payload = json.loads(prompt)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        payload = None
-    if isinstance(payload, dict):
-        prompt_meta["components_after"] = _trace_prompt_components(payload, chars_per_token)
-    if metadata:
-        prompt_meta.update(metadata)
-    execution = current_execution()
-    if execution is not None:
-        execution.begin_call(mode=mode, turn=session.turn, prompt={
-            "characters": len(prompt), "estimated_tokens": estimate_tokens(prompt, chars_per_token),
-            "tool_count": 0, **prompt_meta,
-        })
-
-
-def _fit_claim_grounding_view(
-    session: AgentSession, config: Dict[str, Any], answer: str, selected_ids: List[str],
-) -> Tuple[bool, str, List[Dict[str, Any]], Dict[str, int], int]:
-    """Fit the fresh Claim packet into the real remaining context/task budget.
-
-    There is no standing Claim reserve. Main and Claim share the task budget;
-    once a candidate Final exists, Claim receives the physical headroom that is
-    actually left. Material excerpts are cropped before the critic's output
-    ceiling is reduced.
-    """
-    cfg = claim_config(config)
-    verifier_config = _claim_llm_config(config, cfg["mode"])
-    context_cfg = (config or {}).get("context_engine") or {}
-    chars_per_token = max(1, int(context_cfg.get("chars_per_token_fallback", 3) or 3))
-    execution = current_execution()
-    calibration = execution.prompt_token_calibration if execution is not None else 1.0
-    llm_cfg = verifier_config.get("llm") or {}
-    desired_output = max(1, int(llm_cfg.get("agent_max_tokens", llm_cfg.get("max_tokens", 3600)) or 3600))
-    maximum = int(cfg["grounding"]["max_chars_per_item"])
-    minimum = min(120, maximum)
-    grounding = _grounding_items(session.observation_ledger)
-
-    def build(cap: int) -> Tuple[List[Dict[str, Any]], str, int]:
-        view = compact_grounding(grounding, selected_ids, max_chars_per_item=max(0, int(cap)))
-        prompt = review_prompt(answer, view, session.request)
-        return view, prompt, estimate_tokens(prompt, chars_per_token)
-
-    minimum_view, _minimum_prompt, minimum_tokens = build(minimum)
-    output_tokens = desired_output
-    if execution is not None:
-        margin = max(0, int(context_cfg.get("safety_margin_tokens", 500) or 0))
-        system_tokens = estimate_tokens(PROMPT_CLAIM_VERIFIER, chars_per_token)
-        calibrated_min_prompt = int((system_tokens + minimum_tokens) * max(0.75, min(4.0, float(calibration or 1.0)))) + 1
-        physical_output_room = int(execution.physical_tokens_remaining or 0) - calibrated_min_prompt - margin
-        window = max(1, int(llm_cfg.get("context_window_tokens", 38000) or 38000))
-        window_output_room = window - system_tokens - minimum_tokens - margin
-        output_tokens = min(desired_output, physical_output_room, window_output_room)
-        if output_tokens < 128:
-            return False, "CLAIM_REVIEW_BUDGET_UNAVAILABLE", [], {
-                "minimum_prompt_estimated_tokens": minimum_tokens,
-                "desired_output_tokens": desired_output,
-                "physical_tokens_remaining": int(execution.physical_tokens_remaining or 0),
-            }, 0
-
-    output_tokens = max(1, int(output_tokens))
-    prompt_budget = available_user_prompt_tokens(
-        verifier_config, PROMPT_CLAIM_VERIFIER, output_tokens=output_tokens,
-        token_estimate_multiplier=calibration,
-    )
-    physical_prompt_budget = None
-    if execution is not None:
-        physical_prompt_budget = physical_user_prompt_tokens(
-            verifier_config,
-            PROMPT_CLAIM_VERIFIER,
-            output_tokens=output_tokens,
-            physical_tokens_remaining=execution.physical_tokens_remaining,
-            protected_tokens=0,
-            token_estimate_multiplier=calibration,
-        )
-        prompt_budget = min(prompt_budget, physical_prompt_budget)
-
-    full_view, _full_prompt, full_tokens = build(maximum)
-    if full_tokens <= prompt_budget:
-        return True, "ok", full_view, {
-            "prompt_budget_tokens": prompt_budget,
-            "physical_user_prompt_budget_tokens": physical_prompt_budget,
-            "prompt_estimated_tokens": full_tokens,
-            "grounding_excerpt_chars_per_item": maximum,
-            "selected_grounding_count": len(selected_ids),
-            "output_tokens_reserved": output_tokens,
-            "output_tokens_desired": desired_output,
-        }, output_tokens
-
-    if minimum_tokens > prompt_budget:
-        return False, f"CLAIM_REVIEW_WORKING_SET_EXCEEDED:{minimum_tokens}>{prompt_budget}", [], {
-            "prompt_budget_tokens": prompt_budget,
-            "physical_user_prompt_budget_tokens": physical_prompt_budget,
-            "prompt_estimated_tokens": minimum_tokens,
-            "grounding_excerpt_chars_per_item": minimum,
-            "selected_grounding_count": len(selected_ids),
-            "output_tokens_reserved": output_tokens,
-            "output_tokens_desired": desired_output,
-        }, output_tokens
-
-    best_view, best_tokens, best_cap = minimum_view, minimum_tokens, minimum
-    low, high = minimum, maximum
-    while low <= high:
-        mid = (low + high) // 2
-        view, _prompt, tokens = build(mid)
-        if tokens <= prompt_budget:
-            best_view, best_tokens, best_cap = view, tokens, mid
-            low = mid + 1
-        else:
-            high = mid - 1
-    return True, "ok", best_view, {
-        "prompt_budget_tokens": prompt_budget,
-        "physical_user_prompt_budget_tokens": physical_prompt_budget,
-        "prompt_estimated_tokens": best_tokens,
-        "grounding_excerpt_chars_per_item": best_cap,
-        "selected_grounding_count": len(selected_ids),
-        "output_tokens_reserved": output_tokens,
-        "output_tokens_desired": desired_output,
-    }, output_tokens
-
-
 def _is_structured_response_error(error: Exception, profile: Optional[str] = None) -> bool:
     code = str(getattr(error, "error_code", "") or "")
     prefix = "STRUCTURED_RESPONSE_INVALID:"
@@ -996,116 +811,26 @@ def _is_structured_response_error(error: Exception, profile: Optional[str] = Non
     return profile is None or code.startswith(prefix + profile + ":")
 
 
-def _run_claim_verification(
-    session: AgentSession, config: Dict[str, Any], answer: str, grounding_ids: List[str],
-    *, source_roots: Any = None,
-) -> Tuple[bool, str, Dict[str, Any], List[Dict[str, Any]]]:
-    """Run a fresh critic over Request + candidate Final + Main-selected material only."""
-    cfg = claim_config(config)
-    execution = current_execution()
-    if execution is not None:
-        execution.assert_canonical_request(session.request)
-    selected_ids = list(dict.fromkeys(str(item) for item in (grounding_ids or []) if str(item)))
-    grounding = _grounding_items(session.observation_ledger)
-
-    fresh, freshness_reason = _validate_material_freshness(grounding, selected_ids, source_roots)
-    if not fresh:
-        return False, freshness_reason, {}, []
-
-    verifier_config = _claim_llm_config(config, cfg["mode"])
-    fit_ok, fit_reason, view, fit_meta, output_tokens = _fit_claim_grounding_view(
-        session, config, answer, selected_ids,
-    )
-    if not fit_ok:
-        return False, fit_reason, {}, []
-    visible_ids = [
-        str(item.get("ref") or "").split(":", 1)[1]
-        for item in view if str(item.get("ref") or "").startswith("observation:")
-    ]
-    visible_set = set(visible_ids)
-    if any(item not in visible_set for item in selected_ids):
-        missing = [item for item in selected_ids if item not in visible_set]
-        return False, "CLAIM_REVIEW_UNKNOWN_GROUNDING:" + ",".join(missing), {}, []
-
-    verifier_config["llm"].pop("downstream_completion_reserve_tokens", None)
-    verifier_config["llm"]["claim_verifier_max_tokens"] = output_tokens
-    prompt = review_prompt(answer, view, session.request)
-    fit_meta = dict(fit_meta)
-    fit_meta.update({
-        "fresh_call": True,
-        "semantic_packet_fields": ["request", "candidate_answer", "observed_material"],
-    })
-    _record_aux_prompt(
-        session, verifier_config, mode="claim_verification", prompt=prompt,
-        system_prompt=PROMPT_CLAIM_VERIFIER, output_tokens=output_tokens, metadata=fit_meta,
-    )
-    try:
-        parsed = executar_verificador_claims(prompt, verifier_config)
-    except ErroLLM as error:
-        recoverable_protocol_error = (
-            _is_structured_response_error(error, "claim_verifier")
-            or str(getattr(error, "error_code", "") or "") == "MODEL_OUTPUT_TRUNCATED"
-        )
-        if not recoverable_protocol_error:
-            raise
-        _record_decision(session, "claim_protocol", "rejected", reason=error.error_code)
-        retry_payload = json.loads(prompt)
-        retry_payload["protocol_feedback"] = {
-            "code": "CANONICAL_CLAIM_RECOVERY",
-            "instruction": "Return only the canonical Claim JSON. Keep blockers concrete and concise; do not add prose.",
-        }
-        retry_prompt = json.dumps(retry_payload, ensure_ascii=False, separators=(",", ":"), default=str)
-        _record_aux_prompt(
-            session, verifier_config, mode="claim_verification", prompt=retry_prompt,
-            system_prompt=PROMPT_CLAIM_VERIFIER, output_tokens=output_tokens,
-            metadata={**fit_meta, "protocol_retry": True, "protocol_retry_cause": error.error_code},
-        )
-        _record_decision(session, "claim_protocol", "retry", reason="CANONICAL_CLAIM_RECOVERY")
-        try:
-            parsed = executar_verificador_claims(retry_prompt, verifier_config)
-        except ErroLLM as retry_error:
-            _record_decision(session, "claim_protocol", "failed", reason=retry_error.error_code)
-            raise
-
-    fresh, freshness_reason = _validate_material_freshness(grounding, selected_ids, source_roots)
-    if not fresh:
-        return False, freshness_reason, {}, view
-    if not isinstance(parsed, dict):
-        return False, "CLAIM_REVIEW_PROTOCOL_ERROR:STRUCTURED_OBJECT_REQUIRED", {}, view
-    ok, reason, review = normalize_claim_review(
-        parsed, grounding, visible_grounding_ids=visible_ids,
-    )
-    return ok, reason, review, view
-
-
-def _append_claim_review(session: AgentSession, review: Dict[str, Any]) -> None:
-    session.claim_review = {
-        "turn": session.turn,
-        "verdict": str(review.get("verdict") or ""),
-        "issues": [dict(item) for item in review.get("issues") or [] if isinstance(item, dict)],
-    }
-
-
 def _grounding_usage_metrics(session: AgentSession) -> Dict[str, int]:
-    """Small operational accounting for one canonical material store."""
+    """Small operational accounting for one canonical Material store."""
     grounding = _grounding_items(session.observation_ledger)
     all_ids = {str(item) for item in grounding if str(item)}
-    target_ids = set(investigation_grounding_ids(session.investigation))
-    claim_ids: set[str] = set()
-    for issue in (session.claim_review or {}).get("issues") or []:
-        if isinstance(issue, dict):
-            claim_ids.update(str(item) for item in issue.get("grounding_ids") or [] if str(item))
+    investigation_ids = set(investigation_grounding_ids(session.investigation))
+    task_ids = set(task_grounding_ids(session.tasks))
+    target_ids = investigation_ids | task_ids
     actions_with_grounding = sum(
         1 for item in _tool_history_view(session, limit=200)
         if isinstance(item, dict) and item.get("executed") is True and item.get("grounding_ids")
     )
     return {
         "total_grounding_count": len(all_ids),
-        "investigation_grounding_count": len(target_ids & all_ids),
-        "claim_grounding_count": len(claim_ids & all_ids),
-        "unreferenced_grounding_count": len(all_ids - target_ids - claim_ids),
+        "investigation_grounding_count": len(investigation_ids & all_ids),
+        "task_grounding_count": len(task_ids & all_ids),
+        "completion_grounding_count": len(target_ids & all_ids),
+        "unreferenced_grounding_count": len(all_ids - target_ids),
         "tool_actions_with_grounding": actions_with_grounding,
     }
+
 
 def _details(
     session: AgentSession, status: str, config: Dict[str, Any],
@@ -1153,11 +878,6 @@ def _details(
         "tools_used": [item.get("tool") for item in tool_history if (item.get("result") or {}).get("executed") is True],
         "tool_history": tool_history, "decision_history": decision_history,
         "grounding": session.grounding_index(),
-        "claim_grounding": claim_grounding_ledger(session.claim_review, grounding) if session.claim_review else [],
-        "claim_review": {
-            "verdict": session.claim_review.get("verdict"),
-            "issues": [dict(item) for item in session.claim_review.get("issues") or [] if isinstance(item, dict)],
-        } if session.claim_review else {},
         "limitations": list(limitations or []), "failure_code": failure_code,
         "write_failure": dict(session.write_transaction.get("failure") or {}) if isinstance(session.write_transaction, dict) and session.write_transaction.get("failure") else None,
         "llm_usage": execution.usage_view() if execution else {},
@@ -1516,7 +1236,7 @@ def _enrich_patch_set(session: AgentSession, project: Dict[str, Any], arguments:
             patch["file_hash_expected"] = material["source_version"]
         elif operation == "create":
             if exists:
-                return arguments, f"create cannot overwrite an existing file: {path}; use replace"
+                return arguments, f"create conflicts with an existing file: {path}; replace is the existing-file operation"
 
         if operation == "update":
             start, end = patch["line_start"], patch["line_end"]
@@ -1653,7 +1373,6 @@ def _run(
     full: bool,
     conversation_context: Any = None,
 ) -> tuple:
-    claim_config(config)  # validate once at the execution boundary
     feedback = ""
 
     execution = current_execution()
@@ -1686,11 +1405,8 @@ def _run(
                         retry_feedback = json.dumps({
                             "code": "CANONICAL_DECISION_RETRY",
                             "rejected_code": error.error_code,
-                            "instruction": (
-                                "Your previous decision envelope was rejected before any action executed. "
-                                "Decide again from the unchanged canonical state and return exactly one valid action object. "
-                                "Do not reconstruct or repair the rejected JSON."
-                            ),
+                            "state_unchanged": True,
+                            "expected": "one valid canonical decision envelope",
                         }, ensure_ascii=False, separators=(",", ":"))
                         call_feedback = _merged_runtime_feedback(feedback, retry_feedback)
                         continue
@@ -1761,6 +1477,7 @@ def _run(
             raw_task_updates = []
         prospective_tasks, accepted_task_updates, rejected_task_updates = apply_task_updates(
             raw_task_updates, previous=session.tasks,
+            grounding=_grounding_items(session.observation_ledger),
         )
         session.tasks = prospective_tasks
         by_task_id = {
@@ -1843,7 +1560,7 @@ def _run(
                 return _return("failed", text, None, _details(session, "failed", config, failure_code="WORKSPACE_NOT_AVAILABLE"), full)
             if not write_enabled:
                 _record_decision(session, "patches", "rejected", reason="WRITE_ACTION_NOT_ALLOWED")
-                feedback = "WRITE_ACTION_NOT_ALLOWED: workspace mutation is disabled by runtime configuration."
+                feedback = json.dumps({"code": "WRITE_ACTION_NOT_ALLOWED", "workspace_mutation_enabled": False}, separators=(",", ":"))
                 continue
             enriched, patch_error = _enrich_patch_set(session, project, {"patches": patches})
             if patch_error:
@@ -1874,88 +1591,60 @@ def _run(
             return _return("needs_user", text, pending, _details(session, "needs_user", config), full)
 
         if action_kind == "final":
-            claims_cfg = claim_config(config)
-            project_root = project.get("caminho_origem")
+            open_investigation = [
+                str(item.get("id") or "") for item in session.investigation
+                if isinstance(item, dict) and item.get("status") == "open"
+            ]
+            open_tasks = [
+                str(item.get("id") or "") for item in session.tasks
+                if isinstance(item, dict) and item.get("status") == "open"
+            ]
+            blockers: Dict[str, Any] = {}
+            if open_investigation:
+                blockers["open_investigation"] = open_investigation
+            if open_tasks:
+                blockers["open_tasks"] = open_tasks
+            if blockers:
+                _record_decision(
+                    session, "final", "rejected", reason="FINAL_COMMITMENTS_OPEN", facts=blockers,
+                )
+                feedback = json.dumps(
+                    {
+                        "code": "FINAL_COMMITMENTS_OPEN",
+                        **blockers,
+                        "final_committed": False,
+                    },
+                    ensure_ascii=False, separators=(",", ":"),
+                )
+                continue
+
+            required_grounding_ids = list(dict.fromkeys(
+                investigation_grounding_ids(session.investigation)
+                + task_grounding_ids(session.tasks)
+            ))
             final_obj = {
                 "answer": action.get("answer"),
                 "limitations": list(action.get("limitations") or []),
                 "grounding_ids": list(action.get("grounding_ids") or []),
             }
             ok, reason, answer, limitations = validate_final(
-                final_obj, _grounding_items(session.observation_ledger),
+                final_obj,
+                _grounding_items(session.observation_ledger),
+                required_grounding_ids=required_grounding_ids,
             )
-
-            if ok and claims_cfg["mode"] == "off":
-                _record_decision(session, "final", "accepted")
-                return _return("success", answer, None, _details(session, "success", config, limitations=limitations), full)
-
             if ok:
-                review_grounding_ids = list(dict.fromkeys(
-                    str(item) for item in final_obj.get("grounding_ids") or [] if str(item)
-                ))
                 _record_decision(
-                    session, "final", "provisional",
+                    session, "final", "accepted",
                     facts={
-                        "grounding_ids": review_grounding_ids,
+                        "grounding_ids": list(dict.fromkeys(final_obj.get("grounding_ids") or [])),
+                        "required_grounding_ids": required_grounding_ids,
                         "workspace_epoch": int(session.workspace_epoch or 0),
                     },
                 )
-                try:
-                    review_ok, review_reason, review, _grounding_view = _run_claim_verification(
-                        session, config, answer, review_grounding_ids, source_roots=_physical_source_roots(project),
-                    )
-                except ErroLLM as error:
-                    text = f"A verificação de claims falhou: {error.error_code or 'CLAIM_VERIFIER_LLM_FAILED'}."
-                    return _return(
-                        "failed", text, None,
-                        _details(session, "failed", config, limitations=[str(error)], failure_code=error.error_code or "CLAIM_VERIFIER_LLM_FAILED"),
-                        full,
-                    )
-
-                if not review_ok:
-                    _record_decision(session, "claim_review", "rejected", reason=review_reason)
-                    if str(review_reason).startswith("GROUNDING_STALE:"):
-                        feedback = json.dumps({
-                            "code": "GROUNDING_STALE",
-                            "detail": review_reason,
-                        }, ensure_ascii=False, separators=(",", ":"))
-                        _clear_pending_observation_results(session)
-                        continue
-                    text = f"A verificação de claims ficou inválida: {review_reason}."
-                    return _return("failed", text, None, _details(session, "failed", config, failure_code=review_reason), full)
-
-                _append_claim_review(session, review)
-                if str(review.get("verdict") or "") == "challenge":
-                    issue_kinds = sorted({
-                        str(item.get("kind") or "") for item in review.get("issues") or []
-                        if isinstance(item, dict) and str(item.get("kind") or "")
-                    })
-                    _record_decision(
-                        session, "claim_review", "challenge",
-                        reason=",".join(issue_kinds) or "CLAIM_CHALLENGE",
-                        facts={
-                            "issue_kinds": issue_kinds,
-                            "workspace_epoch": int(session.workspace_epoch or 0),
-                        },
-                    )
-                    if _claim_challenge_count(session) >= 2:
-                        text = "O Claim independente voltou a bloquear a resposta após uma revisão da Main."
-                        return _return(
-                            "failed", text, None,
-                            _details(
-                                session, "failed", config,
-                                limitations=["Candidate Final remained challenged after one Main revision."],
-                                failure_code="CLAIM_CHALLENGE_UNRESOLVED",
-                            ),
-                            full,
-                        )
-                    feedback = review_followup_feedback(review)
-                    _clear_pending_observation_results(session)
-                    continue
-
-                _record_decision(session, "claim_review", "accepted")
-                _record_decision(session, "final", "accepted")
-                return _return("success", answer, None, _details(session, "success", config, limitations=limitations), full)
+                return _return(
+                    "success", answer, None,
+                    _details(session, "success", config, limitations=limitations), full,
+                )
 
             _record_rejected_decision(
                 session, "FINAL_VALIDATION_REJECTED", {"reason": reason, "final": final_obj},
@@ -1968,7 +1657,7 @@ def _run(
         calls = [call for call in calls if isinstance(call, dict) and call.get("tool")]
         if not calls:
             _record_rejected_decision(session, "NO_ACTION", {}, decision="empty")
-            feedback = "Choose one capability from capability_index, ask a blocking question, or return final."
+            feedback = json.dumps({"code": "NO_ACTION", "state_unchanged": True, "valid_action_kinds": ["tool_calls", "patches", "needs_user", "final"]}, separators=(",", ":"))
             continue
 
         _record_decision(
@@ -2168,15 +1857,15 @@ def _executar_agente_bound(
                 details = {
                     "status": "failed",
                     "failure_code": code,
-                    "limitations": ["Eyle 2.7.5 Rev1.3.4 does not migrate or adapt pending continuations from older shapes."],
+                    "limitations": ["Eyle 2.7.5 Rev1.4.1 does not migrate or adapt pending continuations from older shapes."],
                 }
                 return _return("failed", text, None, details, full)
             if code == "SESSION_SCHEMA_INCOMPATIBLE":
-                text = "The persisted session belongs to a different contract and cannot be resumed in Eyle 2.7.5 Rev1.3.4."
+                text = "The persisted session belongs to a different contract and cannot be resumed in Eyle 2.7.5 Rev1.4.1."
                 details = {
                     "status": "failed",
                     "failure_code": "SESSION_SCHEMA_INCOMPATIBLE",
-                    "limitations": ["Eyle 2.7.5 Rev1.3.4 does not migrate or adapt sessions from earlier revisions."],
+                    "limitations": ["Eyle 2.7.5 Rev1.4.1 does not migrate or adapt sessions from earlier revisions."],
                 }
                 return _return("failed", text, None, details, full)
             raise

@@ -5,9 +5,9 @@ import pytest
 
 import eyle.core.agent as core_agent
 from eyle.core.workspace_io import listar_arvore_projeto
-from llm.executar import ErroLLM, PROMPT_CLAIM_VERIFIER
+from llm.executar import ErroLLM
 from llm.structured import StructuredResponseError, parse_agent_response, schema_for_profile
-from tests.canonical import agent_final, base_config, review
+from tests.canonical import agent_final, base_config
 
 
 def _agent(action):
@@ -40,7 +40,7 @@ def test_agent_protocol_gets_one_fresh_retry_without_new_semantic_turn(monkeypat
             raise ErroLLM("bad", transient=False, error_code="STRUCTURED_RESPONSE_INVALID:agent:AGENT_ACTION_KIND_INVALID", structured_observed={"action": {"kind": "invalid"}, "investigation_updates": [], "task_updates": []})
         return agent_final("ok"), set()
     monkeypatch.setattr(core_agent, "_call_agent", fake_call)
-    status, text, _, details = core_agent.executar_agente("Say ok", base_config(claims_mode="off"), projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True)
+    status, text, _, details = core_agent.executar_agente("Say ok", base_config(), projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True)
     assert (status, text) == ("success", "ok")
     assert len(calls) == 2 and details["turns"] == 1
 
@@ -52,35 +52,13 @@ def test_agent_protocol_second_invalid_decision_fails_closed(monkeypatch, tmp_pa
         count += 1
         raise ErroLLM("bad", transient=False, error_code="STRUCTURED_RESPONSE_INVALID:agent:AGENT_ACTION_KIND_INVALID", structured_observed={"action": {"kind": "invalid"}, "investigation_updates": [], "task_updates": []})
     monkeypatch.setattr(core_agent, "_call_agent", fake_call)
-    status, _, _, details = core_agent.executar_agente("Do something", base_config(claims_mode="off"), projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True)
+    status, _, _, details = core_agent.executar_agente("Do something", base_config(), projeto={"caminho_origem": str(tmp_path)}, retornar_detalhes=True)
     assert status == "failed" and count == 2
     assert details["failure_code"] == "AGENT_STRUCTURED_PROTOCOL_INVALID"
 
 
-def test_claim_protocol_gets_one_fresh_retry(monkeypatch):
-    calls = []
-    def fake_claim(prompt, config):
-        calls.append(json.loads(prompt))
-        if len(calls) == 1:
-            raise ErroLLM("bad", transient=False, error_code="STRUCTURED_RESPONSE_INVALID:claim_verifier:CLAIM_REVIEW_MISSING_KEYS", structured_observed={"claims": []})
-        return review()
-    monkeypatch.setattr(core_agent, "executar_verificador_claims", fake_claim)
-    from eyle.core.session import AgentSession
-    session = AgentSession("Say hi")
-    ok, reason, normalized, _ = core_agent._run_claim_verification(session, base_config(claims_mode="fresh"), "Hi", [])
-    assert ok is True and reason == "ok"
-    assert normalized["verdict"] == "accept"
-    assert normalized["issues"] == []
-    assert len(calls) == 2
 
 
-def test_claim_prompt_declares_fresh_isolation_and_no_main_state():
-    lower = PROMPT_CLAIM_VERIFIER.lower()
-    assert "fresh call" in lower
-    assert "no main history" in lower
-    assert "request, candidate_answer and observed_material" in PROMPT_CLAIM_VERIFIER
-    for forbidden in ("runtime_facts", "request_anchors", "answer_anchors", "investigation state", "task_state"):
-        assert forbidden not in lower
 
 
 def test_output_truncation_is_only_provider_ceiling_after_cumulative_completion_budget_removal():

@@ -215,21 +215,8 @@ def test_connect_timeout_does_not_replace_read_timeout():
     assert time.monotonic() - start >= _DelayedOpenAIHandler.response_delay
 
 
-def test_claim_verifier_missing_claims_is_rejected_at_structured_boundary(monkeypatch):
-    content = json.dumps({"issues": []})
-    _capture(monkeypatch, {"choices": [{"message": {"content": content}}]})
-    with pytest.raises(llm_mod.ErroLLM) as exc:
-        llm_mod._chamar_llm("s", "u", _config(), perfil="claim_verifier")
-    assert exc.value.error_code == "STRUCTURED_RESPONSE_INVALID:claim_verifier:CLAIM_REVIEW_MISSING_KEYS"
 
 
-def test_claim_verifier_never_selects_an_earlier_partial_json_object(monkeypatch):
-    complete = json.dumps({"verdict": "accept", "issues": []})
-    content = json.dumps({"issues": []}) + "\n" + complete
-    _capture(monkeypatch, {"choices": [{"message": {"content": content}}]})
-    with pytest.raises(llm_mod.ErroLLM) as exc:
-        llm_mod._chamar_llm("s", "u", _config(), perfil="claim_verifier")
-    assert str(exc.value.error_code).startswith("STRUCTURED_RESPONSE_INVALID:claim_verifier:")
 
 
 def test_transport_timeout_is_recorded_as_started_physical_attempt_not_preflight(monkeypatch):

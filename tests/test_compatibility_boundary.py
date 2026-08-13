@@ -62,7 +62,7 @@ def _benchmark_report():
 
 def test_session_requires_exact_top_level_shape():
     state = AgentSession("x").to_dict()
-    assert state["session_schema_version"] == SESSION_SCHEMA_VERSION == "2.7.5-r1.3.4"
+    assert state["session_schema_version"] == SESSION_SCHEMA_VERSION == "2.7.5-r1.4"
 
     with_extra = copy.deepcopy(state)
     with_extra["mystery_compat_field"] = True
@@ -92,39 +92,18 @@ def test_session_requires_exact_ledger_envelopes():
         AgentSession.from_dict(state)
 
 
-def test_project_memory_requires_one_exact_envelope_and_entry_shape(tmp_path):
-    canonical = {
-        "schema_version": project_memory.MEMORY_SCHEMA_VERSION,
-        "project_root": str(tmp_path),
-        "entries": [{
-            "id": "mem-1",
-            "kind": "fact",
-            "text": "x",
-            "files": [{"path": "a.py", "file_hash": "abc"}],
-            "created_at": "2026-08-10T00:00:00+00:00",
-        }],
-    }
-    path = tmp_path / "memory.json"
-    path.write_text(json.dumps(canonical), encoding="utf-8")
-    assert project_memory._load(str(path)) == canonical
+def test_memory_kernel_uses_one_sqlite_schema_and_rejects_legacy_json_shape(tmp_path):
+    # Rev1.3.6 is a clean break: the old JSON envelope is no longer a readable
+    # memory contract and no compatibility loader remains in Core.
+    assert not hasattr(project_memory, "_load")
+    assert not hasattr(project_memory, "search_memory")
+    assert not hasattr(project_memory, "store_memory")
+    assert project_memory.MEMORY_SCHEMA_VERSION == "2.7.5-r1.3.6-memory-kernel-v1"
 
-    extra = copy.deepcopy(canonical)
-    extra["unknown"] = True
-    path.write_text(json.dumps(extra), encoding="utf-8")
-    with pytest.raises(ValueError, match="MEMORY_STORE_INVALID"):
-        project_memory._load(str(path))
-
-    missing_root = copy.deepcopy(canonical)
-    missing_root.pop("project_root")
-    path.write_text(json.dumps(missing_root), encoding="utf-8")
-    with pytest.raises(ValueError, match="MEMORY_STORE_INVALID"):
-        project_memory._load(str(path))
-
-    extra_entry = copy.deepcopy(canonical)
-    extra_entry["entries"][0]["legacy_note"] = "compat"
-    path.write_text(json.dumps(extra_entry), encoding="utf-8")
-    with pytest.raises(ValueError, match="MEMORY_STORE_INVALID"):
-        project_memory._load(str(path))
+    legacy = tmp_path / "legacy-memory.json"
+    legacy.write_text(json.dumps({"schema_version": "2.7.5-r1.4", "entries": []}), encoding="utf-8")
+    # A legacy file has no automatic import/migration path into the new Kernel.
+    assert legacy.exists()
 
 
 def test_sandbox_backend_has_one_english_vocabulary_and_is_validated_early():

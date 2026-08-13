@@ -1,11 +1,32 @@
-"""Deterministic physical Final gate for Eyle 2.7.5 Rev1.3.4."""
+"""Deterministic Final-readiness gate for Eyle 2.7.5 Rev1.4.1."""
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 
 
-def validate_final(final: Any, grounding: Dict[str, Any]) -> Tuple[bool, str, str, List[str]]:
-    """Validate only Final shape and references to canonical Material ids."""
+def _ids(values: Iterable[Any]) -> List[str]:
+    result: List[str] = []
+    seen = set()
+    for value in values or []:
+        item = str(value or "").strip()
+        if item and item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
+
+
+def validate_final(
+    final: Any,
+    grounding: Dict[str, Any],
+    *,
+    required_grounding_ids: Iterable[str] = (),
+) -> Tuple[bool, str, str, List[str]]:
+    """Validate Final shape and the physical completion contract.
+
+    Runtime does not judge whether Material semantically proves the prose. It
+    only enforces references Main previously committed through Investigation or
+    completed Tasks and verifies that every referenced mat-* physically exists.
+    """
     if not isinstance(final, dict):
         return False, "FINAL_INVALID", "", []
 
@@ -29,10 +50,15 @@ def validate_final(final: Any, grounding: Dict[str, Any]) -> Tuple[bool, str, st
         not isinstance(item, str) or not item.strip() for item in raw_grounding
     ):
         return False, "FINAL_GROUNDING_INVALID", "", limitations
-    grounding_ids = list(dict.fromkeys(str(item).strip() for item in raw_grounding))
+    grounding_ids = _ids(raw_grounding)
     missing_grounding = [item for item in grounding_ids if item not in grounding]
     if missing_grounding:
         return False, "FINAL_UNKNOWN_GROUNDING:" + ",".join(missing_grounding), "", limitations
+
+    required = _ids(required_grounding_ids)
+    missing_required = [item for item in required if item not in grounding_ids]
+    if missing_required:
+        return False, "FINAL_REQUIRED_GROUNDING_MISSING:" + ",".join(missing_required), "", limitations
 
     if not answer.strip():
         return False, "FINAL_EMPTY", "", limitations

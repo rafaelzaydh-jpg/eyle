@@ -23,7 +23,6 @@ def _config():
             "max_tree_entries": 200,
             "max_tree_depth": 6,
             "max_file_read_lines": 400,
-            "claims": {"mode": "off"},
         },
         "codar": {"ativado": True, "testes": {"ativado": False}},
 
@@ -31,14 +30,18 @@ def _config():
 
 
 def test_fixed_agent_prompt_is_compact_and_non_prescriptive():
-    assert estimate_tokens(llm_mod.PROMPT_AGENTE,3)<=1100
-    assert len(llm_mod.PROMPT_AGENTE)<3300
-    assert "sole task-semantic authority" in llm_mod.PROMPT_AGENTE
-    assert "Coverage describes what was physically examined" in llm_mod.PROMPT_AGENTE
-    assert "Frontier exposes additional accessible reality" in llm_mod.PROMPT_AGENTE
-    assert "Runtime-private handles/cursors" in llm_mod.PROMPT_AGENTE
-    assert "Observed citable material is mat-*" in llm_mod.PROMPT_AGENTE
-    assert "prefer" not in llm_mod.PROMPT_AGENTE.lower()
+    assert estimate_tokens(llm_mod.PROMPT_AGENTE,3)<=650
+    assert len(llm_mod.PROMPT_AGENTE)<2000
+    lower = llm_mod.PROMPT_AGENTE.lower()
+    assert "you own semantic decisions" in lower
+    assert "freely choose" in lower
+    assert "use structure only when it helps" in lower
+    assert "ambient workspace state is context, not a task" in lower
+    assert "mat-*" in llm_mod.PROMPT_AGENTE
+    assert "fr-*" in llm_mod.PROMPT_AGENTE
+    assert "mf-*" in llm_mod.PROMPT_AGENTE
+    assert "prefer" not in lower
+    assert "not a prerequisite" not in lower
 
 def test_common_multifile_write_reaches_transaction_in_three_calls(monkeypatch, tmp_path):
     (tmp_path / "app.py").write_text("from flask import Flask\napp = Flask(__name__)\n", encoding="utf-8")
@@ -181,11 +184,6 @@ def test_pending_result_projection_tightens_on_long_jobs():
     assert all(item.get("grounding_ids") for item in projected)
 
 
-def test_claim_prompt_can_challenge_unsupported_current_state_without_mandating_observation():
-    prompt=llm_mod.PROMPT_CLAIM_VERIFIER
-    assert "current workspace/runtime/external facts without material support" in prompt
-    assert "Pure reasoning, explanation or writing does not require observation" in prompt
-    assert "Never plan, choose tools" in prompt
 
 def test_runtime_has_no_resource_pressure_strategy_feedback():
     assert not hasattr(core_agent,"_resource_pressure_feedback")

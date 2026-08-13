@@ -14,6 +14,7 @@ import json
 import os
 import re
 import subprocess
+import uuid
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -27,7 +28,9 @@ from eyle.core.editing import (  # noqa: E402
     localizar_simbolo_no_projeto,
     rodar_testes_projeto,
 )
-from eyle.core.memory import search_memory, store_memory  # noqa: E402
+from eyle.core.memory import (  # noqa: E402
+    activate_memory, continue_memory_view, apply_memory_changeset, memory_record,
+)
 from eyle.core.project_inspection import (  # noqa: E402
     calculate as calculate_expression,
     count_tokens as count_project_tokens,
@@ -603,7 +606,7 @@ def _tool_symbol_relations(arguments, ctx):
     config = (ctx or {}).get("config") or {}
     agent_cfg = config.get("agent") or {}
     query = str(arguments.get("query") or "relations")
-    # Reachability depth is Runtime-owned in Eyle 2.7.5 Rev1.3.4. The resolved graph is
+    # Reachability depth is Runtime-owned in Eyle 2.7.5 Rev1.4.1. The resolved graph is
     # exhausted mechanically; only local relation queries honor max_depth.
     default_depth = 6
     try:
@@ -764,7 +767,7 @@ def _tool_continue_observation(arguments, ctx):
         ledger, frontier_id, workspace_epoch=int((ctx or {}).get("workspace_epoch") or 0),
     )
     if frontier_error:
-        return _falha(frontier_error, "use an open fr-* Frontier returned by Observation", executed=False, retryable=True)
+        return _falha(frontier_error, "expected an open fr-* Observation Frontier", executed=False, retryable=True)
     if not isinstance(ledger.get("handles"), dict):
         return _falha("HANDLE_STORE_UNAVAILABLE", "internal continuation store unavailable", executed=False, retryable=False)
     materialized, error = materialize_snapshot_handle(
@@ -1211,45 +1214,71 @@ def _tool_export_sandbox_zip(arguments, ctx):
 
 
 def _tool_memory_search(arguments, ctx):
-    """Search external project memory only when the agent requests it."""
+    """Activate or continue one bounded Memory Kernel view on explicit request."""
     root = _caminho_projeto(ctx)
     if not root:
         return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
-    query = str(arguments.get("query") or "")
-    limit = int(arguments.get("limit") or 8)
+    limit = int(arguments.get("limit") or 12)
+    seed = arguments.get("seed") if isinstance(arguments.get("seed"), dict) else {}
     try:
-        results = search_memory(MEMORY_DIR, root, query=query, limit=limit)
+        frontier = str(arguments.get("frontier") or "").strip()
+        if frontier:
+            view = continue_memory_view(MEMORY_DIR, root, frontier, limit=limit)
+        else:
+            view = activate_memory(
+                MEMORY_DIR, root,
+                ids=[],
+                region=str(seed.get("region") or "").strip() or None,
+                tags=seed.get("tags") or [],
+                text=str(arguments.get("query") or ""),
+                related_to=seed.get("related_to") or [],
+                limit=limit,
+                include_inactive=False,
+            )
     except (OSError, ValueError) as error:
         return _falha("MEMORY_READ_FAILED", str(error), executed=True)
-    return _sucesso({"entries": results, "count": len(results)})
+    return _sucesso({"view": view, "count": len(view.get("memories") or [])})
 
 
 def _tool_memory_store(arguments, ctx):
-    """Store one observation-grounded fact outside the source workspace."""
+    """Create one semantic memory node plus optional relations/supersession atomically."""
     root = _caminho_projeto(ctx)
     if not root:
         return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
     grounding = (ctx or {}).get("grounding") or {}
-    grounding_ids = [str(item) for item in arguments.get("grounding_ids") or []]
-    if not grounding_ids:
-        return _falha("MEMORY_REQUIRES_GROUNDING", "informe grounding_ids da tarefa atual")
+    meta = arguments.get("meta") if isinstance(arguments.get("meta"), dict) else {}
+    grounding_ids = [str(item) for item in meta.get("grounding_ids") or []]
     missing = [item for item in grounding_ids if item not in grounding]
     if missing:
         return _falha("MEMORY_UNKNOWN_GROUNDING", ", ".join(missing))
-    files = []
-    for grounding_id in grounding_ids:
-        item = grounding.get(grounding_id) or {}
-        locator = item.get("locator") if isinstance(item.get("locator"), dict) else {}
-        if locator.get("kind") == "file" and locator.get("path") and item.get("source_version"):
-            files.append({"path": locator["path"], "file_hash": item["source_version"]})
+    provenance = {"kind": "observation", "refs": grounding_ids} if grounding_ids else {"kind": "main"}
+    memory_id = f"mem-{uuid.uuid4().hex[:16]}"
+    region = str(meta.get("region") or "").strip() or f"project:{os.path.basename(os.path.realpath(root)) or 'active'}"
+    operations = [{
+        "op": "create_memory", "id": memory_id, "region": region,
+        "content": str(arguments.get("text") or ""),
+        "tags": meta.get("tags") or [], "provenance": provenance,
+    }]
     try:
-        entry = store_memory(
-            MEMORY_DIR, root, str(arguments.get("text") or ""),
-            kind=str(arguments.get("kind") or "fact"), files=files,
-        )
+        for old_id in meta.get("supersedes") or []:
+            old = memory_record(MEMORY_DIR, root, str(old_id))
+            operations.append({
+                "op": "supersede_memory", "id": old["id"],
+                "expected_revision": old["revision"], "superseded_by": memory_id,
+            })
+        for relation in meta.get("relations") or []:
+            if not isinstance(relation, dict):
+                continue
+            operations.append({
+                "op": "create_relation", "source": memory_id,
+                "label": relation.get("label"), "target": relation.get("target"),
+                "provenance": provenance,
+            })
+        change = apply_memory_changeset(MEMORY_DIR, root, operations)
+        entry = memory_record(MEMORY_DIR, root, memory_id)
     except (OSError, ValueError) as error:
         return _falha("MEMORY_WRITE_FAILED", str(error), executed=True)
-    return _sucesso({"entry": entry})
+    return _sucesso({"memory": entry, "changeset_id": change["changeset_id"], "affected": change["count"]})
 
 
 # ---------------------------------------------------------------------------
@@ -1464,30 +1493,30 @@ def _observe_none(arguments, result):
 
 def _coverage_memory_search(arguments, result):
     detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+    view = detail.get("view") if isinstance(detail.get("view"), dict) else {}
+    memory_coverage = view.get("memory_coverage") if isinstance(view.get("memory_coverage"), dict) else {}
     if result.get("executed") is not True:
         return {}
-    limit = max(1, min(int(arguments.get("limit") or 8), 20))
-    returned = int(detail.get("count") or 0)
+    frontier = view.get("memory_frontier") if isinstance(view.get("memory_frontier"), dict) else None
     return _coverage_record(
-        scope={"kind": "project_memory_search", "query": str(arguments.get("query") or "")},
-        examined={"entries_returned": returned, "limit": limit},
-        # search_memory stops when limit is reached; equality therefore cannot
-        # prove exhaustion of the physical memory set. Fail conservative.
-        complete=bool(result.get("ok") is True and returned < limit),
-        boundaries=[{"kind": "result_limit", "limit": limit}] if returned >= limit else [],
+        scope={"kind": "memory_kernel_view", "frontier": str(arguments.get("frontier") or "") or None},
+        examined={"memories_materialized": len(view.get("memories") or [])},
+        complete=bool(result.get("ok") is True and memory_coverage.get("complete") is True),
+        boundaries=([{"kind": "memory_frontier", "remaining": int(frontier.get("remaining_count") or 0)}] if frontier else []),
     )
 
 
 def _coverage_memory_store(arguments, result):
     detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
-    entry = detail.get("entry") if isinstance(detail.get("entry"), dict) else {}
+    memory = detail.get("memory") if isinstance(detail.get("memory"), dict) else {}
     if result.get("executed") is not True:
         return {}
     return _coverage_record(
-        scope={"kind": "project_memory_write"},
-        examined={"entries_written": 1 if entry else 0},
+        scope={"kind": "memory_kernel_changeset"},
+        examined={"memories_written": 1 if memory else 0, "entities_affected": int(detail.get("affected") or 0)},
         complete=bool(result.get("ok") is True),
     )
+
 
 def _observe_passthrough(arguments, result):
     values = result.get("observations") if isinstance(result, dict) else []
@@ -1853,11 +1882,16 @@ def _public_arguments_command(arguments):
 
 
 def _public_arguments_memory(arguments):
-    return {
-        key: str(arguments.get(key))[:160]
-        for key in ("query", "key", "chave", "namespace")
-        if arguments.get(key) is not None
-    }
+    out = {}
+    for key in ("query", "frontier"):
+        if arguments.get(key) is not None:
+            out[key] = str(arguments.get(key))[:160]
+    for key in ("seed", "meta"):
+        if isinstance(arguments.get(key), dict):
+            out[key] = copy.deepcopy(arguments.get(key))
+    if arguments.get("limit") is not None:
+        out["limit"] = int(arguments.get("limit"))
+    return out
 
 
 def capability_public_arguments(name, arguments):
@@ -2139,144 +2173,144 @@ def _schema_objeto(properties=None, required=None):
 
 _CAMINHO = {
     "type": "string", "minLength": 1,
-    "description": "Relative path inside the project root.",
+    "description": "Project-relative path.",
 }
-_LINHA = {"type": "integer", "minimum": 1, "description": "1-based line number inside the selected project file."}
+_LINHA = {"type": "integer", "minimum": 1, "description": "1-based file line."}
 _SOURCE = {
     "type": "string", "enum": ["workspace", "eyle"],
-    "description": "Physical source to observe; workspace is the user work plane, eyle is Eyle's own read-only source. run_command may use eyle only inside an isolated writable snapshot.",
+    "description": "workspace=user workspace; eyle=Eyle source (read-only except isolated command snapshots).",
 }
 
 TOOLS = {
     "calculate": {
-        "description": "Evaluate one arithmetic expression deterministically with decimal-safe math.",
+        "description": "Evaluate an arithmetic expression deterministically.",
         "availability": "global",
         "produces_grounding": True,
         "effect": "observe",
-        "returns": "Decimal result with exact/approximate and precision metadata.",
+        "returns": "Numeric result with exactness and precision metadata.",
         "input_schema": _schema_objeto({
-            "expression": {"type": "string", "minLength": 1, "maxLength": 500, "description": "Arithmetic expression containing numeric values and supported operators."},
+            "expression": {"type": "string", "minLength": 1, "maxLength": 500, "description": "Arithmetic expression."},
         }, ["expression"]),
         "fn": _tool_calculate,
     },
     "project_stats": {
-        "description": "Measure safe text in the user workspace or Eyle's read-only self source.",
+        "description": "Measure project text and language statistics.",
         "availability": "workspace",
         "produces_grounding": True,
         "effect": "observe",
-        "returns": "Counts for files, directories, lines, characters, bytes, extensions and languages.",
-        "caveats": ["Measurements only; no importance ranking or code-behavior diagnosis."],
+        "returns": "File, directory, line, character, byte and language counts.",
+        "caveats": ["Measurement only; no semantic ranking or runtime proof."],
         "input_schema": _schema_objeto({"source": _SOURCE}),
         "fn": _tool_project_stats,
     },
     "count_tokens": {
-        "description": "Measure token count or a truthful token estimate for safe project text.",
+        "description": "Measure or estimate tokens for project text.",
         "availability": "workspace",
         "produces_grounding": True,
         "effect": "observe",
-        "returns": "Token count/estimate, method, exactness, measured characters and scan completeness.",
-        "caveats": ["Measures project text, not actual LLM request usage or token waste."],
+        "returns": "Token count/estimate, method, exactness and scan coverage.",
+        "caveats": ["Project-text tokens, not LLM request usage."],
         "input_schema": _schema_objeto({
             "source": _SOURCE,
-            "path": {"type": "string", "minLength": 1, "description": "Optional project-relative file or directory to measure instead of the whole project."},
-            "tokenizer": {"type": "string", "minLength": 1, "description": "Optional tokenizer/model identifier; if unavailable, the configured truthful fallback is reported."},
+            "path": {"type": "string", "minLength": 1, "description": "Optional file or directory scope."},
+            "tokenizer": {"type": "string", "minLength": 1, "description": "Optional tokenizer/model identifier."},
         }),
         "fn": _tool_count_tokens,
     },
     "inspect_project": {
-        "description": "Inspect an existing workspace or Eyle self source when its structure, languages, entrypoints, imports, tests, CI, frameworks or manifests matter. It is not a prerequisite for an empty/already-understood workspace.",
+        "description": "Inspect static project structure and implementation signals.",
         "availability": "workspace",
         "produces_grounding": True,
         "effect": "observe",
-        "returns": "Languages, entrypoints, imports, tests, CI, frameworks, manifests and relation signals.",
-        "caveats": ["Objective static signals only; no importance ranking, runtime confirmation or bug proof. source=eyle is read-only real source."],
+        "returns": "Languages, entrypoints, imports, tests, CI, frameworks and relation signals.",
+        "caveats": ["Static signals only; no semantic ranking or runtime proof."],
         "input_schema": _schema_objeto({"source": _SOURCE}),
         "fn": _tool_inspect_project,
     },
     "list_tree": {
-        "description": "List the fresh project tree with limit, depth, filter, and ignored-item counts.",
+        "description": "List a bounded project tree.",
         "availability": "workspace",
         "produces_grounding": True,
         "effect": "observe",
-        "returns": "Project-relative tree entries plus depth, truncation, ignored-item metadata and protected-resource visibility markers.",
+        "returns": "Tree entries with depth, truncation and boundary metadata.",
         "input_schema": _schema_objeto({
             "source": _SOURCE,
-            "limit": {"type": "integer", "minimum": 1, "description": "Maximum number of tree entries to return before marking the result truncated."},
-            "depth": {"type": "integer", "minimum": 1, "description": "Maximum directory depth to traverse from the project root."},
-            "filter": {"type": "string", "minLength": 1, "description": "Optional filename/path glob-style filter applied to returned tree entries."},
+            "limit": {"type": "integer", "minimum": 1, "description": "Maximum returned entries."},
+            "depth": {"type": "integer", "minimum": 1, "description": "Maximum traversal depth."},
+            "filter": {"type": "string", "minLength": 1, "description": "Optional path filter."},
         }),
         "fn": _tool_list_tree,
     },
     "search_code": {
-        "description": "Find exact literal text/code matches in live project files and return fresh verifiable ranges.",
+        "description": "Find exact literal matches in project files.",
         "availability": "workspace",
         "produces_grounding": True,
         "effect": "observe",
-        "returns": "Complete literal-match Coverage plus deterministic bounded fresh material and Frontiers when more objective ranges exist.",
-        "caveats": ["Literal text/code search only; never semantic relevance ranking. Objective Scope is resolved before Coverage: literal files are exact, literal directories are recursive, wildcard-bearing selectors are explicit globs, and missing/unsafe literal include paths fail closed. Search exhausts the readable resolved scope mechanically; bounded materialization is represented by the returned material plus any unresolved Frontier. Protected credential/private-key resources and their physical aliases are counted in resolved scope but excluded from content access and reported as a coverage boundary."],
+        "returns": "Literal-match Material, Coverage and optional Frontier.",
+        "caveats": ["Literal search only; protected resources remain a Coverage boundary."],
         "input_schema": _schema_objeto(
             {
                 "source": _SOURCE,
-            "query": {"type": "string", "minLength": 1, "description": "Literal text or code fragment to match exactly in project files."},
-                "include_paths": {"type": "array", "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 300}, "description": "Optional Main-declared project-relative paths. A literal file selects that file; a literal directory selects its recursive subtree; selectors containing *, ? or [ are explicit full-path glob patterns."},
-                "exclude_paths": {"type": "array", "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 300}, "description": "Optional Main-declared project-relative exclusions with the same canonical file/directory/explicit-glob semantics as include_paths."},
+            "query": {"type": "string", "minLength": 1, "description": "Exact literal query."},
+                "include_paths": {"type": "array", "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 300}, "description": "Optional file, directory or explicit-glob scopes."},
+                "exclude_paths": {"type": "array", "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 300}, "description": "Optional file, directory or explicit-glob exclusions."},
             }, ["query"],
         ),
         "fn": _tool_search_code,
     },
     "symbol_relations": {
-        "description": "Inspect structural relationships around a code symbol: calls, registrations/bindings, imports, references and optional root-to-symbol paths.",
+        "description": "Inspect static structural relations around a code symbol.",
         "availability": "workspace",
         "produces_grounding": True,
         "effect": "observe",
-        "returns": "AST-aware Python call/binding/registration relations, optional directed root paths, optional literal text references, unresolved dynamic sites and coverage metadata.",
-        "caveats": ["Reports structural facts only; it never labels code live/dead/legacy or proves runtime behavior. Static resolution can be incomplete for dynamic dispatch, reflection, plugins or ambiguous names."],
+        "returns": "Structural relations, optional root paths and Coverage.",
+        "caveats": ["Static relations can be incomplete for dynamic behavior."],
         "input_schema": _schema_objeto({
             "source": _SOURCE,
-            "symbol": {"type": "string", "minLength": 1, "description": "Code symbol name to inspect."},
-            "query": {"type": "string", "enum": ["relations", "reachability"], "description": "relations returns local structural facts; reachability asks for a root-to-symbol structural path and only material frontiers."},
+            "symbol": {"type": "string", "minLength": 1, "description": "Code symbol name."},
+            "query": {"type": "string", "enum": ["relations", "reachability"], "description": "relations=local graph; reachability=root-to-symbol path."},
             "path": _CAMINHO,
-            "roots": {"type": "array", "items": {"type": "string", "minLength": 1}, "description": "Optional caller/root symbols, node ids or project-relative files from which to test structural reachability."},
-            "direction": {"type": "string", "enum": ["incoming", "outgoing", "both"], "description": "Project only the requested relation direction; default both."},
-            "include_text_references": {"type": "boolean", "description": "Include literal text-reference rows. Default false because structural queries usually do not need them."},
-            "max_depth": {"type": "integer", "minimum": 1, "maximum": 32, "description": "Local relations only. Directed reachability ignores/canonicalizes this hint and exhausts the finite resolved graph automatically."},
-            "max_edges": {"type": "integer", "minimum": 10, "maximum": 500, "description": "Local relation output limit. Directed reachability canonicalizes this hint and returns only path/coverage/frontier material."},
+            "roots": {"type": "array", "items": {"type": "string", "minLength": 1}, "description": "Optional reachability roots."},
+            "direction": {"type": "string", "enum": ["incoming", "outgoing", "both"], "description": "Relation direction."},
+            "include_text_references": {"type": "boolean", "description": "Include literal text references."},
+            "max_depth": {"type": "integer", "minimum": 1, "maximum": 32, "description": "Local-relation depth hint."},
+            "max_edges": {"type": "integer", "minimum": 10, "maximum": 500, "description": "Local-relation output limit."},
         }, ["symbol"]),
         "fn": _tool_symbol_relations,
     },
     "continue_observation": {
-        "description": "Continue one open Observation Frontier without exposing Runtime continuation handles.",
+        "description": "Continue an Observation Frontier.",
         "availability": "workspace",
         "produces_grounding": True,
         "effect": "observe",
-        "returns": "A bounded continuation with objective observations, coverage and a new Frontier when more reality remains accessible.",
-        "caveats": ["Frontiers address observation snapshots and become stale after the Runtime workspace epoch changes."],
+        "returns": "Next bounded Observation page, Coverage and optional Frontier.",
+        "caveats": ["Frontier expires when its Observation snapshot becomes stale."],
         "input_schema": _schema_objeto({
-            "frontier": {"type": "string", "minLength": 4, "pattern": r"^fr-[0-9]+$", "description": "Open Frontier id previously returned by Observation."},
+            "frontier": {"type": "string", "minLength": 4, "pattern": r"^fr-[0-9]+$", "description": "Observation Frontier id."},
         }, ["frontier"]),
         "fn": _tool_continue_observation,
     },
     "find_symbol": {
-        "description": "Locate a symbol in a known file or across the live project.",
+        "description": "Locate a code symbol definition.",
         "availability": "workspace",
         "produces_grounding": True,
         "effect": "observe",
-        "returns": "Fresh symbol definition/location and verifiable source range metadata.",
-        "caveats": ["Locates definitions/locations; does not guarantee every runtime reference or call site."],
+        "returns": "Symbol location and source-range metadata.",
+        "caveats": ["Definition lookup is not runtime reachability proof."],
         "input_schema": _schema_objeto({
             "source": _SOURCE,
             "path": _CAMINHO,
-            "symbol": {"type": "string", "minLength": 1, "description": "Exact code symbol name whose definition/location should be found."},
+            "symbol": {"type": "string", "minLength": 1, "description": "Exact symbol name."},
         }, ["symbol"]),
         "fn": _tool_find_symbol,
     },
     "read_file": {
-        "description": "Read a bounded beginning portion of one project file with verifiable hashes and line metadata.",
+        "description": "Read a bounded project-file range.",
         "availability": "workspace",
         "produces_grounding": True,
         "effect": "observe",
         "returns": "Bounded file content, truncation state, line metadata and hashes.",
-        "caveats": ["The returned content may be truncated by configured read limits. Protected credential/private-key resources and their physical aliases deny content access; normal files are never blocked by content heuristics."],
+        "caveats": ["Read limits may truncate content; protected resources deny content access."],
         "input_schema": _schema_objeto({
             "source": _SOURCE,
             "path": _CAMINHO,
@@ -2286,98 +2320,112 @@ TOOLS = {
         "fn": _tool_read_file,
     },
     "run_command": {
-        "description": "Run a shell command in one writable isolated snapshot. source=workspace snapshots the user work plane; source=eyle snapshots Eyle itself for safe self-experiments without changing the installed source.",
+        "description": "Run a shell command in an isolated writable snapshot.",
         "availability": "workspace",
         "produces_grounding": True,
         "effect": "execute",
-        "returns": "Exit code, bounded combined output, sandbox backend and isolation facts. Sandbox mutations never alter the real workspace.",
-        "caveats": ["One sandbox source persists per job; source switching is refused rather than silently discarding state. Protected credentials are omitted. source=eyle also omits live workspace/memory/context state. Real Eyle source is never writable; self changes exist only in the sandbox until explicitly exported as a ZIP artifact."],
+        "returns": "Exit code, bounded output and sandbox isolation facts.",
+        "caveats": ["Sandbox state persists per job; real workspace/Eyle source stays unchanged."],
         "input_schema": _schema_objeto({
             "source": _SOURCE,
-            "command": {"type": "string", "minLength": 1, "maxLength": 8000, "description": "Shell command to execute inside the isolated snapshot."},
-            "cwd": {"type": "string", "minLength": 1, "description": "Optional project-relative working directory inside the sandbox snapshot."},
-            "timeout_seconds": {"type": "integer", "minimum": 1, "description": "Optional command timeout not exceeding the configured sandbox maximum."},
+            "command": {"type": "string", "minLength": 1, "maxLength": 8000, "description": "Shell command."},
+            "cwd": {"type": "string", "minLength": 1, "description": "Optional sandbox working directory."},
+            "timeout_seconds": {"type": "integer", "minimum": 1, "description": "Optional timeout."},
         }, ["command"]),
         "fn": _tool_run_command,
     },
     "export_sandbox_zip": {
-        "description": "Package the current persistent sandbox snapshot into a ZIP and export only that inert artifact beside the Eyle installation. It never copies modified source files back.",
+        "description": "Export the current sandbox snapshot as a ZIP artifact.",
         "availability": "workspace",
         "produces_grounding": True,
         "effect": "mutate",
-        "returns": "Artifact filename, byte size, SHA-256, sandbox source and proof that real source was not modified.",
-        "caveats": ["Requires an initialized run_command sandbox. Existing artifact names are never overwritten. Packaging does not itself prove tests or release identity passed."],
+        "returns": "Artifact name, size, SHA-256 and sandbox source.",
+        "caveats": ["Requires sandbox state; existing artifact names are not overwritten."],
         "input_schema": _schema_objeto({
-            "filename": {"type": "string", "minLength": 5, "maxLength": 160, "pattern": r"^[A-Za-z0-9._-]+\.zip$", "description": "ZIP basename to export beside Eyle."},
-            "archive_root": {"type": "string", "minLength": 1, "maxLength": 120, "pattern": r"^[A-Za-z0-9._-]+$", "description": "Optional top-level directory name inside the ZIP."},
-            "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600, "description": "Packaging/export timeout."},
+            "filename": {"type": "string", "minLength": 5, "maxLength": 160, "pattern": r"^[A-Za-z0-9._-]+\.zip$", "description": "ZIP filename."},
+            "archive_root": {"type": "string", "minLength": 1, "maxLength": 120, "pattern": r"^[A-Za-z0-9._-]+$", "description": "Optional archive root name."},
+            "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600, "description": "Export timeout."},
         }, ["filename"]),
         "fn": _tool_export_sandbox_zip,
     },
     "memory_search": {
-        "description": "Search hash-validated external memory entries associated with the active project.",
+        "description": "Navigate bounded persistent Memory.",
         "availability": "workspace",
         "produces_grounding": False,
         "effect": "observe",
-        "returns": "Bounded hash-validated prior project-memory entries.",
-        "caveats": ["Prior memory is context, not proof of current live source state."],
+        "returns": "Bounded Memory Nodes, MemoryCoverage and optional MemoryFrontier.",
+        "caveats": ["Memory is prior cognitive state, not current-world proof."],
         "input_schema": _schema_objeto({
-            "query": {"type": "string", "description": "Text used to match relevant external project-memory entries."},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "Maximum number of matching memory entries to return."},
+            "query": {"type": "string", "maxLength": 1000, "description": "Optional lexical Memory seed."},
+            "seed": {"type": "object", "additionalProperties": False, "properties": {
+                "region": {"type": "string", "minLength": 1, "maxLength": 240},
+                "tags": {"type": "array", "maxItems": 20, "items": {"type": "string", "minLength": 1, "maxLength": 96}},
+                "related_to": {"type": "array", "maxItems": 20, "items": {"type": "string", "pattern": r"^mem-[A-Za-z0-9._-]+$"}},
+            }, "description": "Optional region, tag and relation seeds."},
+            "frontier": {"type": "string", "pattern": r"^mf-[A-Za-z0-9._-]+$", "description": "MemoryFrontier id to continue."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 30, "description": "Maximum materialized Memory Nodes."},
         }),
         "fn": _tool_memory_search,
     },
     "memory_store": {
-        "description": "Store one useful observation-grounded project fact in external memory.",
+        "description": "Persist one Memory Node with optional links.",
         "availability": "workspace",
         "produces_grounding": False,
         "effect": "mutate",
-        "returns": "The external project-memory entry that was stored.",
-        "caveats": ["Persists project memory only and requires current-task Observation grounding references."],
+        "returns": "Created Memory Node and ChangeSet metadata.",
+        "caveats": ["Kernel validates structure; Main owns Memory meaning."],
         "input_schema": _schema_objeto({
-            "text": {"type": "string", "minLength": 1, "description": "Compact project fact to persist in external project memory."},
-            "kind": {"type": "string", "description": "Optional memory category; defaults to fact when omitted."},
-            "grounding_ids": {"type": "array", "items": {"type": "string", "pattern": r"^mat-[0-9]+$"}, "description": "Current-task Observation material IDs that substantiate the stored fact."},
-        }, ["text", "grounding_ids"]),
+            "text": {"type": "string", "minLength": 1, "maxLength": 8000, "description": "Memory content."},
+            "meta": {"type": "object", "additionalProperties": False, "properties": {
+                "region": {"type": "string", "minLength": 1, "maxLength": 240},
+                "tags": {"type": "array", "maxItems": 30, "items": {"type": "string", "minLength": 1, "maxLength": 96}},
+                "grounding_ids": {"type": "array", "maxItems": 30, "items": {"type": "string", "pattern": r"^mat-[0-9]+$"}},
+                "supersedes": {"type": "array", "maxItems": 20, "items": {"type": "string", "pattern": r"^mem-[A-Za-z0-9._-]+$"}},
+                "relations": {"type": "array", "maxItems": 30, "items": {"type": "object", "additionalProperties": False, "required": ["label", "target"], "properties": {
+                    "label": {"type": "string", "minLength": 1, "maxLength": 120},
+                    "target": {"type": "string", "pattern": r"^mem-[A-Za-z0-9._-]+$"},
+                }}},
+            }, "description": "Optional Memory metadata and links."},
+        }, ["text"]),
         "fn": _tool_memory_store,
     },
     "run_tests": {
-        "description": "Run the detected test suite in the sandbox; optionally focus pytest on one safe relative file or directory.",
+        "description": "Run detected tests in the isolated sandbox.",
         "availability": "tests",
         "produces_grounding": True,
         "effect": "execute",
-        "returns": "Runner command, status, return code, concise summary, bounded output and runner diagnostics.",
-        "caveats": ["Does not install a missing runner or prove untested behavior; tests may create incidental temporary/cache artifacts."],
+        "returns": "Runner status, return code, summary and bounded output.",
+        "caveats": ["Tests only cover executed cases; runner may be unavailable."],
         "input_schema": _schema_objeto({
-            "scope": {"type": "string", "minLength": 1, "description": "Optional safe project-relative pytest file or directory; omitted means the detected full suite."},
+            "scope": {"type": "string", "minLength": 1, "description": "Optional test file or directory scope."},
         }),
         "fn": _tool_run_tests,
     },
     "git_status": {
-        "description": "Inspect current Git working-tree state without changing files; returns branch and compact modified/added/deleted/untracked entries.",
+        "description": "Read Git working-tree status.",
         "availability": "workspace",
         "produces_grounding": True,
         "effect": "observe",
-        "returns": "Branch, clean flag, category counts and bounded changed-path entries.",
-        "caveats": ["Status metadata only; it does not include patch contents."],
+        "returns": "Branch, clean state and bounded changed paths.",
+        "caveats": ["Status metadata excludes patch contents."],
         "input_schema": _schema_objeto({
             "source": _SOURCE,
-            "max_entries": {"type": "integer", "minimum": 1, "maximum": 500, "description": "Maximum number of changed-path status entries to return."},
+            "max_entries": {"type": "integer", "minimum": 1, "maximum": 500, "description": "Maximum returned paths."},
         }),
         "fn": _tool_git_status,
     },
     "git_diff": {
-        "description": "Inspect a bounded read-only Git diff for the workspace or one relative path, optionally staged.",
+        "description": "Read a bounded Git diff.",
         "availability": "workspace",
         "produces_grounding": True,
         "effect": "observe",
-        "returns": "Changed files, added/removed line counts, bounded diff text and truncation state.",
-        "caveats": ["Bounded output may omit truncated hunks."],
+        "returns": "Changed files, line counts and bounded diff text.",
+        "caveats": ["Output may be truncated."],
         "input_schema": _schema_objeto({
             "source": _SOURCE,
-            "path": {"type": "string", "minLength": 1, "description": "Optional project-relative path whose Git diff should be inspected."},
-            "staged": {"type": "boolean", "description": "When true inspect staged/index changes; otherwise inspect unstaged working-tree changes."},
-            "context_lines": {"type": "integer", "minimum": 0, "maximum": 10, "description": "Number of unchanged context lines around each returned diff hunk."},
+            "path": {"type": "string", "minLength": 1, "description": "Optional path scope."},
+            "staged": {"type": "boolean", "description": "Select staged or unstaged diff."},
+            "context_lines": {"type": "integer", "minimum": 0, "maximum": 10, "description": "Diff context lines."},
         }),
         "fn": _tool_git_diff,
     },
@@ -2560,13 +2608,21 @@ def _minimal_tool_signature(name, schema):
         "string": "str", "integer": "int", "number": "num",
         "boolean": "bool", "object": "obj", "array": "list",
     }
+    properties = list((schema.get("properties") or {}).items())
+    required_items = [(arg_name, spec) for arg_name, spec in properties if arg_name in required]
+    optional_items = [(arg_name, spec) for arg_name, spec in properties if arg_name not in required]
+    enum_optionals = [(arg_name, spec) for arg_name, spec in optional_items if isinstance(spec, dict) and spec.get("enum")]
+    other_optionals = [(arg_name, spec) for arg_name, spec in optional_items if (arg_name, spec) not in enum_optionals]
+    selected = required_items + (enum_optionals + other_optionals)[:max(0, 4 - len(required_items))]
     args = []
-    for arg_name, spec in (schema.get("properties") or {}).items():
+    for arg_name, spec in selected:
         spec = spec if isinstance(spec, dict) else {}
         enum_values = [str(value) for value in (spec.get("enum") or [])]
         optional = "" if arg_name in required else "?"
         kind = "|".join(enum_values) if enum_values and len(enum_values) <= 6 else type_labels.get(spec.get("type", "any"), spec.get("type", "any"))
         args.append(f"{arg_name}{optional}:{kind}")
+    if len(selected) < len(properties):
+        args.append("...")
     return f"{name}({','.join(args)})"
 
 
@@ -2676,6 +2732,21 @@ def _validar_valor_schema(valor, regra, caminho):
             return f"argumento '{caminho}' precisa ser >= {regra['minimum']}"
         if "maximum" in regra and valor > regra["maximum"]:
             return f"argumento '{caminho}' precisa ser <= {regra['maximum']}"
+    if tipo == "object":
+        properties = regra.get("properties") if isinstance(regra.get("properties"), dict) else {}
+        if regra.get("additionalProperties") is False:
+            unknown = sorted(set(valor) - set(properties))
+            if unknown:
+                return f"argumento '{caminho}' possui campo(s) desconhecido(s): " + ", ".join(unknown)
+        missing = [name for name in regra.get("required", []) if name not in valor]
+        if missing:
+            return f"argumento '{caminho}' exige campo(s): " + ", ".join(missing)
+        for child_name, child_value in valor.items():
+            child_rule = properties.get(child_name)
+            if isinstance(child_rule, dict):
+                error = _validar_valor_schema(child_value, child_rule, f"{caminho}.{child_name}")
+                if error:
+                    return error
     if tipo == "array":
         if "minItems" in regra and len(valor) < int(regra["minItems"]):
             return f"argumento '{caminho}' precisa ter pelo menos {regra['minItems']} item(ns)"

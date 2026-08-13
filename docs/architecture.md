@@ -1,257 +1,175 @@
+# Architecture — Eyle 2.7.5 Rev1.4.1
 
-# Architecture — Eyle 2.7.5 Rev1.3.4
+## 1. Core thesis
 
-### Rev1.3.4 fresh Claim and token cleanup
-
-Rev1.3.4 restores Claim as an isolated Final-delivery gate. Default `fresh` mode creates a new LLM request using Main's transport/model but no Main message history or semantic state. Its semantic packet is exactly original Request + Candidate Final + Main-selected observed Material. Claim has no tool access and cannot see Investigation, Tasks, Runtime event history or prior Claim reasoning. `verified` retains the option of a distinct verifier transport/model.
-
-The revision also removes prompt/state duplication: the standalone `operational_feedback` projection is gone, empty `task_state` is omitted, Main's fixed system prompt is compacted, Investigation/Task JSON schemas no longer duplicate one object per status, and Claim anchors/runtime compaction/hard issue quotas are removed. The former fixed Claim token reserve is also gone; Claim fits its packet to the task budget actually remaining after Candidate Final creation.
-
-### Rev1.3.3 ownership cleanup
-
-Rev1.3.3 applies the removal rule to the current tree. Pure execution-history/prompt-cost diagnostics are Runtime-owned, write-transaction state is colocated with transaction mechanics, and dead Agent projection/config helpers are gone. The canonical capability-result contract contains only status plus `observations`, `coverage` and `frontiers`; opaque continuation handles exist only in Runtime-private ledger/frontier state. Investigation and Tasks remain separate because they represent different Main-owned semantic concerns.
-
-### Rev1.3.2 bounded context projection
-
-Canonical Runtime state is intentionally larger than model-facing state. Observation keeps the complete physical ledger, Material directory, Coverage and Frontier state, while Main receives a bounded projection:
-
-```text
-Observation canonical state
-  ├─ fresh delta --------------------→ latest_tool_results
-  ├─ immediately previous rows ------→ observation_map
-  ├─ Investigation-pinned Material --→ grounding_index
-  ├─ tiny Material recency tail -----→ grounding_index
-  └─ every open Frontier ------------→ observation_map
-```
-
-Older unrelated Observation rows and Material directory entries disappear from later prompts without being deleted from Runtime state. Cache hits return coordinates and short recall excerpts rather than replaying full source payloads. This is projection compaction, not semantic forgetting.
-
-Rev1.3.2 historically protected a fixed Claim reserve inside the task-wide fuse. Rev1.3.4 supersedes that mechanism: Main is no longer pre-starved for a future review, and Claim instead fits its fresh packet to the real physical headroom remaining after Candidate Final creation.
-
-### Rev1.3.1 workspace/self boundary
-
-`workspace/` is always the automatic user work plane, including its empty state. The Eyle installation is not a fallback workspace. Observational capabilities can explicitly use `source=eyle` for read-only self-analysis. `run_command(source=eyle)` works only on a disposable isolated source snapshot with live workspace/memory/context state omitted. The only supported egress for a modified self snapshot is `export_sandbox_zip`; it exports a non-overwriting ZIP artifact beside Eyle and never copies source files back into the running installation.
-
-This keeps control plane and work plane separate without adding a planner/router: Main still chooses semantics; Runtime only enforces the physical source boundary.
-### Rev1.3 Task Memory
-
-
-Rev1.3 introduces a separate Main-owned intentional state:
+Eyle is a universal agency kernel whose domain power comes from capabilities.
 
 ```text
 Request
   ↓
-Main
-  ├─ Investigation  "what do I need to understand?"
-  └─ Tasks          "what did I decide I need to do?"
-       ↓
-Runtime persists/validates structure
-       ↓
-Effects → Observation → Main
+Main ───────── semantic authority
+  ↓
+Capabilities ─ physical domain operations
+  ↓
+Observation ─ observed reality
+  ↓
+Main state ─ Investigation / Tasks / Memory activation
+  ↓
+Grounded Completion
+  ↓
+Final
 ```
 
-A Task is exactly `{id,parent_id,description,status,result}` with `status=open|completed|dropped`. `parent_id` forms a recursive acyclic tree but never imposes execution order. Main owns creation, revision and closure. Runtime does not infer semantic completion from tools, observations, child status or exit codes, and open Tasks do not gate Final. Closed Tasks require a concise result so Main's own conclusion survives the next turn.
+Runtime owns physical/contract authority only. It does not decide semantic relevance, truth, strategy or whether more available information is important.
 
-Investigation and Tasks deliberately remain separate contracts. Similar persistence mechanics are not evidence that epistemic and intentional state are the same semantic object. No generic semantic-state framework is introduced in Rev1.3.
+## 2. Rev1.4 Grounded Completion
 
-Coverage is now a mechanically enforced Runtime contract. Every non-empty Coverage value has exactly the universal physical fields `scope`, `examined`, `complete`, `boundaries`, with optional domain-owned `facts`; invalid dialects fail the capability contract instead of silently entering Observation.
+## 2.1 Rev1.4.1 Semantic Freedom
 
-Frontier snapshots are retained once and pagination detaches only the requested item slice. Continuation Coverage distinguishes `snapshot_exhausted` from `source_materialization_complete`, so an exhausted cursor cannot falsely claim that vanished/unreadable source reality was materialized.
+Rev1.4.1 changes guidance, not semantic ownership. Main is not required to create Task/Investigation or use a capability merely because one is available. Direct Final is a normal path. Fixed model-facing text is limited to:
 
-Capability-specific normalization, public/model projections, containment lookup, resource-failure lookup, continuation and freshness are registry hooks. Generic dispatch does not branch on capability names. Registry effect metadata is singular: `observe`, `execute` or `mutate`.
+1. semantic/physical authority boundaries;
+2. available action paths;
+3. capability contracts and physical limits;
+4. factual Runtime rejection/state notices.
 
-## The whole system
+Runtime never converts ambient workspace state, an empty workspace, a tool result or an available capability into a semantic obligation. Once Main explicitly creates a commitment, Rev1.4 Grounded Completion enforces that declared contract mechanically.
 
-> **Eyle constrains effects, not thought.**
+
+Claim is removed completely.
+
+There is no:
+
+- `claim_review.py`;
+- Claim LLM call;
+- Claim structured-response profile;
+- Claim configuration;
+- Claim session/history/telemetry state;
+- provisional Final;
+- Main↔Claim correction loop.
+
+Reliability instead uses explicit Main-owned commitments.
+
+### 2.1 Investigation
+
+Investigation answers: **what did Main explicitly decide it must understand?**
+
+- `open`: unresolved epistemic commitment; blocks Final.
+- `established`: resolved with one or more real `mat-*` Material IDs.
+- `dismissed`: Main explicitly decides the question no longer needs resolution.
+
+Runtime validates structure and Material existence. Main owns the meaning of the conclusion.
+
+### 2.2 Tasks
+
+Task answers: **what work did Main explicitly commit to perform?**
+
+Exact state:
 
 ```text
-User
-  ↓
-Main
-  ↕
-Runtime
-  ↓
-Claim?
-  ↓
-User
+id
+parent_id
+description
+completion_criteria[]
+status: open | completed | dropped
+result
+grounding_ids[]
 ```
 
-Everything else is an internal responsibility, not another reasoning authority.
+Rules:
 
-## Authority
+- every Task declares at least one completion criterion;
+- closed Tasks require a result;
+- grounding IDs, when present, must reference real Material;
+- a completed Task cannot retain an open direct child;
+- any open Task blocks Final.
 
-### Main
+Runtime never infers Task completion from tool execution or from children. Main owns completion semantics.
 
-Main is the sole task-semantic authority. It decides interpretation, relevance, capability choice, `Investigation`, `Tasks`, grounding use, recovery and stopping.
+### 2.3 Final continuity
 
-Core does not prescribe domain strategies such as which code-search tool to prefer, how many files to inspect, when a Frontier is relevant, or when Main should stop investigating.
+Before accepting Final, Runtime mechanically gathers Material IDs committed by:
 
-### Runtime
+- established Investigations;
+- completed Tasks that record grounding.
 
-Runtime is physical authority. It owns capability execution, strict schemas, permissions, sandboxing, transactions, workspace state and physical containment. Capability-specific observation identity belongs to the capability registry; Observation owns only generic physical registration.
+Those IDs must appear in Final `grounding_ids`. Missing committed coordinates reject the Final as `FINAL_REQUIRED_GROUNDING_MISSING` and return factual correction feedback to Main.
 
-Runtime may reject an impossible or unsafe effect. It does not turn a poor semantic choice into a task-level punishment when the effect itself can be safely rejected or cached.
+This is continuity, not truth grading. Runtime proves only that evidence Main explicitly committed did not disappear during synthesis.
 
-### Claim
+### 2.4 Direct Final remains valid
 
-Claim is an independent delivery critic over a Candidate Final when enabled. Default `fresh` mode is a new backend call with the same Main transport/model but a clean message context. It receives exactly three semantic inputs: original `request`, `candidate_answer`, and Main-selected `observed_material`. It returns only:
+If Main creates no Task and no Investigation, there is no commitment to close. Conversational or simple requests can return Final directly.
 
-```text
-{verdict: accept|challenge, issues: [...]}
-```
+## 3. Observation
 
-Each issue is exactly `{kind, grounding_refs, reason}`. Claim may challenge unsupported, contradicted, over-broad, omitted, internally inconsistent or unsafe conclusions. It does not plan, select capabilities, prescribe recovery, rewrite Final or mutate `Investigation`/`Tasks`. There is no semantic quota on issue count, reference count or reason length; only normal physical context/output ceilings and strict protocol/coordinate validation apply.
-
-A first semantic `challenge` is returned to Main as feedback for one Candidate Final revision. If the fresh Claim still returns `challenge` after that revision, Runtime stops explicitly with `CLAIM_CHALLENGE_UNRESOLVED` instead of burning tokens in an open-ended Main↔Claim loop. One separate protocol retry remains allowed for malformed/truncated structured output; repeated protocol failure stays fail-closed.
-
-## Investigation
-
-`Investigation` is an optional Main-owned semantic notebook:
-
-```text
-{id, goal, status, grounding_ids, reason}
-```
-
-States remain `open`, `established`, or `dismissed`, but they are Main semantics rather than Runtime completion gates.
-
-Runtime validates only physical/structural facts it can know without interpreting the task:
-
-- IDs/shapes are legal;
-- referenced `mat-*` material exists when supplied;
-- grounding identity remains physically valid.
-
-An open Investigation does not block Final or a valid write. A rejected Investigation update does not cancel an otherwise valid action in the same turn.
-
-## Capability ownership
-
-`ObjectiveScope` is the reference implementation style: mechanically resolve physical scope, report truthful coverage, and never infer semantic relevance. Rev1.2.2 applies that pattern to the full physical output contract.
-
-Every public capability explicitly owns:
-
-- execution;
-- memoization identity policy (`signature` callable or explicit `None`);
-- Material observation;
-- Coverage projection;
-- Frontier projection;
-- source-specific continuation/freshness/rehydration when that physical domain needs it.
-
-Agent and Observation do not branch on the public capability catalog. Adding a future network/device/database capability should not require teaching Core what that domain means.
-
-## Observation
-
-Observation is the canonical physical memory boundary between Runtime and Main.
+Observation is the generic physical boundary:
 
 ```text
 Observation
-├─ material: mat-*
+├─ Material
 ├─ Coverage
-├─ Frontier: fr-*
-└─ Runtime-private continuation state
+└─ Frontier
 ```
 
-### Material
+Material carries domain-neutral identity/content coordinates. Coverage says what was physically examined. Frontier says what can still be continued. Frontier is availability, never an instruction to continue.
 
-`mat-*` entries preserve citable physical material and provenance through generic `locator + content_hash` identity plus an optional opaque `source_version`. Observation never interprets locator kinds or version semantics. A file hash, HTTP ETag, database row version or device generation can all be capability-owned `source_version` values. There is no SourceRecord/Evidence promotion layer.
+Canonical Observation remains Runtime state. Main receives bounded/delta projections so prompt size does not grow proportionally with all previously observed payloads.
 
-### Coverage
+## 4. Memory Kernel
 
-Coverage answers only: **what did this capability physically examine or establish?**
+Rev1.3.6 introduced persistent cognitive memory and Rev1.4 keeps it unchanged.
 
-The canonical shape is:
+Memory is not Observation:
 
-```text
-scope       declared physical scope
-examined    objective measured portion
-complete    whether that scope was exhausted
-boundaries  optional physical exclusions/limits
-facts       optional capability-owned physical facts
-```
+- Observation: what external reality showed.
+- Memory: what has been learned, decided, recorded or intentionally persisted.
 
-Coverage never decides whether the user request is semantically satisfied. Scan completeness and model materialization completeness are separate facts.
+Memory uses three implementation owners:
 
-### Frontier
+- `memory.py`: small public Core surface;
+- `memory_store.py`: SQLite, revisions, relations, atomic ChangeSets and append-only history;
+- `memory_navigation.py`: bounded activation, `MemoryCoverage`, `MemoryFrontier`, private continuation state.
 
-Frontier means more objective reality remains physically accessible. Main receives stable `fr-*` coordinates and freely decides whether continuation matters.
+No shared generic Coverage/Frontier abstraction is extracted with Observation yet.
 
-Opaque handles/cursors remain Runtime-private. Large continuation payloads are stored once in immutable Runtime-private snapshots; each Frontier cursor references the shared snapshot instead of duplicating its payload. The snapshot is garbage-collected after its final handle is consumed.
+## 5. Capabilities
 
-`continue_observation(frontier=...)` resolves the cursor mechanically and delegates page materialization back to the source capability, so Observation never needs domain-specific continuation logic.
+Capabilities own domain mechanics. Core should not learn that code analysis needs files, databases need schemas or networks need routes.
 
-## Replay is memoization
+The public registry owns execution plus physical metadata/projection/Observation hooks. Main chooses which capability matters semantically.
 
-If Main requests an observation already covered at the current workspace epoch, Runtime may return the canonical cached Observation instead of executing the same physical work again.
+## 6. Future validation direction
 
-Replay is telemetry, not semantic debt. It does not create a duplicate Observation and does not trigger a specialized `OBSERVATION_REPLAY_LOOP` task failure. Ordinary physical fuses still contain pathological repetition.
+Some capabilities may later own validators with actual criteria. Examples:
 
-## Main-facing runtime facts
+- code: compile/tests/static checks;
+- database: dry-run/integrity/rollback/permissions;
+- network: reachability/config invariants;
+- security: explicit policy/rubric, optionally evaluated by a specialist fresh LLM.
 
-Rev1.3.4 removes the standalone `operational_feedback` projection because it duplicated facts already present in `latest_tool_results`, `observation_map`, `grounding_index`, `physical_limits` and explicit challenge feedback. Main receives those canonical projections directly. Runtime still does not diagnose semantic loops, prescribe strategy or infer completion.
+A validator result should return through normal Observation so Main reasons over physical findings. Core receives no universal validator semantics and no replacement Claim gate is introduced in Rev1.4.
 
-## Capability failures
+## 7. Mutation and safety
 
-Capability validation/execution failures are physical results returned to Main whenever the task can safely continue. One invalid sibling in a multi-call batch does not cancel valid independent siblings.
+Writes are transactional and operate on the dedicated workspace. Post-write verification may compile/test and rollback physical changes when configured.
 
-Runtime blocks the unsafe/impossible effect; Main decides the next semantic action.
+Eyle source is protected. Self-analysis is observational; self-modification experiments occur only in an isolated writable sandbox copy and may be exported only as an inert ZIP artifact.
 
-## Context and physical containment
+## 8. Physical budgets
 
-The deployment llama-server has one hard per-call context ceiling:
+Runtime uses physical containment:
 
-```text
-context_window_tokens = 38000
-```
+- model context limit;
+- task-wide 90k maximum physical token fuse;
+- deadline;
+- sandbox limits;
+- structured-response fail-closed validation.
 
-Runtime reserves room for model output and safety overhead before compiling each request. There is no separate cumulative prompt-token or completion-token budget in Core.
+There is no standing downstream/Claim token reserve and no Claim request.
 
-Task-wide containment is deliberately limited to:
+## 9. Architectural law
 
-```text
-max_total_tokens       90000
-task_deadline_seconds 1800
-```
+> **The model owns meaning. Runtime owns physical state. Capabilities own domain mechanics.**
 
-There is no standing Claim reserve and no fixed semantic stopping quota. Main may use the shared task-wide physical envelope. After Candidate Final exists, Claim fits its fresh packet and physical output ceiling to the actual remaining headroom. If a viable review cannot fit, Runtime fails closed with `CLAIM_REVIEW_BUDGET_UNAVAILABLE`; it does not retroactively reserve 12k tokens from Main.
-
-Canonical state may outlive one model call. Main-facing views are bounded physical projections; open Frontiers and referenced grounding remain addressable without exposing private handles.
-
-## Writes
-
-Real workspace mutation has one supervised physical path:
-
-```text
-Main patches
-  ↓
-Runtime dry-run
-  ↓
-WriteTransaction
-  ↓
-user confirmation
-  ↓
-apply
-  ↓
-validation
-  ↓
-commit result or rollback
-```
-
-`run_command` operates on a sandbox copy and cannot authorize real workspace mutation.
-
-
-## Sandbox execution
-
-`run_command` keeps the semantic contract unchanged while Runtime selects a strong physical backend. `backend=auto` prefers Microsandbox, then Docker, then Bubblewrap. Microsandbox is a per-job embedded microVM laboratory: Eyle creates one disposable writable workspace snapshot and keeps the VM/rootfs alive across commands in the same physical job. Linux/macOS bind-mount the disposable snapshot at `/workspace` for speed. Native Windows deliberately avoids the 0.6.8 virtio-fs bind path and stages the snapshot into VM-private `/workspace` using `Sandbox.fs.copy_from_host`. The real workspace is never a writable guest mount.
-
-Unrestricted Microsandbox commands use the canonical `public` network profile via `Network.from_profiles("public")`. Supervised tests use Microsandbox only when explicitly configured with a test-capable OCI image; that path creates a separate one-off microVM and uses `Network.none()` when `bloquear_rede=true`. Runtime applies VM vCPU/memory settings and command timeout/resource rlimits. A runtime/virtualization failure after Microsandbox is selected is reported as that physical failure rather than silently switching execution environment mid-attempt.
-
-## Service infrastructure
-
-Queue, worker, persistence, history, progress and telemetry host the agent. They are infrastructure, not reasoning authorities.
-
-## Clean break
-
-2.7.5 Rev1.3 uses strict current Session, queue and project-memory schemas. It does not migrate removed Core contracts or preserve semantic gates from previous revisions. Git and `CHANGELOG.md` retain history.
-
-
-### Microsandbox 0.6.8 API closure
-
-The Runtime targets the pinned Python SDK contract directly: it bootstraps the local runtime with `is_installed()`/`await install()`, uses `Network.from_profiles("public")` for ordinary `run_command`, and `Network.none()` only for explicitly network-isolated supervised execution. The removed/historical `Network.public_only()` helper is not part of the active integration.
+A universal abstraction is added only after multiple real implementations prove the same invariant. Similar names or shapes alone are insufficient.

@@ -30,7 +30,7 @@ def physical_user_prompt_tokens(
     """Return a local user-prompt ceiling inside remaining task budget.
 
     This complements the per-call context-window bound.  ``protected_tokens``
-    is intentionally generic so Main can protect Claim headroom without the
+    is intentionally generic so Main can protect downstream physical headroom without the
     token helper knowing any semantic state.
     """
     context = (config or {}).get("context_engine") or {}

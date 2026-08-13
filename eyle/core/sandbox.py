@@ -369,7 +369,7 @@ def _comando_trusted_local(caminho_projeto, argv, cfg, limites):
 def _comando_processo(caminho_projeto, argv, cfg, limites):
     if cfg.get("bloquear_rede", True):
         raise ErroSandbox(
-            "backend 'process' does not block network; use Microsandbox/Bubblewrap/Docker or explicitly allow network access"
+            "backend 'process' does not block network; strong isolation backends are Microsandbox/Bubblewrap/Docker, or network access must be explicitly allowed"
         )
     if os.name != "posix":
         raise ErroSandbox("backend 'process' with resource limits requires POSIX and prlimit")

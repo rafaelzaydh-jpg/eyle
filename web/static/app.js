@@ -283,7 +283,8 @@
         historyLine("resultados frescos", summaryData.fresh_observation_estimated_tokens),
         historyLine("contexto retido", summaryData.retained_context_estimated_tokens),
         historyLine("estado de observação", summaryData.observation_state_estimated_tokens),
-        historyLine("estado semântico", summaryData.semantic_state_estimated_tokens),
+        historyLine("estado epistêmico", summaryData.epistemic_state_estimated_tokens),
+        historyLine("estado intencional", summaryData.intentional_state_estimated_tokens),
         historyLine("grounding por observação", diagnostics.grounding_per_observation),
         historyLine("taxa de replay", diagnostics.replay_request_rate),
         historyLine("grounding sem referência estrutural", diagnostics.unreferenced_grounding_count),
@@ -293,12 +294,11 @@
       const details = document.createElement("details");
       details.className = "history-item";
       const summaryEl = document.createElement("summary");
-      summaryEl.textContent = "componentes acumulados e pacote do Claim";
+      summaryEl.textContent = "componentes acumulados e diagnósticos";
       details.appendChild(summaryEl);
       details.appendChild(historyJsonBlock({
         categories: accounting.categories || {},
         component_totals: accounting.component_totals || {},
-        claim_packet: accounting.claim_packet || {},
         diagnostics,
         interpretation: accounting.interpretation,
       }));

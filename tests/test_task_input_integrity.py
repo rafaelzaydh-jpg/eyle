@@ -4,7 +4,7 @@ from pathlib import Path
 import eyle.core.agent as core_agent
 import eyle.runtime.service as service_mod
 from llm.structured import parse_agent_response, StructuredResponseError
-from tests.canonical import agent_final, agent_needs_user, agent_tools, base_config, issue, review, tool_call
+from tests.canonical import agent_final, agent_needs_user, agent_tools, base_config, tool_call
 
 
 def test_needs_user_contract_is_blocking_object_and_rejects_legacy_string():
@@ -27,9 +27,9 @@ def test_needs_user_contract_is_blocking_object_and_rejects_legacy_string():
         raise AssertionError("legacy string needs_user must be rejected")
 
 
-def test_resume_clarification_is_canonical_across_tool_and_claim(monkeypatch, tmp_path):
+def test_resume_clarification_is_canonical_across_main_turns(monkeypatch, tmp_path):
     (tmp_path / "session.py").write_text("class AgentSession:\n    pass\n", encoding="utf-8")
-    cfg = base_config(claims_mode="fresh")
+    cfg = base_config()
 
     first_prompts = []
     monkeypatch.setattr(
@@ -63,12 +63,6 @@ def test_resume_clarification_is_canonical_across_tool_and_claim(monkeypatch, tm
         "executar_agente_llm",
         lambda prompt, _cfg: resumed_prompts.append(json.loads(prompt)) or next(outputs),
     )
-    claim_prompts = []
-    monkeypatch.setattr(
-        core_agent,
-        "executar_verificador_claims",
-        lambda prompt, _cfg: claim_prompts.append(json.loads(prompt)) or review(verdict="accept"),
-    )
 
     status, text, pending2, details2 = core_agent.executar_agente(
         pending["session"]["request"],
@@ -86,16 +80,15 @@ def test_resume_clarification_is_canonical_across_tool_and_claim(monkeypatch, tm
     assert len(resumed_prompts) == 2
     canonical = resumed_prompts[0]["request"]
     assert "Localize a classe" in canonical
-    assert "Blocking information requested:" in canonical
+    assert "Missing information:" in canonical
     assert "The class name required" in canonical
-    assert "Eyle asked: Qual classe devo localizar?" in canonical
-    assert "User answered: AgentSession" in canonical
+    assert "Question: Qual classe devo localizar?" in canonical
+    assert "Answer: AgentSession" in canonical
     assert resumed_prompts[1]["request"] == canonical
     assert all(
         not any(item.get("tool") == "user_response" for item in (prompt.get("latest_tool_results") or []))
         for prompt in resumed_prompts
     )
-    assert claim_prompts and claim_prompts[0]["request"] == canonical
     # Job #2 metrics are physical-job scoped; cumulative task chronology is separate.
     assert details2["turns"] == 2
     assert details2["tool_calls"] == 1
@@ -137,13 +130,13 @@ def test_expired_user_input_pending_cannot_capture_new_request(monkeypatch, tmp_
     assert cleared == [True]
 
 
-def test_agent_prompt_treats_conversation_as_valid_user_intent_and_needs_user_as_blocking_only():
+def test_agent_prompt_treats_conversation_as_valid_without_forcing_work_state():
     from llm.executar import PROMPT_AGENTE
     lower=PROMPT_AGENTE.lower()
-    assert "the user's message does not need to be a task" in lower
-    assert "respond naturally with final" in lower
-    assert "genuinely blocking information" in lower
-    assert "never use it merely to turn conversation into a formal task" in lower
+    assert "conversation and simple requests may go straight to final" in lower
+    assert "empty updates mean no new commitment" in lower
+    assert "needs_user represents information or a choice that blocks progress" in lower
+    assert "workspace state is context, not a task" in lower
 
 def test_execution_context_rejects_canonical_request_identity_drift():
     from eyle.core.execution_context import ExecutionContext

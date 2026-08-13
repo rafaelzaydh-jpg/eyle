@@ -182,7 +182,6 @@ def build_prompt_cost_accounting(details: Dict[str, Any], *, limit: int = 20) ->
             if isinstance(components, dict):
                 item["components"] = {str(name): _component_metrics(metric) for name, metric in components.items()}
             for key in (
-                "selected_grounding_count", "grounding_excerpt_chars_per_item",
                 "output_tokens_desired", "prompt_budget_tokens",
                 "physical_user_prompt_budget_tokens",
             ):
@@ -195,14 +194,6 @@ def build_prompt_cost_accounting(details: Dict[str, Any], *, limit: int = 20) ->
         provider_reported_total = provider_prompt_total if provider_calls_with_usage else None
 
     fixed_repeat_tokens = int(categories["system"]["estimated_tokens"]) + int(categories["fixed_contract"]["estimated_tokens"])
-    claim_snaps = [item for item in prompt_views if "claim" in str(item.get("mode") or "") or "verification" in str(item.get("mode") or "")]
-    claim_packet: Dict[str, Any] = {"calls": len(claim_snaps)}
-    selected_counts=[int(item.get("selected_grounding_count")) for item in claim_snaps if isinstance(item.get("selected_grounding_count"),(int,float))]
-    excerpt_widths=[int(item.get("grounding_excerpt_chars_per_item")) for item in claim_snaps if isinstance(item.get("grounding_excerpt_chars_per_item"),(int,float))]
-    if selected_counts: claim_packet.update({"selected_grounding_last":selected_counts[-1],"selected_grounding_max":max(selected_counts)})
-    if excerpt_widths: claim_packet.update({"grounding_excerpt_chars_last":excerpt_widths[-1],"grounding_excerpt_chars_min":min(excerpt_widths)})
-    physical_claim_budgets=[int(item.get("physical_user_prompt_budget_tokens")) for item in claim_snaps if isinstance(item.get("physical_user_prompt_budget_tokens"),(int,float))]
-    if physical_claim_budgets: claim_packet.update({"physical_prompt_budget_last":physical_claim_budgets[-1],"physical_prompt_budget_min":min(physical_claim_budgets)})
 
     observation_count=int(_number(details.get("observation_ledger_size")))
     grounding_count=int(_number(details.get("grounding_count_total")))
@@ -219,8 +210,9 @@ def build_prompt_cost_accounting(details: Dict[str, Any], *, limit: int = 20) ->
     replay_rate=_round_ratio(float(replays),float(tool_requests))
     if replay_rate is not None: diagnostics["replay_request_rate"]=replay_rate
     for key in (
-        "investigation_grounding_count","claim_grounding_count",
-        "unreferenced_grounding_count","tool_actions_with_grounding",
+        "investigation_grounding_count", "task_grounding_count",
+        "completion_grounding_count", "unreferenced_grounding_count",
+        "tool_actions_with_grounding",
     ):
         if grounding_usage.get(key) is not None: diagnostics[key]=grounding_usage.get(key)
 
@@ -243,7 +235,7 @@ def build_prompt_cost_accounting(details: Dict[str, Any], *, limit: int = 20) ->
     fixed_share=_round_ratio(float(fixed_repeat_tokens),float(local_total_estimated))
     if fixed_share is not None: summary["fixed_repeat_tax_share"]=fixed_share
     summary={k:v for k,v in summary.items() if v is not None}
-    return {"summary":summary,"categories":categories,"component_totals":component_totals,"claim_packet":claim_packet,"diagnostics":diagnostics,"calls":calls,"interpretation":"observational_only; token cost is measured, usefulness remains semantic"}
+    return {"summary":summary,"categories":categories,"component_totals":component_totals,"diagnostics":diagnostics,"calls":calls,"interpretation":"observational_only; token cost is measured, usefulness remains semantic"}
 
 
 def _bounded_list(value: Any, limit: int) -> List[Dict[str, Any]]:
@@ -287,8 +279,6 @@ def _safe_llm_calls(details: Dict[str, Any], limit: int) -> List[Dict[str, Any]]
                 "structured_parse_error": attempt.get("structured_parse_error"), "structured_parse_detail": attempt.get("structured_parse_detail"),
                 "structured_top_level_keys": attempt.get("structured_top_level_keys"), "structured_missing_keys": attempt.get("structured_missing_keys"),
                 "error_code": attempt.get("error_code"),
-                "selected_grounding_count": prompt.get("selected_grounding_count"),
-                "grounding_excerpt_chars_per_item": prompt.get("grounding_excerpt_chars_per_item"),
                 "fresh_call": prompt.get("fresh_call"),
                 "semantic_packet_fields": prompt.get("semantic_packet_fields"),
                 "prompt_components": prompt.get("components_after") if isinstance(prompt.get("components_after"), dict) else None,
@@ -314,7 +304,6 @@ def build_execution_trace(
             "output_tokens_reserved", "system_prompt_characters",
             "system_prompt_estimated_tokens", "pre_crop_characters", "pre_crop_estimated_tokens",
             "crop_applied", "components_before", "components_after",
-            "selected_grounding_count", "grounding_excerpt_chars_per_item",
             "fresh_call", "semantic_packet_fields",
         )
         if item.get(key) is not None
@@ -377,7 +366,6 @@ def build_execution_trace(
         "tools": tools,
         "validation": {
             "write_transaction": details.get("write_transaction") if isinstance(details.get("write_transaction"), dict) else {},
-            "claim_review": details.get("claim_review") if isinstance(details.get("claim_review"), dict) else {},
         },
         "privacy": {
             "chain_of_thought_exposed": False,
@@ -444,6 +432,5 @@ def build_public_job_history(registro):
         "decisions": list(trace.get("decisions") or []),
         "tools": list(trace.get("tools") or []),
         "write_transaction": (trace.get("validation") or {}).get("write_transaction") or {},
-        "claim_review": (trace.get("validation") or {}).get("claim_review") or {},
         "privacy": dict(trace.get("privacy") or {}),
     }

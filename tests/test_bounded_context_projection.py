@@ -96,12 +96,12 @@ def test_cached_replay_returns_coordinates_and_small_recall_excerpt():
 
 
 def test_claim_reserve_config_is_removed_from_canonical_agent_config():
-    cfg = base_config(claims_mode="fresh")
+    cfg = base_config()
     assert "claim_reserve_tokens" not in cfg["agent"]
 
 
 def test_agent_preflight_uses_shared_task_budget_without_claim_hostage():
-    cfg = base_config(claims_mode="fresh")
+    cfg = base_config()
     cfg["agent"]["max_total_tokens"] = 20000
     execution = ExecutionContext.from_config(cfg)
     execution.prompt_tokens_budgeted_physical = 7000
@@ -112,7 +112,7 @@ def test_agent_preflight_uses_shared_task_budget_without_claim_hostage():
 
 
 def test_shared_task_budget_still_fails_closed_at_real_total_limit():
-    cfg = base_config(claims_mode="fresh")
+    cfg = base_config()
     cfg["agent"]["max_total_tokens"] = 8000
     execution = ExecutionContext.from_config(cfg)
     execution.prompt_tokens_budgeted_physical = 7600
@@ -124,7 +124,7 @@ def test_shared_task_budget_still_fails_closed_at_real_total_limit():
 
 
 def test_agent_output_ceiling_is_not_clamped_for_a_future_claim():
-    cfg = base_config(claims_mode="fresh")
+    cfg = base_config()
     cfg["agent"]["max_total_tokens"] = 20000
     execution = ExecutionContext.from_config(cfg)
     execution.prompt_tokens_budgeted_physical = 15000

@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 
-from eyle.core import agent, claim_review, observation, tools
+from eyle.core import agent, observation, tools
 
 
 def test_generic_material_accepts_non_file_locator():
@@ -20,13 +20,6 @@ def test_generic_material_accepts_non_file_locator():
     assert "file" not in material and "file_hash" not in material
 
 
-def test_claim_contract_has_no_investigation_coordinate_or_filesystem_freshness():
-    assert "investigation" not in inspect.signature(claim_review.review_prompt).parameters
-    assert "investigation" not in inspect.signature(claim_review.normalize_claim_review).parameters
-    source = inspect.getsource(claim_review)
-    assert "validate_grounding_freshness" not in source
-    assert "_resolver_caminho_seguro" not in source
-    assert "target_id" not in source
 
 
 def test_observation_core_does_not_name_public_capabilities():
