@@ -1,6 +1,17 @@
-# Memory Kernel — Eyle 2.7.5 Rev1.5.1
+# Memory Kernel — Eyle 2.7.5 Rev1.5.3
 
-Rev1.3.6 introduced the Memory Kernel. Rev1.5.1 keeps its storage semantics but moves it behind an independent `memory` Capability Provider. It remains deliberately separate from Observation, Tasks and Investigation.
+Rev1.3.6 introduced the persistent Memory Kernel. Rev1.5.3 keeps its storage semantics behind the independent `memory` Capability Provider. It remains deliberately separate from Observation and from the new task-scoped cognitive Task Memory. Task Memory lives only with the active AgentSession; persistent Memory is longitudinal and changes only when Main explicitly uses the memory provider.
+
+## Separation from Task Memory
+
+Rev1.5.3 has two deliberately different cognitive lifetimes:
+
+```text
+Task Memory       active task/job; EvidenceSpan + Finding + Conclusion
+Persistent Memory longitudinal; explicit memory.search / memory.store
+```
+
+Task findings are not automatically promoted into persistent Memory. Main may later choose to persist a durable conclusion through the `memory` Provider, but Runtime never performs automatic consolidation or semantic promotion.
 
 ## Law
 

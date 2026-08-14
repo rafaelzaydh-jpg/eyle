@@ -1,35 +1,40 @@
 {
   "release": "2.7.5",
   "app_version": "2.7.5",
-  "config_schema_version": "2.7.5-r1.5.1",
-  "revision": "rev1.5.1-host-injected-universal-capabilities",
+  "config_schema_version": "2.7.5-r1.5.3",
+  "revision": "rev1.5.3-cognitive-task-memory",
   "released_at": "2026-08-13",
-  "title": "Rev1.5.1 Host-Injected Universal Capabilities",
+  "title": "Rev1.5.3 Cognitive Task Memory",
   "compatibility": {
     "backward_compatible": false,
-    "session_schema": "2.7.5-r1.5.1",
+    "session_schema": "2.7.5-r1.5.3",
     "queue_schema": "2.7.5-r1.4.3",
     "pending_continuation_schema": "4",
     "benchmark_schema": "2",
-    "policy": "Clean break. Core receives an explicit Host-injected capability registry. Confirmed capability results return to Main. request_context carries authoritative user refinements. Memory is an independent provider. Provider IDs are namespaced mechanically."
+    "policy": "Clean break at the persisted Session boundary from Rev1.5.2: Rev1.5.3 adds task-scoped cognitive memory while preserving the Host-injected Provider architecture, Main semantic authority, Tasks/Investigation and universal physical contracts."
   },
   "architecture": {
     "main": "Sole semantic authority. Interprets immutable request plus authoritative request_context, freely chooses provider capabilities, user supervision, optional Investigation/Tasks, or completion.",
     "runtime": "Domain-neutral mechanical authority. Validates capability/result/effect coherence, confirmation, persistence, budgets and continuation identity; confirmed results always return to Main.",
     "providers": "Independent owners of domain mechanics and private runtime state. Providers register local capability IDs; Registry exposes provider.local canonical IDs and validates their physical contracts.",
-    "capability_contract": "Capabilities self-describe purpose, inputs, returns, caveats, limits, effect class and confirmation. Registry namespaces IDs and validates canonical result/effect coherence.",
+    "capability_contract": "Capabilities self-describe purpose, inputs, returns, caveats, limits, effect class and confirmation. Providers may also publish establishes/does_not_establish causal boundaries; Registry validates their shape and exposes them without interpreting domain meaning.",
     "actions": "Exactly capability_calls, await_user, complete. Workspace mutation is workspace_transaction from the bundled standard provider, not a special Core action.",
-    "completion": "Complete has answer, limitations, grounding_ids and effect_ids. There is no Direct/Observed/Effect classification phase. Main cites mat-* and eff-* coordinates when relied upon; Runtime checks coordinate existence/identity only.",
-    "effects": "Universal physical_effect shape is resource, operation, persistence and changed. Persistent changed effects advance reality_epoch independent of provider domain.",
+    "completion": "Complete has answer, limitations, grounding_ids and effect_ids. There is no Direct/Observed/Effect classification phase. Main must compare requested world changes against actual effect resource, changed state and persistence; Runtime still checks coordinate existence/identity only.",
+    "effects": "Universal physical_effect shape is resource, operation, persistence and changed. Main is explicitly taught that successful execution is not automatically task success and that temporary/isolated/different-resource effects cannot stand in for requested persistent/external effects.",
     "continuation": "await_user answers are retained as authoritative request_context for the same active task. Capability confirmation executes mechanically, records observation/effect, then resumes Main.",
     "provider_context": "Host injects Registry and opaque provider_context. Runtime/service does not import or discover the standard provider domain directly.",
     "runtime_state": "ExecutionContext exposes provider-private runtime state and generic cleanup callbacks; sandbox/container/session state belongs to the provider that created it.",
     "configuration": "Runtime validates universal host fields and delegates providers.* validation to the registered provider. Provider-specific search/sandbox/test limits are opaque to Core.",
     "standard_provider": "Bundled workspace/code/Git/sandbox provider only. Persistent cognitive Memory is a separate bundled memory provider.",
-    "semantic_freedom": "Capabilities are resources, not workflow stages. Main is only generally advised that when it is unsure whether it has enough information to answer reliably, it should prefer observing before answering. No keyword router or mandatory inspect rule exists.",
+    "semantic_freedom": "Capabilities remain optional resources rather than workflow stages. Causal-effect literacy is generic and domain-neutral: no keyword router, forced capability choice or prose classifier is introduced.",
     "contracts": "Universal capability, Observation, Coverage and physical-effect contracts live below Core and Providers; provider implementations do not import eyle.core.*.",
     "http_retry": "Transient OpenAI-compatible HTTP statuses (408/425/429/500/502/503/504) retain retryability through backend error translation.",
-    "host_description": "Host may expose opaque presentation/status metadata through describe(); Runtime passes it through without domain interpretation, while bundled CLI/Web choose which fields to render."
+    "host_description": "Host may expose opaque presentation/status metadata through describe(); Runtime passes it through without domain interpretation, while bundled CLI/Web choose which fields to render.",
+    "action_semantics": "await_user means active progress is blocked on user input; complete means the current turn/task is adequately answered or finished and does not terminate the conversation itself.",
+    "task_memory": "Task-scoped cognitive memory stores Main-selected EvidenceSpan coordinates plus semantic Findings and Conclusions. Raw Observation remains canonical and is not duplicated into prompt memory.",
+    "observation_replay": "Physical Coverage memoizes external observation, while provider-owned rematerialization may project the exact requested already-observed range back to Main without physical re-execution. Physical coverage is not treated as cognitive availability.",
+    "presentation": "Provider model projections report presentation completeness/ranges when a physically observed source is only partially shown to Main; silent source truncation is not treated as full cognitive coverage.",
+    "memory_separation": "Persistent Memory provider remains separate from task-scoped cognitive memory. Task knowledge is active-task state and is not automatically promoted to longitudinal Memory."
   },
   "bundled_providers": [
     "standard",
@@ -71,11 +76,13 @@
     "provider confirmation_message terminal responses",
     "Memory capabilities embedded in the standard provider",
     "Provider imports of eyle.core observation/execution contracts",
-    "mandatory empty investigation_updates/task_updates on every Main turn"
+    "mandatory empty investigation_updates/task_updates on every Main turn",
+    "Rev1.5.2 cached source replay semantics that returned only a tiny generic recall excerpt when the provider can exactly rematerialize the requested observed range",
+    "Persisted Session schema 2.7.5-r1.5.1; Rev1.5.3 persists task_memory under session schema 2.7.5-r1.5.3"
   ],
   "publication": {
     "requires_extracted_artifact_verification": true,
-    "target_tag": "v2.7.5-rev1.5.1"
+    "target_tag": "v2.7.5-rev1.5.3"
   },
   "agent_action_kinds": [
     "capability_calls",

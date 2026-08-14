@@ -16,11 +16,11 @@ from tests.canonical import standard_registry
 
 def test_rev1_session_schema_is_exact_and_old_state_is_not_migrated():
     current = AgentSession("x").to_dict()
-    assert current["session_schema_version"] == SESSION_SCHEMA_VERSION == "2.7.5-r1.5.1"
+    assert current["session_schema_version"] == SESSION_SCHEMA_VERSION == "2.7.5-r1.5.3"
     assert set(current) == {
         "session_schema_version", "request", "execution_id", "turn", "reality_epoch",
         "observation_ledger", "decision_ledger", "investigation", "tasks",
-        "conversation_background", "request_context", "pending_capability",
+        "conversation_background", "request_context", "task_memory", "pending_capability",
     }
     for old_version in ("5.9.1", "5.9", "5.5", "5.4"):
         old = dict(current); old["session_schema_version"] = old_version

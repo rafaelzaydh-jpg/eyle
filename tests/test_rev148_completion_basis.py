@@ -85,8 +85,8 @@ def test_prompt_teaches_reality_and_full_provider_contracts_without_cost_quota(m
 def test_rev15_identity_and_no_task_wide_token_fuse():
     manifest = json.loads(Path("release_manifest.json").read_text(encoding="utf-8"))
     config = json.loads(Path("config.json").read_text(encoding="utf-8"))
-    assert manifest["config_schema_version"] == "2.7.5-r1.5.1"
-    assert manifest["revision"] == "rev1.5.1-host-injected-universal-capabilities"
+    assert manifest["config_schema_version"] == "2.7.5-r1.5.3"
+    assert manifest["revision"] == "rev1.5.3-cognitive-task-memory"
     assert "max_total_tokens" not in config["agent"]
     source = Path("llm/executar.py").read_text(encoding="utf-8")
     assert "MAX_TOTAL_TOKENS_EXCEEDED" not in source

@@ -1,12 +1,12 @@
-# Configuration — Eyle 2.7.5 Rev1.5.1
+# Configuration — Eyle 2.7.5 Rev1.5.3
 
 Canonical identity:
 
 ```json
 {
   "app_version": "2.7.5",
-  "config_schema_version": "2.7.5-r1.5.1",
-  "revision": "rev1.5.1-host-injected-universal-capabilities"
+  "config_schema_version": "2.7.5-r1.5.3",
+  "revision": "rev1.5.3-cognitive-task-memory"
 }
 ```
 
@@ -33,11 +33,12 @@ An alternative Host may define a different provider set and config schema. Provi
 
 ## Physical limits
 
-Rev1.5.1 keeps per-call context/output containment, task deadline and provider-owned physical limits. There is no task-wide economic `max_total_tokens` fuse.
+Rev1.5.3 keeps per-call context/output containment, task deadline and provider-owned physical limits. There is no task-wide economic `max_total_tokens` fuse yet; Task Memory is intentionally being validated before budget/no-progress changes are added.
 
 ## Persistence schemas
 
-- configuration/session: `2.7.5-r1.5.1`;
+- configuration: `2.7.5-r1.5.3`;
+- persisted Session: `2.7.5-r1.5.3`;
 - Queue: `2.7.5-r1.4.3`;
 - pending continuation: `4`.
 

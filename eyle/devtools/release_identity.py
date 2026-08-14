@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Release verifier for Eyle 2.7.5 Rev1.5.1.
+"""Release verifier for Eyle 2.7.5 Rev1.5.3.
 
 The verifier protects the Capability Provider Architecture rather than old
 workspace/tool-specific implementation details.
@@ -18,7 +18,7 @@ _FORBIDDEN_DIR_NAMES = {".git", ".pytest_cache", "__pycache__", "htmlcov"}
 _FORBIDDEN_FILE_NAMES = {".coverage"}
 _GENERIC_CORE_FILES = {
     "__init__.py", "agent.py", "continuation.py", "decision.py",
-    "investigation.py", "session.py", "tasks.py", "token_budget.py",
+    "investigation.py", "session.py", "tasks.py", "task_memory.py", "token_budget.py",
     "validation.py",
 }
 _REQUIRED_PROVIDER_FILES = {
@@ -123,6 +123,8 @@ def _architecture_violations(base: Path, manifest: Dict[str, Any]) -> List[str]:
         if kinds != ["capability_calls", "await_user", "complete"]:
             out.append(f"action kinds invalidos:{kinds!r}")
         schema_text = json.dumps(schema, ensure_ascii=False)
+        if "memory_updates" not in schema.get("properties", {}):
+            out.append("agent schema sem memory_updates opcional")
         for legacy in ('"patches"', '"tool_calls"', '"completion_mode"'):
             if legacy in schema_text:
                 out.append(f"contrato estruturado legado:{legacy}")
@@ -132,13 +134,24 @@ def _architecture_violations(base: Path, manifest: Dict[str, Any]) -> List[str]:
             "sole semantic authority", "independent providers", "capabilities are resources, not mandatory steps",
             "if you are unsure whether you possess enough information", "available capability is not evidence",
             "grounding_ids and effect_ids", "runtime validates coordinate existence and identity only",
+            "capability success is not automatically task success",
+            "resource identifies what was affected", "establishes and does_not_establish",
+            "task memory", "physical coverage means the body observed a scope",
         )
         for text in required:
             if text not in lower_prompt:
                 out.append(f"conceito generico ausente no Main prompt:{text}")
-        for domain_name in ("search_code", "read_file", "workspace_transaction", "run_tests", "petbot", "router.restart"):
+        for domain_name in ("search_code", "read_file", "workspace_transaction", "run_tests", "run_command", "petbot", "router.restart"):
             if domain_name in lower_prompt:
                 out.append(f"Main prompt acoplado a dominio:{domain_name}")
+
+        catalog = {item["name"]: item for item in registry.catalog(_json(base / "config.json"))}
+        run_contract = catalog.get("standard.run_command") or {}
+        if not run_contract.get("establishes") or not run_contract.get("does_not_establish"):
+            out.append("standard.run_command sem fronteira causal model-facing")
+        tx_contract = catalog.get("standard.workspace_transaction") or {}
+        if not tx_contract.get("establishes") or not tx_contract.get("does_not_establish"):
+            out.append("standard.workspace_transaction sem fronteira causal model-facing")
         for forcing in ("if the request contains", "always use", "always investigate", "must create a task"):
             if forcing in lower_prompt:
                 out.append(f"Main prompt prescritivo:{forcing}")
@@ -179,8 +192,19 @@ def _architecture_violations(base: Path, manifest: Dict[str, Any]) -> List[str]:
         if legacy in capability_init:
             out.append(f"registry global legado reapareceu:{legacy}")
 
-    if "request_context" not in (base / "eyle/core/session.py").read_text(encoding="utf-8"):
+    session_source = (base / "eyle/core/session.py").read_text(encoding="utf-8")
+    if "request_context" not in session_source:
         out.append("AgentSession sem request_context autoritativo")
+    if "task_memory" not in session_source:
+        out.append("AgentSession sem task_memory cognitivo")
+    task_memory_source = (base / "eyle/core/task_memory.py").read_text(encoding="utf-8")
+    for required_symbol in ("EvidenceSpan", "project_task_knowledge", "apply_task_memory_updates"):
+        if required_symbol not in task_memory_source:
+            out.append(f"Task Memory sem conceito/simbolo requerido:{required_symbol}")
+    registry_source = (base / "eyle/capabilities/registry.py").read_text(encoding="utf-8")
+    for required_symbol in ("def rematerialize", "def select_evidence"):
+        if required_symbol not in registry_source:
+            out.append(f"Registry sem suporte Task Memory:{required_symbol}")
     return out
 
 

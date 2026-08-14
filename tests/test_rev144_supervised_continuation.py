@@ -165,7 +165,7 @@ def test_web_client_renders_model_options_custom_response_and_cancel_controls():
 
 def test_release_manifest_declares_rev15_pending_and_action_contract():
     manifest = json.loads(Path("release_manifest.json").read_text(encoding="utf-8"))
-    assert manifest["config_schema_version"] == "2.7.5-r1.5.1"
+    assert manifest["config_schema_version"] == "2.7.5-r1.5.3"
     assert manifest["compatibility"]["pending_continuation_schema"] == "4"
     assert manifest["compatibility"]["queue_schema"] == "2.7.5-r1.4.3"
     assert manifest["agent_action_kinds"] == ["capability_calls", "await_user", "complete"]

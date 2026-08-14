@@ -94,7 +94,7 @@ def test_structured_contract_rejects_established_investigation_without_conclusio
 
 
 def test_session_and_queue_advance_for_new_persisted_investigation_shape():
-    assert SESSION_SCHEMA_VERSION == "2.7.5-r1.5.1"
+    assert SESSION_SCHEMA_VERSION == "2.7.5-r1.5.3"
     # Queue storage shape did not change in Rev1.5; do not bump persistence schemas cosmetically.
     assert QUEUE_SCHEMA_VERSION == "2.7.5-r1.4.3"
     state = AgentSession("x").to_dict()

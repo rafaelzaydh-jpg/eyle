@@ -190,5 +190,13 @@ def capability_public_contract(name: str, provider_id: str, spec: Dict[str, Any]
         "caveats": [str(v) for v in (spec.get("caveats") or [])],
         "limits": limits,
     }
+    # Providers may explicitly teach causal scope without teaching the domain to
+    # Core. These are semantic descriptions, not Runtime routing rules.
+    establishes = [str(v).strip() for v in (spec.get("establishes") or []) if str(v).strip()]
+    does_not_establish = [str(v).strip() for v in (spec.get("does_not_establish") or []) if str(v).strip()]
+    if establishes:
+        item["establishes"] = establishes
+    if does_not_establish:
+        item["does_not_establish"] = does_not_establish
     item["confirmation"] = str(spec.get("confirmation") or "none")
     return item

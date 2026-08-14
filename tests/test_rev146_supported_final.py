@@ -97,7 +97,7 @@ def test_workspace_transaction_declares_provider_owned_persistent_mutation():
 
 def test_release_manifest_declares_rev15_universal_physical_effects():
     manifest = json.loads(Path("release_manifest.json").read_text(encoding="utf-8"))
-    assert manifest["config_schema_version"] == "2.7.5-r1.5.1"
-    assert manifest["revision"] == "rev1.5.1-host-injected-universal-capabilities"
+    assert manifest["config_schema_version"] == "2.7.5-r1.5.3"
+    assert manifest["revision"] == "rev1.5.3-cognitive-task-memory"
     assert "resource, operation, persistence and changed" in manifest["architecture"]["effects"]
 

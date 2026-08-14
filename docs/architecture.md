@@ -1,4 +1,4 @@
-# Architecture — Eyle 2.7.5 Rev1.5.1
+# Architecture — Eyle 2.7.5 Rev1.5.3
 
 ## Core thesis
 
@@ -53,6 +53,20 @@ Main is the sole semantic authority. It receives:
 Main chooses exactly one action per turn: `capability_calls`, `await_user`, or `complete`.
 
 Capabilities are resources, not workflow stages. Runtime never routes by words such as “analyze”, “verify”, “code”, “router” or “PetBot”.
+
+## Task-scoped cognitive memory
+
+Rev1.5.3 adds Task Memory without replacing Tasks, Investigation, Observation, Coverage or Frontier. Observation remains the canonical physical record. Main may select an exact provider-owned span of an existing `mat-*` Material as an EvidenceSpan, then retain semantic Findings and Conclusions that reference those spans. Runtime validates only identities, ranges and references; it does not decide what is important or whether a Finding is true.
+
+```text
+Observation/Material  -> Main-selected EvidenceSpan -> Finding -> Conclusion
+        ^                                                   |
+        |------------- exact rematerialization -------------|
+```
+
+Raw source bodies do not need to remain in prompt memory after Main has metabolized them. If Main later requests a range that is already physically covered, the owning Provider may rematerialize that exact range from canonical Observation without another physical read. Physical Coverage therefore means "the body already observed this", not "Main still has this text in working memory".
+
+Provider model projections must also distinguish physical observation from presentation. If a source is physically read beyond what is shown to Main, presentation metadata reports the actually presented range and whether more remains; silent truncation is not treated as cognitive coverage.
 
 ## Active request continuity
 
@@ -113,7 +127,7 @@ petbot.dispense_food
 
 Two providers may safely own the same local name because identity is namespaced mechanically.
 
-Every model-visible capability contract includes provider, purpose, inputs, returns, caveats, limits, effect class and explicit confirmation requirement.
+Every model-visible capability contract includes provider, purpose, inputs, returns, caveats, limits, effect class and explicit confirmation requirement. Providers may additionally publish `establishes[]` and `does_not_establish[]` causal boundaries; Registry checks their shape but does not interpret their meaning.
 
 ## Effect coherence
 
@@ -128,6 +142,12 @@ Registry mechanically enforces at least:
 - `mutate` with `changed=true` must report a valid physical effect.
 
 This is contract enforcement, not semantic interpretation.
+
+## Causal completion boundary
+
+Rev1.5.2 distinguishes successful capability execution from successful fulfillment of the active objective without adding a semantic Runtime gate. Main is taught to compare the requested effect with actual `resource`, `operation`, `persistence` and `changed` facts. A job-scoped or isolated effect cannot be silently promoted into a persistent effect on another resource. If the effect is insufficient, Main continues, asks when genuinely blocked, or reports the limitation.
+
+Runtime deliberately does not parse Final prose or infer which capability should have been used. This keeps semantic authority with Main while making the physical world unambiguous.
 
 ## Confirmation
 
@@ -182,7 +202,7 @@ It can be installed alongside a PetBot, network or workspace Host. Memory is con
 
 ## Clean-break boundary
 
-Rev1.5.1 deliberately does not restore:
+Rev1.5.2 deliberately does not restore:
 
 - `default_registry()` / global provider mutation;
 - special `patches` action;

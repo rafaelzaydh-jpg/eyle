@@ -1,10 +1,22 @@
 # Eyle
 
-**Version:** 2.7.5 · **Schema:** 2.7.5-r1.5.1 · **Revision:** rev1.5.1-host-injected-universal-capabilities
+**Version:** 2.7.5 · **Schema:** 2.7.5-r1.5.3 · **Revision:** rev1.5.3-cognitive-task-memory
 
 Eyle is a domain-neutral agency kernel built around one Main LLM, a mechanical Runtime and Host-injected Capability Providers.
 
 > **Main owns meaning. Runtime owns mechanics. Providers own the world. Host chooses the body.**
+
+## Rev1.5.3: Cognitive Task Memory
+
+Rev1.5.3 evolves the existing Rev1.5.2 architecture instead of replacing it. Observation remains the canonical physical record, while the active AgentSession gains task-scoped cognitive memory: Main may select exact EvidenceSpans from `mat-*` Material, retain compact Findings and Conclusions, and let raw source bodies leave the prompt after they have been metabolized.
+
+Physical Coverage no longer implies cognitive availability. When Main requests a previously observed source range, the owning Provider may rematerialize that exact range from canonical Observation without re-reading the external source. File projections also expose presentation completeness when a physically read range is only partially shown to Main, closing the replay/working-memory loop that could otherwise cause repeated cached reads. Persistent `memory.*` remains a separate provider for longitudinal memory across tasks.
+
+## Rev1.5.2: Causal Effect Literacy
+
+Rev1.5.2 keeps the Host-injected universal-provider architecture from Rev1.5.1 and closes the causal interpretation gap exposed by real sandbox testing. Main is now taught generically that capability success is not automatically task success: it must compare the active objective with the actual physical effect resource, operation, persistence and changed state. Providers may publish `establishes` / `does_not_establish` boundaries so weak or small models can understand what a capability can causally prove without Core knowing the domain.
+
+`await_user` is clarified as a true blocked-work suspension, while `complete` also serves ordinary conversational turns. Runtime remains mechanically strict but semantically dumb: no prose classifier, keyword router, mandatory capability workflow or Direct/Observed/Effect phase is reintroduced. Persisted Session schema remains Rev1.5.1 because its shape did not change.
 
 ## Rev1.5.1: Host-Injected Universal Capabilities
 
@@ -30,7 +42,7 @@ Investigation and Task deltas are optional fields rather than mandatory empty ce
 
 The Main prompt stays deliberately non-prescriptive: no keyword router, no Direct/Observed/Effect phase, no “analyze → inspect” rule. Capabilities describe themselves; when Main is unsure whether it possesses enough information to answer reliably, it is generally encouraged to observe before answering.
 
-Historical sections below describe earlier revisions and may use contracts removed by Rev1.5.1.
+Historical sections below describe earlier revisions and may use contracts removed by Rev1.5.1 or refined by Rev1.5.2.
 
 ## Rev1.4.8: Completion Basis
 

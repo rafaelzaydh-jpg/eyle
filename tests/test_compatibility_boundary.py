@@ -63,7 +63,7 @@ def _benchmark_report():
 
 def test_session_requires_exact_top_level_shape():
     state = AgentSession("x").to_dict()
-    assert state["session_schema_version"] == SESSION_SCHEMA_VERSION == "2.7.5-r1.5.1"
+    assert state["session_schema_version"] == SESSION_SCHEMA_VERSION == "2.7.5-r1.5.3"
 
     with_extra = copy.deepcopy(state)
     with_extra["mystery_compat_field"] = True

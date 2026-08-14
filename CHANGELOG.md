@@ -1,3 +1,29 @@
+# Eyle 2.7.5 Rev1.5.3 — Cognitive Task Memory
+
+- **Task-scoped cognitive memory:** AgentSession now persists compact `EvidenceSpan`, `Finding` and `Conclusion` state selected/created by Main; Runtime validates identity/references only.
+- **Observation remains canonical:** Evidence spans reference existing `mat-*` Material instead of duplicating raw source bodies into another physical ledger.
+- **Provider-owned Evidence selectors:** Core does not learn file/range semantics. The Provider that produced a Material validates Main's opaque selector and returns a stable selected locator/content identity.
+- **Exact cognitive rematerialization:** a physically covered source range can be served again from canonical Observation without external re-execution; cached reads no longer collapse to a tiny generic excerpt when exact provider rematerialization is available.
+- **Presentation honesty:** bounded file projection reports the exact line range presented to Main and any remaining physically observed lines rather than silently treating a character crop as full cognitive coverage.
+- **Memory separation preserved:** `memory.search/store` remains longitudinal persistent Memory; Task Memory is active-task cognitive state and is not automatically promoted across tasks.
+- **No phase/router rewrite:** Tasks, Investigation, Coverage, Frontier, Providers, confirmation and completion semantics remain in place; `memory_updates` is an optional Main-owned delta beside the existing optional notebooks.
+- Persisted Session/config identity advances to `2.7.5-r1.5.3` / `rev1.5.3-cognitive-task-memory`; pending continuation and Queue schemas remain unchanged.
+
+---
+
+# Eyle 2.7.5 Rev1.5.2 — Causal Effect Literacy
+
+- **Capability success ≠ task success:** Main now receives a domain-neutral causal rule to compare the active objective against the actual effect `resource`, `operation`, `persistence` and `changed` values before claiming completion.
+- **Temporary/isolated effects stay temporary:** the fixed Main contract explicitly states that call/job-scoped, isolated, simulated or different-resource effects may support experimentation/validation but cannot substitute for a requested persistent/external effect.
+- **Provider-owned causal boundaries:** capability specs may expose optional `establishes[]` and `does_not_establish[]`; Registry validates their mechanical shape and projects them to Main without making semantic routing decisions.
+- **Standard provider hardened:** `standard.run_command` now explicitly establishes only job-snapshot execution/behavior and explicitly does not establish persistent real-workspace mutation; `standard.workspace_transaction` explicitly establishes confirmed persistent real-workspace mutation and its reported verification state.
+- **No hidden semantic judge:** `complete` remains coordinate-validated only. Runtime does not parse prose, classify claims, infer requested persistence or choose a capability on Main's behalf.
+- **Action semantics clarified:** `await_user` is for an active objective genuinely blocked on user input; `complete` is also the normal terminal action for a conversational turn and does not mean the whole conversation is over.
+- **No Session migration:** persisted Session schema remains `2.7.5-r1.5.1`; config/release identity advances to `2.7.5-r1.5.2` / `rev1.5.2-causal-effect-literacy`.
+- Added Rev1.5.2 regressions for generic causal prompt guidance, provider causal-boundary projection/validation, Standard sandbox-vs-persistent semantics and the continued absence of a Runtime prose classifier.
+
+---
+
 # Eyle 2.7.5 Rev1.5.1 — Host-Injected Universal Capabilities
 
 - **Bundled shell hotfix:** CLI/Web no longer import the removed `runtime.service.carregar_projeto`. Host presentation metadata is exposed through a domain-neutral `Host.describe()` / `service.carregar_ambiente()` boundary, while workspace rendering stays in the bundled shell. Regression coverage now exercises the exact `main.carregar_projeto()` path that failed on Windows.

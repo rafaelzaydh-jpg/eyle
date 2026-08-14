@@ -45,8 +45,8 @@ def test_prompt_uses_completion_coordinates_without_adding_mandatory_workflow():
 
 def test_release_manifest_declares_rev15_completion_coordinates():
     manifest = json.loads(Path("release_manifest.json").read_text(encoding="utf-8"))
-    assert manifest["config_schema_version"] == "2.7.5-r1.5.1"
-    assert manifest["revision"] == "rev1.5.1-host-injected-universal-capabilities"
+    assert manifest["config_schema_version"] == "2.7.5-r1.5.3"
+    assert manifest["revision"] == "rev1.5.3-cognitive-task-memory"
     assert manifest["agent_action_kinds"] == ["capability_calls", "await_user", "complete"]
     assert "grounding_ids and effect_ids" in manifest["architecture"]["completion"]
 

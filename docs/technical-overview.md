@@ -1,4 +1,4 @@
-# Technical overview — Eyle 2.7.5 Rev1.5.1
+# Technical overview — Eyle 2.7.5 Rev1.5.3
 
 ## Decision loop
 
@@ -50,6 +50,12 @@ observations, coverage, frontiers
 
 Physical effects are `{resource, operation, persistence, changed}`. Registry rejects mechanically incoherent provider results.
 
+## Task Memory
+
+`AgentSession.task_memory` is active-task state with three compact buckets: EvidenceSpans, Findings and Conclusions. EvidenceSpans are provider-validated coordinates into canonical `mat-*` Material; they do not duplicate raw source bodies in the prompt. `task_knowledge` projects those coordinates plus Main-authored semantic knowledge on later turns.
+
+For source capabilities that support it, Registry delegates exact replay to provider-owned `rematerialize` and EvidenceSpan validation to provider-owned `evidence_selector` hooks. This keeps line/range semantics out of Core.
+
 ## Continuations
 
 Pending schema `4` supports `capability_confirmation` and `await_user`. Provider confirmations bind to `provider_context_hash`. `await_user` answers are written to `AgentSession.request_context`, not concatenated into `request` and not downgraded to generic conversation background.
@@ -60,6 +66,7 @@ OpenAI-compatible transport preserves transient classification for HTTP 408/425/
 
 ## Persistence schemas
 
-- configuration/session: `2.7.5-r1.5.1`;
+- configuration: `2.7.5-r1.5.3`;
+- persisted Session: `2.7.5-r1.5.3`;
 - Queue: `2.7.5-r1.4.3`;
 - pending continuation: `4`.

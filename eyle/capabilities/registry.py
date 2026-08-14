@@ -61,6 +61,13 @@ class CapabilityRegistry:
                 raise ValueError(f"CAPABILITY_SCHEMA_REQUIRED:{canonical}")
             if not str(spec.get("returns") or "").strip():
                 raise ValueError(f"CAPABILITY_RETURNS_REQUIRED:{canonical}")
+            for semantic_field in ("establishes", "does_not_establish"):
+                if semantic_field not in spec:
+                    continue
+                value = spec.get(semantic_field)
+                if not isinstance(value, list) or any(not isinstance(v, str) or not v.strip() for v in value):
+                    raise ValueError(f"CAPABILITY_CAUSAL_DESCRIPTION_INVALID:{canonical}:{semantic_field}")
+                spec[semantic_field] = [v.strip() for v in value]
             raw_effect = str(spec.get("effect") or "observe").strip().lower()
             if raw_effect not in {"observe", "execute", "mutate"}:
                 raise ValueError(f"CAPABILITY_EFFECT_INVALID:{canonical}")
@@ -335,6 +342,52 @@ class CapabilityRegistry:
         if isinstance(value, dict) and grounding_ids:
             value["grounding_id"] = grounding_ids[0]
         return value
+
+    def rematerialize(
+        self,
+        name: str,
+        arguments: Dict[str, Any],
+        entry: Dict[str, Any],
+        grounding: Dict[str, Any],
+        config: Dict[str, Any],
+    ) -> Any:
+        """Ask the owning capability to rematerialize an already observed request.
+
+        This is cognitive cache projection, not a new physical execution. Core
+        never interprets provider locators or source ranges.
+        """
+        hook = self.hook(name, "rematerialize")
+        if not callable(hook):
+            return None
+        detail = hook(arguments or {}, entry or {}, grounding or {}, config or {})
+        if detail is None:
+            return None
+        grounding_ids = [
+            str(value) for value in (entry.get("grounding_ids") or [])
+            if str(value) in (grounding or {})
+        ]
+        return self.model_detail(name, detail, grounding_ids, config or {})
+
+    def select_evidence(self, material: Dict[str, Any], selector: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate one Main-selected EvidenceSpan through its provider contract."""
+        if not isinstance(material, dict) or not isinstance(selector, dict):
+            raise ValueError("TASK_MEMORY_SELECTOR_INVALID")
+        source_capability = str(material.get("source_capability") or "")
+        item = self._item(source_capability)
+        if item is None and "." in source_capability:
+            item = self._item(source_capability)
+        hook = item[2].get("evidence_selector") if item is not None else None
+        if callable(hook):
+            value = hook(material, selector)
+            if not isinstance(value, dict):
+                raise ValueError("TASK_MEMORY_SELECTOR_INVALID")
+            return value
+        if selector:
+            raise ValueError("TASK_MEMORY_SELECTOR_UNSUPPORTED")
+        return {
+            "locator": copy.deepcopy(material.get("locator") or {}),
+            "content_hash": str(material.get("content_hash") or ""),
+        }
 
     def find_covering(self, name: str, arguments: Dict[str, Any], entries: Dict[str, Any], reality_epoch: int):
         hook = self.hook(name, "covers")

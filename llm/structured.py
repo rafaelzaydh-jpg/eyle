@@ -77,6 +77,61 @@ _TASK_SCHEMA = {
 }
 
 
+_TASK_MEMORY_EVIDENCE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "id": {"type": "string", "minLength": 4, "maxLength": 80, "pattern": r"^ev-[A-Za-z0-9._-]+$"},
+        "material_id": deepcopy(_INVESTIGATION_GROUNDING_ITEM_SCHEMA),
+        "selector": {"type": "object"},
+    },
+    "required": ["id", "material_id", "selector"],
+    "additionalProperties": False,
+}
+
+_TASK_MEMORY_FINDING_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "id": {"type": "string", "minLength": 3, "maxLength": 80, "pattern": r"^f-[A-Za-z0-9._-]+$"},
+        "statement": {"type": "string", "minLength": 1, "maxLength": 1200},
+        "evidence_ids": {
+            "type": "array", "maxItems": 16,
+            "items": {"type": "string", "minLength": 4, "maxLength": 80, "pattern": r"^ev-[A-Za-z0-9._-]+$"},
+        },
+    },
+    "required": ["id", "statement", "evidence_ids"],
+    "additionalProperties": False,
+}
+
+_TASK_MEMORY_CONCLUSION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "id": {"type": "string", "minLength": 3, "maxLength": 80, "pattern": r"^c-[A-Za-z0-9._-]+$"},
+        "statement": {"type": "string", "minLength": 1, "maxLength": 1600},
+        "evidence_ids": {
+            "type": "array", "maxItems": 16,
+            "items": {"type": "string", "minLength": 4, "maxLength": 80, "pattern": r"^ev-[A-Za-z0-9._-]+$"},
+        },
+        "finding_ids": {
+            "type": "array", "maxItems": 16,
+            "items": {"type": "string", "minLength": 3, "maxLength": 80, "pattern": r"^f-[A-Za-z0-9._-]+$"},
+        },
+    },
+    "required": ["id", "statement", "evidence_ids", "finding_ids"],
+    "additionalProperties": False,
+}
+
+_TASK_MEMORY_UPDATES_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "evidence": {"type": "array", "maxItems": 12, "items": _TASK_MEMORY_EVIDENCE_SCHEMA},
+        "findings": {"type": "array", "maxItems": 12, "items": _TASK_MEMORY_FINDING_SCHEMA},
+        "conclusions": {"type": "array", "maxItems": 8, "items": _TASK_MEMORY_CONCLUSION_SCHEMA},
+    },
+    "required": ["evidence", "findings", "conclusions"],
+    "additionalProperties": False,
+}
+
+
 _CAPABILITY_CALL_SCHEMA = {
     "type": "object",
     "properties": {
@@ -141,6 +196,7 @@ _AGENT_SCHEMA = {
         "action": _AGENT_ACTION_SCHEMA,
         "investigation_updates": {"type": "array", "items": _INVESTIGATION_TARGET_SCHEMA},
         "task_updates": {"type": "array", "items": _TASK_SCHEMA},
+        "memory_updates": _TASK_MEMORY_UPDATES_SCHEMA,
     },
     "required": ["action"],
     "additionalProperties": False,
@@ -191,7 +247,7 @@ def contract_instruction(profile: str) -> str:
     mandatory_top_level_keys(profile)
     return (
         "Return only the JSON object required by the schema. "
-        "investigation_updates and task_updates are optional state deltas; omit them when unused. "
+        "investigation_updates, task_updates and memory_updates are optional state deltas; omit them when unused. "
         "action contains exactly one action kind."
     )
 
@@ -258,7 +314,7 @@ def _exact_item(value: Any, keys: set[str], *, code: str, detail: str) -> Dict[s
 def parse_agent_response(raw: Any) -> Dict[str, Any]:
     value = _object(raw)
     required = set(mandatory_top_level_keys("agent"))
-    allowed = {"action", "investigation_updates", "task_updates"}
+    allowed = {"action", "investigation_updates", "task_updates", "memory_updates"}
     _exact_keys(value, required=required, allowed=allowed, profile="agent")
 
     investigation = value.get("investigation_updates", [])
@@ -317,6 +373,45 @@ def parse_agent_response(raw: Any) -> Dict[str, Any]:
         grounding_ids = _string_list(item["grounding_ids"], code="AGENT_TASK_GROUNDING_INVALID", detail=f"task_updates[{index}].grounding_ids must be an array of canonical mat-* grounding IDs")
         if any(re.fullmatch(r"mat-[0-9]+", ref) is None for ref in grounding_ids):
             raise StructuredResponseError("AGENT_TASK_GROUNDING_INVALID", f"task_updates[{index}].grounding_ids contains a noncanonical grounding ID")
+
+    memory_updates = value.get("memory_updates")
+    if "memory_updates" in value:
+        if not isinstance(memory_updates, dict) or set(memory_updates) != {"evidence", "findings", "conclusions"}:
+            raise StructuredResponseError("AGENT_MEMORY_UPDATES_INVALID", "memory_updates must contain exactly evidence, findings and conclusions arrays")
+        for key in ("evidence", "findings", "conclusions"):
+            if not isinstance(memory_updates.get(key), list):
+                raise StructuredResponseError("AGENT_MEMORY_UPDATES_INVALID", f"memory_updates.{key} must be an array")
+        if len(memory_updates["evidence"]) > 12 or len(memory_updates["findings"]) > 12 or len(memory_updates["conclusions"]) > 8:
+            raise StructuredResponseError("AGENT_MEMORY_UPDATES_INVALID", "memory_updates exceeds the per-turn update limit")
+        for index, item in enumerate(memory_updates["evidence"], start=1):
+            item = _exact_item(item, {"id", "material_id", "selector"}, code="AGENT_MEMORY_EVIDENCE_INVALID", detail=f"memory_updates.evidence[{index}] has invalid shape")
+            if not isinstance(item.get("id"), str) or re.fullmatch(r"ev-[A-Za-z0-9._-]+", item["id"]) is None:
+                raise StructuredResponseError("AGENT_MEMORY_EVIDENCE_INVALID", f"memory_updates.evidence[{index}].id is invalid")
+            if not isinstance(item.get("material_id"), str) or re.fullmatch(r"mat-[0-9]+", item["material_id"]) is None:
+                raise StructuredResponseError("AGENT_MEMORY_EVIDENCE_INVALID", f"memory_updates.evidence[{index}].material_id is invalid")
+            if not isinstance(item.get("selector"), dict):
+                raise StructuredResponseError("AGENT_MEMORY_EVIDENCE_INVALID", f"memory_updates.evidence[{index}].selector must be an object")
+        for index, item in enumerate(memory_updates["findings"], start=1):
+            item = _exact_item(item, {"id", "statement", "evidence_ids"}, code="AGENT_MEMORY_FINDING_INVALID", detail=f"memory_updates.findings[{index}] has invalid shape")
+            if not isinstance(item.get("id"), str) or re.fullmatch(r"f-[A-Za-z0-9._-]+", item["id"]) is None:
+                raise StructuredResponseError("AGENT_MEMORY_FINDING_INVALID", f"memory_updates.findings[{index}].id is invalid")
+            if not isinstance(item.get("statement"), str) or not item["statement"].strip() or len(item["statement"]) > 1200:
+                raise StructuredResponseError("AGENT_MEMORY_FINDING_INVALID", f"memory_updates.findings[{index}].statement is invalid")
+            refs = _string_list(item.get("evidence_ids"), code="AGENT_MEMORY_FINDING_INVALID", detail=f"memory_updates.findings[{index}].evidence_ids must be an array of ev-* IDs")
+            if len(refs) > 16 or any(re.fullmatch(r"ev-[A-Za-z0-9._-]+", ref) is None for ref in refs):
+                raise StructuredResponseError("AGENT_MEMORY_FINDING_INVALID", f"memory_updates.findings[{index}].evidence_ids is invalid")
+        for index, item in enumerate(memory_updates["conclusions"], start=1):
+            item = _exact_item(item, {"id", "statement", "evidence_ids", "finding_ids"}, code="AGENT_MEMORY_CONCLUSION_INVALID", detail=f"memory_updates.conclusions[{index}] has invalid shape")
+            if not isinstance(item.get("id"), str) or re.fullmatch(r"c-[A-Za-z0-9._-]+", item["id"]) is None:
+                raise StructuredResponseError("AGENT_MEMORY_CONCLUSION_INVALID", f"memory_updates.conclusions[{index}].id is invalid")
+            if not isinstance(item.get("statement"), str) or not item["statement"].strip() or len(item["statement"]) > 1600:
+                raise StructuredResponseError("AGENT_MEMORY_CONCLUSION_INVALID", f"memory_updates.conclusions[{index}].statement is invalid")
+            evidence_refs = _string_list(item.get("evidence_ids"), code="AGENT_MEMORY_CONCLUSION_INVALID", detail=f"memory_updates.conclusions[{index}].evidence_ids must be an array")
+            finding_refs = _string_list(item.get("finding_ids"), code="AGENT_MEMORY_CONCLUSION_INVALID", detail=f"memory_updates.conclusions[{index}].finding_ids must be an array")
+            if len(evidence_refs) > 16 or any(re.fullmatch(r"ev-[A-Za-z0-9._-]+", ref) is None for ref in evidence_refs):
+                raise StructuredResponseError("AGENT_MEMORY_CONCLUSION_INVALID", f"memory_updates.conclusions[{index}].evidence_ids is invalid")
+            if len(finding_refs) > 16 or any(re.fullmatch(r"f-[A-Za-z0-9._-]+", ref) is None for ref in finding_refs):
+                raise StructuredResponseError("AGENT_MEMORY_CONCLUSION_INVALID", f"memory_updates.conclusions[{index}].finding_ids is invalid")
 
     action = value.get("action")
     if not isinstance(action, dict):
@@ -392,6 +487,8 @@ def parse_agent_response(raw: Any) -> Dict[str, Any]:
         normalized["investigation_updates"] = investigation
     if "task_updates" in value:
         normalized["task_updates"] = task_updates
+    if "memory_updates" in value:
+        normalized["memory_updates"] = memory_updates
     return normalized
 
 

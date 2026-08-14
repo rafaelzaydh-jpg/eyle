@@ -1392,6 +1392,110 @@ def _file_material(detail, *, source_type, source="workspace"):
     return material
 
 
+def _slice_file_material(material, line_start, line_end):
+    """Return an exact sub-range from one canonical file Material.
+
+    The provider owns file/range semantics. Core only addresses the Material
+    and carries the opaque selector chosen by Main.
+    """
+    if not isinstance(material, dict):
+        raise ValueError("TASK_MEMORY_SELECTOR_INVALID")
+    locator = material.get("locator") if isinstance(material.get("locator"), dict) else {}
+    if locator.get("kind") != "file":
+        raise ValueError("TASK_MEMORY_SELECTOR_UNSUPPORTED")
+    try:
+        parent_start = int(locator.get("line_start"))
+        parent_end = int(locator.get("line_end"))
+        start = int(line_start)
+        end = int(line_end)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("TASK_MEMORY_SELECTOR_INVALID") from exc
+    if start < parent_start or end > parent_end or start > end:
+        raise ValueError("TASK_MEMORY_SELECTOR_OUT_OF_RANGE")
+    text = material.get("content")
+    if not isinstance(text, str):
+        raise ValueError("TASK_MEMORY_MATERIAL_NOT_MATERIALIZED")
+    lines = text.splitlines(keepends=True)
+    offset_start = start - parent_start
+    offset_end = end - parent_start + 1
+    selected = "".join(lines[offset_start:offset_end])
+    numbered = "\n".join(
+        f"{number:>6} | {line.rstrip(chr(13) + chr(10))}"
+        for number, line in enumerate(lines[offset_start:offset_end], start=start)
+    )
+    selected_locator = copy.deepcopy(locator)
+    selected_locator["line_start"] = start
+    selected_locator["line_end"] = end
+    return {
+        "locator": selected_locator,
+        "content": selected,
+        "numbered_content": numbered,
+        "content_hash": hash_texto(selected),
+    }
+
+
+def _evidence_selector_file(material, selector):
+    if not selector:
+        return {
+            "locator": copy.deepcopy(material.get("locator") or {}),
+            "content_hash": str(material.get("content_hash") or ""),
+        }
+    if set(selector) != {"line_start", "line_end"}:
+        raise ValueError("TASK_MEMORY_SELECTOR_INVALID")
+    return _slice_file_material(material, selector.get("line_start"), selector.get("line_end"))
+
+
+def _rematerialize_read_file(arguments, entry, materials, config):
+    """Serve an exact requested file range from canonical Observation Material."""
+    if arguments.get("line_start") is None or arguments.get("line_end") is None:
+        return None
+    path = _norm_capability_path(arguments.get("path"))
+    source = _source_name(arguments)
+    try:
+        requested_start = int(arguments.get("line_start"))
+        requested_end = int(arguments.get("line_end"))
+    except (TypeError, ValueError):
+        return None
+    candidates = []
+    for grounding_id in entry.get("grounding_ids") or []:
+        material = materials.get(str(grounding_id)) if isinstance(materials, dict) else None
+        if not isinstance(material, dict):
+            continue
+        locator = material.get("locator") if isinstance(material.get("locator"), dict) else {}
+        if locator.get("kind") != "file":
+            continue
+        if _norm_capability_path(locator.get("path")) != path:
+            continue
+        if str(locator.get("source") or "workspace") != str(source or "workspace"):
+            continue
+        try:
+            start = int(locator.get("line_start")); end = int(locator.get("line_end"))
+        except (TypeError, ValueError):
+            continue
+        if start <= requested_start and end >= requested_end:
+            candidates.append((end - start, material))
+    if not candidates:
+        return None
+    material = min(candidates, key=lambda item: item[0])[1]
+    selected = _slice_file_material(material, requested_start, requested_end)
+    locator = selected["locator"]
+    total_lines = int(locator.get("total_lines") or material.get("locator", {}).get("total_lines") or requested_end)
+    return {
+        "file": locator.get("path"),
+        "line_start": requested_start,
+        "line_end": requested_end,
+        "requested_line_end": requested_end,
+        "total_lines": total_lines,
+        "numbered_content": selected["numbered_content"],
+        "content": selected["content"],
+        "content_hash": selected["content_hash"],
+        "file_hash": str(material.get("source_version") or ""),
+        "end_clamped": False,
+        "truncated": bool(requested_start > 1 or requested_end < total_lines),
+        "rematerialized_from_observation": True,
+    }
+
+
 def _json_material(source_type, locator_name, detail, *, source="workspace"):
     if not isinstance(detail, dict):
         return []
@@ -2000,7 +2104,44 @@ def _model_projection_read_file(detail, grounding_ids, config):
     if not isinstance(clone, dict): return clone
     text = str(clone.get("numbered_content") or clone.get("content") or "")
     if text:
-        clone["numbered_content"] = text[:6000]; clone.pop("content", None)
+        max_chars = 6000
+        lines = text.splitlines()
+        selected = []
+        used = 0
+        partial_last_line = False
+        for line in lines:
+            cost = len(line) + (1 if selected else 0)
+            if selected and used + cost > max_chars:
+                break
+            if not selected and cost > max_chars:
+                selected.append(line[:max_chars])
+                used = max_chars
+                partial_last_line = True
+                break
+            selected.append(line)
+            used += cost
+        projected_text = "\n".join(selected)
+        clone["numbered_content"] = projected_text
+        clone.pop("content", None)
+        physical_start = clone.get("line_start")
+        physical_end = clone.get("line_end")
+        try:
+            presented_start = int(physical_start)
+            presented_end = presented_start + max(0, len(selected) - 1)
+            physical_end_int = int(physical_end)
+            presentation_complete = presented_end >= physical_end_int and not partial_last_line
+            clone["presentation"] = {
+                "line_start": presented_start,
+                "line_end": min(presented_end, physical_end_int),
+                "complete": bool(presentation_complete),
+            }
+            if partial_last_line:
+                clone["presentation"]["partial_line"] = min(presented_end, physical_end_int)
+            if not presentation_complete:
+                remaining_start = presented_end if partial_last_line else presented_end + 1
+                clone["presentation"]["remaining_lines"] = [remaining_start, physical_end_int]
+        except (TypeError, ValueError):
+            clone["presentation"] = {"complete": len(projected_text) >= len(text)}
     return clone
 
 
@@ -2278,12 +2419,23 @@ CAPABILITIES = {
         "fn": _tool_read_file,
     },
     "run_command": {
-        "description": "Run a shell command in an isolated writable snapshot.",
+        "description": "Execute or experiment with a shell command inside an isolated writable snapshot for the current job.",
         "availability": "workspace",
         "produces_grounding": True,
         "effect": "execute",
-        "returns": "Exit code, bounded output and sandbox isolation facts.",
-        "caveats": ["Sandbox state persists per job; real workspace/Eyle source stays unchanged."],
+        "returns": "Exit code, bounded output, isolation facts and a job-scoped isolated-snapshot physical effect.",
+        "establishes": [
+            "That the command executed with the reported result inside the isolated job snapshot.",
+            "Behavior and files observed inside that snapshot for the lifetime of the current job.",
+        ],
+        "does_not_establish": [
+            "Persistent creation or modification of files in the real workspace.",
+            "That state created only in the snapshot exists outside the current job.",
+        ],
+        "caveats": [
+            "Sandbox state persists only for the current job; the real workspace and running Eyle source stay unchanged.",
+            "Use this capability to experiment or validate in isolation, not as proof of persistent workspace mutation.",
+        ],
         "input_schema": _schema_objeto({
             "source": _SOURCE,
             "command": {"type": "string", "minLength": 1, "maxLength": 8000, "description": "Shell command."},
@@ -2375,6 +2527,7 @@ CAPABILITIES["export_sandbox_zip"].update(observe=_observe_json("export_sandbox_
 CAPABILITIES["read_file"].update(
     public_arguments=_public_arguments_read_file, public_result=_public_result_file,
     model_projection=_model_projection_read_file, covers=_covering_read_file,
+    rematerialize=_rematerialize_read_file, evidence_selector=_evidence_selector_file,
     resource_failure=_resource_failure_by_path("read_file"),
 )
 CAPABILITIES["list_tree"].update(
@@ -2382,11 +2535,12 @@ CAPABILITIES["list_tree"].update(
 )
 CAPABILITIES["search_code"].update(
     public_arguments=_public_arguments_search, public_result=_public_result_search,
-    model_projection=_model_projection_search,
+    model_projection=_model_projection_search, evidence_selector=_evidence_selector_file,
 )
 CAPABILITIES["find_symbol"].update(
     public_arguments=_public_arguments_keys("source", "symbol", "path"), public_result=_public_result_find_symbol,
-    model_projection=_model_projection_find_symbol, resource_failure=_resource_failure_by_path("find_symbol"),
+    model_projection=_model_projection_find_symbol, evidence_selector=_evidence_selector_file,
+    resource_failure=_resource_failure_by_path("find_symbol"),
 )
 CAPABILITIES["symbol_relations"].update(
     public_arguments=_public_arguments_keys("source", "symbol", "query", "path", "roots", "direction", "include_text_references", "max_depth", "max_edges"),
@@ -2426,11 +2580,19 @@ CAPABILITIES["git_diff"].update(public_arguments=_public_arguments_keys("source"
 # Workspace mutation is a provider capability, not an Agent action. The generic
 # Runtime only sees confirmation=required and delegates prepare/confirm here.
 CAPABILITIES["workspace_transaction"] = {
-    "description": "Apply an atomic set of file changes to the real user workspace after deterministic dry-run and explicit user confirmation.",
+    "description": "Apply an atomic set of persistent file changes to the real user workspace after deterministic dry-run and explicit user confirmation.",
     "availability": "workspace",
     "produces_grounding": False,
     "effect": "mutate",
-    "returns": "Applied files, compile/test/reread verification state, rollback diagnostics and a persistent workspace effect.",
+    "returns": "Applied files, compile/test/reread verification state, rollback diagnostics and a persistent real-workspace physical effect.",
+    "establishes": [
+        "After successful confirmation/execution, the reported file mutation was applied to the real user workspace with persistent lifetime.",
+        "The provider-reported verification and rollback state for that real-workspace transaction.",
+    ],
+    "does_not_establish": [
+        "Any real-workspace mutation before explicit confirmation and successful execution.",
+        "Correctness beyond the verification results actually reported by the provider.",
+    ],
     "caveats": [
         "Existing files must be observed first so freshness preconditions can be attached.",
         "Confirmation is required before real workspace mutation.",
@@ -2453,6 +2615,7 @@ for _capability_entry in CAPABILITIES.values():
     for _hook_name in (
         "freshness", "rehydrate", "public_arguments", "public_result",
         "model_projection", "covers", "resource_failure", "normalize", "continue",
+        "rematerialize", "evidence_selector",
     ):
         _capability_entry.setdefault(_hook_name, None)
 

@@ -45,9 +45,9 @@ def test_core_prompt_does_not_own_standard_provider_source_identity():
 
 def test_release_manifest_declares_rev15_provider_identity_boundary():
     manifest = json.loads(Path("release_manifest.json").read_text(encoding="utf-8"))
-    assert manifest["config_schema_version"] == "2.7.5-r1.5.1"
-    assert manifest["revision"] == "rev1.5.1-host-injected-universal-capabilities"
-    assert manifest["compatibility"]["session_schema"] == "2.7.5-r1.5.1"
+    assert manifest["config_schema_version"] == "2.7.5-r1.5.3"
+    assert manifest["revision"] == "rev1.5.3-cognitive-task-memory"
+    assert manifest["compatibility"]["session_schema"] == "2.7.5-r1.5.3"
     assert manifest["compatibility"]["queue_schema"] == "2.7.5-r1.4.3"
     assert manifest["compatibility"]["pending_continuation_schema"] == "4"
     assert "provider_context" in manifest["architecture"]

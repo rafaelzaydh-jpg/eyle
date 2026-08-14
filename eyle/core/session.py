@@ -1,4 +1,4 @@
-"""One active Eyle 2.7.5 Rev1.4.3 agent session.
+"""One active Eyle 2.7.5 Rev1.5.3 agent session.
 
 Observation owns physical history and Material. Investigation records unresolved
 epistemic commitments; Tasks record intentional completion commitments. Runtime
@@ -13,8 +13,9 @@ from .decision import empty_ledger as empty_decision_ledger, persisted_view as p
 from eyle.runtime.observation import empty_ledger as empty_observation_ledger, material_index_view, persisted_view as persisted_observations
 from .investigation import validate_investigation_state
 from .tasks import validate_task_state
+from .task_memory import empty_task_memory, persisted_view as persisted_task_memory, validate_task_memory_state
 
-SESSION_SCHEMA_VERSION = "2.7.5-r1.5.1"
+SESSION_SCHEMA_VERSION = "2.7.5-r1.5.3"
 
 
 @dataclass
@@ -29,6 +30,7 @@ class AgentSession:
     tasks: List[Dict[str, Any]] = field(default_factory=list)
     conversation_background: List[Dict[str, Any]] = field(default_factory=list)
     request_context: List[Dict[str, Any]] = field(default_factory=list)
+    task_memory: Dict[str, Any] = field(default_factory=empty_task_memory)
     pending_capability: Dict[str, Any] = field(default_factory=dict)
 
     def grounding_index(self) -> List[Dict[str, Any]]:
@@ -47,6 +49,7 @@ class AgentSession:
             "tasks": [dict(item) for item in self.tasks if isinstance(item, dict)],
             "conversation_background": [dict(item) for item in self.conversation_background if isinstance(item, dict)],
             "request_context": [dict(item) for item in self.request_context if isinstance(item, dict)],
+            "task_memory": persisted_task_memory(self.task_memory),
             "pending_capability": dict(self.pending_capability or {}),
         }
 
@@ -55,7 +58,7 @@ class AgentSession:
         expected_top_level = {
             "session_schema_version", "request", "execution_id", "turn", "reality_epoch",
             "observation_ledger", "decision_ledger", "investigation", "tasks",
-            "conversation_background", "request_context", "pending_capability",
+            "conversation_background", "request_context", "task_memory", "pending_capability",
         }
         if not isinstance(data, dict) or data.get("session_schema_version") != SESSION_SCHEMA_VERSION:
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
@@ -96,6 +99,10 @@ class AgentSession:
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
         if not isinstance(data["request_context"], list) or not all(isinstance(item, dict) for item in data["request_context"]):
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        try:
+            task_memory = validate_task_memory_state(data["task_memory"])
+        except ValueError as error:
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE") from error
         if not isinstance(data["pending_capability"], dict):
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
 
@@ -123,5 +130,6 @@ class AgentSession:
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE") from error
         session.conversation_background = [dict(item) for item in data["conversation_background"]]
         session.request_context = [dict(item) for item in data["request_context"]]
+        session.task_memory = task_memory
         session.pending_capability = dict(data["pending_capability"])
         return session

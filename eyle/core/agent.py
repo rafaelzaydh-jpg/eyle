@@ -33,6 +33,7 @@ from .investigation import (
     apply_investigation_updates, established_investigation_grounding_ids, investigation_grounding_ids, open_investigation_grounding_ids,
 )
 from .tasks import apply_task_updates, task_grounding_ids, task_state_view
+from .task_memory import apply_task_memory_updates, project_task_knowledge
 from .token_budget import available_user_prompt_tokens, estimate_tokens
 from eyle.capabilities.registry import CapabilityRegistry
 from eyle.contracts.capability import physical_effect as _physical_effect
@@ -125,7 +126,7 @@ def _capability_view(
 ) -> Tuple[set[str], List[Dict[str, Any]]]:
     """Expose complete model-readable contracts for every physically available capability.
 
-    Rev1.5.1 does not hide semantics behind first-use activation or
+    Rev1.5.3 does not hide semantics behind first-use activation or
     tiny signatures. The executable registry remains authoritative, but Main sees
     purpose, effect class, inputs, returns, caveats and physical limits before it
     chooses. This spends prompt tokens for comprehension rather than routing.
@@ -400,6 +401,7 @@ def _minimal_capability_context(result: Dict[str, Any], *, detail_char_limit: in
         for key in (
             "capability", "status", "ok", "executed", "changed", "error_code", "retryable",
             "failure_scope", "failure_resource", "physical_effect", "grounding_ids", "frontiers",
+            "replayed", "coverage_replayed", "source_observation_capability", "rematerialized",
         )
         if result.get(key) is not None
     }
@@ -616,6 +618,7 @@ def _compile_prompt(
         "runtime_observations": _project_observation_map(session),
         "latest_capability_results": _project_pending_results(session, config),
         "current_material": _project_grounding_index(session),
+        "task_knowledge": project_task_knowledge(session.task_memory),
         "runtime_effects": _physical_effect_index(session.observation_ledger),
         "physical_limits": {
             "context_window_tokens": int(((config.get("llm") or {}).get("context_window_tokens", 38000) or 38000)),
@@ -732,6 +735,7 @@ def _details(
     job_grounding_count = len(set(grounding) - start_grounding)
     return {
         "status": status, "execution_id": session.execution_id, "investigation": session.investigation, "tasks": session.tasks,
+        "task_memory": project_task_knowledge(session.task_memory),
         "turns": int(execution.agent_turns if execution is not None else session.turn),
         "capability_calls": job_capability_calls,
         "reality_epoch": int(session.reality_epoch or 0),
@@ -827,7 +831,15 @@ def _record_rejected_decision(
     )
 
 
-def _rehydrate_observation(session: AgentSession, entry: Dict[str, Any], config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _rehydrate_observation(
+    session: AgentSession,
+    entry: Dict[str, Any],
+    config: Dict[str, Any],
+    *,
+    registry: CapabilityRegistry | None = None,
+    requested_capability: str | None = None,
+    requested_arguments: Dict[str, Any] | None = None,
+) -> Optional[Dict[str, Any]]:
     replay = copy.deepcopy(entry.get("replay_result")) if isinstance(entry.get("replay_result"), dict) else None
     grounding = _grounding_items(session.observation_ledger)
     grounding_ids = [str(item) for item in entry.get("grounding_ids") or [] if str(item) in grounding]
@@ -851,12 +863,31 @@ def _rehydrate_observation(session: AgentSession, entry: Dict[str, Any], config:
             "grounding_ids": grounding_ids, "frontiers": frontier_ids,
         }
 
-    # A cache hit proves that canonical physical reality is already in
-    # Observation. Replaying the old source body defeats memoization at the LLM
-    # boundary, so Main receives coordinates plus a very small recall excerpt.
-    # Stable failures keep their concise failure detail because there may be no
-    # Material coordinate to cite.
-    if grounding_ids:
+    # Physical memoization must not become cognitive amnesia. If the capability
+    # knows how to rematerialize the exact requested view from canonical
+    # Observation, serve that view without touching the external source again.
+    rematerialized = None
+    if (
+        grounding_ids
+        and registry is not None
+        and requested_capability
+        and isinstance(requested_arguments, dict)
+        and replay.get("ok") is not False
+    ):
+        rematerialized = registry.rematerialize(
+            requested_capability,
+            requested_arguments,
+            entry,
+            grounding,
+            config,
+        )
+    if rematerialized is not None:
+        replay["detail"] = rematerialized
+        replay["rematerialized"] = True
+        replay["context_compacted"] = False
+    # Generic cached observations still return compact coordinates. Their
+    # provider may not define a rematerializable sub-view.
+    elif grounding_ids:
         materials: List[Dict[str, Any]] = []
         for grounding_id in grounding_ids[:3]:
             item = dict(grounding.get(grounding_id) or {})
@@ -1085,6 +1116,43 @@ def _run(
                 feedback = _merged_runtime_feedback(
                     feedback,
                     json.dumps(task_feedback, ensure_ascii=False, separators=(",", ":")),
+                )
+
+        if "memory_updates" in decision:
+            raw_memory_updates = decision.get("memory_updates")
+            prospective_memory, accepted_memory_updates, rejected_memory_updates = apply_task_memory_updates(
+                raw_memory_updates,
+                previous=session.task_memory,
+                materials=_grounding_items(session.observation_ledger),
+                select_evidence=lambda material, selector: registry.select_evidence(material, selector),
+            )
+            session.task_memory = prospective_memory
+            for item in accepted_memory_updates:
+                _record_decision(
+                    session,
+                    "task_memory_update",
+                    "committed" if item.get("changed") else "unchanged",
+                    reason=f"{item.get('kind')}:{item.get('id')}",
+                    facts={"kind": item.get("kind"), "id": item.get("id")},
+                )
+            for item in rejected_memory_updates:
+                reason = str(item.get("reason") or "TASK_MEMORY_UPDATE_REJECTED")
+                _record_rejected_decision(
+                    session,
+                    reason.split(":", 1)[0],
+                    decision="task_memory_update",
+                    reason=reason,
+                )
+            if rejected_memory_updates:
+                memory_feedback = {
+                    "code": "TASK_MEMORY_UPDATES_PARTIALLY_REJECTED",
+                    "accepted_updates": accepted_memory_updates,
+                    "rejected_updates": rejected_memory_updates,
+                    "task_knowledge": project_task_knowledge(session.task_memory),
+                }
+                feedback = _merged_runtime_feedback(
+                    feedback,
+                    json.dumps(memory_feedback, ensure_ascii=False, separators=(",", ":")),
                 )
 
         action = decision.get("action") if isinstance(decision.get("action"), dict) else {}
@@ -1316,7 +1384,14 @@ def _run(
                     if previous is not None:
                         replay_reason = "RESOURCE_FAILURE_REHYDRATED"
                 if previous is not None:
-                    replay = _rehydrate_observation(session, previous, config)
+                    replay = _rehydrate_observation(
+                        session,
+                        previous,
+                        config,
+                        registry=registry,
+                        requested_capability=tool,
+                        requested_arguments=normalized,
+                    )
                     if replay is not None:
                         replay["capability"] = tool
                         replay["replayed"] = True
@@ -1445,15 +1520,15 @@ def _executar_agente_bound(
                 details = {
                     "status": "failed",
                     "failure_code": code,
-                    "limitations": ["Eyle 2.7.5 Rev1.5.1 does not migrate or adapt pending continuations from older shapes."],
+                    "limitations": ["Eyle 2.7.5 Rev1.5.3 does not migrate or adapt pending continuations from older shapes."],
                 }
                 return _return("failed", text, None, details, full)
             if code == "SESSION_SCHEMA_INCOMPATIBLE":
-                text = "The persisted session belongs to a different contract and cannot be resumed in Eyle 2.7.5 Rev1.5.1."
+                text = "The persisted session belongs to a different contract and cannot be resumed in Eyle 2.7.5 Rev1.5.3."
                 details = {
                     "status": "failed",
                     "failure_code": "SESSION_SCHEMA_INCOMPATIBLE",
-                    "limitations": ["Eyle 2.7.5 Rev1.5.0 does not migrate or adapt sessions from earlier revisions."],
+                    "limitations": ["Eyle 2.7.5 Rev1.5.3 does not migrate or adapt sessions from earlier revisions."],
                 }
                 return _return("failed", text, None, details, full)
             raise

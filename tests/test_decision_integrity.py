@@ -18,7 +18,7 @@ def _agent(action):
 def test_agent_schema_and_parser_share_one_discriminated_decision_contract():
     schema = schema_for_profile("agent")
     assert schema["required"] == ["action"]
-    assert set(schema["properties"]) == {"action", "investigation_updates", "task_updates"}
+    assert set(schema["properties"]) == {"action", "investigation_updates", "task_updates", "memory_updates"}
     valid = [
         _agent({"kind": "capability_calls", "calls": [{"capability": "search_code", "arguments": {"query": "x"}}]}),
         _agent({"kind": "await_user", "question": "Which port?", "reason": "port is user-owned", "options": []}),
@@ -30,6 +30,15 @@ def test_agent_schema_and_parser_share_one_discriminated_decision_contract():
         parse_agent_response({"capability_calls": [], "final": {}, "investigation_updates": [], "task_updates": []})
     optional = parse_agent_response({"action": {"kind": "complete", "answer": "done", "limitations": [], "grounding_ids": [], "effect_ids": []}, "investigation_updates": []})
     assert optional["action"]["kind"] == "complete" and "task_updates" not in optional
+    memory = parse_agent_response({
+        "action": {"kind": "complete", "answer": "done", "limitations": [], "grounding_ids": [], "effect_ids": []},
+        "memory_updates": {
+            "evidence": [{"id": "ev-lines", "material_id": "mat-0001", "selector": {"line_start": 28, "line_end": 37}}],
+            "findings": [{"id": "f-lines", "statement": "The selected span matters.", "evidence_ids": ["ev-lines"]}],
+            "conclusions": [{"id": "c-lines", "statement": "The task can retain learned knowledge.", "evidence_ids": [], "finding_ids": ["f-lines"]}],
+        },
+    })
+    assert memory["memory_updates"]["findings"][0]["id"] == "f-lines"
     with pytest.raises(StructuredResponseError):
         parse_agent_response({"action": {"kind": "complete", "answer": "done", "limitations": [], "grounding_ids": [], "effect_ids": []}, "unknown": []})
 

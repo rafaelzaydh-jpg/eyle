@@ -174,8 +174,8 @@ def agent_await_user(
 def base_config(*, tests_enabled=False):
     return {
         "app_version": "2.7.5",
-        "config_schema_version": "2.7.5-r1.5.1",
-        "revision": "rev1.5.1-host-injected-universal-capabilities",
+        "config_schema_version": "2.7.5-r1.5.3",
+        "revision": "rev1.5.3-cognitive-task-memory",
         "llm": {
             "context_window_tokens": 38000,
             "agent_max_tokens": 3600,
