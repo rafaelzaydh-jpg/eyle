@@ -1,45 +1,24 @@
-# Configuration — Eyle 2.7.5 Rev1.5.3
+# Configuration
 
-Canonical identity:
+The current application identity is stored in `config.json` and verified at startup.
 
-```json
-{
-  "app_version": "2.7.5",
-  "config_schema_version": "2.7.5-r1.5.3",
-  "revision": "rev1.5.3-cognitive-task-memory"
-}
+```text
+app_version = 2.7.5
+config_schema_version = 2.7.5-r2.5.2-ecc
+revision = rev2.5.3-ecc
 ```
 
-Unknown universal fields and mismatched identity are errors. Provider configuration is validated by the Registry/Provider selected by the Host.
+The revision may change without changing the persisted AgentSession schema. This release keeps the existing `2.7.5-r2.5.2-ecc` session/config schema because no persisted shape changed.
 
-## Universal host configuration
+## Memory host state
 
-Top-level universal namespaces remain `llm`, `context_engine`, `web`, `confirmacoes`, `agent`, `worker`, `telemetry`, and `providers`.
+Persistent memory is Host-owned internal state, not a public capability. A Host supplies:
 
-Runtime does not know provider-specific search, sandbox, device or network fields.
-
-## Bundled Host
-
-The bundled distribution installs:
-
-```json
-"providers": {
-  "standard": {"...": "workspace/Git/sandbox/test mechanics"},
-  "memory": {}
-}
+```text
+core_memory.storage_dir
+core_memory.world_scope_id
 ```
 
-An alternative Host may define a different provider set and config schema. Provider IDs in config must correspond to Providers actually registered by that Host.
+`world_scope_id` is opaque to Core. A workspace Host may use a workspace identity; another Host may use a robot, device, network, tenant, or other stable identity.
 
-## Physical limits
-
-Rev1.5.3 keeps per-call context/output containment, task deadline and provider-owned physical limits. There is no task-wide economic `max_total_tokens` fuse yet; Task Memory is intentionally being validated before budget/no-progress changes are added.
-
-## Persistence schemas
-
-- configuration: `2.7.5-r1.5.3`;
-- persisted Session: `2.7.5-r1.5.3`;
-- Queue: `2.7.5-r1.4.3`;
-- pending continuation: `4`.
-
-This is a clean break; old session/config shapes are not silently migrated.
+The memory database should stay outside the observed world when a provider could otherwise inspect its own private storage.

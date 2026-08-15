@@ -10,7 +10,7 @@ from typing import Any, Dict, Iterable, List
 
 from eyle.core.agent import executar_agente
 from eyle.devtools.benchmark_schema import BENCHMARK_SCHEMA_VERSION, canonical_token_usage, validate_report
-from eyle.runtime.persistence import salvar_json_atomico
+from eyle.runtime.storage import salvar_json_atomico
 
 
 CASES = (
@@ -88,7 +88,7 @@ def _run_case(config: Dict[str, Any], case_id: str) -> Dict[str, Any]:
         )
         after_proposal = _snapshot(root)
         wrote_before_confirmation = before != after_proposal
-        confirmation_requested = status == "await_user" and isinstance(pending, dict) and pending.get("continuation_kind") == "capability_confirmation"
+        confirmation_requested = status == "confirmation_required" and isinstance(pending, dict) and pending.get("continuation_kind") == "capability_confirmation"
         if confirmation_requested:
             status, text, pending, details = executar_agente(
                 request, cfg, provider_context={"standard": project}, retomar=pending,

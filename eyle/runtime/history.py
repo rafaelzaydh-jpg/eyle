@@ -9,15 +9,16 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, List, Optional
 
 _COMPONENT_GROUPS = {
-    "fixed_contract": {"available_capabilities"},
-    "request": {"request"},
-    "fresh_observation": {"latest_capability_results"},
-    "retained_context": {"prior_conversation"},
-    "observation_state": {"runtime_observations", "current_material"},
-    "epistemic_state": {"investigation"},
-    "intentional_state": {"task_state"},
+    "ecc_contract": {"ecc_operations"},
+    "request": {"current_request", "request_context"},
+    "objective_state": {"objective_state"},
+    "current_runtime_results": {"latest_observations"},
+    "memory_state": {"memory_graph"},
+    "physical_navigation": {"exploration_map", "runtime_effects", "runtime_environment"},
+    "background_context": {"conversation_background"},
     "runtime_feedback": {"runtime_feedback"},
 }
+
 
 
 def _number(value: Any) -> float:
@@ -192,28 +193,32 @@ def build_prompt_cost_accounting(details: Dict[str, Any], *, limit: int = 20) ->
     if not isinstance(provider_reported_total, (int, float)):
         provider_reported_total = provider_prompt_total if provider_calls_with_usage else None
 
-    fixed_repeat_tokens = int(categories["system"]["estimated_tokens"]) + int(categories["fixed_contract"]["estimated_tokens"])
+    fixed_repeat_tokens = int(categories["system"]["estimated_tokens"]) + int(categories["ecc_contract"]["estimated_tokens"])
 
-    observation_count=int(_number(details.get("observation_ledger_size")))
-    grounding_count=int(_number(details.get("grounding_count_total")))
-    replays=int(_number(details.get("observation_replays")))
-    capability_requests=len([item for item in (details.get("capability_history") or []) if isinstance(item,dict)])
-    grounding_usage=details.get("grounding_usage") if isinstance(details.get("grounding_usage"),dict) else {}
-    grounding_count = int(_number(grounding_usage.get("total_grounding_count"))) or grounding_count
-    diagnostics={
-        "observation_count":observation_count, "grounding_count":grounding_count,
-        "observation_replays":replays, "capability_requests_observed":capability_requests,
+    observation_count = int(_number(details.get("observation_ledger_size")))
+    grounding_count = int(_number(details.get("grounding_count_total")))
+    replays = int(_number(details.get("operation_replays")))
+    physical_calls = int(_number(details.get("physical_capability_calls")))
+    operation_requests = physical_calls + replays
+    diagnostics = {
+        "physical_observations": observation_count,
+        "grounding_count": grounding_count,
+        "physical_capability_calls": physical_calls,
+        "operation_replays": replays,
+        "operation_requests_observed": operation_requests,
+        "memory_nodes": int(_number(details.get("memory_nodes"))),
+        "memory_edges": int(_number(details.get("memory_edges"))),
+        "memory_fresh_nodes": int(_number(details.get("memory_fresh_nodes"))),
+        "memory_degraded_nodes": int(_number(details.get("memory_degraded_nodes"))),
+        "memory_semantic_nodes": int(_number(details.get("memory_semantic_nodes"))),
+        "evidence_items": int(_number(details.get("evidence_items"))),
     }
-    grounding_per_observation=_round_ratio(float(grounding_count),float(observation_count))
-    if grounding_per_observation is not None: diagnostics["grounding_per_observation"]=grounding_per_observation
-    replay_rate=_round_ratio(float(replays),float(capability_requests))
-    if replay_rate is not None: diagnostics["replay_capability_rate"]=replay_rate
-    for key in (
-        "investigation_grounding_count", "task_grounding_count",
-        "completion_grounding_count", "unreferenced_grounding_count",
-        "capability_actions_with_grounding",
-    ):
-        if grounding_usage.get(key) is not None: diagnostics[key]=grounding_usage.get(key)
+    grounding_per_observation = _round_ratio(float(grounding_count), float(observation_count))
+    if grounding_per_observation is not None:
+        diagnostics["grounding_per_observation"] = grounding_per_observation
+    replay_rate = _round_ratio(float(replays), float(operation_requests))
+    if replay_rate is not None:
+        diagnostics["replay_operation_rate"] = replay_rate
 
 
     summary: Dict[str, Any] = {
@@ -223,11 +228,11 @@ def build_prompt_cost_accounting(details: Dict[str, Any], *, limit: int = 20) ->
         "local_total_estimated_tokens":local_total_estimated,
         "provider_prompt_tokens":int(provider_reported_total) if isinstance(provider_reported_total,(int,float)) else None,
         "provider_cached_prompt_tokens":provider_cached_total,"fixed_repeat_tax_estimated_tokens":fixed_repeat_tokens,
-        "fresh_observation_estimated_tokens":int(categories["fresh_observation"]["estimated_tokens"]),
-        "retained_context_estimated_tokens":int(categories["retained_context"]["estimated_tokens"]),
-        "observation_state_estimated_tokens":int(categories["observation_state"]["estimated_tokens"]),
-        "epistemic_state_estimated_tokens":int(categories["epistemic_state"]["estimated_tokens"]),
-        "intentional_state_estimated_tokens":int(categories["intentional_state"]["estimated_tokens"]),
+        "current_runtime_results_estimated_tokens": int(categories["current_runtime_results"]["estimated_tokens"]),
+        "memory_state_estimated_tokens": int(categories["memory_state"]["estimated_tokens"]),
+        "physical_navigation_estimated_tokens": int(categories["physical_navigation"]["estimated_tokens"]),
+        "background_context_estimated_tokens": int(categories["background_context"]["estimated_tokens"]),
+        "ecc_contract_estimated_tokens": int(categories["ecc_contract"]["estimated_tokens"]),
     }
     ratio=_round_ratio(float(summary["provider_prompt_tokens"] or 0),float(local_total_estimated))
     if ratio is not None and summary["provider_prompt_tokens"] is not None: summary["provider_to_local_estimate_ratio"]=ratio
@@ -307,17 +312,11 @@ def build_execution_trace(
         if item.get(key) is not None
     } for item in snapshots]
 
-    decisions = [{
-        "event": index + 1,
-        "turn": item.get("turn"),
-        "decision": item.get("decision"),
-        "outcome": item.get("outcome"),
-        "reason": item.get("reason"),
-        "capabilities": list(item.get("capabilities") or [])[:8],
-    } for index, item in enumerate(_bounded_list(details.get("decision_history"), limit))]
+    decisions = []
+
 
     capabilities = []
-    for index, item in enumerate(_bounded_list(details.get("capability_history"), limit)):
+    for index, item in enumerate(_bounded_list(details.get("operation_history"), limit)):
         result = item.get("result") if isinstance(item.get("result"), dict) else {}
         capabilities.append({
             "event": index + 1,
@@ -350,9 +349,17 @@ def build_execution_trace(
             "completed_at": completed_at,
             "duration_seconds": duration_seconds,
             "turns": details.get("turns"),
-            "capability_calls": details.get("capability_calls"),
+            "physical_capability_calls": details.get("physical_capability_calls"),
+            "operation_replays": details.get("operation_replays"),
+            "memory_nodes": details.get("memory_nodes"),
+            "memory_edges": details.get("memory_edges"),
+            "memory_fresh_nodes": details.get("memory_fresh_nodes"),
+            "memory_degraded_nodes": details.get("memory_degraded_nodes"),
+            "memory_semantic_nodes": details.get("memory_semantic_nodes"),
+            "objective_present": details.get("objective_present"),
+            "objective_children": details.get("objective_children"),
+            "evidence_items": details.get("evidence_items"),
             "failure_code": details.get("failure_code"),
-            "task_totals": details.get("task_totals") if isinstance(details.get("task_totals"), dict) else {},
         },
         "tokens": tokens,
         "prompt_accounting": build_prompt_cost_accounting(details, limit=limit),
@@ -402,13 +409,20 @@ def build_public_job_history(registro):
         "duration_seconds": summary.get("duration_seconds"),
         "agent": {
             "turns": summary.get("turns"),
-            "capability_calls": summary.get("capability_calls"),
+            "physical_capability_calls": summary.get("physical_capability_calls"),
+            "operation_replays": summary.get("operation_replays"),
+            "memory_nodes": summary.get("memory_nodes"),
+            "memory_edges": summary.get("memory_edges"),
+            "memory_fresh_nodes": summary.get("memory_fresh_nodes"),
+            "memory_degraded_nodes": summary.get("memory_degraded_nodes"),
+            "memory_semantic_nodes": summary.get("memory_semantic_nodes"),
+            "objective_present": summary.get("objective_present"),
+            "objective_children": summary.get("objective_children"),
+            "evidence_items": summary.get("evidence_items"),
             "reality_epoch": details.get("reality_epoch"),
             "grounding_count_total": details.get("grounding_count_total"),
-            "observation_replays": details.get("observation_replays"),
             "observation_ledger_size": details.get("observation_ledger_size"),
             "failure_code": summary.get("failure_code") or (resultado.get("error_code") if isinstance(resultado, dict) else None),
-            "task_totals": summary.get("task_totals") if isinstance(summary.get("task_totals"), dict) else {},
         },
         "tokens": token_summary,
         "prompt_accounting": trace.get("prompt_accounting") or {},

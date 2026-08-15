@@ -23,7 +23,7 @@ def test_normal_source_is_never_blocked_by_secret_like_content(tmp_path):
     result = ler_faixa_projeto(tmp_path, "agent.py", 1, 4, max_linhas=20)
     assert result["content"] == content
 
-    search = standard_registry().execute("search_code", {"query": "api_key"}, _ctx(tmp_path))
+    search = standard_registry().execute("standard.search_code", {"query": "api_key"}, _ctx(tmp_path))
     assert search["ok"] is True
     assert search["detail"]["materialized_files"] == ["agent.py"]
     assert search["detail"]["protected_resources_excluded"] == 0
@@ -68,12 +68,12 @@ def test_search_excludes_protected_content_without_hiding_normal_matches(tmp_pat
     (tmp_path / ".env").write_text("needle=secret\n", encoding="utf-8")
     (tmp_path / "app.py").write_text("needle = 'visible'\n", encoding="utf-8")
 
-    result = standard_registry().execute("search_code", {"query": "needle"}, _ctx(tmp_path))
+    result = standard_registry().execute("standard.search_code", {"query": "needle"}, _ctx(tmp_path))
     detail = result["detail"]
     assert result["ok"] is True
     assert detail["materialized_files"] == ["app.py"]
     assert detail["protected_resources_excluded"] == 1
-    assert detail["coverage_scope"] == "readable_workspace_files"
+    assert detail["coverage_scope"] == "readable_source_files"
 
 
 def test_sandbox_preserves_normal_source_even_when_content_looks_sensitive(tmp_path):
@@ -101,7 +101,7 @@ def test_symbol_relations_does_not_drop_normal_source_for_sensitive_words(tmp_pa
         encoding="utf-8",
     )
     result = standard_registry().execute(
-        "symbol_relations",
+        "standard.symbol_relations",
         {"symbol": "target", "query": "reachability", "direction": "incoming", "include_text_references": False},
         _ctx(tmp_path),
     )
@@ -163,20 +163,20 @@ def test_symlink_and_hardlink_aliases_share_protected_physical_identity(tmp_path
         with pytest.raises(ErroLeituraProjeto) as exc:
             ler_faixa_projeto(tmp_path, name, 1, 1)
         assert exc.value.error_code == "PROTECTED_RESOURCE_READ_BLOCKED"
-        result = standard_registry().execute("search_code", {"query": "TOP_SECRET"}, _ctx(tmp_path))
+        result = standard_registry().execute("standard.search_code", {"query": "TOP_SECRET"}, _ctx(tmp_path))
         assert result["ok"] is True
         assert name not in result["detail"]["materialized_files"]
 
 
 def test_search_negative_observation_preserves_protected_coverage_boundary(tmp_path):
     (tmp_path / ".env").write_text("needle=secret\n", encoding="utf-8")
-    result = standard_registry().execute("search_code", {"query": "needle"}, _ctx(tmp_path))
+    result = standard_registry().execute("standard.search_code", {"query": "needle"}, _ctx(tmp_path))
     detail = result["detail"]
     assert detail["scope_complete"] is True
     assert detail["coverage_complete"] is False
     assert result["coverage"]["complete"] is False
     assert any(item.get("kind") == "protected_resource" for item in result["coverage"]["boundaries"])
-    assert result["coverage"]["facts"]["coverage_scope"] == "readable_workspace_files"
+    assert result["coverage"]["facts"]["coverage_scope"] == "readable_source_files"
     assert any(item.get("kind") == "protected_resource" and item.get("count") == 1 for item in result["coverage"]["boundaries"])
     assert len(result["observations"]) == 1
     assert result["observations"][0]["locator"] == {"kind": "capability", "name": "search_code", "source": "workspace"}
@@ -248,15 +248,15 @@ def test_resource_scoped_block_is_reusable_across_read_ranges(tmp_path):
     (tmp_path / ".env").write_text("TOKEN=TOP_SECRET\n", encoding="utf-8")
     session = AgentSession(request="test")
     arguments = {"path": ".env", "line_start": 1, "line_end": 1}
-    result = standard_registry().execute("read_file", arguments, _ctx(tmp_path))
+    result = standard_registry().execute("standard.read_file", arguments, _ctx(tmp_path))
     assert result["retryable"] is False
     assert result["failure_scope"] == "resource"
     model_result = {"tool": "read_file", **result, "grounding_ids": []}
-    signature = tools.capability_observation_signature("read_file", arguments)
+    signature = standard_registry().observation_signature("standard.read_file", arguments)
     record(session, signature, "read_file", arguments, result, model_result)
 
-    replayable = tools.capability_find_resource_failure(
-        "read_file", {"path": ".env", "line_start": 100, "line_end": 120},
+    replayable = standard_registry().find_resource_failure(
+        "standard.read_file", {"path": ".env", "line_start": 100, "line_end": 120},
         session.observation_ledger["entries"], session.reality_epoch,
     )
     assert replayable is not None
@@ -267,27 +267,23 @@ def test_resource_scoped_block_is_reusable_across_read_ranges(tmp_path):
 def test_resource_scoped_block_survives_session_serialization(tmp_path):
     from eyle.core.session import AgentSession
     from eyle.runtime.observation import record
-    from eyle.core.agent import _rehydrate_observation
 
     (tmp_path / ".env").write_text("TOKEN=TOP_SECRET\n", encoding="utf-8")
     session = AgentSession(request="test")
     arguments = {"path": ".env", "line_start": 1, "line_end": 1}
-    result = standard_registry().execute("read_file", arguments, _ctx(tmp_path))
+    result = standard_registry().execute("standard.read_file", arguments, _ctx(tmp_path))
     model_result = {"tool": "read_file", **result, "grounding_ids": []}
-    signature = tools.capability_observation_signature("read_file", arguments)
+    signature = standard_registry().observation_signature("standard.read_file", arguments)
     record(session, signature, "read_file", arguments, result, model_result)
 
     restored = AgentSession.from_dict(session.to_dict())
-    entry = tools.capability_find_resource_failure(
-        "read_file", {"path": ".env", "line_start": 20, "line_end": 30},
+    entry = standard_registry().find_resource_failure(
+        "standard.read_file", {"path": ".env", "line_start": 20, "line_end": 30},
         restored.observation_ledger["entries"], restored.reality_epoch,
     )
     assert entry is not None
-    replay = _rehydrate_observation(restored, entry, _ctx(tmp_path)["config"])
-    assert replay["ok"] is False
-    assert replay["error_code"] == "PROTECTED_RESOURCE_READ_BLOCKED"
-    assert replay["failure_scope"] == "resource"
-    assert replay["executed"] is False
+    assert entry["failure_error_code"] == "PROTECTED_RESOURCE_READ_BLOCKED"
+    assert entry["failure_scope"] == "resource"
 
 
 def test_protected_symlink_does_not_hide_normal_target_source(tmp_path):

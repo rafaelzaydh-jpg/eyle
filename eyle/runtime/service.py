@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Nucleo unificado da Eyle 2.7.5.
 
-Existe somente um caminho público para tarefas de projeto: eyle.core.agent.
-Toda mensagem não operacional entra na mesma AgentSession.
-Os pipelines historicos Retrieval/Analista/Executor/Verify foram removidos.
+Existe somente um caminho público para tarefas: o Core ECC.
+A LLM escolhe Explorar, Construir ou Concluir; Runtime controla somente fatos físicos.
 """
 from __future__ import annotations
 
@@ -18,11 +17,10 @@ from datetime import datetime, timedelta, timezone
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eyle.core.agent import executar_agente
-from eyle.core.continuation import validate_pending_continuation
+from eyle.runtime.continuation import validate_pending_continuation, confirmation_control, is_explicit_confirmation_control
 from eyle.host import build_bundled_host
 from eyle.runtime.config import carregar_config_validada
-from eyle.runtime.lock import lock_para
-from eyle.runtime.persistence import salvar_json_atomico
+from eyle.runtime.storage import lock_para, salvar_json_atomico
 from eyle.runtime import queue as fila_persistente
 from eyle.runtime import progress as job_progress
 from llm.executar import ErroLLM
@@ -70,6 +68,42 @@ def carregar_conversa():
 
 def salvar_conversa(mensagens):
     _salvar_json(os.path.join(MEMORY_DIR, "conversa.json"), mensagens)
+
+
+def limpar_conversa_preservando_memoria():
+    """Zera somente o transcript persistido da conversa.
+
+    O Memory Graph vive em armazenamento separado (core_memory.sqlite3) e nao
+    e tocado por esta operacao. O comando e destinado a testes/benchmark em
+    que se deseja uma sessao visual limpa usando a mesma memoria cognitiva.
+    Recusa a limpeza enquanto houver jobs ativos para evitar corridas entre
+    snapshots ja congelados e a interface.
+    """
+    stats = fila_persistente.estatisticas()
+    ativos = int(stats.get("pending", 0) or 0) + int(stats.get("processing", 0) or 0)
+    if ativos:
+        return {
+            "status": "busy",
+            "error_code": "CONVERSATION_RESET_BUSY",
+            "active_jobs": ativos,
+            "removed_messages": 0,
+            "memory_graph_preserved": True,
+        }
+
+    caminho = os.path.join(MEMORY_DIR, "conversa.json")
+    with lock_para(caminho):
+        mensagens = carregar_conversa()
+        removidas = len(mensagens)
+        salvar_conversa([])
+
+    # Uma conversa visual limpa nao deve carregar uma confirmacao pendente de
+    # um transcript que acabou de ser descartado. Isto nao altera Memory Graph.
+    limpar_agent_pendente()
+    return {
+        "status": "ok",
+        "removed_messages": removidas,
+        "memory_graph_preserved": True,
+    }
 
 def registrar_mensagem_com_snapshot(role, texto, limite_snapshot=6, metadata=None):
     """Registra uma mensagem e captura, sob o mesmo lock, o historico do job.
@@ -353,31 +387,6 @@ def limpar_agent_pendente():
         os.remove(AGENT_PENDENTE_PATH)
 
 
-_CONFIRM_CONTROL = re.compile(
-    r"^\s*(?:sim|confirmar|confirme|confirmo|aplicar|aplique)"
-    r"(?:\s+[0-9A-Fa-f]{4})?\s*[.!]?\s*$",
-    re.IGNORECASE,
-)
-_CANCEL_CONTROL = re.compile(
-    r"^\s*(?:não|nao|cancelar|cancele|cancela)"
-    r"(?:\s+[0-9A-Fa-f]{4})?\s*[.!]?\s*$",
-    re.IGNORECASE,
-)
-_EXPLICIT_CONTROL = re.compile(
-    r"^\s*(?:(?:sim|não|nao|confirmar|confirme|confirmo|aplicar|aplique|cancelar|cancele|cancela)"
-    r"(?:\s+[0-9A-Fa-f]{4})?)\s*[.!]?\s*$",
-    re.IGNORECASE,
-)
-
-
-def _controle_pendencia(pergunta):
-    text = str(pergunta or "")
-    if _CANCEL_CONTROL.fullmatch(text):
-        return "cancelar"
-    if _CONFIRM_CONTROL.fullmatch(text):
-        return "aplicar"
-    return None
-
 
 def _selecionar_pendencia(pergunta, pendencia):
     if not pendencia:
@@ -449,34 +458,30 @@ def _desempacotar_resultado_agente(resultado):
 
 
 
-def _public_await_user(pending):
-    if not isinstance(pending, dict) or pending.get("continuation_kind") != "await_user":
+def _public_confirmation(pending):
+    if not isinstance(pending, dict) or pending.get("continuation_kind") != "capability_confirmation":
         return None
     return {
         "id": str(pending.get("id") or ""),
         "question": str(pending.get("question") or ""),
-        "reason": str(pending.get("reason") or ""),
-        "options": [
-            {"id": str(item.get("id") or ""), "label": str(item.get("label") or "")}
-            for item in list(pending.get("options") or []) if isinstance(item, dict)
-        ],
+        "operation": str((pending.get("session") or {}).get("pending_operation", {}).get("operation") or ""),
     }
 
 
 def _execution_failure_from_details(details):
     details = details if isinstance(details, dict) else {}
-    for event in reversed(list(details.get("capability_history") or [])):
+    for event in reversed(list(details.get("operation_history") or [])):
         if not isinstance(event, dict):
             continue
         result = event.get("result") if isinstance(event.get("result"), dict) else {}
-        if result.get("ok") is False:
+        if result.get("ok") is False or event.get("ok") is False:
             failure = {
                 "capability": event.get("capability"),
                 "error_code": result.get("error_code") or event.get("error_code"),
                 "detail": result.get("detail"),
-                "retryable": result.get("retryable"),
-                "failure_scope": result.get("failure_scope"),
-                "failure_resource": result.get("failure_resource"),
+                "retryable": result.get("retryable", event.get("retryable")),
+                "failure_scope": result.get("failure_scope") or event.get("failure_scope"),
+                "failure_resource": result.get("failure_resource") or event.get("failure_resource"),
                 "physical_effect": result.get("physical_effect"),
             }
             return {k: v for k, v in failure.items() if v not in (None, "", [], {})}
@@ -489,22 +494,22 @@ def _metadata_resposta_agente(status, detalhes, pending=None):
     failure = _execution_failure_from_details(detalhes)
     if failure:
         metadata["execution_failure"] = failure
-    await_user = _public_await_user(pending)
-    if await_user:
-        metadata["await_user"] = await_user
+    confirmation = _public_confirmation(pending)
+    if confirmation:
+        metadata["confirmation"] = confirmation
     return metadata
 
 
-def carregar_await_user_publico():
-    """Return only safe UI metadata for the active human supervision gate."""
+def carregar_confirmacao_publica():
+    """Return safe UI metadata for the active Runtime confirmation gate."""
     pending = carregar_agent_pendente()
-    if not pending or pending.get("continuation_kind") != "await_user":
+    if not pending or pending.get("continuation_kind") != "capability_confirmation":
         return None
     provider_context = carregar_provider_context()
     valid, _ = _validar_pendencia(pending, provider_context)
     if not valid:
         return None
-    return _public_await_user(pending)
+    return _public_confirmation(pending)
 
 def _resultado_agente(status, texto, detalhes):
     detalhes = detalhes if isinstance(detalhes, dict) else {}
@@ -533,7 +538,7 @@ def _processar_agente(pergunta, config, provider_context, execution_id=None, con
         )
     except ErroLLM as erro:
         return _resultado_falha_llm(erro)
-    if status == "await_user" and estado_pendente:
+    if status == "confirmation_required" and estado_pendente:
         estado_pendente = salvar_agent_pendente(estado_pendente, provider_context=provider_context, config=config_execucao)
         texto = estado_pendente["question"]
     if source_job_id is not None:
@@ -558,7 +563,7 @@ def _retomar_agente_pendente(pendente, config, resposta_usuario=None, source_job
         )
     except ErroLLM as erro:
         return _resultado_falha_llm(erro)
-    if status == "await_user" and nova_pendencia:
+    if status == "confirmation_required" and nova_pendencia:
         nova_pendencia = salvar_agent_pendente(nova_pendencia, provider_context=provider_context, config=config)
         texto = nova_pendencia["question"]
     else:
@@ -569,10 +574,7 @@ def _retomar_agente_pendente(pendente, config, resposta_usuario=None, source_job
 
 def _cancelar_agente_pendente(pendente):
     limpar_agent_pendente()
-    if (pendente or {}).get("continuation_kind") == "await_user":
-        resposta = "Tarefa suspensa cancelada."
-    else:
-        resposta = "Ok, cancelado. A alteração pendente não foi aplicada."
+    resposta = "Ok, cancelado. A alteração pendente não foi aplicada."
     registrar_mensagem("assistant", resposta)
     detalhes = {"status": "cancelled", "failure_code": "CANCELLED"}
     return _resultado_agente("cancelled", resposta, detalhes)
@@ -595,8 +597,8 @@ def processar(pergunta, registrar_pergunta=True, historico_snapshot=None,
             limpar_agent_pendente()
             pendente = None
 
-    controle = _controle_pendencia(pergunta) if pendente else None
-    if not pendente and _EXPLICIT_CONTROL.fullmatch(str(pergunta or "")):
+    controle = confirmation_control(pergunta) if pendente else None
+    if not pendente and is_explicit_confirmation_control(pergunta):
         return _resultado_controle_pendencia("Não existe capability aguardando confirmação.")
 
     if pendente and controle == "cancelar":
@@ -604,14 +606,6 @@ def processar(pergunta, registrar_pergunta=True, historico_snapshot=None,
         if erro:
             return _resultado_controle_pendencia(erro)
         return _cancelar_agente_pendente(selecionada)
-
-    if pendente and pendente.get("continuation_kind") == "await_user":
-        # Any natural text is the human resolution. Only explicit cancel above
-        # is Runtime control authority for this continuation kind.
-        return _retomar_agente_pendente(
-            pendente, config, resposta_usuario=pergunta,
-            source_job_id=source_job_id, execution_id=execution_id,
-        )
 
     if pendente and controle == "aplicar":
         selecionada, erro = _selecionar_pendencia(pergunta, pendente)

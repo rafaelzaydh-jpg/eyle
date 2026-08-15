@@ -1,186 +1,99 @@
 from __future__ import annotations
-from tests.canonical import standard_registry
 
-import sqlite3
+from pathlib import Path
 
 import pytest
 
-from eyle.providers.memory_impl.memory import (
-    activate_memory,
-    apply_memory_changeset,
-    continue_memory_view,
-    memory_history,
-    memory_record,
+from eyle.runtime.memory_graph import (
+    MEMORY_GRAPH_SCHEMA_VERSION,
+    apply_graph_operations,
+    graph_counts,
+    memory_db_path,
+    node_record,
+    world_scope,
+    retrieve_graph,
 )
-from eyle.providers.memory_impl.memory_store import MEMORY_SCHEMA_VERSION, memory_db_path
 
 
-def test_memory_kernel_atomic_changeset_relations_and_supersession(tmp_path):
-    base = str(tmp_path / "state")
-    root = str(tmp_path / "project")
-    first = apply_memory_changeset(base, root, [{
-        "op": "create_memory", "id": "mem-old", "region": "project:eyle",
-        "content": "EvidenceLedger exists.", "tags": ["architecture", "evidence"],
-        "provenance": {"kind": "user", "ref": "msg-1"},
-    }])
-    assert first["count"] == 1
-    old = memory_record(base, root, "mem-old")
-
-    change = apply_memory_changeset(base, root, [
-        {
-            "op": "create_memory", "id": "mem-new", "region": "project:eyle",
-            "content": "Material direct grounding replaced EvidenceLedger.",
-            "tags": ["architecture", "grounding"],
-            "provenance": {"kind": "observation", "ref": "mat-42"},
-        },
-        {
-            "op": "supersede_memory", "id": "mem-old",
-            "expected_revision": old["revision"], "superseded_by": "mem-new",
-        },
+def test_memory_graph_atomic_nodes_edges_and_supersession(tmp_path):
+    storage = str(tmp_path / "memory")
+    apply_graph_operations(storage, [
+        {"op": "create_node", "id": "mem-core", "scope": "world:x", "kind": "component", "content": "Core", "tags": ["ecc"]},
+        {"op": "create_node", "id": "mem-runtime", "scope": "world:x", "kind": "component", "content": "Runtime"},
+        {"op": "create_edge", "id": "rel-core-runtime", "source": "mem-core", "label": "coordinates", "target": "mem-runtime"},
     ])
-    assert change["count"] == 2
-    old = memory_record(base, root, "mem-old")
-    assert old["status"] == "superseded"
-    assert any(rel["label"] == "superseded_by" and rel["target"] == "mem-new" for rel in old["relations"])
-    assert memory_record(base, root, "mem-new")["status"] == "current"
+    assert graph_counts(storage) == {"nodes": 2, "edges": 1, "isolated_nodes": 0}
+    old = node_record(storage, "mem-core")
+    apply_graph_operations(storage, [
+        {"op": "create_node", "id": "mem-core2", "scope": "world:x", "kind": "component", "content": "New Core"},
+        {"op": "supersede_node", "id": "mem-core", "expected_revision": old["revision"], "replacement": "mem-core2"},
+    ])
+    assert node_record(storage, "mem-core")["status"] == "superseded"
+    assert any(edge["label"] == "superseded_by" for edge in node_record(storage, "mem-core")["edges"])
 
 
-def test_memory_kernel_revision_conflict_rolls_back_whole_changeset(tmp_path):
-    base = str(tmp_path / "state")
-    root = str(tmp_path / "project")
-    apply_memory_changeset(base, root, [{
-        "op": "create_memory", "id": "mem-a", "region": "project:test", "content": "A",
-    }])
+def test_memory_graph_revision_conflict_rolls_back_whole_delta(tmp_path):
+    storage = str(tmp_path / "memory")
+    apply_graph_operations(storage, [{"op": "create_node", "id": "mem-a", "scope": "world:x", "kind": "fact", "content": "A"}])
     with pytest.raises(ValueError, match="MEMORY_CONFLICT"):
-        apply_memory_changeset(base, root, [
-            {"op": "create_memory", "id": "mem-b", "region": "project:test", "content": "B"},
-            {"op": "update_memory", "id": "mem-a", "expected_revision": 999, "content": "bad"},
+        apply_graph_operations(storage, [
+            {"op": "create_node", "id": "mem-b", "scope": "world:x", "kind": "fact", "content": "B"},
+            {"op": "update_node", "id": "mem-a", "expected_revision": 999, "content": "bad"},
         ])
-    with pytest.raises(ValueError, match="MEMORY_NOT_FOUND"):
-        memory_record(base, root, "mem-b")
-    assert memory_record(base, root, "mem-a")["content"] == "A"
+    with pytest.raises(ValueError, match="MEMORY_NODE_NOT_FOUND"):
+        node_record(storage, "mem-b")
+    assert node_record(storage, "mem-a")["content"] == "A"
 
 
-def test_memory_kernel_cross_region_relation_activation(tmp_path):
-    base = str(tmp_path / "state")
-    root = str(tmp_path / "project")
-    apply_memory_changeset(base, root, [
-        {"op": "create_memory", "id": "mem-project", "region": "project:eyle", "content": "Rev architecture", "tags": ["architecture"]},
-        {"op": "create_memory", "id": "mem-user", "region": "user", "content": "Avoid backward compatibility", "tags": ["preference"]},
-        {"op": "create_relation", "id": "rel-pref", "source": "mem-user", "label": "relevant_to", "target": "mem-project"},
-    ])
-    view = activate_memory(base, root, region="project:eyle", related_to=["mem-project"], limit=10)
-    ids = {item["id"] for item in view["memories"]}
-    assert "mem-project" in ids
-    assert "mem-user" in ids
-    assert view["memory_coverage"]["regions"] == ["project:eyle"]
-
-    related_only = activate_memory(base, root, related_to=["mem-project"], limit=10)
-    assert {item["id"] for item in related_only["memories"]} == {"mem-project", "mem-user"}
-    assert related_only["memory_frontier"] is None
-
-
-def test_memory_kernel_10000_nodes_stay_bounded_and_frontier_continues(tmp_path):
-    base = str(tmp_path / "state")
-    root = str(tmp_path / "project")
-    operations = [
-        {
-            "op": "create_memory", "id": f"mem-{index:05d}", "region": "project:scale",
-            "content": f"node {index}", "tags": ["scale"],
-        }
-        for index in range(10_000)
+def test_memory_graph_topology_exposes_bridge_without_semantic_verdict(tmp_path):
+    storage = str(tmp_path / "memory")
+    scope = world_scope(str(tmp_path / "project"))
+    ops = []
+    for name in ("core", "runtime", "llm", "ghost", "helper1", "helper2"):
+        ops.append({"op": "create_node", "id": f"mem-{name}", "scope": scope, "kind": "component", "content": name, "tags": [name]})
+    ops += [
+        {"op": "create_edge", "source": "mem-core", "label": "connects", "target": "mem-runtime"},
+        {"op": "create_edge", "source": "mem-core", "label": "connects", "target": "mem-llm"},
+        {"op": "create_edge", "source": "mem-core", "label": "connects", "target": "mem-ghost"},
+        {"op": "create_edge", "source": "mem-ghost", "label": "calls", "target": "mem-helper1"},
+        {"op": "create_edge", "source": "mem-ghost", "label": "calls", "target": "mem-helper2"},
     ]
-    result = apply_memory_changeset(base, root, operations)
-    assert result["count"] == 10_000
-
-    view = activate_memory(base, root, region="project:scale", tags=["scale"], limit=30)
-    assert len(view["memories"]) == 30
-    assert view["memory_coverage"]["examined"]["ordered_candidates"] == 10_000
-    assert view["memory_coverage"]["complete"] is False
-    frontier = view["memory_frontier"]
-    assert frontier and frontier["remaining_count"] == 9_970
-
-    second = continue_memory_view(base, root, frontier["id"], limit=30)
-    assert len(second["memories"]) == 30
-    assert second["memory_frontier"]["remaining_count"] == 9_940
-    assert {item["id"] for item in view["memories"]}.isdisjoint({item["id"] for item in second["memories"]})
+    apply_graph_operations(storage, ops)
+    view = retrieve_graph(storage, world_scope_value=scope, query="core ghost", limit=10)
+    by_id = {node["id"]: node for node in view["nodes"]}
+    assert by_id["mem-core"]["topology"]["articulation_point"] is True
+    assert by_id["mem-ghost"]["topology"]["articulation_point"] is True
+    assert "connectivity_score" in by_id["mem-core"]["topology"]
+    assert by_id["mem-helper1"]["topology"]["degree"] == 1
 
 
-def test_memory_kernel_history_is_append_only_and_survives_reopen(tmp_path):
-    base = str(tmp_path / "state")
-    root = str(tmp_path / "project")
-    apply_memory_changeset(base, root, [{
-        "op": "create_memory", "id": "mem-history", "region": "knowledge", "content": "v1",
-    }])
-    node = memory_record(base, root, "mem-history")
-    apply_memory_changeset(base, root, [{
-        "op": "update_memory", "id": "mem-history", "expected_revision": node["revision"],
-        "content": "v2", "add_tags": ["current"],
-    }])
-    reopened = memory_record(base, root, "mem-history")
-    assert reopened["content"] == "v2"
-    assert reopened["revision"] == 2
-    history = memory_history(base, root, "mem-history")
-    assert [item["action"] for item in history[:2]] == ["update_memory", "create_memory"]
+def test_memory_graph_user_scope_is_retrievable_across_world_scopes(tmp_path):
+    storage = str(tmp_path / "memory")
+    scope_a = world_scope(str(tmp_path / "project-a")); scope_b = world_scope(str(tmp_path / "project-b"))
+    apply_graph_operations(storage, [
+        {"op": "create_node", "id": "mem-user", "scope": "user", "kind": "preference", "content": "User likes dogs", "tags": ["dogs"]},
+        {"op": "create_node", "id": "mem-a", "scope": scope_a, "kind": "world", "content": "Only world A"},
+    ])
+    view = retrieve_graph(storage, world_scope_value=scope_b, query="dogs", limit=10)
+    assert [node["id"] for node in view["nodes"]] == ["mem-user"]
 
 
-def test_memory_kernel_rejects_incompatible_sqlite_schema(tmp_path):
-    base = str(tmp_path / "state")
-    root = str(tmp_path / "project")
-    path = memory_db_path(base, root)
-    with sqlite3.connect(path) as conn:
-        conn.execute("CREATE TABLE memory_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
-        conn.execute("INSERT INTO memory_meta(key,value) VALUES('schema_version','old')")
-        conn.execute("INSERT INTO memory_meta(key,value) VALUES('project_root',?)", (root,))
-    with pytest.raises(ValueError, match="MEMORY_SCHEMA_INCOMPATIBLE"):
-        activate_memory(base, root)
-    assert MEMORY_SCHEMA_VERSION == "2.7.5-r1.3.6-memory-kernel-v1"
+def test_memory_graph_10000_nodes_retrieval_is_bounded(tmp_path):
+    storage = str(tmp_path / "memory")
+    scope = world_scope(str(tmp_path / "project"))
+    apply_graph_operations(storage, [
+        {"op": "create_node", "id": f"mem-{i:05d}", "scope": scope, "kind": "symbol", "content": f"worker node {i}", "tags": ["worker"]}
+        for i in range(10_000)
+    ])
+    view = retrieve_graph(storage, world_scope_value=scope, query="worker", limit=30)
+    assert len(view["nodes"]) == 30
+    assert view["retrieval"]["candidate_nodes"] == 10_000
 
 
-def test_memory_tools_allow_semantic_memory_without_grounding_and_continue_frontier(monkeypatch, tmp_path):
-    root = tmp_path / "project"
-    root.mkdir()
-    context = {"provider_context": {"memory": {"storage_dir": str(tmp_path / "state"), "scope_root": str(root)}}, "grounding": {}}
-    for index in range(35):
-        stored = standard_registry().execute(
-            "memory_store",
-            {
-                "text": f"decision {index}",
-                "meta": {"region": "project:test", "tags": ["decision"]},
-            },
-            context,
-        )
-        assert stored["ok"] is True
-
-    first = standard_registry().execute(
-        "memory_search",
-        {"seed": {"region": "project:test", "tags": ["decision"]}, "limit": 10},
-        context,
-    )
-    assert first["ok"] is True
-    first_view = first["detail"]["view"]
-    assert len(first_view["memories"]) == 10
-    frontier = first_view["memory_frontier"]
-    assert frontier and frontier["remaining_count"] == 25
-
-    second = standard_registry().execute("memory_search", {"frontier": frontier["id"], "limit": 10}, context)
-    assert second["ok"] is True
-    second_view = second["detail"]["view"]
-    assert len(second_view["memories"]) == 10
-    assert {item["id"] for item in first_view["memories"]}.isdisjoint(
-        {item["id"] for item in second_view["memories"]}
-    )
-
-
-def test_memory_tool_nested_contract_is_validated(monkeypatch, tmp_path):
-    root = tmp_path / "project"
-    root.mkdir()
-    context = {"provider_context": {"memory": {"storage_dir": str(tmp_path / "state"), "scope_root": str(root)}}, "grounding": {}}
-    result = standard_registry().execute(
-        "memory_store",
-        {"text": "x", "meta": {"region": "project:test", "mystery": True}},
-        context,
-    )
-    assert result["ok"] is False
-    assert result["error_code"] == "INVALID_ARGUMENT"
-    assert "meta" in str(result["detail"])
+def test_memory_graph_schema_identity(tmp_path):
+    storage = str(tmp_path / "memory")
+    path = Path(memory_db_path(storage))
+    assert not path.exists()  # path resolution alone must not create state
+    assert graph_counts(storage) == {"nodes": 0, "edges": 0, "isolated_nodes": 0}
+    assert path.exists()
+    assert MEMORY_GRAPH_SCHEMA_VERSION == "2.7.5-r2.5-memory-graph-v2"

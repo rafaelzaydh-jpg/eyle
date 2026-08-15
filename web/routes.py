@@ -7,6 +7,7 @@ O navegador SO fala com estes endpoints. Nunca com a LLM diretamente.
     GET    /               -> painel de chat (templates/index.html), so HTML/CSS/JS
     POST   /enviar          -> entra na fila, responde na hora ({"status": "ok"})
     GET    /conversa        -> conversa persistida (memory/conversa.json)
+    DELETE /conversa        -> limpa transcript e preserva Memory Graph
     DELETE /mensagem/<id>   -> remove mensagem (fila + memoria)
     GET    /status          -> estado do workspace + tamanho da fila
     GET    /jobs/<id>       -> estado persistido exato de uma tarefa
@@ -391,6 +392,13 @@ def conversa():
     return jsonify(eyle_service.carregar_conversa())
 
 
+@app.route("/conversa", methods=["DELETE"])
+def limpar_conversa():
+    resultado = eyle_service.limpar_conversa_preservando_memoria()
+    codigo = 409 if resultado.get("status") == "busy" else 200
+    return jsonify(resultado), codigo
+
+
 @app.route("/mensagem/<int:mensagem_id>", methods=["DELETE"])
 def apagar_mensagem(mensagem_id):
     # A exclusao precisa agir imediatamente sobre o job correto. Colocar esta
@@ -428,7 +436,7 @@ def status():
         "eventos_na_fila": queue.tamanho(),
         "fila": fila,
         "metricas": metricas,
-        "await_user": eyle_service.carregar_await_user_publico(),
+        "confirmation": eyle_service.carregar_confirmacao_publica(),
         "avisos_config": config.get("_config_warnings", []),
     })
 

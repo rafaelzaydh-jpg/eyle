@@ -12,7 +12,6 @@ from typing import Any, Callable, Dict, Optional
 
 from eyle.capabilities import CapabilityRegistry, build_registry
 from eyle.providers.standard import get_provider as get_standard_provider
-from eyle.providers.memory import get_provider as get_memory_provider
 from eyle.providers.standard_impl.workspace import discover_project
 
 
@@ -46,7 +45,7 @@ class Host:
 
 def build_bundled_host(base_dir: str) -> Host:
     root = os.path.realpath(base_dir)
-    registry = build_registry([get_standard_provider(), get_memory_provider()])
+    registry = build_registry([get_standard_provider()])
 
     def workspace_context():
         value = discover_project(root)
@@ -54,12 +53,13 @@ def build_bundled_host(base_dir: str) -> Host:
 
     def context_factory() -> Dict[str, Any]:
         standard = workspace_context() or {}
-        scope_root = standard.get("caminho_origem") or root
+        observed_root = os.path.realpath(str(standard.get("caminho_origem") or root))
         return {
             "standard": standard,
-            "memory": {
+            "core_memory": {
                 "storage_dir": os.path.join(root, "memory"),
-                "scope_root": scope_root,
+                # Host-defined opaque identity. Core never interprets the prefix.
+                "world_scope_id": f"workspace:{observed_root}",
             },
         }
 

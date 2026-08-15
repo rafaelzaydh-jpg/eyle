@@ -1,252 +1,158 @@
 #!/usr/bin/env python3
-"""Release verifier for Eyle 2.7.5 Rev1.5.3.
-
-The verifier protects the Capability Provider Architecture rather than old
-workspace/tool-specific implementation details.
-"""
+"""Fail-closed release identity/architecture verifier for Eyle ECC."""
 from __future__ import annotations
-
-import json
-import os
-import sys
+import json, os, sys
 from pathlib import Path
 from typing import Any, Dict, List
 
-MIN_PYTHON = (3, 11)
-_RUNTIME_DIRS = ("context", "memory", "workspace")
-_FORBIDDEN_DIR_NAMES = {".git", ".pytest_cache", "__pycache__", "htmlcov"}
-_FORBIDDEN_FILE_NAMES = {".coverage"}
-_GENERIC_CORE_FILES = {
-    "__init__.py", "agent.py", "continuation.py", "decision.py",
-    "investigation.py", "session.py", "tasks.py", "task_memory.py", "token_budget.py",
-    "validation.py",
-}
-_REQUIRED_PROVIDER_FILES = {
-    "eyle/capabilities/registry.py",
-    "eyle/contracts/capability.py", "eyle/contracts/observation.py",
-    "eyle/host.py",
-    "eyle/providers/standard.py", "eyle/providers/workspace_transaction.py",
-    "eyle/providers/memory.py",
-}
-_REMOVED_CORE_DOMAIN_FILES = {
-    "tools.py", "editing.py", "git_tools.py", "memory.py", "memory_navigation.py",
-    "memory_store.py", "microsandbox_backend.py", "objective_scope.py", "post_write.py",
-    "project_inspection.py", "sandbox.py", "security.py", "symbols.py", "text_hash.py",
-    "transactions.py", "workspace.py", "workspace_io.py", "workspace_policy.py",
-    "code_relations.py", "write_transaction.py", "claim_review.py", "evidence.py",
-    "source_record.py", "execution_trace.py", "prompt_accounting.py",
-}
+MIN_PYTHON=(3,11)
+CORE_FILES={"__init__.py","agent.py","ecc.py","evidence.py","memory.py","session.py"}
+_GENERIC_CORE_FILES=CORE_FILES
+FORBIDDEN_CORE={"knowledge.py","decision.py","investigation.py","tasks.py","task_memory.py","validation.py","continuation.py","token_budget.py","tools.py","patching.py","grounding.py"}
+FORBIDDEN_DIRS={"__pycache__",".pytest_cache",".mypy_cache",".ruff_cache"}
+_REMOVED_CORE_DOMAIN_FILES=FORBIDDEN_CORE
+FORBIDDEN_RUNTIME_FILES={"agent_pendente.json","telemetry.sqlite3","fila.json","conversa.json"}
 
+class ReleaseIdentityError(RuntimeError): pass
 
-class ReleaseIdentityError(ValueError):
-    pass
-
-
-def _json(path: Path) -> Dict[str, Any]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise ReleaseIdentityError(f"arquivo ausente: {path.name}") from exc
-    except json.JSONDecodeError as exc:
-        raise ReleaseIdentityError(f"JSON invalido em {path.name}: {exc}") from exc
-    if not isinstance(value, dict):
-        raise ReleaseIdentityError(f"{path.name} precisa conter objeto JSON")
+def _json(path:Path)->Dict[str,Any]:
+    value=json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value,dict): raise ReleaseIdentityError(f"JSON object required:{path.name}")
     return value
 
+def identidade_config(base:Path)->Dict[str,str]:
+    cfg=_json(base/"config.json")
+    return {k:str(cfg.get(k) or "") for k in ("app_version","config_schema_version","revision")}
 
-def identidade_config(base_dir: os.PathLike[str] | str) -> Dict[str, str]:
-    config = _json(Path(base_dir) / "config.json")
-    result = {k: config.get(k) for k in ("app_version", "config_schema_version", "revision")}
-    bad = [k for k, v in result.items() if not isinstance(v, str) or not v.strip()]
-    if bad:
-        raise ReleaseIdentityError("identidade invalida: " + ", ".join(bad))
-    return {k: str(v).strip() for k, v in result.items()}
-
-
-def _artifact_violations(base: Path) -> List[str]:
-    out: List[str] = []
-    for dirname in _RUNTIME_DIRS:
-        root = base / dirname
-        if root.exists():
-            for path in root.rglob("*"):
-                if path.is_file() and path.name != ".gitkeep":
-                    out.append(f"estado Runtime proibido:{path.relative_to(base)}")
+def _artifact_violations(base:Path)->List[str]:
+    out=[]
     for path in base.rglob("*"):
-        rel = str(path.relative_to(base)).replace("\\", "/")
-        if path.is_dir() and path.name in _FORBIDDEN_DIR_NAMES:
-            out.append(f"artefato gerado proibido:{rel}/")
-        elif path.is_file() and (path.name in _FORBIDDEN_FILE_NAMES or path.suffix in {".pyc", ".pyo"}):
-            out.append(f"artefato gerado proibido:{rel}")
+        rel=str(path.relative_to(base)).replace("\\","/")
+        if path.is_dir() and path.name in FORBIDDEN_DIRS: out.append(f"generated artifact:{rel}/")
+        elif path.is_file() and (path.suffix in {".pyc",".pyo"} or path.name in FORBIDDEN_RUNTIME_FILES): out.append(f"generated artifact:{rel}")
     return out
 
+def _architecture_violations(base:Path, manifest:Dict[str,Any])->List[str]:
+    out=[]
+    core=base/"eyle/core"
+    actual={p.name for p in core.glob("*.py")}
+    if actual != CORE_FILES: out.append(f"core files invalid:{sorted(actual)!r}")
+    if actual & FORBIDDEN_CORE: out.append(f"legacy core returned:{sorted(actual & FORBIDDEN_CORE)!r}")
+    for rel in ("eyle/runtime/ecc_runtime.py","eyle/runtime/continuation.py","eyle/runtime/token_budget.py"):
+        if not (base/rel).is_file(): out.append(f"required ECC runtime file missing:{rel}")
 
-def _architecture_violations(base: Path, manifest: Dict[str, Any]) -> List[str]:
-    out: List[str] = []
-    core = base / "eyle" / "core"
-    actual_core = {p.name for p in core.glob("*.py")}
-    unexpected = sorted(actual_core - _GENERIC_CORE_FILES)
-    if unexpected:
-        out.append("Core contem modulos de dominio/nao canonicos:" + ",".join(unexpected))
-    returned = sorted(_REMOVED_CORE_DOMAIN_FILES & actual_core)
-    if returned:
-        out.append("modulos de dominio reapareceram no Core:" + ",".join(returned))
-    for rel in _REQUIRED_PROVIDER_FILES:
-        if not (base / rel).is_file():
-            out.append(f"infraestrutura provider ausente:{rel}")
-
-    base_text = str(base.resolve())
-    inserted = False
-    if base_text not in sys.path:
-        sys.path.insert(0, base_text); inserted = True
+    base_text=str(base.resolve()); inserted=False
+    if base_text not in sys.path: sys.path.insert(0,base_text); inserted=True
     try:
-        from eyle.contracts.capability import RESULT_FIELDS, physical_effect
+        from eyle.core.session import SESSION_SCHEMA_VERSION, AgentSession
+        from eyle.core.ecc import catalog as ecc_catalog
         from eyle.host import build_bundled_host
-        from llm.executar import PROMPT_AGENTE
+        from llm.executar import PROMPT_ECC
         from llm.structured import schema_for_profile
-
-        registry = build_bundled_host(str(base)).registry
-        names = registry.names()
-        declared = manifest.get("public_capabilities")
-        if declared != names:
-            out.append(f"public_capabilities diverge do registry: manifest={declared!r} registry={names!r}")
-        if manifest.get("bundled_providers") != ["standard", "memory"]:
-            out.append("bundled_providers deve declarar standard e memory")
-        if "physical_effect" not in RESULT_FIELDS:
-            out.append("resultado canonico nao possui physical_effect")
-        effect = physical_effect("demo.resource", "demo", "persistent", changed=True)
-        if set(effect) != {"resource", "operation", "persistence", "changed"}:
-            out.append("physical_effect universal shape invalido")
-
-        schema = schema_for_profile("agent")
-        variants = schema["properties"]["action"]["anyOf"]
-        kinds = [v["properties"]["kind"]["enum"][0] for v in variants]
-        if kinds != ["capability_calls", "await_user", "complete"]:
-            out.append(f"action kinds invalidos:{kinds!r}")
-        schema_text = json.dumps(schema, ensure_ascii=False)
-        if "memory_updates" not in schema.get("properties", {}):
-            out.append("agent schema sem memory_updates opcional")
-        for legacy in ('"patches"', '"tool_calls"', '"completion_mode"'):
-            if legacy in schema_text:
-                out.append(f"contrato estruturado legado:{legacy}")
-
-        lower_prompt = PROMPT_AGENTE.lower()
-        required = (
-            "sole semantic authority", "independent providers", "capabilities are resources, not mandatory steps",
-            "if you are unsure whether you possess enough information", "available capability is not evidence",
-            "grounding_ids and effect_ids", "runtime validates coordinate existence and identity only",
-            "capability success is not automatically task success",
-            "resource identifies what was affected", "establishes and does_not_establish",
-            "task memory", "physical coverage means the body observed a scope",
-        )
-        for text in required:
-            if text not in lower_prompt:
-                out.append(f"conceito generico ausente no Main prompt:{text}")
-        for domain_name in ("search_code", "read_file", "workspace_transaction", "run_tests", "run_command", "petbot", "router.restart"):
-            if domain_name in lower_prompt:
-                out.append(f"Main prompt acoplado a dominio:{domain_name}")
-
-        catalog = {item["name"]: item for item in registry.catalog(_json(base / "config.json"))}
-        run_contract = catalog.get("standard.run_command") or {}
-        if not run_contract.get("establishes") or not run_contract.get("does_not_establish"):
-            out.append("standard.run_command sem fronteira causal model-facing")
-        tx_contract = catalog.get("standard.workspace_transaction") or {}
-        if not tx_contract.get("establishes") or not tx_contract.get("does_not_establish"):
-            out.append("standard.workspace_transaction sem fronteira causal model-facing")
-        for forcing in ("if the request contains", "always use", "always investigate", "must create a task"):
-            if forcing in lower_prompt:
-                out.append(f"Main prompt prescritivo:{forcing}")
+        cfg=_json(base/"config.json")
+        host=build_bundled_host(str(base)); registry=host.registry
+        host_context=host.provider_context()
+        core_memory=host_context.get("core_memory") if isinstance(host_context,dict) else None
+        if not isinstance(core_memory,dict) or not str(core_memory.get("world_scope_id") or "").strip() or "scope_root" in core_memory:
+            out.append("Host must provide opaque core_memory.world_scope_id without scope_root")
+        if manifest.get("public_capabilities") != registry.names(): out.append("manifest public_capabilities != registry")
+        expected_surface=ecc_catalog(registry,cfg,registry.names())
+        expected_ops={
+            "explorar":[item.get("operation") for item in expected_surface.get("explorar") or []],
+            "construir":[item.get("operation") for item in expected_surface.get("construir") or []],
+            "concluir":["concluir"],
+        }
+        if manifest.get("ecc_operations") != expected_ops: out.append("manifest ecc_operations != ECC catalog")
+        schema=schema_for_profile("ecc")
+        types=[]
+        for variant in schema.get("oneOf") or []:
+            enum=((variant.get("properties") or {}).get("type") or {}).get("enum") or []
+            if enum: types.append(enum[0])
+        if types != ["explorar","construir","concluir"]: out.append(f"ECC decision types invalid:{types!r}")
+        schema_text=json.dumps(schema,ensure_ascii=False).lower()
+        for forbidden in ("investigation_updates","task_updates","memory_updates","learned","await_user","completion_mode","grounding_ids","effect_ids"):
+            if forbidden in schema_text: out.append(f"legacy structured field:{forbidden}")
+        lower=PROMPT_ECC.lower()
+        for required in (
+            "three moves", "explorar", "construir", "concluir",
+            "understand what the user means", "not every message is a task",
+            "runtime does not understand meaning", "what am i still trying to achieve",
+            "evidence means something was really observed", "fresh does not mean",
+            "memory is what is worth knowing again later", "useful again in the future",
+            "do not need to wait for the user", "memory can also be wrong",
+            "not a fourth move", "operation=recall", "objective says what",
+        ):
+            if required not in lower: out.append(f"ECC prompt concept missing:{required}")
+        memory_props=[]
+        for variant in schema.get("oneOf") or []:
+            memory=((variant.get("properties") or {}).get("memory") or {})
+            props=memory.get("properties") or {}
+            memory_props.append(set(props))
+        if any(props != {"focus","disposition","operations"} for props in memory_props):
+            out.append("ECC memory sidecar contract invalid")
+        objective_props=[]
+        for variant in schema.get("oneOf") or []:
+            objective=((variant.get("properties") or {}).get("objective") or {})
+            objective_props.append(set((objective.get("properties") or {}).keys()))
+            if "objective" not in (variant.get("required") or []): out.append("ECC objective sidecar must be required")
+        if any(props != {"disposition","state"} for props in objective_props):
+            out.append("ECC objective sidecar contract invalid")
+        if '"project"' in schema_text or "line_start" in schema_text or "line_end" in schema_text:
+            out.append("ECC memory contract contains domain-specific project/line selector")
+        state=AgentSession("x").to_dict()
+        if state.get("session_schema_version") != SESSION_SCHEMA_VERSION: out.append("Session schema identity mismatch")
+        for forbidden in ("decision_ledger","investigation","tasks","task_memory","pending_capability"):
+            if forbidden in state: out.append(f"legacy session field:{forbidden}")
+        for required in ("evidence","memory_focus","objective_state","runtime_feedback","pending_operation","conversation_background"):
+            if required not in state: out.append(f"ECC session field missing:{required}")
+        if set((cfg.get("agent") or {}).keys()) != {"task_deadline_seconds"}: out.append("agent config must only contain task_deadline_seconds")
     finally:
         if inserted:
             try: sys.path.remove(base_text)
             except ValueError: pass
 
-    config = _json(base / "config.json")
-    if set((config.get("agent") or {}).keys()) != {"task_deadline_seconds"}:
-        out.append("agent config deve conter apenas task_deadline_seconds")
-    providers = config.get("providers")
-    if not isinstance(providers, dict) or set(providers) != {"standard", "memory"}:
-        out.append("config.providers deve declarar exatamente standard e memory no host bundled")
-    for forbidden in ("codar", "tools", "workspace"):
-        if forbidden in config:
-            out.append(f"config top-level de dominio/legado:{forbidden}")
-
-    agent_source = (base / "eyle/core/agent.py").read_text(encoding="utf-8").lower()
-    for forbidden in ("from eyle.providers.standard", "import eyle.providers.standard", "workspace_transaction", "search_code", "read_file", "run_tests", "default_registry"):
-        if forbidden in agent_source:
-            out.append(f"Core agent acoplado ao provider standard/global:{forbidden}")
-
-    service_source = (base / "eyle/runtime/service.py").read_text(encoding="utf-8").lower()
-    for forbidden in ("providers.standard", "standard_impl", "discover_project"):
-        if forbidden in service_source:
-            out.append(f"runtime/service acoplado ao provider standard:{forbidden}")
-
-    for root_name in ("eyle/providers", "eyle/capabilities"):
-        root = base / root_name
-        for path in root.rglob("*.py"):
-            text = path.read_text(encoding="utf-8").lower()
-            if "from eyle.core" in text or "import eyle.core" in text:
-                out.append(f"provider/capability importa Core:{path.relative_to(base)}")
-
-    capability_init = (base / "eyle/capabilities/__init__.py").read_text(encoding="utf-8").lower()
-    for legacy in ("default_registry", "register_provider", "reset_providers"):
-        if legacy in capability_init:
-            out.append(f"registry global legado reapareceu:{legacy}")
-
-    session_source = (base / "eyle/core/session.py").read_text(encoding="utf-8")
-    if "request_context" not in session_source:
-        out.append("AgentSession sem request_context autoritativo")
-    if "task_memory" not in session_source:
-        out.append("AgentSession sem task_memory cognitivo")
-    task_memory_source = (base / "eyle/core/task_memory.py").read_text(encoding="utf-8")
-    for required_symbol in ("EvidenceSpan", "project_task_knowledge", "apply_task_memory_updates"):
-        if required_symbol not in task_memory_source:
-            out.append(f"Task Memory sem conceito/simbolo requerido:{required_symbol}")
-    registry_source = (base / "eyle/capabilities/registry.py").read_text(encoding="utf-8")
-    for required_symbol in ("def rematerialize", "def select_evidence"):
-        if required_symbol not in registry_source:
-            out.append(f"Registry sem suporte Task Memory:{required_symbol}")
+    ecc=(base/"eyle/core/ecc.py").read_text(encoding="utf-8").lower()
+    for forbidden_provider in ('"standard.', '"memory.', "'standard.", "'memory."):
+        if forbidden_provider in ecc: out.append(f"ECC core hardcodes bundled provider:{forbidden_provider}")
+    agent=(base/"eyle/core/agent.py").read_text(encoding="utf-8").lower()
+    for forbidden in ("from eyle.providers.standard","import eyle.providers.standard","write_prepare","analysis_investigate","task_updates","investigation_updates"):
+        if forbidden in agent: out.append(f"agent legacy/domain coupling:{forbidden}")
+    for root_name in ("eyle/providers","eyle/capabilities"):
+        for path in (base/root_name).rglob("*.py"):
+            text=path.read_text(encoding="utf-8").lower()
+            if "from eyle.core" in text or "import eyle.core" in text: out.append(f"provider imports core:{path.relative_to(base)}")
+    memory_runtime=(base/"eyle/runtime/memory_graph.py").read_text(encoding="utf-8").lower()
+    for forbidden_semantic in ("decide_importance", "detect_dead_code", "semantic_relevance", "choose_what_to_remember"):
+        if forbidden_semantic in memory_runtime: out.append(f"memory runtime gained semantic policy:{forbidden_semantic}")
+    if "def world_scope(" not in memory_runtime or "def project_scope(" in memory_runtime:
+        out.append("memory runtime world scope boundary invalid")
     return out
 
+def validar_artefato_release(base_dir:os.PathLike[str]|str, manifesto:Dict[str,Any]|None=None)->None:
+    base=Path(base_dir); manifest=manifesto if isinstance(manifesto,dict) else _json(base/"release_manifest.json")
+    violations=_artifact_violations(base)+_architecture_violations(base,manifest)
+    if (manifest.get("publication") or {}).get("requires_extracted_artifact_verification") is not True: violations.append("extracted artifact verification not required")
+    if violations: raise ReleaseIdentityError("invalid release artifact:\n- "+"\n- ".join(sorted(set(violations))))
 
-def validar_artefato_release(base_dir: os.PathLike[str] | str, manifesto: Dict[str, Any] | None = None) -> None:
-    base = Path(base_dir)
-    manifest = manifesto if isinstance(manifesto, dict) else _json(base / "release_manifest.json")
-    violations = _artifact_violations(base) + _architecture_violations(base, manifest)
-    publication = manifest.get("publication") if isinstance(manifest.get("publication"), dict) else {}
-    if publication.get("requires_extracted_artifact_verification") is not True:
-        violations.append("publication.requires_extracted_artifact_verification precisa ser true")
-    if violations:
-        raise ReleaseIdentityError("artefato de release invalido:\n- " + "\n- ".join(sorted(set(violations))))
+def validar_identidade_release(base_dir:os.PathLike[str]|str)->Dict[str,str]:
+    if sys.version_info<MIN_PYTHON: raise ReleaseIdentityError("Python 3.11+ required")
+    base=Path(base_dir); identity=identidade_config(base); manifest=_json(base/"release_manifest.json")
+    errors=[]
+    for k,v in identity.items():
+        if str(manifest.get(k) or "") != v: errors.append(f"manifest {k} mismatch")
+    if str(manifest.get("release")) != identity["app_version"]: errors.append("release != app_version")
+    readme=(base/"README.md").read_text(encoding="utf-8")
+    if not readme.startswith("# Eyle") or "Explorar" not in readme or "Construir" not in readme or "Concluir" not in readme:
+        errors.append("README project overview missing")
+    if "**Revision:**" in readme or "REV2_" in readme:
+        errors.append("README must describe the project, not a revision report")
+    if errors: raise ReleaseIdentityError("release identity mismatch:\n- "+"\n- ".join(errors))
+    validar_artefato_release(base,manifest); return identity
 
-
-def validar_identidade_release(base_dir: os.PathLike[str] | str) -> Dict[str, str]:
-    if sys.version_info < MIN_PYTHON:
-        raise ReleaseIdentityError(f"Eyle requer Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+")
-    base = Path(base_dir)
-    identity = identidade_config(base)
-    manifest = _json(base / "release_manifest.json")
-    errors = []
-    for key, expected in identity.items():
-        if manifest.get(key) != expected:
-            errors.append(f"release_manifest.json:{key}={manifest.get(key)!r}; esperado {expected!r}")
-    if manifest.get("release") != identity["app_version"]:
-        errors.append("release precisa ser igual a app_version")
-    readme = (base / "README.md").read_text(encoding="utf-8")
-    marker = f"**Version:** {identity['app_version']} · **Schema:** {identity['config_schema_version']} · **Revision:** {identity['revision']}"
-    if marker not in readme:
-        errors.append("README sem marcador canonico: " + marker)
-    if errors:
-        raise ReleaseIdentityError("identidade de release divergente:\n- " + "\n- ".join(errors))
-    validar_artefato_release(base, manifest)
-    return identity
-
-
-def main() -> int:
-    base = Path(__file__).resolve().parent.parent.parent
-    identity = validar_identidade_release(base)
+def main()->int:
+    base=Path(__file__).resolve().parent.parent.parent
+    identity=validar_identidade_release(base)
     print(f"release artifact ok: app={identity['app_version']} schema={identity['config_schema_version']} revision={identity['revision']} python>={MIN_PYTHON[0]}.{MIN_PYTHON[1]}")
     return 0
 
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+if __name__=="__main__": raise SystemExit(main())

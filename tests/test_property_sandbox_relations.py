@@ -6,12 +6,16 @@ import json
 from pathlib import Path
 
 import eyle.core.agent as core_agent
+from eyle.runtime.ecc_runtime import project_result
 import eyle.providers.standard_impl.sandbox as sandbox_mod
 import eyle.providers.standard as tools
 from eyle.runtime.execution_context import ExecutionContext, bind_execution, reset_execution
-from eyle.providers.standard import capability_observation_signature as observation_signature
 from eyle.core.session import AgentSession
-from tests.canonical import agent_tools, agent_complete, base_config, investigation_target, tool_call
+from tests.canonical import base_config
+
+
+def observation_signature(name, arguments):
+    return standard_registry().observation_signature(f"standard.{name}" if "." not in name else name, arguments)
 
 
 def _ctx(root, config=None):
@@ -28,7 +32,7 @@ def test_symbol_relations_distinguishes_references_from_root_reachability(tmp_pa
         encoding="utf-8",
     )
     result = standard_registry().execute(
-        "symbol_relations",
+        "standard.symbol_relations",
         {"symbol": "target", "roots": ["main.py", "dead_a"], "max_depth": 6},
         _ctx(tmp_path),
     )
@@ -92,27 +96,15 @@ def test_run_command_is_not_replayable_because_sandbox_state_can_change():
 
 def test_find_symbol_model_view_is_location_only(tmp_path):
     (tmp_path / "a.py").write_text("def hello():\n    return 'world'\n", encoding="utf-8")
-    raw = standard_registry().execute("find_symbol", {"symbol": "hello"}, _ctx(tmp_path))
+    raw = standard_registry().execute("standard.find_symbol", {"symbol": "hello"}, _ctx(tmp_path))
     assert raw["ok"] is True
     # Raw Evidence may retain source bytes; model-facing locator must not.
     session = AgentSession("locate")
-    model = core_agent._model_capability_result(session, "standard.find_symbol", raw, standard_registry(), base_config(), {"symbol": "hello"})
+    model = project_result(session, "standard.find_symbol", raw, standard_registry(), base_config())
     detail = model["detail"]
     assert detail["file"] == "a.py"
     assert "numbered_content" not in detail and "content" not in detail and "codigo_original" not in detail
 
-
-def test_repeated_identical_investigation_transition_does_not_create_semantic_fatal(monkeypatch, tmp_path):
-    calls=0
-    def fake(prompt,cfg):
-        nonlocal calls; calls+=1
-        if calls<3:
-            return agent_tools(tool_call("count_tokens",{}),investigation=[{"id":"T1","goal":"x","status":"open","grounding_ids":[],"conclusion":"","reason":""}])
-        return agent_complete("done",investigation=[{"id":"T1","goal":"x","status":"dismissed","grounding_ids":[],"conclusion":"","reason":"not needed for final"}])
-    monkeypatch.setattr(core_agent,"executar_agente_llm",fake)
-    status,text,_,details=run_agent(core_agent, "x",base_config(),provider_context={"standard":{"caminho_origem":str(tmp_path)}},retornar_detalhes=True)
-    assert status=="success" and text=="done"
-    assert details["failure_code"] is None
 
 def test_agent_sandbox_snapshot_omits_only_path_identified_protected_resources(tmp_path):
     (tmp_path / ".env").write_text("TOKEN=supersecretvalue\n", encoding="utf-8")

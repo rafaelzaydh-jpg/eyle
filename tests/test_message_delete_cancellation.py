@@ -15,6 +15,7 @@ def _ambiente_temporario(monkeypatch, tmp_path):
     memory.mkdir()
     context.mkdir()
     monkeypatch.setattr(service_mod, "MEMORY_DIR", str(memory))
+    monkeypatch.setattr(service_mod, "AGENT_PENDENTE_PATH", str(context / "agent_pendente.json"))
     monkeypatch.setattr(queue, "DB_PATH", str(context / "fila.sqlite3"))
     queue._evento_disponivel.clear()
     return memory, context
@@ -104,3 +105,34 @@ def test_pergunta_web_forca_processo_terminavel_mesmo_com_isolamento_desligado(
     assert chamadas and chamadas[0][0] == job_id
     assert callable(chamadas[0][1])
     assert queue.obter(job_id)["status"] == "completed"
+
+
+def test_limpar_conversa_preserva_memory_graph(monkeypatch, tmp_path):
+    memory, _ = _ambiente_temporario(monkeypatch, tmp_path)
+    service_mod.registrar_mensagem("user", "mensagem antiga")
+    service_mod.registrar_mensagem("assistant", "resposta antiga")
+    graph = memory / "core_memory.sqlite3"
+    graph.write_bytes(b"memory-graph-sentinel")
+
+    resultado = service_mod.limpar_conversa_preservando_memoria()
+
+    assert resultado == {
+        "status": "ok",
+        "removed_messages": 2,
+        "memory_graph_preserved": True,
+    }
+    assert service_mod.carregar_conversa() == []
+    assert graph.read_bytes() == b"memory-graph-sentinel"
+
+
+def test_limpar_conversa_recusa_enquanto_job_ativo(monkeypatch, tmp_path):
+    _ambiente_temporario(monkeypatch, tmp_path)
+    service_mod.registrar_mensagem("user", "nao apagar ainda")
+    queue.adicionar({"type": "pergunta", "texto": "oi", "mensagem_id": 1})
+
+    resultado = service_mod.limpar_conversa_preservando_memoria()
+
+    assert resultado["status"] == "busy"
+    assert resultado["error_code"] == "CONVERSATION_RESET_BUSY"
+    assert resultado["memory_graph_preserved"] is True
+    assert len(service_mod.carregar_conversa()) == 1

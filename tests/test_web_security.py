@@ -207,3 +207,44 @@ def test_job_falho_expoe_so_diagnostico_seguro(monkeypatch):
     assert "resultado" not in dados
     assert "roteador" not in corpo
     assert routes.BASE_DIR not in corpo
+
+
+def test_delete_conversa_preserva_memory_graph_e_exige_token(monkeypatch):
+    cliente = _cliente(monkeypatch)
+    chamadas = []
+    monkeypatch.setattr(
+        routes.eyle_service,
+        "limpar_conversa_preservando_memoria",
+        lambda: chamadas.append(True) or {
+            "status": "ok", "removed_messages": 4, "memory_graph_preserved": True,
+        },
+    )
+
+    sem_token = cliente.delete("/conversa")
+    assert sem_token.status_code == 401
+    assert chamadas == []
+
+    resposta = cliente.delete("/conversa", headers=_cabecalho())
+    assert resposta.status_code == 200
+    assert resposta.get_json()["removed_messages"] == 4
+    assert resposta.get_json()["memory_graph_preserved"] is True
+    assert chamadas == [True]
+
+
+def test_delete_conversa_retorna_409_se_job_ativo(monkeypatch):
+    cliente = _cliente(monkeypatch)
+    monkeypatch.setattr(
+        routes.eyle_service,
+        "limpar_conversa_preservando_memoria",
+        lambda: {
+            "status": "busy",
+            "error_code": "CONVERSATION_RESET_BUSY",
+            "active_jobs": 1,
+            "removed_messages": 0,
+            "memory_graph_preserved": True,
+        },
+    )
+
+    resposta = cliente.delete("/conversa", headers=_cabecalho())
+    assert resposta.status_code == 409
+    assert resposta.get_json()["error_code"] == "CONVERSATION_RESET_BUSY"

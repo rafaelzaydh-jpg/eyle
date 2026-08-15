@@ -1,9 +1,9 @@
 """Run-scoped physical execution state.
 
 Configuration is immutable input. This context owns deadlines and the canonical
-LLM call ledger for one execution/resume. Rev1.4.8 removes the task-wide token
-fuse: token usage is accounting only. Physical containment is the provider/model
-context window plus the wall-clock deadline and capability-specific limits.
+LLM call ledger for one ECC execution/resume. Token usage is accounting only;
+physical containment is the provider/model context window, wall-clock deadline
+and capability-specific limits.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
@@ -23,7 +23,6 @@ class ExecutionContext:
     history_messages_omitted: int = 0
     agent_turns: int = 0
     session_turn_start: int = 0
-    decision_event_start: int = 0
     observation_event_start: int = 0
     observation_replay_start: int = 0
     grounding_ids_start: List[str] = field(default_factory=list)
@@ -54,9 +53,7 @@ class ExecutionContext:
     def bind_session_baseline(self, session: Any) -> None:
         """Capture task-cumulative state at the start of this physical job."""
         self.session_turn_start = int(getattr(session, "turn", 0) or 0)
-        decisions = getattr(session, "decision_ledger", {}) or {}
         observations = getattr(session, "observation_ledger", {}) or {}
-        self.decision_event_start = len(decisions.get("events") or []) if isinstance(decisions, dict) else 0
         self.observation_event_start = len(observations.get("events") or []) if isinstance(observations, dict) else 0
         self.observation_replay_start = max(0, int(observations.get("replay_count") or 0)) if isinstance(observations, dict) else 0
         materials = observations.get("materials") if isinstance(observations, dict) else {}

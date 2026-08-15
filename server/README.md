@@ -1,101 +1,52 @@
-# Eyle Qwen Proxy — porta 8080
+# Eyle DeepSeek Adapter Rev2.5.2
 
-Servidor local OpenAI-compatible que recebe as chamadas da Eyle e encaminha para o Qwen pela API do DashScope.
+Adapter dedicado à Eyle Rev2.5.2 ECC para o endpoint estável OpenAI-compatible da DeepSeek.
 
-## O que ele faz
+## Contrato estruturado
 
-- Escuta em `127.0.0.1:8080`.
-- Expõe `POST /v1/chat/completions` e `GET /v1/models`.
-- Encaminha streaming SSE sem juntar toda a resposta na memória.
-- Preserva `content` e `reasoning_content` exatamente como chegam do Qwen.
-- Traduz os controles de pensamento da Eyle para `enable_thinking`.
-- Desliga pensamento por padrão nas decisões JSON internas do agente.
-- Normaliza `response_format` para o formato aceito pelo DashScope.
-- Mantém a chave real do DashScope fora da configuração da Eyle.
-- Não registra prompts ou respostas nos logs.
+A Eyle envia seu contrato canônico como `response_format.type=json_schema` para o adapter. O adapter **não encaminha `json_schema` à DeepSeek**. Ele converte a chamada para `response_format={"type":"json_object"}`, injeta uma gramática JSON compacta derivada do schema recebido e valida a resposta localmente com JSON Schema Draft 2020-12.
 
-## Instalação no Windows
+Rev2.5.2 estende essa gramática com o sidecar de **Objective State** além da Memory Graph:
 
-1. Extraia a pasta.
-2. Copie `.env.example` para `.env`.
-3. Abra `.env` e troque:
-
-```env
-DASHSCOPE_API_KEY=sk-coloque-sua-chave-aqui
+```json
+{"objective":{"disposition":"unchanged","state":null}}
 ```
 
-4. Execute:
-
-```powershell
-.\iniciar.ps1
-```
-
-Ou dê dois cliques em `iniciar.bat`.
-
-## Configuração da Eyle
-
-Use estes valores na configuração de LLM:
+ou:
 
 ```json
 {
-  "provider": "openai_compatible",
-  "base_url": "http://127.0.0.1:8080/v1",
-  "model": "qwen3.8-max",
-  "api_key": "local-sem-chave",
-  "stream_responses": true
+  "objective": {
+    "disposition": "updated",
+    "state": {
+      "summary": "Satisfy the compound request",
+      "status": "active",
+      "children": [],
+      "constraints": []
+    }
+  }
 }
 ```
 
-A `api_key` acima é apenas um valor compatível com clientes que exigem uma chave. A chave verdadeira fica somente no `.env` do proxy.
+A gramática Objective e a gramática Memory (`remember`, `revise`, `relate`, `archive`, `supersede`, `retire_relation`, aliases e supports) são derivadas do **schema canônico recebido**, não de uma lista paralela simplificada.
 
-## Teste rápido
+## Repair
 
-Com o servidor aberto:
+Quando a resposta não satisfaz o schema, o adapter discrimina primeiro o ramo ECC real por `type`, depois valida Objective e Memory em seus ramos específicos. Assim os repairs recebem erros acionáveis como:
 
-```powershell
-curl.exe http://127.0.0.1:8080/health
+```text
+$.objective.state.status: required property missing
+$.memory.operations[0].scope: required property missing
 ```
 
-Teste uma resposta sem instalar o SDK:
+em vez de mensagens genéricas de `oneOf`.
 
-```powershell
-curl.exe -N http://127.0.0.1:8080/v1/chat/completions `
-  -H "Content-Type: application/json" `
-  -d '{"model":"qwen3.8-max","messages":[{"role":"user","content":"Quem é você?"}],"stream":true}'
+O repair é limitado por `STRUCTURED_REPAIR_ATTEMPTS`, preserva a decisão ECC e é instruído a não apagar uma atualização genuína de Objective/Memory apenas para passar na validação.
+
+## Testes
+
+```bash
+python -m pytest -q
 ```
 
-Para usar `testar_api.py`, instale também o SDK:
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install openai
-.\.venv\Scripts\python.exe testar_api.py
-```
-
-## Pensamento
-
-Configuração padrão:
-
-```env
-DEFAULT_ENABLE_THINKING=true
-STRUCTURED_ENABLE_THINKING=false
-FORCE_ENABLE_THINKING=false
-```
-
-- `DEFAULT_ENABLE_THINKING=true`: respostas comuns podem usar pensamento.
-- `STRUCTURED_ENABLE_THINKING=false`: decisões JSON do agente saem direto, sem gastar tempo pensando.
-- O proxy também entende `reasoning_effort=none` e `chat_template_kwargs.enable_thinking=false` enviados pela Eyle.
-- `FORCE_ENABLE_THINKING=true` ignora tudo e força pensamento em todas as chamadas; não é recomendado para a Eyle.
-
-O proxy não converte `reasoning_content` em resposta comum. Ele apenas repassa os blocos. A Eyle decide quando usar esse conteúdo.
-
-## Segurança
-
-Por padrão, o servidor escuta apenas em `127.0.0.1`, portanto não fica disponível para outros computadores.
-
-Caso altere para `0.0.0.0`, defina obrigatoriamente:
-
-```env
-PROXY_API_KEY=uma-chave-local-bem-grande
-```
-
-Então configure essa mesma chave na Eyle. Não exponha a porta 8080 diretamente na internet.
+A suíte usa `tests/fixtures/eyle_rev252_ecc_schema.json`, snapshot do **schema ECC canônico completo** gerado de `llm/structured.py` da Eyle Rev2.5.2.

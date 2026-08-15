@@ -4,6 +4,7 @@ from tests.canonical import standard_registry
 from pathlib import Path
 
 import eyle.core.agent as core_agent
+from eyle.runtime.ecc_runtime import project_result
 from eyle.runtime import observation
 from eyle.providers import standard as tools
 from eyle.runtime.observation import record
@@ -27,8 +28,8 @@ def _ctx(root, session=None, *, max_ranges=2, max_matches=2):
 
 
 def _observe(session, name, arguments, result, cfg):
-    projected = core_agent._model_capability_result(session, name, result, standard_registry(), cfg, arguments)
-    record(session, tools.capability_observation_signature(name, arguments), name, arguments, result, projected)
+    projected = project_result(session, name, result, standard_registry(), cfg)
+    record(session, standard_registry().observation_signature(name, arguments), name, arguments, result, projected)
     return projected
 
 
@@ -70,7 +71,7 @@ def test_search_coverage_is_complete_while_materialization_frontier_remains(tmp_
         (tmp_path / f"f{index}.py").write_text("needle\n", encoding="utf-8")
     session = AgentSession("search")
     ctx = _ctx(tmp_path, session)
-    result = standard_registry().execute("search_code", {"query": "needle"}, ctx)
+    result = standard_registry().execute("standard.search_code", {"query": "needle"}, ctx)
 
     coverage = result["coverage"]
     assert coverage["scope"]["kind"] == "literal_search"
@@ -87,13 +88,13 @@ def test_search_frontier_materializes_real_file_material_and_reuses_one_snapshot
     session = AgentSession("search")
     ctx = _ctx(tmp_path, session)
     args = {"query": "needle"}
-    raw = standard_registry().execute("search_code", args, ctx)
+    raw = standard_registry().execute("standard.search_code", args, ctx)
     model = _observe(session, "search_code", args, raw, ctx["config"])
     frontier_id = model["frontiers"][0]["id"]
     snapshot_ids = set(session.observation_ledger["snapshots"])
     assert len(snapshot_ids) == 1
 
-    continued = standard_registry().execute("continue_observation", {"frontier": frontier_id}, ctx)
+    continued = standard_registry().execute("standard.continue_observation", {"frontier": frontier_id}, ctx)
     assert continued["ok"] is True
     assert continued["observations"]
     first = continued["observations"][0]
@@ -177,7 +178,7 @@ def test_new_non_file_capability_plugs_into_physical_contract_without_core_branc
     }
     monkeypatch.setitem(tools.CAPABILITIES, name, spec)
 
-    raw = standard_registry().execute(name, {"device": "sensor-7"}, {})
+    raw = standard_registry().execute(f"standard.{name}", {"device": "sensor-7"}, {})
     assert raw["ok"] is True
     assert raw["coverage"]["complete"] is True
     assert raw["observations"][0]["locator"]["kind"] == "device"

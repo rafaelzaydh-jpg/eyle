@@ -3,11 +3,11 @@ import json
 
 import eyle.core.agent as core_agent
 from eyle.runtime import service
-from tests.canonical import agent_complete, base_config
+from tests.canonical import base_config
 
 
-def test_service_projects_generic_execution_failure_from_capability_history():
-    details={"capability_history":[{"capability":"petbot.dispense","result":{"ok":False,"error_code":"MOTOR_JAM","detail":"motor blocked","retryable":False}}]}
+def test_service_projects_generic_execution_failure_from_operation_history():
+    details={"operation_history":[{"capability":"petbot.dispense","result":{"ok":False,"error_code":"MOTOR_JAM","detail":"motor blocked","retryable":False}}]}
     metadata=service._metadata_resposta_agente("failed",details)
     assert metadata["agent_status"] == "failed"
     assert metadata["execution_failure"] == {"capability":"petbot.dispense","error_code":"MOTOR_JAM","detail":"motor blocked","retryable":False}
@@ -17,7 +17,7 @@ def test_service_carries_execution_failure_into_agent_conversation_context(monke
     failure={"capability":"router.restart","error_code":"OFFLINE","detail":"router did not answer"}
     captured={}
     monkeypatch.setattr(service,"carregar_config",lambda:{})
-    monkeypatch.setattr(service,"carregar_provider_context",lambda:{"standard":{"caminho_origem":"/tmp/project"},"memory":{"storage_dir":"/tmp/memory","scope_root":"/tmp/project"}})
+    monkeypatch.setattr(service,"carregar_provider_context",lambda:{"standard":{"caminho_origem":"/tmp/project"},"memory":{"storage_dir":"/tmp/memory","world_scope_id":"workspace:/tmp/project"}})
     monkeypatch.setattr(service,"carregar_agent_pendente",lambda:None)
     def fake_process(question,config,project,**kwargs):
         captured.update(kwargs.get("conversation_context") or {})
@@ -28,14 +28,16 @@ def test_service_carries_execution_failure_into_agent_conversation_context(monke
     assert captured["recent_messages"] == [{"role":"assistant","content":"falhou","execution_failure":failure}]
 
 
-def test_follow_up_can_ground_prior_runtime_failure(monkeypatch,tmp_path):
+def test_follow_up_receives_prior_runtime_failure_as_current_observation(monkeypatch,tmp_path):
     prompts=[]
     def fake(prompt,_cfg):
         payload=json.loads(prompt); prompts.append(payload)
-        assert payload["latest_capability_results"][0]["detail"]["source_type"] == "runtime_failure"
-        return agent_complete({"answer":"O roteador não respondeu.","grounding_ids":["mat-0001"]})
-    monkeypatch.setattr(core_agent,"executar_agente_llm",fake)
+        observation=payload["latest_observations"][0]
+        assert observation["detail"]["source_type"] == "runtime_failure"
+        return {"type":"concluir","response":"O roteador não respondeu.","memory":{"focus":[],"disposition":"unchanged","operations":[]}}
+    monkeypatch.setattr(core_agent,"executar_ecc_llm",fake)
     context={"recent_messages":[{"role":"assistant","content":"falhou","execution_failure":{"capability":"router.restart","error_code":"OFFLINE","detail":"router did not answer"}}]}
-    status,text,_,details=run_agent(core_agent, "Por que falhou?",base_config(),provider_context={"standard":{"caminho_origem":str(tmp_path)}},retornar_detalhes=True,conversation_context=context)
-    assert status == "success" and "roteador" in text.lower()
-    assert details["grounding"][0]["source_type"] == "runtime_failure"
+    provider_context={"standard":{"caminho_origem":str(tmp_path)},"core_memory":{"storage_dir":str(tmp_path.parent/(tmp_path.name+"_memory")),"world_scope_id":f"workspace:{tmp_path.resolve()}"}}
+    status,text,_,details=run_agent(core_agent,"Por que falhou?",base_config(),provider_context=provider_context,retornar_detalhes=True,conversation_context=context)
+    assert status == "completed" and "roteador" in text.lower()
+    assert details["grounding_count_total"] == 1

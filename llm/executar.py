@@ -16,7 +16,7 @@ import urllib.error
 from contextlib import contextmanager
 
 from eyle.runtime.execution_context import ExecutionContext, current_execution  # noqa: E402
-from eyle.core.token_budget import estimate_tokens as estimar_tokens  # noqa: E402
+from eyle.runtime.token_budget import estimate_tokens as estimar_tokens  # noqa: E402
 from eyle.runtime import telemetry  # noqa: E402
 from eyle.runtime import limiter  # noqa: E402
 from eyle.runtime import progress as job_progress  # noqa: E402
@@ -179,6 +179,98 @@ def _erro_http(base_url, erro, corpo_erro=""):
         retry_after=_retry_after_seconds(erro),
         error_code="HTTP_TRANSIENT" if transitorio else "HTTP_PERMANENT",
     )
+
+
+def _adapter_error_contract(erro, corpo_erro=""):
+    """Recognize Eyle-adapter errors without treating every 5xx as retry-safe.
+
+    A structured-contract 502 may already represent multiple billed upstream
+    generations. An adapter upstream timeout may likewise have been processed by
+    the model provider. Retrying either blindly can multiply token cost.
+    """
+    try:
+        payload = json.loads(str(corpo_erro or ""))
+    except Exception:
+        payload = {}
+    error = payload.get("error") if isinstance(payload, dict) else None
+    error_obj = error if isinstance(error, dict) else {}
+    error_type = str(error_obj.get("type") or "")
+    usage = payload.get("usage") if isinstance(payload, dict) and isinstance(payload.get("usage"), dict) else {}
+    headers = getattr(erro, "headers", None)
+
+    def header_int(name):
+        try:
+            raw = headers.get(name) if headers is not None else None
+            return int(raw) if raw is not None and str(raw).strip() else None
+        except (TypeError, ValueError):
+            return None
+
+    prompt_tokens = header_int("X-Eyle-Usage-Prompt-Tokens")
+    completion_tokens = header_int("X-Eyle-Usage-Completion-Tokens")
+    cached_tokens = header_int("X-Eyle-Usage-Cached-Prompt-Tokens")
+    upstream_attempts = header_int("X-Eyle-Upstream-Attempts")
+    structured_repairs = header_int("X-Eyle-Structured-Repairs")
+    if prompt_tokens is None and isinstance(usage.get("prompt_tokens"), (int, float)):
+        prompt_tokens = max(0, int(usage.get("prompt_tokens") or 0))
+    if completion_tokens is None and isinstance(usage.get("completion_tokens"), (int, float)):
+        completion_tokens = max(0, int(usage.get("completion_tokens") or 0))
+    if cached_tokens is None:
+        raw_cached = usage.get("cached_prompt_tokens")
+        if isinstance(raw_cached, (int, float)):
+            cached_tokens = max(0, int(raw_cached))
+
+    metadata = {}
+    if prompt_tokens is not None or completion_tokens is not None:
+        metadata = {
+            "provider_usage_from_error": True,
+            "prompt_tokens": max(0, int(prompt_tokens or 0)),
+            "completion_tokens": max(0, int(completion_tokens or 0)),
+        }
+        if cached_tokens is not None:
+            metadata["cached_prompt_tokens"] = min(metadata["prompt_tokens"], max(0, int(cached_tokens)))
+    if upstream_attempts is None and isinstance(error_obj.get("upstream_attempts"), (int, float)):
+        upstream_attempts = max(0, int(error_obj.get("upstream_attempts") or 0))
+    if structured_repairs is None and isinstance(error_obj.get("repairs"), (int, float)):
+        structured_repairs = max(0, int(error_obj.get("repairs") or 0))
+    validation_errors = error_obj.get("validation_errors")
+    if isinstance(validation_errors, list):
+        validation_errors = [str(item)[:500] for item in validation_errors[:8] if str(item).strip()]
+    else:
+        validation_errors = []
+    if upstream_attempts is not None:
+        metadata["adapter_upstream_attempts"] = upstream_attempts
+    if structured_repairs is not None:
+        metadata["adapter_structured_repairs"] = structured_repairs
+    if validation_errors:
+        metadata["adapter_validation_errors"] = validation_errors
+    if headers is not None:
+        profile = headers.get("X-Eyle-Adapter-Profile")
+        enforcement = headers.get("X-Eyle-Schema-Enforcement")
+        if profile:
+            metadata["adapter_profile"] = str(profile)
+        if enforcement:
+            metadata["adapter_schema_enforcement"] = str(enforcement)
+
+    if error_type == "structured_contract_unsatisfied":
+        detail = f" Validação: {validation_errors[0]}" if validation_errors else ""
+        return ErroLLM(
+            "O adaptador esgotou a recuperação estruturada no upstream." + detail,
+            transient=False, status_code=getattr(erro, "code", None),
+            error_code="LLM_STRUCTURED_RESPONSE_UNSATISFIED",
+        ), metadata
+    if error_type == "upstream_timeout":
+        return ErroLLM(
+            "O adaptador excedeu o timeout aguardando o provider; a geração pode ter sido processada/cobrada.",
+            transient=False, status_code=getattr(erro, "code", None),
+            error_code="READ_TIMEOUT",
+        ), metadata
+    if error_type == "upstream_connection_error":
+        return ErroLLM(
+            "O adaptador não conseguiu conectar ao provider.",
+            transient=True, status_code=getattr(erro, "code", None),
+            error_code="TRANSPORT_ERROR",
+        ), metadata
+    return None, metadata
 
 
 def _ajustar_timeout_leitura(resposta, read_timeout):
@@ -470,6 +562,12 @@ def _registrar_falha_tentativa_runtime(attempt, error_code: str, detail: str = "
         attempt["error_detail"] = str(detail)[:500]
     if isinstance(elapsed_ms, (int, float)):
         attempt["latency_ms"] = round(float(elapsed_ms), 2)
+    if str(error_code or "").upper() == "READ_TIMEOUT":
+        # The request crossed the send boundary but provider usage was never
+        # returned. The provider may still have completed/billed the generation.
+        attempt["provider_usage_unknown"] = True
+        attempt["billing_may_have_occurred"] = True
+        attempt["retry_cost_risk"] = True
 
 
 def _structured_response_format(profile):
@@ -610,6 +708,11 @@ def _chamar_openai_compatible(
                 corpo = bruto
     except urllib.error.HTTPError as exc:
         body = _ler_corpo_http_error(exc)
+        adapter_error, adapter_usage = _adapter_error_contract(exc, body)
+        if adapter_usage:
+            _LLM_RESPONSE_LOCAL.metadata = adapter_usage
+        if adapter_error is not None:
+            raise adapter_error from exc
         if perfil is not None and getattr(exc, "code", None) in (400, 404, 422):
             raise ErroLLM(
                 _mensagem_http_error(base_url, exc, body),
@@ -617,9 +720,7 @@ def _chamar_openai_compatible(
                 status_code=getattr(exc, "code", None),
                 error_code="LLM_STRUCTURED_OUTPUT_UNAVAILABLE",
             ) from exc
-        # Preserve the canonical HTTP classification so transient statuses
-        # (408/425/429/5xx) can reach the outer retry policy instead of being
-        # flattened into a permanent HTTP_ERROR after one attempt.
+        # Preserve canonical HTTP classification only for unknown upstream 5xx.
         raise _erro_http(base_url, exc, body) from exc
 
     try:
@@ -919,6 +1020,16 @@ def _chamar_llm_impl(
     if perfil is not None:
         prompt_sistema = prompt_sistema.rstrip() + "\n\n" + contract_instruction(perfil)
 
+    if execution is not None:
+        latest_call = execution.latest_call()
+        if isinstance(latest_call, dict):
+            prompt_meta = latest_call.setdefault("prompt", {})
+            chars_per_token = max(
+                1, int((config or {}).get("context_engine", {}).get("chars_per_token_fallback", 3) or 3),
+            )
+            prompt_meta["system_prompt_characters"] = len(str(prompt_sistema or ""))
+            prompt_meta["system_prompt_estimated_tokens"] = estimar_tokens(prompt_sistema, chars_per_token)
+
     job_progress.publicar(
         execution, "llm_wait", "Aguardando a LLM local",
         profile=perfil or "default",
@@ -1013,6 +1124,7 @@ def _chamar_llm_impl(
                             profile=perfil,
                         )
                         reservations.append(reservation)
+                        attempt_state["reservation"] = reservation
                         attempt_state["started_at"] = time.monotonic()
                         attempt_state["attempt"] = _registrar_inicio_tentativa_runtime(
                             execution, profile=perfil or "default", max_tokens_requested=token_limit,
@@ -1091,7 +1203,7 @@ def _chamar_llm_impl(
                 eh_timeout = isinstance(motivo, (socket.timeout, TimeoutError)) or (
                     "timed out" in str(motivo or erro_rede).lower()
                 )
-                repetir_timeout = bool(cfg_llm.get("retry_read_timeouts", True))
+                repetir_timeout = bool(cfg_llm.get("retry_read_timeouts", False))
                 ultimo_erro = ErroLLM(
                     (
                         f"A LLM local excedeu o timeout de leitura de {read_atual:.1f}s "
@@ -1106,7 +1218,7 @@ def _chamar_llm_impl(
                 ultimo_erro = ErroLLM(
                     f"A LLM local excedeu o timeout de leitura de {read_atual:.1f}s "
                     f"em {base_url}. Detalhe: {erro_timeout}",
-                    transient=bool(cfg_llm.get("retry_read_timeouts", True)),
+                    transient=bool(cfg_llm.get("retry_read_timeouts", False)),
                     error_code="READ_TIMEOUT",
                 )
             except ConnectionError as erro_rede:
@@ -1121,6 +1233,15 @@ def _chamar_llm_impl(
                     f"Falha ao chamar a LLM local: {erro_inesperado}",
                     transient=False, error_code="UNEXPECTED_LLM_ERROR",
                 )
+
+            failed_metadata = _ultima_metadata_backend()
+            reservation = attempt_state.get("reservation")
+            if failed_metadata.get("provider_usage_from_error") and isinstance(reservation, dict):
+                _finalizar_requisicao_llm(config, execution, reservation, failed_metadata)
+                if execution is not None:
+                    execution.completion_tokens_actual += max(0, int(failed_metadata.get("completion_tokens") or 0))
+                    execution.reasoning_tokens_actual += max(0, int(failed_metadata.get("reasoning_tokens") or 0))
+                _registrar_metadata_runtime(execution, failed_metadata, attempt=attempt_state.get("attempt"))
 
             started_at = attempt_state.get("started_at")
             elapsed_ms = (time.monotonic() - started_at) * 1000 if isinstance(started_at, (int, float)) else None
@@ -1171,37 +1292,30 @@ def _chamar_llm_impl(
     parsed_response = resposta
     if perfil is not None:
         try:
-            parsed_response = parse_profile_response(resposta, perfil or "agent")
+            parsed_response = parse_profile_response(resposta, perfil or "ecc")
             last = _latest_attempt(execution)
             if isinstance(last, dict):
                 last["structured_parse_status"] = "valid"
-                last["structured_profile"] = perfil or "agent"
+                last["structured_profile"] = perfil or "ecc"
                 last["structured_top_level_keys"] = sorted(parsed_response.keys())
-                if (perfil or "agent") == "agent" and isinstance(parsed_response.get("action"), dict):
-                    last["structured_action_kind"] = str((parsed_response.get("action") or {}).get("kind") or "") or None
         except StructuredResponseError as error:
             observed = observed_top_level(resposta)
             observed_keys = sorted(observed.keys()) if isinstance(observed, dict) else []
-            required_keys = list(mandatory_top_level_keys(perfil or "agent"))
+            required_keys = list(mandatory_top_level_keys(perfil or "ecc"))
             missing_keys = [key for key in required_keys if key not in observed_keys]
             last = _latest_attempt(execution)
             if isinstance(last, dict):
                 last["structured_parse_status"] = "invalid"
                 last["structured_parse_error"] = error.code
                 last["structured_parse_detail"] = error.detail
-                last["structured_profile"] = perfil or "agent"
+                last["structured_profile"] = perfil or "ecc"
                 last["structured_top_level_keys"] = observed_keys
                 last["structured_missing_keys"] = missing_keys
-                if (perfil or "agent") == "agent" and isinstance(observed, dict):
-                    action = observed.get("action")
-                    last["structured_action_kind"] = (
-                        str(action.get("kind") or "") or None if isinstance(action, dict) else None
-                    )
 
             raise ErroLLM(
-                f"Structured response for {perfil or 'agent'} is invalid: {error.detail}",
+                f"Structured response for {perfil or 'ecc'} is invalid: {error.detail}",
                 transient=False,
-                error_code=f"STRUCTURED_RESPONSE_INVALID:{perfil or 'agent'}:{error.code}",
+                error_code=f"STRUCTURED_RESPONSE_INVALID:{perfil or 'ecc'}:{error.code}",
                 structured_error=error,
                 structured_observed=observed,
             ) from error
@@ -1264,64 +1378,56 @@ def _chamar_llm(
 
 
 
-PROMPT_AGENTE = """You are Eyle Main. Return only the structured Agent response.
+PROMPT_ECC = """You are Eyle. Return only one valid ECC JSON object.
 
-ROLE
-You are the sole semantic authority. Understand the current request, use retained context when it helps resolve what the user means, choose useful capabilities, interpret observations, decide when user input is needed, and decide when the request is complete. Runtime never decides meaning or relevance for you.
+THINK SIMPLY
+Understand what the user means, not only the exact words they used. Use common sense. Notice useful hints and reasonable implications. Do not wait for the user to spell out every obvious next step. Not every message is a task: normal conversation, a reaction, or learning a fact can be complete by itself.
 
-WORLD AND CAPABILITIES
-- available_capabilities is the capability surface physically available now. Capabilities come from independent providers. Eyle Core is not specialized in any provider domain.
-- Each capability describes its provider, purpose, inputs, returns, effects, caveats, limits and confirmation requirements. Those descriptions are the authority for what that capability can do.
-- Capabilities are resources, not mandatory steps. Use any capability when it produces useful information or effects for the current request; do not call capabilities merely because they exist.
-- If you are unsure whether you possess enough information to answer reliably, prefer observing before answering.
-- An available capability is not evidence that it was called. A requested call is not evidence that it executed. A plan is not an effect.
+THE THREE MOVES
+You have only three moves:
+- explorar: look, read, check, calculate, test, or otherwise observe without making a lasting change.
+- construir: make a lasting change through a Runtime-controlled operation.
+- concluir: answer the user when you have enough to give a good answer.
+For explorar or construir, choose a short operation name from the matching ecc_operations list. Never put explorar. or construir. inside operation.
 
-REALITY
-- runtime_observations and current_material contain observations produced by executed capabilities. mat-* coordinates identify Material. Material proves only the physical content it represents; interpretation remains yours.
-- runtime_effects contains eff-* coordinates for physical effects actually reported by executed capabilities. Read effect records literally: resource identifies what was affected, operation identifies what occurred, persistence identifies how long that effect/state survives (call, job, or persistent), and changed says whether that resource's state changed.
-- Capability success is not automatically task success. Compare the actual observation/effect with the active objective. A temporary, isolated, simulated, or different-resource effect can be useful for experimentation or validation but cannot stand in for a requested persistent/external effect.
-- Provider contracts may include establishes and does_not_establish. Treat those fields as the provider's causal boundary for what a successful call can and cannot prove or accomplish.
-- If an executed capability did not actually fulfill the objective, continue using available capabilities when useful or report the remaining limitation; do not present the objective as completed merely because a command/call succeeded.
-- Persistent Memory and prior_conversation are context, not automatic proof that the current external world still matches them.
-- Never silently turn remembered, inferred, planned or generated content into a claim that the environment was observed or changed. Temporary or isolated content likewise cannot be promoted into a claim that a different resource or persistence level was changed.
+WHO DECIDES WHAT
+You decide meaning, intent, relevance, what to remember, what to check next, and when you know enough. Runtime does not understand meaning. Runtime only checks rules, stores state, runs capabilities, records what was observed, checks source freshness, handles IDs, limits, permissions, confirmations, transactions, rollback, and other mechanical facts. Never hand semantic choices to Runtime.
 
-ACTIONS
-You may choose exactly one action per turn:
-1. capability_calls: call one or more provider capabilities. Read their contracts and choose freely. A capability whose contract says confirmation is required will be prepared by Runtime and suspended for user confirmation before its real effect occurs. After confirmation, its observation/effect returns to you; confirmation never completes the task on your behalf.
-2. await_user: suspend only when an active objective cannot make meaningful progress without user information, choice or supervision. Do not use await_user merely because a conversational reply invites another message.
-3. complete: deliver the terminal answer for the current turn/task. Complete does not end the conversation; it means you have adequately answered or finished what is currently required.
+OBJECTIVE
+current_request is exactly what the user said for this run. Do not rewrite it. objective_state is optional and means: "what am I still trying to achieve?"
+Every decision includes objective={disposition,state}:
+- unchanged + state:null: keep the current objective_state.
+- updated + state:{summary,status,children,constraints}: replace it.
+- cleared + state:null: remove it.
+Use Objective only when it helps you keep track of something that continues across moves. If you can answer now, do not invent one. Conversation can have no Objective. A request with several goals may use children. Objective says WHAT is still wanted, never HOW to do it. Do not put tool order, phases, checklists, or a hidden plan in Objective. Runtime stores Objective but never reads its meaning or uses it to block concluir.
 
-COMPLETE COORDINATES
-Complete carries grounding_ids and effect_ids as explicit coordinates, not as a required reasoning phase.
-- Cite mat-* IDs when observations materially support what you tell the user.
-- Cite eff-* IDs when you rely on a physical effect that actually occurred.
-- When claiming that a requested world change was completed, rely only on effect records whose resource, changed state and persistence actually establish that change.
-- Leave those arrays empty when the answer genuinely relies only on the request, conversational context, stable knowledge or reasoning.
-Runtime validates coordinate existence and identity only; it does not read your prose and decide whether the cited basis semantically proves it. That responsibility is yours.
+WHAT YOU SAW
+Evidence means something was really observed in this run. Runtime creates Evidence automatically from physical observations. latest_observations contains the newest results and their mat-* / ev-* IDs. Use explorar + operation=recall with an ev-* ID only when you need an exact old Evidence span again.
+Memory and conversation background are things you already know. They are not automatic proof that a changing world is still the same. Freshness only means the source behind a memory has not changed since it was observed. Fresh does NOT mean your old interpretation was correct. If a claim needs current facts, verify what is stale, missing, unclear, surprising, or important to check. If you claim that something does not exist, that there is no bug, or that nothing is wrong, make sure you looked widely enough to support that claim. Having a possible answer is not the same as having enough support for it.
 
-OPTIONAL STATE
-Investigation is an optional Main-owned notebook for unresolved questions across turns. Task is an optional Main-owned commitment for work that benefits from explicit completion criteria. Do not create either merely because the structures exist. Omit investigation_updates/task_updates entirely when you are not changing those states. If present, they may be empty; when unused, omit them. If you create them, close or drop them before Complete.
+MEMORY
+Memory is what is worth knowing again later. Eyle keeps it as a lasting graph of facts and links shared by explorar, construir, and concluir. It is not a fourth move and not a tool. Runtime gives you a small memory_graph before each decision. You decide all meanings, node contents, tags, relations, revisions, and whether memory should change. Runtime only stores the graph and reports mechanical facts about it.
 
-TASK MEMORY
-Task Memory is optional Main-owned cognitive memory for the active task. Use memory_updates when it is useful to compress a large observation into durable task knowledge without keeping the raw source body in every later prompt.
-- EvidenceSpan: select an exact part of an existing mat-* Material. You decide which span is relevant; Runtime only validates that the selector belongs to that Material and preserves its identity.
-- Finding: record what you learned from one or more ev-* EvidenceSpans. Findings are your semantic statements, not Runtime truth judgments.
-- Conclusion: combine Findings/Evidence into a higher-level result useful to the active objective.
-- task_knowledge contains compact retained Evidence coordinates, Findings and Conclusions. It is task-scoped, not persistent Memory across unrelated tasks.
-- Raw source text may leave the current prompt after you have metabolized it into task_knowledge. If you later need to verify the source again, request the relevant capability/range again. Physical Coverage may allow Runtime to rematerialize the exact requested content from canonical Observation without re-executing the external read.
-- Physical Coverage means the body observed a scope; it does not mean the source body is still cognitively present in your current prompt. Respect provider presentation metadata when a physically read range was only partially presented.
-- Omit memory_updates entirely when nothing worth retaining changed. Do not create ceremonial Evidence/Findings merely because Task Memory exists.
+Every decision includes memory={focus,disposition,operations}:
+- unchanged: your lasting understanding did not change; operations must be empty.
+- updated: you learned or changed something worth keeping; operations contains the graph changes.
+focus asks the next memory lookup to pay more attention to topics, tags, or mem-* IDs. remember creates a node; revise changes one; relate creates a relation; archive, supersede, and retire_relation keep history tidy. Runtime owns mem-* / rel-* IDs and revision conflicts.
 
-CONTEXT
-request is the immutable origin of the active task. request_context contains authoritative user answers supplied while that same task was suspended or refined; interpret request + request_context together as the active task. prior_conversation can resolve references, continuation cues and conversational context but must not replace the active task with an older task. environment contains provider/runtime facts about the connected world.
+Anything that may be useful again in the future can become Memory. You do not need to wait for the user to say "remember this". Good memory candidates include user facts and preferences, decisions, rules, important identifiers, useful facts about a project or world, relationships, and conclusions that can save work later. If the user says something is important, recurring, or useful later, treat that as a strong hint to consider Memory.
+Do not save everything. Save the small meaning that may help later, not whole raw outputs. If you learned a reusable fact or relationship, do not choose unchanged only to keep the answer short. Memory can also be wrong. When new Evidence shows an old memory was mistaken, revise or supersede it instead of trusting it just because it is fresh. Never add exact details such as a line number, date, or location unless your Evidence or Memory actually contains them.
 
-Continuation coordinates such as fr-* and mf-* are provider/runtime navigation handles. Coverage reports physically examined scope, not semantic sufficiency.
+MEMORY SUPPORT
+A memory node or relation may be supported by the current request, another memory node, or a current Material. For Material support use {kind:"material",material_id:"mat-*",selector:{...}}. The selector belongs to the provider and may point to lines, cells, device state, records, sensor spans, or another exact part. Omit selector when the whole Material supports the memory. For a durable fact stated by the user, use kind=request. For a memory built from another memory, use kind=memory.
+If a physical source changes, Runtime marks the affected anchor stale/degraded. It never deletes the meaning by itself. You decide what the change means after re-observing.
+
+BODY
+Capabilities are Eyle's replaceable body. runtime_environment tells you what body is attached now. It may be a workspace, robot, network, document system, or something else. Core does not need to know the domain. Provider contracts tell you what each operation can do. Seeing an operation in ecc_operations only means it is available. It does not mean it was run. Only a Runtime result or Evidence shows that something was actually observed or changed.
+
+HOW TO ACT
+Use Memory when it already answers the question well enough. Explore only what you still need to know or should verify. Prefer small targeted checks over broad repeated reads. Construct when the user needs a lasting world change and you know enough to make it safely. Conclude when you have enough for a useful, well-supported answer. Do not create fake task ledgers, phase routers, mini-agents, or hidden planners.
 """
 
 
-def executar_agente(prompt_usuario, config, execution: ExecutionContext | None = None):
-    """Run the canonical structured Eyle agent reasoning profile."""
-    return _chamar_llm(
-        PROMPT_AGENTE, prompt_usuario, config, execution,
-        perfil="agent",
-    )
+def executar_ecc(prompt_usuario, config, execution: ExecutionContext | None = None):
+    """Run the canonical Eyle ECC structured reasoning profile."""
+    return _chamar_llm(PROMPT_ECC, prompt_usuario, config, execution, perfil="ecc")

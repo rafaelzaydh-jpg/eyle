@@ -3,8 +3,11 @@ from tests.canonical import standard_registry
 
 import eyle.providers.standard as tools
 from eyle.providers.standard_impl.code_relations import analyze_symbol_relations
-from eyle.providers.standard import capability_observation_signature as observation_signature
 from tests.canonical import base_config
+
+
+def observation_signature(name, arguments):
+    return standard_registry().observation_signature(f"standard.{name}" if "." not in name else name, arguments)
 
 
 def _ctx(root):
@@ -18,7 +21,7 @@ def test_literal_directory_scope_is_recursive_and_coverage_is_physical(tmp_path)
     (tmp_path / "eyle" / "core" / "nested" / "b.py").write_text("needle = 2\n", encoding="utf-8")
     (tmp_path / "eyle" / "runtime" / "c.py").write_text("needle = 3\n", encoding="utf-8")
 
-    result = standard_registry().execute("search_code", {"query": "needle", "include_paths": ["eyle/core"]}, _ctx(tmp_path))
+    result = standard_registry().execute("standard.search_code", {"query": "needle", "include_paths": ["eyle/core"]}, _ctx(tmp_path))
     assert result["ok"] is True
     detail = result["detail"]
     assert detail["matches_observed"] == 2
@@ -37,11 +40,11 @@ def test_literal_file_exact_directory_exclusion_recursive_and_glob_explicit(tmp_
     (tmp_path / "tests" / "test_a.py").write_text("needle\n", encoding="utf-8")
     (tmp_path / "tests" / "nested" / "test_b.py").write_text("needle\n", encoding="utf-8")
 
-    exact = standard_registry().execute("search_code", {"query": "needle", "include_paths": ["src/a.py"]}, _ctx(tmp_path))["detail"]
+    exact = standard_registry().execute("standard.search_code", {"query": "needle", "include_paths": ["src/a.py"]}, _ctx(tmp_path))["detail"]
     assert exact["materialized_files"] == ["src/a.py"]
-    excluded = standard_registry().execute("search_code", {"query": "needle", "exclude_paths": ["tests"]}, _ctx(tmp_path))["detail"]
+    excluded = standard_registry().execute("standard.search_code", {"query": "needle", "exclude_paths": ["tests"]}, _ctx(tmp_path))["detail"]
     assert set(excluded["materialized_files"]) == {"src/a.py", "src/b.py", "src/a.txt"}
-    globbed = standard_registry().execute("search_code", {"query": "needle", "include_paths": ["src/*.py"]}, _ctx(tmp_path))["detail"]
+    globbed = standard_registry().execute("standard.search_code", {"query": "needle", "include_paths": ["src/*.py"]}, _ctx(tmp_path))["detail"]
     assert set(globbed["materialized_files"]) == {"src/a.py", "src/b.py"}
     assert globbed["search_scope"]["include_resolution"][0]["kind"] == "glob"
 
@@ -56,7 +59,7 @@ def test_missing_unsafe_and_capability_excluded_scope_fail_closed(tmp_path):
         ({"query": "needle", "include_paths": ["node_modules"]}, "SEARCH_SCOPE_OUTSIDE_CAPABILITY_BOUNDARY"),
     ]
     for args, code in cases:
-        result = standard_registry().execute("search_code", args, _ctx(tmp_path))
+        result = standard_registry().execute("standard.search_code", args, _ctx(tmp_path))
         assert result["ok"] is False
         assert result["executed"] is False
         assert result["error_code"] == code
@@ -66,7 +69,7 @@ def test_scope_counts_protected_files_before_read_boundary(tmp_path):
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "app.py").write_text("needle\n", encoding="utf-8")
     (tmp_path / "pkg" / ".env").write_text("needle=secret\n", encoding="utf-8")
-    detail = standard_registry().execute("search_code", {"query": "needle", "include_paths": ["pkg"]}, _ctx(tmp_path))["detail"]
+    detail = standard_registry().execute("standard.search_code", {"query": "needle", "include_paths": ["pkg"]}, _ctx(tmp_path))["detail"]
     assert detail["search_scope"]["files_resolved"] == 2
     assert detail["search_scope"]["files_scanned"] == 1
     assert detail["search_scope"]["protected_files"] == 1
@@ -104,7 +107,7 @@ def test_reachability_is_exhaustive_not_llm_depth_tuned(tmp_path):
         "\ndef main():\n    f0()\n\nif __name__ == '__main__':\n    main()\n", encoding="utf-8",
     )
     (tmp_path / "target.py").write_text("def target():\n    return 1\n", encoding="utf-8")
-    result = standard_registry().execute("symbol_relations", {"symbol": "target", "query": "reachability", "max_depth": 3, "max_edges": 20}, _ctx(tmp_path))
+    result = standard_registry().execute("standard.symbol_relations", {"symbol": "target", "query": "reachability", "max_depth": 3, "max_edges": 20}, _ctx(tmp_path))
     assert result["ok"] is True
     assert result["coverage"]["facts"]["objective_result"] == "reachable"
     assert result["coverage"]["facts"]["depth_mode"] == "auto_exhaustive"
@@ -115,6 +118,6 @@ def test_reachability_identity_and_validation_drop_tuning_knobs():
     low = observation_signature("symbol_relations", {"symbol": "target", "query": "reachability", "max_depth": 3, "max_edges": 20})
     high = observation_signature("symbol_relations", {"symbol": "target", "query": "reachability", "max_depth": 32, "max_edges": 500})
     assert low == high
-    normalized, error = standard_registry().validate("symbol_relations", {"symbol": "target", "query": "reachability", "max_depth": 5, "max_edges": 20})
+    normalized, error = standard_registry().validate("standard.symbol_relations", {"symbol": "target", "query": "reachability", "max_depth": 5, "max_edges": 20})
     assert error is None
     assert "max_depth" not in normalized and "max_edges" not in normalized

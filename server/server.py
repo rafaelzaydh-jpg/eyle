@@ -11,7 +11,6 @@ import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import quote
 
 import httpx
 import uvicorn
@@ -27,11 +26,7 @@ logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
-log = logging.getLogger("eyle-llm-adapter")
-
-STRUCTURED_BACKENDS = {"native_schema", "native_tool", "native_json", "text"}
-THINKING_STYLES = {"auto", "qwen", "deepseek", "openrouter", "anthropic", "none"}
-PROTOCOLS = {"openai", "anthropic", "gemini"}
+log = logging.getLogger("eyle-deepseek-adapter")
 
 
 def env_bool(name: str, default: bool) -> bool:
@@ -49,27 +44,15 @@ def env_int(name: str, default: int, *, minimum: int | None = None, maximum: int
 
 
 @dataclass(frozen=True)
-class Endpoint:
-    protocol: str
-    base_url: str
-    api_key: str
-    model: str
-    model_override: str | None
-    provider_profile: str
-    structured_backend: str
-    thinking_style: str
-
-
-@dataclass(frozen=True)
 class Settings:
-    primary: Endpoint
-    fallback: Endpoint | None
-
+    upstream_base_url: str
+    upstream_api_key: str
+    default_model: str
+    model_override: str | None
     default_thinking: bool
     structured_thinking: bool
     force_thinking: bool
     structured_repair_attempts: int
-
     host: str
     port: int
     timeout: float
@@ -78,40 +61,11 @@ class Settings:
     proxy_key: str | None
 
 
-def _endpoint_from_env(prefix: str, *, primary: bool) -> Endpoint | None:
-    p = f"{prefix}_" if prefix else ""
-
-    if primary:
-        protocol = os.getenv(f"{p}LLM_PROTOCOL", "openai").strip().lower()
-        base_url = os.getenv(
-            f"{p}UPSTREAM_BASE_URL",
-            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-        ).rstrip("/")
-        api_key = os.getenv(f"{p}UPSTREAM_API_KEY", "").strip()
-        model = os.getenv(f"{p}DEFAULT_MODEL", "qwen3.8-max").strip()
-    else:
-        base_url = os.getenv(f"{p}UPSTREAM_BASE_URL", "").strip().rstrip("/")
-        model = os.getenv(f"{p}DEFAULT_MODEL", "").strip()
-        if not base_url or not model:
-            return None
-        protocol = os.getenv(f"{p}LLM_PROTOCOL", "openai").strip().lower()
-        api_key = os.getenv(f"{p}UPSTREAM_API_KEY", "").strip()
-
-    return Endpoint(
-        protocol=protocol,
-        base_url=base_url,
-        api_key=api_key,
-        model=model,
-        model_override=os.getenv(f"{p}MODEL_OVERRIDE", "").strip() or None,
-        provider_profile=os.getenv(f"{p}PROVIDER_PROFILE", "auto").strip().lower(),
-        structured_backend=os.getenv(f"{p}STRUCTURED_BACKEND", "auto").strip().lower(),
-        thinking_style=os.getenv(f"{p}THINKING_STYLE", "auto").strip().lower(),
-    )
-
-
 S = Settings(
-    primary=_endpoint_from_env("", primary=True),  # type: ignore[arg-type]
-    fallback=_endpoint_from_env("FALLBACK", primary=False),
+    upstream_base_url=os.getenv("UPSTREAM_BASE_URL", "https://api.deepseek.com").rstrip("/"),
+    upstream_api_key=os.getenv("UPSTREAM_API_KEY", "").strip(),
+    default_model=os.getenv("DEFAULT_MODEL", "deepseek-v4-flash").strip(),
+    model_override=os.getenv("MODEL_OVERRIDE", "").strip() or None,
     default_thinking=env_bool("DEFAULT_ENABLE_THINKING", True),
     structured_thinking=env_bool("STRUCTURED_ENABLE_THINKING", False),
     force_thinking=env_bool("FORCE_ENABLE_THINKING", False),
@@ -124,76 +78,16 @@ S = Settings(
     proxy_key=os.getenv("PROXY_API_KEY", "").strip() or None,
 )
 
-
-def infer_provider(endpoint: Endpoint) -> str:
-    if endpoint.provider_profile != "auto":
-        return endpoint.provider_profile
-    if endpoint.protocol == "anthropic":
-        return "anthropic"
-    if endpoint.protocol == "gemini":
-        return "gemini"
-
-    url = endpoint.base_url.lower()
-    if "api.deepseek.com" in url:
-        return "deepseek"
-    if "dashscope" in url or "aliyuncs.com" in url:
-        return "qwen"
-    if "openrouter.ai" in url:
-        return "openrouter"
-    if "api.openai.com" in url:
-        return "openai"
-    if "anthropic.com" in url:
-        return "anthropic"
-    return "generic"
-
-
-def structured_backend_for(endpoint: Endpoint) -> str:
-    if endpoint.structured_backend != "auto":
-        return endpoint.structured_backend
-    provider = infer_provider(endpoint)
-    if provider == "deepseek":
-        return "native_json"
-    if provider in {"qwen", "openai", "openrouter", "anthropic", "gemini"}:
-        return "native_schema"
-    # OpenAI-compatible desconhecido: JSON mode é um default mais conservador
-    # que fingir suporte a constrained JSON Schema.
-    return "native_json" if endpoint.protocol == "openai" else "native_schema"
-
-
-def thinking_style_for(endpoint: Endpoint) -> str:
-    if endpoint.thinking_style != "auto":
-        return endpoint.thinking_style
-    provider = infer_provider(endpoint)
-    if provider in {"qwen", "deepseek", "openrouter", "anthropic"}:
-        return provider
-    return "none"
-
-
-def check_endpoint(endpoint: Endpoint, *, label: str) -> None:
-    if endpoint.protocol not in PROTOCOLS:
-        raise RuntimeError(f"{label}: LLM_PROTOCOL deve ser openai, anthropic ou gemini.")
-    if not endpoint.base_url:
-        raise RuntimeError(f"{label}: UPSTREAM_BASE_URL não configurada.")
-    if not (endpoint.model_override or endpoint.model):
-        raise RuntimeError(f"{label}: DEFAULT_MODEL/MODEL_OVERRIDE não configurado.")
-    if endpoint.protocol in {"anthropic", "gemini"} and not endpoint.api_key:
-        raise RuntimeError(f"{label}: UPSTREAM_API_KEY é obrigatória para API nativa.")
-    if endpoint.structured_backend != "auto" and endpoint.structured_backend not in STRUCTURED_BACKENDS:
-        raise RuntimeError(
-            f"{label}: STRUCTURED_BACKEND deve ser auto, native_schema, native_tool, native_json ou text."
-        )
-    if endpoint.thinking_style not in THINKING_STYLES:
-        raise RuntimeError(
-            f"{label}: THINKING_STYLE deve ser auto, qwen, deepseek, openrouter, anthropic ou none."
-        )
-    if endpoint.protocol != "openai" and structured_backend_for(endpoint) == "native_tool":
-        raise RuntimeError(f"{label}: native_tool é suportado somente no protocolo OpenAI-compatible.")
+ADAPTER_PROFILE = "deepseek-stable-json-local-schema-v2"
 
 
 def check_config() -> None:
-    check_endpoint(S.primary, label="primary")
-    if S.fallback is not None:
-        check_endpoint(S.fallback, label="fallback")
+    if not S.upstream_base_url:
+        raise RuntimeError("UPSTREAM_BASE_URL não configurada.")
+    if not (S.model_override or S.default_model):
+        raise RuntimeError("DEFAULT_MODEL/MODEL_OVERRIDE não configurado.")
+    if not S.upstream_api_key:
+        log.warning("UPSTREAM_API_KEY vazia; o upstream provavelmente recusará chamadas autenticadas.")
 
 
 def client_auth(request: Request) -> None:
@@ -206,8 +100,21 @@ def client_auth(request: Request) -> None:
         raise HTTPException(401, "Chave do proxy inválida.")
 
 
-def model_for(payload: dict[str, Any], endpoint: Endpoint) -> str:
-    return endpoint.model_override or str(payload.get("model") or "").strip() or endpoint.model
+def model_for(payload: dict[str, Any]) -> str:
+    return S.model_override or str(payload.get("model") or "").strip() or S.default_model
+
+
+def schema_for(payload: dict[str, Any]) -> dict[str, Any] | None:
+    fmt = payload.get("response_format")
+    if not isinstance(fmt, dict):
+        return None
+    kind = fmt.get("type")
+    if kind == "json_object":
+        return {"type": "object"}
+    if kind != "json_schema":
+        return None
+    block = fmt.get("json_schema")
+    return block.get("schema") if isinstance(block, dict) and isinstance(block.get("schema"), dict) else None
 
 
 def structured(payload: dict[str, Any]) -> bool:
@@ -215,86 +122,16 @@ def structured(payload: dict[str, Any]) -> bool:
     if fmt is None:
         return False
     if not isinstance(fmt, dict) or fmt.get("type") not in {"json_object", "json_schema"}:
-        raise HTTPException(400, "response_format inválido.")
+        raise HTTPException(400, "response_format inválido para o adaptador DeepSeek.")
+    schema = schema_for(payload)
+    if schema is None:
+        raise HTTPException(400, "response_format estruturado sem schema/formato válido.")
     if fmt.get("type") == "json_schema":
-        block = fmt.get("json_schema")
-        if not isinstance(block, dict) or not isinstance(block.get("schema"), dict):
-            raise HTTPException(400, "response_format.json_schema.schema inválido.")
         try:
-            Draft202012Validator.check_schema(block["schema"])
+            Draft202012Validator.check_schema(schema)
         except SchemaError as exc:
             raise HTTPException(400, f"JSON Schema inválido: {exc.message}") from exc
     return True
-
-
-def schema_for(payload: dict[str, Any]) -> dict[str, Any] | None:
-    fmt = payload.get("response_format")
-    if not isinstance(fmt, dict):
-        return None
-    if fmt.get("type") == "json_object":
-        return {"type": "object", "additionalProperties": True}
-    block = fmt.get("json_schema")
-    return block.get("schema") if isinstance(block, dict) else None
-
-
-def thinking_enabled(payload: dict[str, Any]) -> bool:
-    if S.force_thinking:
-        return True
-    if isinstance(payload.get("enable_thinking"), bool):
-        return payload["enable_thinking"]
-    reasoning = payload.get("reasoning")
-    if isinstance(reasoning, dict) and isinstance(reasoning.get("enabled"), bool):
-        return reasoning["enabled"]
-    thinking = payload.get("thinking")
-    if isinstance(thinking, dict):
-        thinking_type = str(thinking.get("type") or "").strip().lower()
-        if thinking_type == "enabled":
-            return True
-        if thinking_type == "disabled":
-            return False
-    if isinstance(payload.get("reasoning_effort"), str) and payload["reasoning_effort"].strip():
-        return True
-    return S.structured_thinking if structured(payload) else S.default_thinking
-
-
-def text_of(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        out = []
-        for item in content:
-            if isinstance(item, dict) and item.get("type") in {"text", "input_text", "output_text"}:
-                if isinstance(item.get("text"), str):
-                    out.append(item["text"])
-        return "\n".join(out)
-    return ""
-
-
-def split_messages(payload: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
-    messages = payload.get("messages")
-    if not isinstance(messages, list) or not messages:
-        raise HTTPException(400, "messages deve ser uma lista não vazia.")
-
-    system_parts: list[str] = []
-    normal: list[dict[str, str]] = []
-    for m in messages:
-        if not isinstance(m, dict):
-            raise HTTPException(400, "Mensagem inválida.")
-        role = str(m.get("role") or "").lower()
-        text = text_of(m.get("content"))
-        if role in {"system", "developer"}:
-            if text:
-                system_parts.append(text)
-            continue
-        if role not in {"user", "assistant"}:
-            raise HTTPException(400, f"Role não suportada no modo nativo: {role}")
-        if normal and normal[-1]["role"] == role:
-            normal[-1]["content"] += "\n" + text
-        else:
-            normal.append({"role": role, "content": text})
-    if not normal:
-        raise HTTPException(400, "Nenhuma mensagem user/assistant.")
-    return "\n".join(system_parts), normal
 
 
 def max_output(payload: dict[str, Any]) -> int:
@@ -304,375 +141,360 @@ def max_output(payload: dict[str, Any]) -> int:
     return S.default_max_output
 
 
-def _schema_constraint_lines(schema: dict[str, Any], path: str = "$", *, limit: int = 16) -> list[str]:
-    """Extrai somente restrições mecânicas úteis; o JSON Schema completo continua sendo a fonte de verdade."""
+def thinking_enabled(payload: dict[str, Any]) -> bool:
+    if S.force_thinking:
+        return True
+    if isinstance(payload.get("enable_thinking"), bool):
+        return payload["enable_thinking"]
+    thinking = payload.get("thinking")
+    if isinstance(thinking, dict):
+        kind = str(thinking.get("type") or "").strip().lower()
+        if kind == "enabled":
+            return True
+        if kind == "disabled":
+            return False
+    reasoning = payload.get("reasoning")
+    if isinstance(reasoning, dict) and isinstance(reasoning.get("enabled"), bool):
+        return reasoning["enabled"]
+    return S.structured_thinking if structured(payload) else S.default_thinking
+
+
+def text_of(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        out: list[str] = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") in {"text", "input_text", "output_text"}:
+                if isinstance(item.get("text"), str):
+                    out.append(item["text"])
+        return "\n".join(out)
+    return ""
+
+
+def _is_ecc_schema(schema: dict[str, Any]) -> bool:
+    variants = schema.get("oneOf")
+    if not isinstance(variants, list) or len(variants) != 3:
+        return False
+    seen: list[str] = []
+    for variant in variants:
+        if not isinstance(variant, dict):
+            return False
+        prop = ((variant.get("properties") or {}).get("type") or {})
+        enum = prop.get("enum")
+        if not isinstance(enum, list) or len(enum) != 1 or not isinstance(enum[0], str):
+            return False
+        seen.append(enum[0])
+    return seen == ["explorar", "construir", "concluir"]
+
+
+def _example_from_schema(node: Any, depth: int = 0) -> Any:
+    if depth > 5 or not isinstance(node, dict):
+        return None
+    if "const" in node:
+        return node["const"]
+    enum = node.get("enum")
+    if isinstance(enum, list) and enum:
+        return enum[0]
+    variants = node.get("oneOf") or node.get("anyOf")
+    if isinstance(variants, list) and variants:
+        return _example_from_schema(variants[0], depth + 1)
+    typ = node.get("type")
+    if typ == "object" or isinstance(node.get("properties"), dict):
+        props = node.get("properties") if isinstance(node.get("properties"), dict) else {}
+        required = set(node.get("required") or [])
+        out: dict[str, Any] = {}
+        for name, child in props.items():
+            if name in required:
+                out[name] = _example_from_schema(child, depth + 1)
+        return out
+    if typ == "array":
+        return []
+    if typ == "integer" or typ == "number":
+        return node.get("minimum", 1)
+    if typ == "boolean":
+        return False
+    return "value"
+
+
+def _singleton_enum(node: Any) -> str | None:
+    if not isinstance(node, dict):
+        return None
+    if "const" in node and isinstance(node.get("const"), str):
+        return str(node["const"])
+    enum = node.get("enum")
+    if isinstance(enum, list) and len(enum) == 1 and isinstance(enum[0], str):
+        return enum[0]
+    return None
+
+
+def _variant_for(schema: dict[str, Any], discriminator: str, value: str) -> dict[str, Any] | None:
+    variants = schema.get("oneOf")
+    if not isinstance(variants, list):
+        return None
+    for variant in variants:
+        if not isinstance(variant, dict):
+            continue
+        prop = ((variant.get("properties") or {}).get(discriminator) or {})
+        if _singleton_enum(prop) == value:
+            return variant
+    return None
+
+
+def _ecc_memory_schema(schema: dict[str, Any]) -> dict[str, Any] | None:
+    branch = _variant_for(schema, "type", "explorar")
+    memory = ((branch or {}).get("properties") or {}).get("memory")
+    return memory if isinstance(memory, dict) else None
+
+
+def _ecc_objective_schema(schema: dict[str, Any]) -> dict[str, Any] | None:
+    branch = _variant_for(schema, "type", "explorar")
+    objective = ((branch or {}).get("properties") or {}).get("objective")
+    return objective if isinstance(objective, dict) else None
+
+
+def _objective_state_schema(objective_schema: dict[str, Any]) -> dict[str, Any] | None:
+    state = ((objective_schema.get("properties") or {}).get("state") or {})
+    variants = state.get("oneOf") if isinstance(state, dict) else None
+    if not isinstance(variants, list):
+        return None
+    for variant in variants:
+        if isinstance(variant, dict) and (variant.get("type") == "object" or isinstance(variant.get("properties"), dict)):
+            return variant
+    return None
+
+
+def _field_hint(name: str, node: dict[str, Any], required: bool) -> str:
+    enum = node.get("enum") if isinstance(node, dict) else None
+    typ = str(node.get("type") or "value") if isinstance(node, dict) else "value"
+    if isinstance(enum, list) and enum:
+        shape = "|".join(str(v) for v in enum)
+    elif typ == "array":
+        shape = "array"
+    elif typ == "object":
+        shape = "object"
+    elif typ == "integer":
+        shape = "int"
+    else:
+        shape = typ
+    return f"{name}:{shape}{'' if required else '?'}"
+
+
+def _operation_grammar(memory_schema: dict[str, Any]) -> tuple[list[str], list[str]]:
+    operations = ((memory_schema.get("properties") or {}).get("operations") or {})
+    item_schema = operations.get("items") if isinstance(operations, dict) else None
+    variants = item_schema.get("oneOf") if isinstance(item_schema, dict) else None
     lines: list[str] = []
+    examples: list[str] = []
+    if not isinstance(variants, list):
+        return lines, examples
+    for variant in variants:
+        if not isinstance(variant, dict):
+            continue
+        props = variant.get("properties") if isinstance(variant.get("properties"), dict) else {}
+        op = _singleton_enum(props.get("op"))
+        if not op:
+            continue
+        required = set(variant.get("required") or [])
+        fields = [_field_hint(name, child, name in required) for name, child in props.items()]
+        lines.append(f"{op}={{" + ",".join(fields) + "}")
+        sample: dict[str, Any] = {"op": op}
+        if op == "remember":
+            if "key" in props: sample["key"] = "session"
+            sample.update({"scope": "world", "kind": "architecture_component", "content": "AgentSession stores active task state."})
+            if "tags" in props: sample["tags"] = ["ecc", "session"]
+            if "supports" in props: sample["supports"] = [{"kind": "material", "material_id": "mat-1"}]
+        elif op == "revise":
+            sample.update({"id": "mem-abc", "expected_revision": 1, "content": "Updated understanding."})
+        elif op == "relate":
+            sample.update({"source": "@session", "relation": "part_of", "target": "mem-ecc"})
+        elif op == "archive":
+            sample.update({"id": "mem-abc", "expected_revision": 1})
+        elif op == "supersede":
+            sample.update({"id": "mem-old", "expected_revision": 1, "replacement": "@new"})
+        elif op == "retire_relation":
+            sample.update({"id": "rel-abc", "expected_revision": 1})
+        examples.append(json.dumps(sample, ensure_ascii=False, separators=(",", ":")))
+    return lines, examples
 
-    def walk(node: Any, here: str) -> None:
-        if len(lines) >= limit or not isinstance(node, dict):
-            return
-        if isinstance(node.get("maxLength"), int):
-            lines.append(f"- {here}: no máximo {node['maxLength']} caracteres")
-        if isinstance(node.get("minLength"), int):
-            lines.append(f"- {here}: no mínimo {node['minLength']} caracteres")
-        if isinstance(node.get("maxItems"), int):
-            lines.append(f"- {here}: no máximo {node['maxItems']} itens")
-        if isinstance(node.get("minItems"), int):
-            lines.append(f"- {here}: no mínimo {node['minItems']} itens")
-        if isinstance(node.get("enum"), list) and len(node["enum"]) <= 8:
-            values = ", ".join(json.dumps(v, ensure_ascii=False) for v in node["enum"])
-            lines.append(f"- {here}: valor deve ser um de [{values}]")
-        if "const" in node:
-            lines.append(f"- {here}: valor deve ser {json.dumps(node['const'], ensure_ascii=False)}")
-        if isinstance(node.get("required"), list) and node["required"]:
-            req = ", ".join(str(x) for x in node["required"][:10])
-            lines.append(f"- {here}: campos obrigatórios [{req}]")
-        props = node.get("properties")
-        if isinstance(props, dict):
-            for name, child in props.items():
-                walk(child, f"{here}.{name}")
-                if len(lines) >= limit:
-                    return
-        items = node.get("items")
-        if isinstance(items, dict):
-            walk(items, f"{here}[]")
 
-    walk(schema, path)
-    return lines[:limit]
+def _support_grammar(memory_schema: dict[str, Any]) -> list[str]:
+    operations = ((memory_schema.get("properties") or {}).get("operations") or {})
+    item_schema = operations.get("items") if isinstance(operations, dict) else None
+    variants = item_schema.get("oneOf") if isinstance(item_schema, dict) else None
+    support_schema = None
+    if isinstance(variants, list):
+        for variant in variants:
+            props = variant.get("properties") if isinstance(variant, dict) and isinstance(variant.get("properties"), dict) else {}
+            supports = props.get("supports")
+            if isinstance(supports, dict) and isinstance(supports.get("items"), dict):
+                support_schema = supports["items"]
+                break
+    out: list[str] = []
+    for variant in (support_schema or {}).get("oneOf") or []:
+        props = variant.get("properties") if isinstance(variant, dict) and isinstance(variant.get("properties"), dict) else {}
+        kind = _singleton_enum(props.get("kind"))
+        if not kind:
+            continue
+        required = set(variant.get("required") or [])
+        fields = [_field_hint(name, child, name in required) for name, child in props.items()]
+        out.append(f"support.{kind}={{" + ",".join(fields) + "}")
+    return out
 
 
-def add_schema_instruction(body: dict[str, Any], schema: dict[str, Any], *, tool_mode: bool = False) -> None:
+def _objective_grammar(objective_schema: dict[str, Any]) -> str:
+    state_schema = _objective_state_schema(objective_schema) or {}
+    props = state_schema.get("properties") if isinstance(state_schema.get("properties"), dict) else {}
+    required = set(state_schema.get("required") or [])
+    fields = [_field_hint(name, child, name in required) for name, child in props.items()]
+    child_schema = ((props.get("children") or {}).get("items") or {}) if isinstance(props.get("children"), dict) else {}
+    cprops = child_schema.get("properties") if isinstance(child_schema.get("properties"), dict) else {}
+    crequired = set(child_schema.get("required") or [])
+    child_fields = [_field_hint(name, child, name in crequired) for name, child in cprops.items()]
+    return "objective.state={" + ",".join(fields) + "}; objective.child={" + ",".join(child_fields) + "}"
+
+
+def _compact_schema_rules(schema: dict[str, Any]) -> str:
+    if _is_ecc_schema(schema):
+        memory_schema = _ecc_memory_schema(schema) or {}
+        objective_schema = _ecc_objective_schema(schema) or {}
+        op_lines, op_examples = _operation_grammar(memory_schema)
+        support_lines = _support_grammar(memory_schema)
+        grammar = "; ".join([*op_lines, *support_lines])
+        objective_grammar = _objective_grammar(objective_schema)
+        examples = " | ".join(op_examples)
+        return (
+            "Return exactly one JSON object for the Eyle ECC decision. 'type' is the only family authority. "
+            "For explorar/construir use a SHORT operation name without family prefix. "
+            "Every ECC object MUST include objective={disposition,state}; Objective is transient semantic state, NOT a fourth action or plan. "
+            "Use objective.disposition=unchanged or cleared only with state=null; updated requires the full objective.state object. "
+            "Objective state describes what is being pursued, not execution steps. Status strings are semantic labels, not Runtime control codes. "
+            + objective_grammar + ". "
+            "Every ECC object MUST include memory={focus,disposition,operations}; Memory is internal cognition, NOT a fourth action. "
+            "Use disposition=unchanged only with operations=[]; use disposition=updated only with 1+ valid graph operations. "
+            "Memory refs are mem-* or @alias. A remember key creates @key for later operations in the SAME memory transaction. "
+            "Do not invent memory merely to satisfy the field. Supports ground semantic memory: material points to observed mat-N and may include opaque selector; request grounds in the current request; memory points to an existing mem-* or @alias. "
+            "ECC examples: "
+            "{\"type\":\"explorar\",\"operation\":\"search\",\"arguments\":{\"source\":\"eyle\",\"query\":\"AgentSession\"},\"objective\":{\"disposition\":\"unchanged\",\"state\":null},\"memory\":{\"focus\":[],\"disposition\":\"unchanged\",\"operations\":[]}} | "
+            "{\"type\":\"concluir\",\"response\":\"...\",\"objective\":{\"disposition\":\"updated\",\"state\":{\"summary\":\"Answer the compound request\",\"status\":\"active\",\"children\":[{\"key\":\"part1\",\"description\":\"First subobjective\",\"status\":\"resolved\",\"outcome\":\"done\"}],\"constraints\":[]}},\"memory\":{\"focus\":[\"mem-ecc\"],\"disposition\":\"updated\",\"operations\":[{\"op\":\"remember\",\"key\":\"session\",\"scope\":\"world\",\"kind\":\"architecture_component\",\"content\":\"AgentSession stores active task state.\",\"supports\":[{\"kind\":\"material\",\"material_id\":\"mat-1\"}]}]}}. "
+            "Memory operation grammar: " + grammar + ". Examples: " + examples + ". "
+            "Return JSON only; no markdown or commentary."
+        )
+    schema_text = json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
+    example = json.dumps(_example_from_schema(schema), ensure_ascii=False, separators=(",", ":"))
+    return (
+        "Return only valid JSON satisfying this JSON Schema. No markdown or commentary. "
+        f"Example JSON shape: {example}. Canonical JSON Schema: {schema_text}"
+    )
+
+def _inject_deepseek_json_instruction(body: dict[str, Any], schema: dict[str, Any]) -> None:
     messages = body.get("messages")
     if not isinstance(messages, list):
-        return
-    schema_text = json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
-    constraint_lines = _schema_constraint_lines(schema)
-    constraints = "\n".join(constraint_lines)
-    instruction = (
-        "Produza somente a saída estruturada solicitada. O contrato canônico é este JSON Schema: "
-        f"{schema_text}"
-    )
-    if constraints:
-        instruction += "\nRestrições mecânicas importantes derivadas do schema:\n" + constraints
-    if tool_mode:
-        instruction += "\nUse exatamente a função estruturada fornecida e não responda com texto livre."
-    else:
-        instruction += "\nNão use markdown, comentários ou texto fora do objeto JSON."
+        raise HTTPException(400, "messages inválido.")
+    instruction = _compact_schema_rules(schema)
     body["messages"] = [{"role": "system", "content": instruction}, *messages]
 
 
-def _apply_openai_thinking(body: dict[str, Any], payload: dict[str, Any], endpoint: Endpoint) -> None:
-    style = thinking_style_for(endpoint)
-    enabled = thinking_enabled(payload)
-    if S.force_thinking:
-        enabled = True
-
-    # Não vaza aliases incompatíveis entre providers.
-    for key in ("enable_thinking", "reasoning", "thinking"):
-        body.pop(key, None)
-
-    if style == "qwen":
-        body["enable_thinking"] = enabled
-        body.pop("reasoning_effort", None)
-    elif style == "deepseek":
-        body["thinking"] = {"type": "enabled" if enabled else "disabled"}
-        if enabled:
-            effort = str(payload.get("reasoning_effort") or "high").strip().lower()
-            body["reasoning_effort"] = effort if effort in {"high", "max"} else "high"
-            for key in ("temperature", "top_p", "presence_penalty", "frequency_penalty"):
-                body.pop(key, None)
-        else:
-            body.pop("reasoning_effort", None)
-    elif style == "openrouter":
-        body["reasoning"] = {"enabled": enabled}
-        body.pop("reasoning_effort", None)
-    elif style == "anthropic":
-        if enabled:
-            body["thinking"] = {"type": "adaptive"}
-        body.pop("reasoning_effort", None)
-    else:
-        body.pop("reasoning_effort", None)
-
-
-def _apply_openai_structured_backend(
-    body: dict[str, Any], payload: dict[str, Any], endpoint: Endpoint
-) -> str:
-    backend = structured_backend_for(endpoint)
-    schema = schema_for(payload)
-    fmt = body.get("response_format")
-    if not isinstance(fmt, dict) or fmt.get("type") != "json_schema" or not schema:
-        return backend
-
-    if backend == "native_schema":
-        return backend
-
-    if backend == "native_tool":
-        add_schema_instruction(body, schema, tool_mode=True)
-        body.pop("response_format", None)
-        tool_name = "submit_structured_output"
-        body["tools"] = [
-            {
-                "type": "function",
-                "function": {
-                    "name": tool_name,
-                    "description": "Entrega exatamente o objeto estruturado exigido pelo chamador.",
-                    "parameters": schema,
-                },
-            }
-        ]
-        body["tool_choice"] = {"type": "function", "function": {"name": tool_name}}
-        return backend
-
-    add_schema_instruction(body, schema)
-    if backend == "native_json":
-        body["response_format"] = {"type": "json_object"}
-    elif backend == "text":
-        body.pop("response_format", None)
-    return backend
-
-
-@dataclass(frozen=True)
-class PreparedRequest:
-    url: str
-    headers: dict[str, str]
-    body: dict[str, Any]
-    structured_backend: str
-    provider_profile: str
-
-
-def prepare_openai(payload: dict[str, Any], endpoint: Endpoint) -> PreparedRequest:
+def prepare_upstream(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str], dict[str, Any] | None]:
     if not isinstance(payload.get("messages"), list):
         raise HTTPException(400, "messages inválido.")
-    structured(payload)
+    is_structured = structured(payload)
     body = copy.deepcopy(payload)
-    body["model"] = model_for(payload, endpoint)
-    backend = _apply_openai_structured_backend(body, payload, endpoint)
-    _apply_openai_thinking(body, payload, endpoint)
+    body["model"] = model_for(payload)
+    schema = schema_for(payload) if is_structured else None
+
+    # DeepSeek stable supports JSON Output via json_object. OpenAI json_schema is never forwarded.
+    if schema is not None:
+        _inject_deepseek_json_instruction(body, schema)
+        body["response_format"] = {"type": "json_object"}
+
+    enabled = thinking_enabled(payload)
+    for key in ("enable_thinking", "reasoning"):
+        body.pop(key, None)
+    body["thinking"] = {"type": "enabled" if enabled else "disabled"}
+    if enabled:
+        effort = str(payload.get("reasoning_effort") or "high").strip().lower()
+        body["reasoning_effort"] = effort if effort in {"low", "high", "max"} else "high"
+        for key in ("temperature", "top_p", "presence_penalty", "frequency_penalty"):
+            body.pop(key, None)
+    else:
+        body.pop("reasoning_effort", None)
+
+    # OpenAI aliases that DeepSeek stable does not need.
+    if "max_completion_tokens" in body:
+        if "max_tokens" not in body:
+            body["max_tokens"] = body["max_completion_tokens"]
+        body.pop("max_completion_tokens", None)
 
     headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
-    if endpoint.api_key:
-        headers["Authorization"] = f"Bearer {endpoint.api_key}"
-    return PreparedRequest(
-        url=f"{endpoint.base_url}/chat/completions",
-        headers=headers,
-        body=body,
-        structured_backend=backend,
-        provider_profile=infer_provider(endpoint),
-    )
+    if S.upstream_api_key:
+        headers["Authorization"] = f"Bearer {S.upstream_api_key}"
+    return body, headers, schema
 
 
-def prepare_anthropic(payload: dict[str, Any], endpoint: Endpoint) -> PreparedRequest:
-    if payload.get("stream"):
-        raise HTTPException(400, "Use stream=false no modo Anthropic nativo.")
-    system, messages = split_messages(payload)
-    body: dict[str, Any] = {
-        "model": model_for(payload, endpoint),
-        "max_tokens": max_output(payload),
-        "messages": messages,
-    }
-    if system:
-        body["system"] = system
-    if isinstance(payload.get("temperature"), (int, float)):
-        body["temperature"] = payload["temperature"]
-    if isinstance(payload.get("top_p"), (int, float)):
-        body["top_p"] = payload["top_p"]
-    stop = payload.get("stop")
-    if isinstance(stop, str):
-        body["stop_sequences"] = [stop]
-    elif isinstance(stop, list):
-        body["stop_sequences"] = [x for x in stop if isinstance(x, str)]
-    if thinking_enabled(payload):
-        body["thinking"] = {"type": "adaptive"}
-    schema = schema_for(payload)
-    if schema:
-        body["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
-    headers = {
-        "Content-Type": "application/json",
-        "x-api-key": endpoint.api_key,
-        "anthropic-version": "2023-06-01",
-    }
-    path = "/messages" if endpoint.base_url.endswith("/v1") else "/v1/messages"
-    return PreparedRequest(
-        url=f"{endpoint.base_url}{path}",
-        headers=headers,
-        body=body,
-        structured_backend="native_schema",
-        provider_profile="anthropic",
-    )
+@dataclass
+class UsageAccumulator:
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cached_prompt_tokens: int = 0
+    cache_miss_tokens: int = 0
+    reasoning_tokens: int = 0
 
+    def add(self, data: dict[str, Any]) -> None:
+        usage = data.get("usage")
+        if not isinstance(usage, dict):
+            return
+        prompt = max(0, int(usage.get("prompt_tokens") or 0))
+        completion = max(0, int(usage.get("completion_tokens") or 0))
+        hit = usage.get("prompt_cache_hit_tokens")
+        miss = usage.get("prompt_cache_miss_tokens")
+        details = usage.get("prompt_tokens_details")
+        detail_hit = details.get("cached_tokens") if isinstance(details, dict) else None
+        hit_values = [int(x) for x in (hit, detail_hit) if isinstance(x, (int, float)) and int(x) >= 0]
+        if hit_values:
+            cached = min(prompt, max(hit_values))
+            cache_miss = max(0, prompt - cached)
+        elif isinstance(miss, (int, float)) and int(miss) >= 0:
+            cache_miss = min(prompt, int(miss))
+            cached = max(0, prompt - cache_miss)
+        else:
+            cached = 0
+            cache_miss = prompt
+        cdetails = usage.get("completion_tokens_details")
+        reasoning = int(cdetails.get("reasoning_tokens") or 0) if isinstance(cdetails, dict) else 0
 
-def prepare_gemini(payload: dict[str, Any], endpoint: Endpoint) -> PreparedRequest:
-    if payload.get("stream"):
-        raise HTTPException(400, "Use stream=false no modo Gemini nativo.")
-    system, messages = split_messages(payload)
-    model = model_for(payload, endpoint)
-    config: dict[str, Any] = {"maxOutputTokens": max_output(payload)}
-    if isinstance(payload.get("temperature"), (int, float)):
-        config["temperature"] = payload["temperature"]
-    if isinstance(payload.get("top_p"), (int, float)):
-        config["topP"] = payload["top_p"]
-    stop = payload.get("stop")
-    if isinstance(stop, str):
-        config["stopSequences"] = [stop]
-    elif isinstance(stop, list):
-        config["stopSequences"] = [x for x in stop if isinstance(x, str)]
-    schema = schema_for(payload)
-    if schema:
-        config["responseMimeType"] = "application/json"
-        config["responseJsonSchema"] = schema
-    enabled = thinking_enabled(payload)
-    if "2.5" in model.lower():
-        config["thinkingConfig"] = {"thinkingBudget": -1 if enabled else 0}
-    else:
-        config["thinkingConfig"] = {"thinkingLevel": "high" if enabled else "low"}
-    body: dict[str, Any] = {
-        "contents": [
-            {
-                "role": "model" if m["role"] == "assistant" else "user",
-                "parts": [{"text": m["content"]}],
-            }
-            for m in messages
-        ],
-        "generationConfig": config,
-    }
-    if system:
-        body["systemInstruction"] = {"parts": [{"text": system}]}
-    headers = {"Content-Type": "application/json", "x-goog-api-key": endpoint.api_key}
-    return PreparedRequest(
-        url=f"{endpoint.base_url}/models/{quote(model, safe='')}:generateContent",
-        headers=headers,
-        body=body,
-        structured_backend="native_schema",
-        provider_profile="gemini",
-    )
+        self.prompt_tokens += prompt
+        self.completion_tokens += completion
+        self.cached_prompt_tokens += cached
+        self.cache_miss_tokens += cache_miss
+        self.reasoning_tokens += max(0, reasoning)
 
+    def apply(self, data: dict[str, Any]) -> dict[str, Any]:
+        result = copy.deepcopy(data)
+        usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+        usage["prompt_tokens"] = self.prompt_tokens
+        usage["completion_tokens"] = self.completion_tokens
+        usage["total_tokens"] = self.prompt_tokens + self.completion_tokens
+        usage["prompt_cache_hit_tokens"] = min(self.prompt_tokens, self.cached_prompt_tokens)
+        usage["prompt_cache_miss_tokens"] = min(self.prompt_tokens, self.cache_miss_tokens)
+        if self.reasoning_tokens:
+            cdetails = usage.get("completion_tokens_details") if isinstance(usage.get("completion_tokens_details"), dict) else {}
+            cdetails["reasoning_tokens"] = self.reasoning_tokens
+            usage["completion_tokens_details"] = cdetails
+        result["usage"] = usage
+        return result
 
-def prepare(payload: dict[str, Any], endpoint: Endpoint) -> PreparedRequest:
-    if endpoint.protocol == "anthropic":
-        return prepare_anthropic(payload, endpoint)
-    if endpoint.protocol == "gemini":
-        return prepare_gemini(payload, endpoint)
-    return prepare_openai(payload, endpoint)
-
-
-def anthropic_to_openai(data: dict[str, Any]) -> dict[str, Any]:
-    text, reasoning = [], []
-    for block in data.get("content") or []:
-        if not isinstance(block, dict):
-            continue
-        if block.get("type") == "text" and isinstance(block.get("text"), str):
-            text.append(block["text"])
-        elif block.get("type") in {"thinking", "redacted_thinking"}:
-            value = block.get("thinking") or block.get("text")
-            if isinstance(value, str):
-                reasoning.append(value)
-    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
-    prompt_tokens = int(usage.get("input_tokens") or 0)
-    completion_tokens = int(usage.get("output_tokens") or 0)
-    stop = {
-        "end_turn": "stop",
-        "stop_sequence": "stop",
-        "max_tokens": "length",
-        "tool_use": "tool_calls",
-        "refusal": "content_filter",
-    }.get(data.get("stop_reason"), data.get("stop_reason"))
-    message: dict[str, Any] = {"role": "assistant", "content": "".join(text)}
-    if reasoning:
-        message["reasoning_content"] = "".join(reasoning)
-    return {
-        "id": data.get("id") or f"chatcmpl-{uuid.uuid4().hex}",
-        "object": "chat.completion",
-        "created": int(time.time()),
-        "model": data.get("model"),
-        "choices": [{"index": 0, "message": message, "finish_reason": stop}],
-        "usage": {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": prompt_tokens + completion_tokens,
-        },
-    }
-
-
-def gemini_to_openai(data: dict[str, Any], model: str) -> dict[str, Any]:
-    candidates = data.get("candidates") or []
-    candidate = candidates[0] if candidates and isinstance(candidates[0], dict) else {}
-    parts = ((candidate.get("content") or {}).get("parts") or [])
-    text, reasoning = [], []
-    for part in parts:
-        if not isinstance(part, dict) or not isinstance(part.get("text"), str):
-            continue
-        (reasoning if part.get("thought") is True else text).append(part["text"])
-    usage = data.get("usageMetadata") if isinstance(data.get("usageMetadata"), dict) else {}
-    prompt_tokens = int(usage.get("promptTokenCount") or 0)
-    answer_tokens = int(usage.get("candidatesTokenCount") or 0)
-    reasoning_tokens = int(usage.get("thoughtsTokenCount") or 0)
-    completion_tokens = answer_tokens + reasoning_tokens
-    finish = str(candidate.get("finishReason") or "").upper()
-    finish = (
-        "stop"
-        if finish in {"STOP", "FINISH_REASON_UNSPECIFIED"}
-        else "length"
-        if finish == "MAX_TOKENS"
-        else "content_filter"
-        if finish in {"SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII"}
-        else finish.lower() or None
-    )
-    message: dict[str, Any] = {"role": "assistant", "content": "".join(text)}
-    if reasoning:
-        message["reasoning_content"] = "".join(reasoning)
-    result: dict[str, Any] = {
-        "id": data.get("responseId") or f"chatcmpl-{uuid.uuid4().hex}",
-        "object": "chat.completion",
-        "created": int(time.time()),
-        "model": data.get("modelVersion") or model,
-        "choices": [{"index": 0, "message": message, "finish_reason": finish}],
-        "usage": {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": int(usage.get("totalTokenCount") or (prompt_tokens + completion_tokens)),
-        },
-    }
-    if reasoning_tokens:
-        result["usage"]["completion_tokens_details"] = {"reasoning_tokens": reasoning_tokens}
-    return result
-
-
-def _openai_tool_to_content(data: dict[str, Any]) -> dict[str, Any]:
-    choices = data.get("choices")
-    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-        return data
-    choice = choices[0]
-    message = choice.get("message")
-    if not isinstance(message, dict):
-        return data
-    tool_calls = message.get("tool_calls")
-    if not isinstance(tool_calls, list) or not tool_calls:
-        return data
-    first = tool_calls[0]
-    function = first.get("function") if isinstance(first, dict) else None
-    if not isinstance(function, dict) or function.get("name") != "submit_structured_output":
-        return data
-    arguments = function.get("arguments")
-    if isinstance(arguments, dict):
-        content = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
-    elif isinstance(arguments, str):
-        content = arguments
-    else:
-        content = ""
-    normalized = copy.deepcopy(data)
-    normalized_message = normalized["choices"][0].setdefault("message", {})
-    normalized_message["content"] = content
-    normalized_message.pop("tool_calls", None)
-    normalized["choices"][0]["finish_reason"] = "stop"
-    return normalized
-
-
-def normalize_upstream(data: dict[str, Any], endpoint: Endpoint, backend: str) -> dict[str, Any]:
-    if endpoint.protocol == "anthropic":
-        return anthropic_to_openai(data)
-    if endpoint.protocol == "gemini":
-        return gemini_to_openai(data, model_for({}, endpoint))
-    return _openai_tool_to_content(data) if backend == "native_tool" else data
+    def as_dict(self) -> dict[str, int]:
+        out = {
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.prompt_tokens + self.completion_tokens,
+            "prompt_cache_hit_tokens": min(self.prompt_tokens, self.cached_prompt_tokens),
+            "prompt_cache_miss_tokens": min(self.prompt_tokens, self.cache_miss_tokens),
+        }
+        if self.reasoning_tokens:
+            out["reasoning_tokens"] = self.reasoning_tokens
+        return out
 
 
 def _assistant_content(data: dict[str, Any]) -> str:
@@ -687,7 +509,6 @@ _FENCE_RE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.IGNORECASE | re
 
 
 def parse_json_representation(text: str) -> Any:
-    """Normalização puramente representacional: fence e JSON duplamente serializado."""
     candidate = text.strip()
     match = _FENCE_RE.match(candidate)
     if match:
@@ -700,11 +521,174 @@ def parse_json_representation(text: str) -> Any:
     return value
 
 
-def _json_path(error: ValidationError) -> str:
-    path = "$"
+def _json_path(error: ValidationError, prefix: str = "$") -> str:
+    path = prefix
     for part in error.absolute_path:
         path += f"[{part}]" if isinstance(part, int) else f".{part}"
+    if error.validator == "required":
+        match = re.search(r"'([^']+)' is a required property", error.message)
+        if match:
+            path += f".{match.group(1)}"
     return path
+
+
+def _concise_errors(instance: Any, schema: dict[str, Any], *, prefix: str, limit: int = 8) -> list[str]:
+    errors = sorted(Draft202012Validator(schema).iter_errors(instance), key=lambda e: (list(e.absolute_path), e.message))
+    out: list[str] = []
+    for error in errors:
+        if error.validator in {"oneOf", "anyOf"} and error.context:
+            continue
+        msg = error.message.replace("\n", " ")
+        item = f"{_json_path(error, prefix)}: {msg[:260]}"
+        if item not in out:
+            out.append(item)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _diagnose_support(value: Any, schema: dict[str, Any], *, prefix: str) -> list[str]:
+    if not isinstance(value, dict):
+        return [f"{prefix}: support must be an object"]
+    kind = str(value.get("kind") or "")
+    branch = _variant_for(schema, "kind", kind)
+    if branch is None:
+        allowed = []
+        for candidate in schema.get("oneOf") or []:
+            prop = ((candidate.get("properties") or {}).get("kind") or {}) if isinstance(candidate, dict) else {}
+            found = _singleton_enum(prop)
+            if found: allowed.append(found)
+        return [f"{prefix}.kind: expected one of {allowed}, got {kind!r}"]
+    return _concise_errors(value, branch, prefix=prefix)
+
+
+def _diagnose_ecc_contract(value: Any, schema: dict[str, Any]) -> list[str]:
+    if not isinstance(value, dict):
+        return ["$: top-level ECC value must be an object"]
+    kind = str(value.get("type") or "")
+    branch = _variant_for(schema, "type", kind)
+    if branch is None:
+        return [f"$.type: expected explorar, construir or concluir; got {kind!r}"]
+
+    errors: list[str] = []
+    props = branch.get("properties") if isinstance(branch.get("properties"), dict) else {}
+    required = set(branch.get("required") or [])
+    for name in sorted(required - set(value)):
+        errors.append(f"$.{name}: required property missing")
+    if branch.get("additionalProperties") is False:
+        for name in sorted(set(value) - set(props)):
+            errors.append(f"$.{name}: additional property is not allowed")
+    for name, child in props.items():
+        if name in {"memory", "objective"} or name not in value:
+            continue
+        errors.extend(_concise_errors(value[name], child, prefix=f"$.{name}", limit=4))
+
+    objective_schema = props.get("objective") if isinstance(props.get("objective"), dict) else None
+    objective = value.get("objective")
+    if objective_schema is not None:
+        if not isinstance(objective, dict):
+            errors.append("$.objective: required object missing or invalid")
+        else:
+            oprops = objective_schema.get("properties") if isinstance(objective_schema.get("properties"), dict) else {}
+            orequired = set(objective_schema.get("required") or [])
+            for name in sorted(orequired - set(objective)):
+                errors.append(f"$.objective.{name}: required property missing")
+            if objective_schema.get("additionalProperties") is False:
+                for name in sorted(set(objective) - set(oprops)):
+                    errors.append(f"$.objective.{name}: additional property is not allowed")
+            disposition = objective.get("disposition")
+            if "disposition" in objective:
+                errors.extend(_concise_errors(disposition, oprops.get("disposition") or {}, prefix="$.objective.disposition", limit=2))
+            state_value = objective.get("state")
+            if disposition in {"unchanged", "cleared"} and state_value is not None:
+                errors.append(f"$.objective.state: disposition={disposition} requires null state")
+            elif disposition == "updated":
+                state_schema = _objective_state_schema(objective_schema)
+                if not isinstance(state_value, dict):
+                    errors.append("$.objective.state: disposition=updated requires an objective state object")
+                elif state_schema is not None:
+                    errors.extend(_concise_errors(state_value, state_schema, prefix="$.objective.state", limit=5))
+
+    memory_schema = props.get("memory") if isinstance(props.get("memory"), dict) else None
+    memory = value.get("memory")
+    if memory_schema is None:
+        return errors[:8]
+    if not isinstance(memory, dict):
+        return (errors + ["$.memory: required object missing or invalid"])[:8]
+    mprops = memory_schema.get("properties") if isinstance(memory_schema.get("properties"), dict) else {}
+    mrequired = set(memory_schema.get("required") or [])
+    for name in sorted(mrequired - set(memory)):
+        errors.append(f"$.memory.{name}: required property missing")
+    if memory_schema.get("additionalProperties") is False:
+        for name in sorted(set(memory) - set(mprops)):
+            errors.append(f"$.memory.{name}: additional property is not allowed")
+    if "focus" in memory:
+        errors.extend(_concise_errors(memory.get("focus"), mprops.get("focus") or {}, prefix="$.memory.focus", limit=3))
+    disposition = memory.get("disposition")
+    if "disposition" in memory:
+        errors.extend(_concise_errors(disposition, mprops.get("disposition") or {}, prefix="$.memory.disposition", limit=3))
+    operations = memory.get("operations")
+    if not isinstance(operations, list):
+        errors.append("$.memory.operations: must be an array")
+        return errors[:8]
+    if disposition == "updated" and not operations:
+        errors.append("$.memory.operations: disposition=updated requires at least one operation")
+    if disposition == "unchanged" and operations:
+        errors.append("$.memory.operations: disposition=unchanged requires an empty operations array")
+    op_container = mprops.get("operations") if isinstance(mprops.get("operations"), dict) else {}
+    errors.extend(_concise_errors(operations, {k:v for k,v in op_container.items() if k != "items"}, prefix="$.memory.operations", limit=2))
+    item_schema = op_container.get("items") if isinstance(op_container.get("items"), dict) else {}
+    for index, operation in enumerate(operations):
+        prefix = f"$.memory.operations[{index}]"
+        if not isinstance(operation, dict):
+            errors.append(f"{prefix}: operation must be an object")
+            continue
+        op = str(operation.get("op") or "")
+        op_branch = _variant_for(item_schema, "op", op)
+        if op_branch is None:
+            allowed = []
+            for candidate in item_schema.get("oneOf") or []:
+                prop = ((candidate.get("properties") or {}).get("op") or {}) if isinstance(candidate, dict) else {}
+                found = _singleton_enum(prop)
+                if found: allowed.append(found)
+            errors.append(f"{prefix}.op: expected one of {allowed}, got {op!r}")
+            continue
+        # Validate the exact operation branch while treating supports separately,
+        # avoiding the unhelpful nested oneOf umbrella error.
+        branch_copy = copy.deepcopy(op_branch)
+        bprops = branch_copy.get("properties") if isinstance(branch_copy.get("properties"), dict) else {}
+        support_schema = None
+        if isinstance(bprops.get("supports"), dict):
+            support_schema = bprops["supports"].get("items") if isinstance(bprops["supports"].get("items"), dict) else None
+            bprops["supports"]["items"] = {"type": "object"}
+        errors.extend(_concise_errors(operation, branch_copy, prefix=prefix, limit=6))
+        if support_schema is not None and isinstance(operation.get("supports"), list):
+            for sidx, support in enumerate(operation["supports"]):
+                errors.extend(_diagnose_support(support, support_schema, prefix=f"{prefix}.supports[{sidx}]"))
+        if len(errors) >= 8:
+            break
+    return errors[:8]
+
+
+def _leaf_validation_errors(errors: list[ValidationError], *, limit: int = 8) -> list[str]:
+    leaves: list[ValidationError] = []
+    stack = list(errors)
+    while stack:
+        error = stack.pop(0)
+        if error.context:
+            stack[0:0] = list(error.context)
+        else:
+            leaves.append(error)
+    leaves.sort(key=lambda e: (-len(list(e.absolute_path)), list(e.absolute_path), e.message))
+    out: list[str] = []
+    for error in leaves:
+        msg = error.message.replace("\n", " ")
+        item = f"{_json_path(error)}: {msg[:260]}"
+        if item not in out:
+            out.append(item)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def validate_structured_response(data: dict[str, Any], schema: dict[str, Any]) -> tuple[Any | None, list[str]]:
@@ -715,46 +699,38 @@ def validate_structured_response(data: dict[str, Any], schema: dict[str, Any]) -
         value = parse_json_representation(text)
     except Exception as exc:
         return None, [f"$: JSON inválido ({type(exc).__name__})"]
-
     errors = sorted(Draft202012Validator(schema).iter_errors(value), key=lambda e: (list(e.absolute_path), e.message))
     if not errors:
         return value, []
-    concise: list[str] = []
-    for error in errors[:8]:
-        message = error.message.replace("\n", " ")
-        if len(message) > 220:
-            message = message[:217] + "..."
-        concise.append(f"{_json_path(error)}: {message}")
-    return value, concise
-
+    if _is_ecc_schema(schema):
+        diagnosed = _diagnose_ecc_contract(value, schema)
+        if diagnosed:
+            return value, diagnosed
+    return value, _leaf_validation_errors(errors)
 
 def canonicalize_content(data: dict[str, Any], value: Any) -> dict[str, Any]:
-    normalized = copy.deepcopy(data)
-    choices = normalized.get("choices")
-    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-        return normalized
-    message = choices[0].get("message")
-    if not isinstance(message, dict):
-        message = {"role": "assistant"}
-        choices[0]["message"] = message
-    message["content"] = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-    return normalized
+    result = copy.deepcopy(data)
+    choices = result.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        message = choices[0].get("message")
+        if not isinstance(message, dict):
+            message = {"role": "assistant"}
+            choices[0]["message"] = message
+        message["content"] = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return result
 
 
-def build_repair_payload(
-    original: dict[str, Any], previous_content: str, validation_errors: list[str]
-) -> dict[str, Any]:
+def build_repair_payload(original: dict[str, Any], previous_content: str, errors: list[str]) -> dict[str, Any]:
     repaired = copy.deepcopy(original)
     repaired["stream"] = False
     messages = repaired.get("messages")
     if not isinstance(messages, list):
         return repaired
-    error_text = "\n".join(f"- {e}" for e in validation_errors[:8])
+    err = "\n".join(f"- {x}" for x in errors[:8])
     instruction = (
-        "A resposta estruturada anterior não satisfez o contrato solicitado. Corrija somente o necessário para "
-        "produzir um objeto semanticamente equivalente que obedeça ao JSON Schema. Não acrescente explicações.\n"
-        f"Erros de validação:\n{error_text}\n"
-        "Responda novamente somente com a saída estruturada corrigida."
+        "Repair the previous JSON object. Preserve its intended ECC decision, objective semantics and memory semantics, but satisfy the exact contract. "
+        "Use the objective and memory grammars from the system instruction; do not erase a genuine objective or memory update merely to make validation pass. "
+        "Return JSON only, with no markdown or explanation.\nValidation errors:\n" + err
     )
     repaired["messages"] = [
         *messages,
@@ -764,212 +740,127 @@ def build_repair_payload(
     return repaired
 
 
-@dataclass
-class UsageAccumulator:
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    cached_prompt_tokens: int = 0
-    reasoning_tokens: int = 0
-
-    def add(self, data: dict[str, Any]) -> None:
-        usage = data.get("usage")
-        if not isinstance(usage, dict):
-            return
-        self.prompt_tokens += int(usage.get("prompt_tokens") or 0)
-        self.completion_tokens += int(usage.get("completion_tokens") or 0)
-        prompt_details = usage.get("prompt_tokens_details")
-        if isinstance(prompt_details, dict):
-            self.cached_prompt_tokens += int(prompt_details.get("cached_tokens") or 0)
-        self.cached_prompt_tokens += int(usage.get("prompt_cache_hit_tokens") or 0)
-        completion_details = usage.get("completion_tokens_details")
-        if isinstance(completion_details, dict):
-            self.reasoning_tokens += int(completion_details.get("reasoning_tokens") or 0)
-
-    def apply(self, data: dict[str, Any]) -> dict[str, Any]:
-        result = copy.deepcopy(data)
-        usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
-        usage["prompt_tokens"] = self.prompt_tokens
-        usage["completion_tokens"] = self.completion_tokens
-        usage["total_tokens"] = self.prompt_tokens + self.completion_tokens
-        if self.cached_prompt_tokens:
-            details = usage.get("prompt_tokens_details") if isinstance(usage.get("prompt_tokens_details"), dict) else {}
-            details["cached_tokens"] = self.cached_prompt_tokens
-            usage["prompt_tokens_details"] = details
-        if self.reasoning_tokens:
-            details = (
-                usage.get("completion_tokens_details")
-                if isinstance(usage.get("completion_tokens_details"), dict)
-                else {}
-            )
-            details["reasoning_tokens"] = self.reasoning_tokens
-            usage["completion_tokens_details"] = details
-        result["usage"] = usage
-        return result
-
-    def as_dict(self) -> dict[str, int]:
-        out = {
-            "prompt_tokens": self.prompt_tokens,
-            "completion_tokens": self.completion_tokens,
-            "total_tokens": self.prompt_tokens + self.completion_tokens,
-        }
-        if self.cached_prompt_tokens:
-            out["cached_prompt_tokens"] = self.cached_prompt_tokens
-        if self.reasoning_tokens:
-            out["reasoning_tokens"] = self.reasoning_tokens
-        return out
-
-
 @dataclass(frozen=True)
 class AttemptResult:
     data: dict[str, Any] | None
     status_code: int
     media_type: str
     raw: bytes
-    prepared: PreparedRequest
 
 
-async def call_once(
-    client: httpx.AsyncClient, payload: dict[str, Any], endpoint: Endpoint
-) -> AttemptResult:
-    prepared = prepare(payload, endpoint)
-    upstream = await client.post(prepared.url, headers=prepared.headers, json=prepared.body)
-    media = upstream.headers.get("content-type", "application/json")
-    if upstream.status_code >= 400:
-        return AttemptResult(None, upstream.status_code, media, upstream.content, prepared)
+async def call_once(client: httpx.AsyncClient, payload: dict[str, Any], request_id: str, attempt_no: int) -> AttemptResult:
+    body, headers, _ = prepare_upstream(payload)
+    url = f"{S.upstream_base_url}/chat/completions"
+    log.info(
+        "request=%s upstream_attempt=%s start model=%s structured=%s chars=%s",
+        request_id, attempt_no, body.get("model"), bool(schema_for(payload)), len(json.dumps(body, ensure_ascii=False)),
+    )
+    response = await client.post(url, headers=headers, json=body)
+    media = response.headers.get("content-type", "application/json")
+    if response.status_code >= 400:
+        log.warning("request=%s upstream_attempt=%s http=%s", request_id, attempt_no, response.status_code)
+        return AttemptResult(None, response.status_code, media, response.content)
     try:
-        raw_data = upstream.json()
+        data = response.json()
     except Exception:
-        return AttemptResult(None, 502, media, upstream.content, prepared)
-    if not isinstance(raw_data, dict):
-        return AttemptResult(None, 502, media, upstream.content, prepared)
-    data = normalize_upstream(raw_data, endpoint, prepared.structured_backend)
-    return AttemptResult(data, upstream.status_code, media, upstream.content, prepared)
+        return AttemptResult(None, 502, media, response.content)
+    if not isinstance(data, dict):
+        return AttemptResult(None, 502, media, response.content)
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    log.info(
+        "request=%s upstream_attempt=%s ok prompt=%s completion=%s cache_hit=%s",
+        request_id, attempt_no, usage.get("prompt_tokens"), usage.get("completion_tokens"), usage.get("prompt_cache_hit_tokens"),
+    )
+    return AttemptResult(data, response.status_code, media, response.content)
 
 
-def _adapter_headers(
-    *, requested: str, backend: str, enforcement: str, repairs: int, fallback_used: bool,
-    provider: str, attempts: int, usage: UsageAccumulator,
-) -> dict[str, str]:
-    headers = {
-        "X-Eyle-Structured-Requested": requested,
-        "X-Eyle-Structured-Backend": backend,
+def _adapter_headers(*, usage: UsageAccumulator, attempts: int, repairs: int, enforcement: str, usage_unknown: bool = False) -> dict[str, str]:
+    return {
+        "X-Eyle-Adapter-Profile": ADAPTER_PROFILE,
+        "X-Eyle-Structured-Backend": "deepseek_json_object_local_schema",
         "X-Eyle-Schema-Enforcement": enforcement,
         "X-Eyle-Structured-Repairs": str(repairs),
-        "X-Eyle-Structured-Fallback": "1" if fallback_used else "0",
-        "X-Eyle-Provider-Profile": provider,
         "X-Eyle-Upstream-Attempts": str(attempts),
         "X-Eyle-Usage-Prompt-Tokens": str(usage.prompt_tokens),
         "X-Eyle-Usage-Completion-Tokens": str(usage.completion_tokens),
+        "X-Eyle-Usage-Cached-Prompt-Tokens": str(min(usage.prompt_tokens, usage.cached_prompt_tokens)),
+        "X-Eyle-Usage-Cache-Miss-Tokens": str(min(usage.prompt_tokens, usage.cache_miss_tokens)),
+        "X-Eyle-Upstream-Usage-Unknown": "1" if usage_unknown else "0",
     }
-    return headers
 
 
-async def execute_structured(
-    client: httpx.AsyncClient, incoming: dict[str, Any], request_id: str
-) -> Response:
+async def execute_structured(client: httpx.AsyncClient, incoming: dict[str, Any], request_id: str) -> Response:
     schema = schema_for(incoming)
     if schema is None:
         raise HTTPException(400, "Structured request sem schema.")
-    requested = str((incoming.get("response_format") or {}).get("type") or "json_schema")
     usage = UsageAccumulator()
-    total_attempts = 0
-    total_repairs = 0
-    fallback_used = False
+    attempts = 0
+    repairs = 0
     last_errors: list[str] = []
-    last_backend = structured_backend_for(S.primary)
-    last_provider = infer_provider(S.primary)
+    payload = copy.deepcopy(incoming)
 
-    async def run_endpoint(endpoint: Endpoint) -> tuple[dict[str, Any] | None, AttemptResult | None, list[str]]:
-        nonlocal total_attempts, total_repairs, last_backend, last_provider
-        payload = copy.deepcopy(incoming)
-        if endpoint is not S.primary:
-            payload["model"] = endpoint.model_override or endpoint.model
-        for repair_index in range(S.structured_repair_attempts + 1):
-            result = await call_once(client, payload, endpoint)
-            total_attempts += 1
-            last_backend = result.prepared.structured_backend
-            last_provider = result.prepared.provider_profile
-            if result.data is None:
-                # Erro HTTP/provider não é transformado em decisão semântica nem em repair de schema.
-                return None, result, [f"upstream HTTP {result.status_code}"]
-            usage.add(result.data)
-            value, errors = validate_structured_response(result.data, schema)
-            if not errors:
-                assert value is not None
-                return canonicalize_content(result.data, value), result, []
-            last_content = _assistant_content(result.data)
-            last_errors[:] = errors
-            if repair_index >= S.structured_repair_attempts:
-                return None, result, errors
-            total_repairs += 1
-            payload = build_repair_payload(incoming, last_content, errors)
-        return None, None, ["structured repair exhausted"]
+    for repair_index in range(S.structured_repair_attempts + 1):
+        attempts += 1
+        try:
+            result = await call_once(client, payload, request_id, attempts)
+        except httpx.TimeoutException:
+            headers = _adapter_headers(
+                usage=usage, attempts=attempts, repairs=repairs, enforcement="adapter_timeout", usage_unknown=True
+            )
+            log.warning("request=%s upstream_timeout attempt=%s billing_may_have_occurred=true", request_id, attempts)
+            return JSONResponse(
+                status_code=504,
+                headers=headers,
+                content={
+                    "error": {
+                        "type": "upstream_timeout",
+                        "message": "Timeout no upstream DeepSeek; a tentativa pode ter sido processada/cobrada sem usage retornado.",
+                        "billing_may_have_occurred": True,
+                        "provider_usage_unknown": True,
+                        "upstream_attempts": attempts,
+                    },
+                    "usage": usage.as_dict(),
+                },
+            )
+        except httpx.HTTPError as exc:
+            headers = _adapter_headers(usage=usage, attempts=attempts, repairs=repairs, enforcement="adapter_transport")
+            log.exception("request=%s upstream_transport_error attempt=%s error=%s", request_id, attempts, exc)
+            return JSONResponse(
+                status_code=502,
+                headers=headers,
+                content={"error": {"type": "upstream_connection_error", "message": "Falha ao conectar ao DeepSeek."}, "usage": usage.as_dict()},
+            )
 
-    data, attempt, errors = await run_endpoint(S.primary)
-    if data is None and errors and S.fallback is not None and not errors[0].startswith("upstream HTTP"):
-        fallback_used = True
-        data, attempt, errors = await run_endpoint(S.fallback)
+        if result.data is None:
+            headers = _adapter_headers(usage=usage, attempts=attempts, repairs=repairs, enforcement="provider_http")
+            return Response(content=result.raw, status_code=result.status_code, media_type=result.media_type, headers=headers)
 
-    if data is not None and attempt is not None:
-        aggregated = usage.apply(data)
-        headers = _adapter_headers(
-            requested=requested,
-            backend=last_backend,
-            enforcement="provider" if last_backend == "native_schema" and total_repairs == 0 else "adapter",
-            repairs=total_repairs,
-            fallback_used=fallback_used,
-            provider=last_provider,
-            attempts=total_attempts,
-            usage=usage,
-        )
-        log.info(
-            "request=%s structured_ok provider=%s backend=%s repairs=%s fallback=%s attempts=%s",
-            request_id, last_provider, last_backend, total_repairs, fallback_used, total_attempts,
-        )
-        return JSONResponse(aggregated, headers=headers)
+        usage.add(result.data)
+        value, errors = validate_structured_response(result.data, schema)
+        if not errors:
+            canonical = canonicalize_content(result.data, value)
+            aggregated = usage.apply(canonical)
+            headers = _adapter_headers(usage=usage, attempts=attempts, repairs=repairs, enforcement="adapter")
+            return JSONResponse(aggregated, headers=headers)
 
-    if attempt is not None and attempt.data is None and attempt.status_code >= 400:
-        headers = _adapter_headers(
-            requested=requested,
-            backend=last_backend,
-            enforcement="adapter",
-            repairs=total_repairs,
-            fallback_used=fallback_used,
-            provider=last_provider,
-            attempts=total_attempts,
-            usage=usage,
-        )
-        return Response(
-            content=attempt.raw,
-            status_code=attempt.status_code,
-            media_type=attempt.media_type,
-            headers=headers,
-        )
+        last_errors = errors
+        if repair_index >= S.structured_repair_attempts:
+            break
+        repairs += 1
+        payload = build_repair_payload(incoming, _assistant_content(result.data), errors)
 
-    headers = _adapter_headers(
-        requested=requested,
-        backend=last_backend,
-        enforcement="adapter_failed",
-        repairs=total_repairs,
-        fallback_used=fallback_used,
-        provider=last_provider,
-        attempts=total_attempts,
-        usage=usage,
-    )
-    log.warning(
-        "request=%s structured_contract_unsatisfied provider=%s backend=%s repairs=%s fallback=%s errors=%s",
-        request_id, last_provider, last_backend, total_repairs, fallback_used, errors or last_errors,
-    )
+    headers = _adapter_headers(usage=usage, attempts=attempts, repairs=repairs, enforcement="adapter_failed")
+    log.warning("request=%s structured_contract_unsatisfied attempts=%s repairs=%s errors=%s", request_id, attempts, repairs, last_errors)
     return JSONResponse(
         status_code=502,
         headers=headers,
         content={
             "error": {
                 "type": "structured_contract_unsatisfied",
-                "message": "O provider não conseguiu satisfazer o contrato estruturado após a recuperação permitida.",
-                "validation_errors": (errors or last_errors)[:8],
-                "repairs": total_repairs,
-                "fallback_used": fallback_used,
+                "message": "A DeepSeek não satisfez o contrato estruturado após o repair permitido.",
+                "validation_errors": last_errors[:8],
+                "repairs": repairs,
+                "upstream_attempts": attempts,
             },
             "usage": usage.as_dict(),
         },
@@ -995,13 +886,8 @@ async def lifespan(app: FastAPI):
     timeout = httpx.Timeout(connect=20, read=S.timeout, write=60, pool=20)
     app.state.http = httpx.AsyncClient(timeout=timeout, follow_redirects=False)
     log.info(
-        "Eyle LLM Adapter -> %s | protocol=%s | model=%s | provider=%s | structured=%s | fallback=%s",
-        S.primary.base_url,
-        S.primary.protocol,
-        S.primary.model_override or S.primary.model,
-        infer_provider(S.primary),
-        structured_backend_for(S.primary),
-        bool(S.fallback),
+        "Eyle DeepSeek Adapter -> %s | model=%s | profile=%s | repairs=%s",
+        S.upstream_base_url, S.model_override or S.default_model, ADAPTER_PROFILE, S.structured_repair_attempts,
     )
     try:
         yield
@@ -1009,29 +895,20 @@ async def lifespan(app: FastAPI):
         await app.state.http.aclose()
 
 
-app = FastAPI(title="Eyle Universal LLM Adapter", version="2.0", lifespan=lifespan)
+app = FastAPI(title="Eyle DeepSeek Adapter", version="2.5.2", lifespan=lifespan)
 
 
 @app.get("/")
 @app.get("/health")
 async def health() -> dict[str, Any]:
-    fallback = None
-    if S.fallback is not None:
-        fallback = {
-            "protocol": S.fallback.protocol,
-            "provider": infer_provider(S.fallback),
-            "model": S.fallback.model_override or S.fallback.model,
-            "structured_backend": structured_backend_for(S.fallback),
-        }
     return {
         "status": "ok",
-        "protocol": S.primary.protocol,
-        "upstream": S.primary.base_url,
-        "provider": infer_provider(S.primary),
-        "model": S.primary.model_override or S.primary.model,
-        "structured_backend": structured_backend_for(S.primary),
+        "provider": "deepseek",
+        "upstream": S.upstream_base_url,
+        "model": S.model_override or S.default_model,
+        "structured_backend": "json_object + local Draft 2020-12 validation",
         "structured_repair_attempts": S.structured_repair_attempts,
-        "fallback": fallback,
+        "adapter_profile": ADAPTER_PROFILE,
         "openai_base_url": f"http://{S.host}:{S.port}/v1",
     }
 
@@ -1039,17 +916,7 @@ async def health() -> dict[str, Any]:
 @app.get("/v1/models")
 async def models(request: Request) -> dict[str, Any]:
     client_auth(request)
-    return {
-        "object": "list",
-        "data": [
-            {
-                "id": S.primary.model_override or S.primary.model,
-                "object": "model",
-                "created": 0,
-                "owned_by": infer_provider(S.primary),
-            }
-        ],
-    }
+    return {"object": "list", "data": [{"id": S.model_override or S.default_model, "object": "model", "created": 0, "owned_by": "deepseek"}]}
 
 
 @app.post("/v1/chat/completions")
@@ -1062,28 +929,17 @@ async def chat(request: Request) -> Response:
     stream = bool(incoming.get("stream"))
     client: httpx.AsyncClient = request.app.state.http
 
-    log.info(
-        "request=%s protocol=%s model=%s provider=%s stream=%s structured=%s backend=%s thinking=%s",
-        request_id,
-        S.primary.protocol,
-        model_for(incoming, S.primary),
-        infer_provider(S.primary),
-        stream,
-        is_structured,
-        structured_backend_for(S.primary),
-        thinking_enabled(incoming),
-    )
-
     if is_structured and stream:
-        raise HTTPException(400, "Validação estruturada do adaptador requer stream=false.")
+        raise HTTPException(400, "Validação estruturada requer stream=false.")
 
+    if is_structured:
+        return await execute_structured(client, incoming, request_id)
+
+    body, headers, _ = prepare_upstream(incoming)
+    url = f"{S.upstream_base_url}/chat/completions"
     try:
-        if is_structured:
-            return await execute_structured(client, incoming, request_id)
-
-        prepared = prepare(incoming, S.primary)
-        if S.primary.protocol == "openai" and stream:
-            req = client.build_request("POST", prepared.url, headers=prepared.headers, json=prepared.body)
+        if stream:
+            req = client.build_request("POST", url, headers=headers, json=body)
             upstream = await client.send(req, stream=True)
             if upstream.status_code >= 400:
                 content = await upstream.aread()
@@ -1098,30 +954,27 @@ async def chat(request: Request) -> Response:
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
                 background=BackgroundTask(upstream.aclose),
             )
-
-        attempt = await call_once(client, incoming, S.primary)
-        if attempt.data is None:
-            return Response(content=attempt.raw, status_code=attempt.status_code, media_type=attempt.media_type)
-        return JSONResponse(attempt.data)
-
+        result = await call_once(client, incoming, request_id, 1)
+        if result.data is None:
+            return Response(content=result.raw, status_code=result.status_code, media_type=result.media_type)
+        return JSONResponse(result.data)
     except httpx.TimeoutException:
         return JSONResponse(
             status_code=504,
-            content={"error": {"type": "upstream_timeout", "message": "Timeout no upstream."}},
+            headers={"X-Eyle-Upstream-Usage-Unknown": "1"},
+            content={
+                "error": {
+                    "type": "upstream_timeout",
+                    "message": "Timeout no upstream DeepSeek.",
+                    "billing_may_have_occurred": True,
+                    "provider_usage_unknown": True,
+                }
+            },
         )
     except httpx.HTTPError as exc:
         log.exception("request=%s erro HTTP: %s", request_id, exc)
-        return JSONResponse(
-            status_code=502,
-            content={"error": {"type": "upstream_connection_error", "message": "Falha ao conectar ao upstream."}},
-        )
+        return JSONResponse(status_code=502, content={"error": {"type": "upstream_connection_error", "message": "Falha ao conectar ao DeepSeek."}})
 
 
 if __name__ == "__main__":
-    uvicorn.run(
-        "server:app",
-        host=S.host,
-        port=S.port,
-        reload=False,
-        log_level=os.getenv("LOG_LEVEL", "info").lower(),
-    )
+    uvicorn.run("server:app", host=S.host, port=S.port, reload=False, log_level=os.getenv("LOG_LEVEL", "info").lower())

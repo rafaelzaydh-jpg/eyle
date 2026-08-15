@@ -23,7 +23,7 @@ def test_caminho_normal_dentro_do_projeto_continua_funcionando(tmp_path):
     assert resolvido == os.path.realpath(arquivo)
 
     resultado = standard_registry().execute(
-        "read_file", {"path": "src/normal.py"}, _ctx(raiz),
+        "standard.read_file", {"path": "src/normal.py"}, _ctx(raiz),
     )
     assert resultado["status"] == "success"
     assert resultado["detail"]["content"] == "valor = 42\n"
@@ -37,7 +37,7 @@ def test_read_file_rejeita_travessia_sem_vazar_conteudo(tmp_path):
     segredo.write_text("SEGREDO_QUE_NAO_PODE_VAZAR", encoding="utf-8")
 
     resultado = standard_registry().execute(
-        "read_file", {"path": "../fora.txt"}, _ctx(raiz),
+        "standard.read_file", {"path": "../fora.txt"}, _ctx(raiz),
     )
 
     assert resultado["status"] == "failed"
@@ -54,7 +54,7 @@ def test_caminho_absoluto_e_rejeitado_mesmo_quando_aponta_para_dentro(tmp_path):
 
     assert _resolver_caminho_seguro(raiz, str(arquivo)) is None
     resultado = standard_registry().execute(
-        "read_file", {"path": str(arquivo)}, _ctx(raiz),
+        "standard.read_file", {"path": str(arquivo)}, _ctx(raiz),
     )
     assert resultado["status"] == "failed"
     assert resultado["error_code"] in {"UNSAFE_PATH", "FILE_READ_REJECTED"}
@@ -70,7 +70,7 @@ def test_symlink_para_fora_do_projeto_e_rejeitado(tmp_path):
 
     assert _resolver_caminho_seguro(raiz, "atalho.txt") is None
     resultado = standard_registry().execute(
-        "read_file", {"path": "atalho.txt"}, _ctx(raiz),
+        "standard.read_file", {"path": "atalho.txt"}, _ctx(raiz),
     )
     assert resultado["status"] == "failed"
     assert "caminho inseguro rejeitado" in resultado["detail"]

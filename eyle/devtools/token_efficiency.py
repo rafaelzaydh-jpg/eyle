@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from eyle.devtools.benchmark_schema import TOKEN_USAGE_FIELDS, validate_report
-from eyle.runtime.persistence import salvar_json_atomico
+from eyle.runtime.storage import salvar_json_atomico
 
 
 def _case_index(report):

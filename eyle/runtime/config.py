@@ -1,4 +1,4 @@
-"""Eyle Rev1.5 host configuration boundary.
+"""Eyle ECC host configuration boundary.
 
 Core/Runtime validate only universal host mechanics. Domain configuration is
 opaque here and delegated to the capability provider that owns that domain.
@@ -88,11 +88,6 @@ def validar_config(config, registry: CapabilityRegistry):
     ):
         _validate_positive_number(llm, key, default, "llm")
     _validate_int(llm, "context_window_tokens", 38000, minimum=1, prefix="llm")
-    if int(llm.get("context_window_tokens", 38000) or 38000) > 38000:
-        raise ConfigError(
-            "llm.context_window_tokens não pode exceder 38000 nesta instalação; "
-            "o llama-server é iniciado com janela física de 38k"
-        )
 
     worker = config.get("worker") or {}
     if not isinstance(worker, dict):

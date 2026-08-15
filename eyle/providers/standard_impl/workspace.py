@@ -33,14 +33,13 @@ def discover_project(base_dir: str):
     """
     root = os.path.realpath(base_dir)
     workspace = os.path.realpath(os.path.join(root, "workspace"))
-    if not os.path.isdir(workspace):
-        return None
+    workspace_available = os.path.isdir(workspace)
     return {
-        "caminho_origem": workspace,
+        "caminho_origem": workspace if workspace_available else None,
         "nome": os.path.basename(workspace) or "workspace",
         "auto_discovered": True,
-        "discovery": "workspace",
-        "content_state": "nonempty" if _has_meaningful_content(workspace) else "empty",
+        "discovery": "workspace" if workspace_available else "workspace_unavailable",
+        "content_state": ("nonempty" if _has_meaningful_content(workspace) else "empty") if workspace_available else "unavailable",
         # Runtime-private physical source. _project_descriptor never exposes the
         # host path; observational capabilities can select it as source=eyle.
         "eyle_root": root,

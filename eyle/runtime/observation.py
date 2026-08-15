@@ -1,8 +1,8 @@
-"""Canonical Runtime observation state for Eyle 2.7.5 Rev1.5.0.
+"""Canonical physical Observation/Material state for Eyle ECC.
 
-Observation owns physical capability history, replay identity, materialized grounding,
-Coverage/Frontier continuity and the pending model-facing delta.  The Main LLM
-never manages opaque Runtime handles and there is no second grounding ledger.
+Observation owns executed capability history, replay identity, materialized grounding,
+Coverage/Frontier continuity and the pending model-facing delta. Main never manages
+opaque Runtime handles; cache/coverage is physical state, not semantic memory.
 """
 from __future__ import annotations
 
@@ -106,7 +106,7 @@ def _locator(item: Dict[str, Any]) -> Dict[str, Any]:
 
 
 
-def register_material_candidates(ledger: Dict[str, Any], candidates: Iterable[Dict[str, Any]]) -> List[str]:
+def register_material_candidates(ledger: Dict[str, Any], candidates: Iterable[Dict[str, Any]], *, reality_epoch: int | None = None) -> List[str]:
     """Register capability-produced Material using only universal physical identity.
 
     Required universal shape: locator + content identity. ``source_type`` and
@@ -133,6 +133,10 @@ def register_material_candidates(ledger: Dict[str, Any], candidates: Iterable[Di
         source_capability = str(item.get("source_capability") or source_type).strip() or source_type
         item["source_type"] = source_type
         item["source_capability"] = source_capability
+        if reality_epoch is not None:
+            item["reality_epoch"] = int(reality_epoch)
+        else:
+            item["reality_epoch"] = int(item.get("reality_epoch") or 0)
         source_version = str(item.get("source_version") or "").strip()
         existing = next((
             material_id for material_id, record in store.items()
@@ -141,6 +145,7 @@ def register_material_candidates(ledger: Dict[str, Any], candidates: Iterable[Di
             and str(record.get("source_capability") or "") == source_capability
             and str(record.get("source_version") or "") == source_version
             and str(record.get("content_hash") or "") == content_hash
+            and int(record.get("reality_epoch") or 0) == int(item.get("reality_epoch") or 0)
         ), None)
         material_id = existing or f"mat-{len(store)+1:04d}"
         item["id"] = material_id
@@ -161,6 +166,7 @@ def material_index_view(ledger: Dict[str, Any]) -> List[Dict[str, Any]]:
             "source_capability": item.get("source_capability"),
             "locator": _locator(item),
             "content_hash": item.get("content_hash"),
+            "reality_epoch": int(item.get("reality_epoch") or 0),
         }
         if item.get("query") is not None:
             entry["query"] = item.get("query")
@@ -343,6 +349,28 @@ def result_fingerprint(result: Dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+
+def equivalent_result_seen(session: Any, signature: Optional[str], result: Dict[str, Any]) -> bool:
+    """Return whether the same physical request already produced the same outcome.
+
+    This is a mechanical no-progress fact. It does not block execution or infer
+    semantic usefulness; callers may use it only to avoid treating identical
+    repeated failures/results as fresh progress.
+    """
+    if not signature:
+        return False
+    fingerprint = result_fingerprint(result)
+    epoch = int(getattr(session, "reality_epoch", 0) or 0)
+    for event in reversed(_events(session)):
+        if not isinstance(event, dict):
+            continue
+        if int(event.get("reality_epoch") or 0) != epoch:
+            continue
+        if str(event.get("observation_signature") or "") != str(signature):
+            continue
+        return str(event.get("result_fingerprint") or "") == fingerprint
+    return False
+
 def _strip_private_handles(value: Any) -> Any:
     clone = copy.deepcopy(value)
     if not isinstance(clone, dict):
@@ -379,6 +407,7 @@ def _append_event(session: Any, *, capability: str, arguments: Dict[str, Any], r
         "grounding_ids": list(model_result.get("grounding_ids") or []),
         "frontier_ids": [str(item.get("id")) for item in model_result.get("frontiers") or [] if isinstance(item, dict) and item.get("id")],
         "result": _strip_private_handles(public_result if public_result is not None else result),
+        "result_fingerprint": result_fingerprint(result),
     }
     if result.get("executed") is True and isinstance(result.get("physical_effect"), dict):
         event["effect_id"] = f"eff-{len(events)+1:04d}"
@@ -390,7 +419,7 @@ def _append_event(session: Any, *, capability: str, arguments: Dict[str, Any], r
 
 def record(session: Any, signature: Optional[str], capability: str, arguments: Dict[str, Any], result: Dict[str, Any],
            model_result: Dict[str, Any], *, public_arguments: Optional[Dict[str, Any]] = None,
-           public_result: Optional[Dict[str, Any]] = None) -> None:
+           public_result: Optional[Dict[str, Any]] = None, freshness_token: Optional[str] = None) -> None:
     """Record one physical outcome without interpreting capability semantics."""
     frontier_ids = expose_frontiers(session, capability, model_result)
     event = _append_event(
@@ -423,6 +452,7 @@ def record(session: Any, signature: Optional[str], capability: str, arguments: D
         "failure_resource": result.get("failure_resource"),
         "failure_error_code": result.get("error_code") if result.get("failure_scope") else None,
         "failure_detail": str(result.get("detail") or "")[:500] if result.get("failure_scope") else None,
+        "freshness_token": str(freshness_token or "") or None,
         "replay_result": copy.deepcopy(model_result),
         "turn": int(getattr(session, "turn", 0)),
     }
@@ -502,7 +532,7 @@ def persisted_view(ledger: Dict[str, Any]) -> Dict[str, Any]:
             for field in (
                 "observation_signature", "reality_epoch", "capability", "arguments", "public_arguments",
                 "result_fingerprint", "grounding_ids", "effect_id", "frontier_ids", "coverage",
-                "failure_scope", "failure_resource", "failure_error_code", "failure_detail", "turn",
+                "failure_scope", "failure_resource", "failure_error_code", "failure_detail", "freshness_token", "turn",
             )
             if value.get(field) is not None
         }
@@ -515,7 +545,7 @@ def persisted_view(ledger: Dict[str, Any]) -> Dict[str, Any]:
             for field in (
                 "event_id", "turn", "reality_epoch", "capability", "arguments", "status", "executed",
                 "ok", "error_code", "failure_scope", "failure_resource", "observation_signature",
-                "grounding_ids", "effect_id", "frontier_ids", "result", "replay_reason",
+                "grounding_ids", "effect_id", "frontier_ids", "result", "result_fingerprint", "replay_reason",
             )
             if item.get(field) is not None
         })

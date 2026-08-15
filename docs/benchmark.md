@@ -1,70 +1,38 @@
-# Benchmarking — Eyle 2.7.5 Rev1.4.8
+# ECC Benchmarks
 
-Benchmarks must measure capability, reliability and physical cost rather than only whether a final string was produced.
+ECC must earn migration by measured behavior, not architectural aesthetics.
 
-## Record at minimum
+## Required scenarios
 
-- task outcome / failure code;
-- Main LLM calls and physical attempts;
-- provider prompt/cache/output tokens;
-- tool requests and executions;
-- Observation count and replay rate;
-- Material/grounding count;
-- Coverage/Frontier behavior;
-- Investigation transitions and conclusions;
-- Task transitions, completion criteria and results;
-- committed grounding count;
-- whether Complete required a Grounded Completion correction;
-- wall-clock duration.
+1. **AgentSession analysis:** find its definition, usages and real flow with Explore operations, retain useful knowledge, then Conclude.
+2. **Bug search:** reason over project structure/tests/source rather than merely search `BUG`/`TODO`.
+3. **Write:** inspect, request `operation=transaction` under `type=construir`, suspend for Runtime confirmation, apply, re-observe as needed, Conclude.
+4. **Memory isolation:** durable conversation instruction may survive turns, while an old task never becomes the new active request.
+5. **Cache bias:** background/cached material must not be treated as proof of mutable current state.
+6. **Coverage union:** adjacent/overlapping observed file ranges must prevent redundant physical reads.
+7. **Exact recall:** a retained `ev-*` recall returns only the selected span.
+8. **Unknown provider:** a new provider (for example PetBot) must project into E/C mechanically without Core changes.
 
-Rev1.4 has no Claim outcome/call to record.
+## Metrics
 
-## Reliability regressions
+Track Core LOC/files, fixed prompt/schema size, LLM calls, physical operations, compact replays, knowledge/evidence creation, prompt tokens, duration, no-progress signals and answer/patch correctness.
+## Conversation-background ablation
 
-Canonical tests should cover:
+For memory-causality experiments, Eyle can suppress only the conversation background projected to the LLM while preserving the stored conversation, Memory Graph, Objective State, provider cache behavior, and capabilities.
 
-1. simple conversational Complete requires no Task/Investigation;
-2. open Task blocks Complete;
-3. every Task requires explicit completion criteria;
-4. completed parent cannot retain an open direct child;
-5. open Investigation blocks Complete;
-6. established Investigation requires real Material and a non-empty semantic conclusion;
-7. closed Task requires a result against its declared criteria;
-8. committed Investigation/Task Material cannot disappear from Complete grounding;
-9. Runtime does not infer semantic truth or relevance;
-10. capability failure/rollback remains observable rather than silently converted into success;
-11. removed Claim contracts cannot reappear.
+Set the diagnostic environment variable before launching Eyle:
 
-## Token regressions
+```text
+EYLE_BENCHMARK_SUPPRESS_CONVERSATION_BACKGROUND=1
+```
 
-Track separately:
+When enabled, `conversation_background` is projected as an empty list for every ECC call. The underlying `AgentSession.conversation_background` is not deleted or mutated. Prompt telemetry records `conversation_background_suppressed_for_benchmark`, stored item count, and projected item count.
 
-- fixed repeated contract tax;
-- active capability schema/index cost;
-- fresh tool-result cost;
-- observation-map cost;
-- grounding-index cost;
-- epistemic/intentional state cost;
-- retained conversation context;
-- MemoryView cost when memory is explicitly activated;
-- established Investigation raw grounding retained in prompt after semantic closure (expected: not pinned solely by established status).
+Disable the variable after the experiment (`0`, unset, or any value other than `1/true/yes/on`) to restore normal projection. This switch exists only for diagnostic ablation and must not be used as semantic routing.
 
-The expected Rev1.4 structural win is one fewer LLM request for every normally delivered Complete because the universal Claim review no longer exists.
 
-## Memory Kernel regressions
+## Clean transcript, same Memory Graph
 
-Keep the Rev1.3.6 proofs:
+For a visually and semantically clean cross-session-memory benchmark, the Web shell exposes **limpar chat**. It calls `DELETE /conversa`, which clears only `memory/conversa.json` after verifying that no job is pending/processing. `core_memory.sqlite3` is not touched. Completed queue/job history also remains intact, while client-side tracked-job UI state is cleared.
 
-- 10,000 stored memories with <=30 materialized per view;
-- correct MemoryFrontier continuation;
-- cross-region relation traversal;
-- atomic ChangeSet rollback on revision conflict;
-- persistent append-only history;
-- restart recovery without transcript;
-- incompatible memory schema fails closed.
-
-## Benchmark law
-
-> Physical invariants belong in Runtime; semantic recovery and completion meaning belong to Main.
-
-A benchmark should flag any optimization that reduces tokens by hiding required reality or that increases reliability only by adding another unconstrained semantic judge.
+This is intentionally a shell/diagnostic operation, not an ECC semantic action and not a Runtime memory decision. It is useful together with the background-ablation switch, but clearing the transcript already makes future `conversation_background` naturally empty.

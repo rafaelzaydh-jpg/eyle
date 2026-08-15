@@ -29,7 +29,7 @@ def available_user_prompt_tokens(
     llm = (config or {}).get("llm") or {}
     context = (config or {}).get("context_engine") or {}
     chars_per_token = max(1, int(context.get("chars_per_token_fallback", 3) or 3))
-    window = min(38000, max(1, int(llm.get("context_window_tokens", 38000) or 38000)))
+    window = max(1, int(llm.get("context_window_tokens", 38000) or 38000))
     margin = max(0, int(context.get("safety_margin_tokens", 500) or 0))
     system_tokens = estimate_tokens(system_prompt, chars_per_token)
     try:

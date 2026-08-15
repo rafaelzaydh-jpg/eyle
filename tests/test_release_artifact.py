@@ -24,7 +24,7 @@ def test_release_manifest_capabilities_match_registry():
     base=Path(__file__).resolve().parent.parent
     manifest=json.loads((base/"release_manifest.json").read_text(encoding="utf-8"))
     assert manifest["public_capabilities"] == standard_registry().names()
-    assert manifest["bundled_providers"] == ["standard", "memory"]
+    assert manifest["bundled_providers"] == ["standard"]
     assert manifest["publication"]["requires_extracted_artifact_verification"] is True
 
 

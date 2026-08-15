@@ -10,7 +10,7 @@ import eyle.providers.standard_impl.sandbox as sandbox_mod
 import eyle.providers.standard as tools
 from eyle.providers.standard_impl.code_relations import analyze_symbol_relations
 from eyle.runtime.execution_context import ExecutionContext, bind_execution, reset_execution
-from tests.canonical import agent_complete, agent_tools, base_config, tool_call
+from tests.canonical import base_config
 
 
 
@@ -18,16 +18,6 @@ from tests.canonical import agent_complete, agent_tools, base_config, tool_call
 
 
 
-
-def test_nonretryable_tool_failure_becomes_runtime_fact_and_main_remains_free(monkeypatch, tmp_path):
-    prompts=[]; outputs=iter([agent_tools(tool_call("run_command", {"command":"echo ok"})), agent_complete("Não consegui executar porque o sandbox está indisponível.")])
-    monkeypatch.setattr(core_agent,"executar_agente_llm",lambda prompt,_config:(prompts.append(json.loads(prompt)) or next(outputs)))
-    def fake_tool(name, arguments, context):
-        return {"status":"failed","ok":False,"executed":False,"changed":False,"error_code":"SANDBOX_UNAVAILABLE","retryable":False,"detail":"unavailable"}
-    monkeypatch.setattr(standard_registry(),"execute",fake_tool)
-    status,text,_,details=run_agent(core_agent, "Execute no sandbox.",base_config(),provider_context={"standard":{"caminho_origem":str(tmp_path)}},retornar_detalhes=True)
-    assert status=="success" and "sandbox" in text.lower()
-    assert len(prompts)==2
 
 def test_symbol_relations_reports_registry_binding_and_root_reachability(tmp_path):
     (tmp_path / "tools.py").write_text(
@@ -35,7 +25,7 @@ def test_symbol_relations_reports_registry_binding_and_root_reachability(tmp_pat
         encoding="utf-8",
     )
     result = standard_registry().execute(
-        "symbol_relations",
+        "standard.symbol_relations",
         {"symbol": "target", "roots": ["tools.py"], "direction": "incoming", "include_text_references": False},
         {"provider_context": {"standard": {"caminho_origem": str(tmp_path)}}, "config": base_config()},
     )

@@ -1,21 +1,57 @@
-"""One active Eyle 2.7.5 Rev1.5.3 agent session.
-
-Observation owns physical history and Material. Investigation records unresolved
-epistemic commitments; Tasks record intentional completion commitments. Runtime
-persists and validates their physical contracts without semantic inference.
-"""
+"""Minimal persisted ECC AgentSession with internal graph-memory focus."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from .decision import empty_ledger as empty_decision_ledger, persisted_view as persisted_decisions
-from eyle.runtime.observation import empty_ledger as empty_observation_ledger, material_index_view, persisted_view as persisted_observations
-from .investigation import validate_investigation_state
-from .tasks import validate_task_state
-from .task_memory import empty_task_memory, persisted_view as persisted_task_memory, validate_task_memory_state
+from eyle.runtime.observation import empty_ledger as empty_observation_ledger, persisted_view as persisted_observations
+from .evidence import empty_evidence, validate_evidence
+from .memory import empty_memory_focus
 
-SESSION_SCHEMA_VERSION = "2.7.5-r1.5.3"
+SESSION_SCHEMA_VERSION = "2.7.5-r2.5.2-ecc"
+
+
+def _validated_objective_state(value: Any) -> Optional[Dict[str, Any]]:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"summary", "status", "children", "constraints"}:
+        raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+    summary, status = value.get("summary"), value.get("status")
+    if not isinstance(summary, str) or not summary.strip() or len(summary.strip()) > 2000:
+        raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+    if not isinstance(status, str) or not status.strip() or len(status.strip()) > 96:
+        raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+    children = value.get("children")
+    constraints = value.get("constraints")
+    if not isinstance(children, list) or len(children) > 16 or not isinstance(constraints, list) or len(constraints) > 16:
+        raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+    clean_children = []
+    seen = set()
+    for item in children:
+        if not isinstance(item, dict) or set(item) - {"key", "description", "status", "outcome"} or not {"key", "description", "status"}.issubset(item):
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        key, description, child_status = item.get("key"), item.get("description"), item.get("status")
+        if not isinstance(key, str) or not key or len(key) > 64 or key in seen:
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        if not all(ch.isalnum() or ch in "_-" for ch in key):
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        if not isinstance(description, str) or not description.strip() or len(description.strip()) > 2000:
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        if not isinstance(child_status, str) or not child_status.strip() or len(child_status.strip()) > 96:
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        out = {"key": key, "description": description.strip(), "status": child_status.strip()}
+        if "outcome" in item:
+            outcome = item.get("outcome")
+            if not isinstance(outcome, str) or not outcome.strip() or len(outcome.strip()) > 4000:
+                raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+            out["outcome"] = outcome.strip()
+        seen.add(key); clean_children.append(out)
+    clean_constraints = []
+    for item in constraints:
+        if not isinstance(item, str) or not item.strip() or len(item.strip()) > 1000:
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        clean_constraints.append(item.strip())
+    return {"summary": summary.strip(), "status": status.strip(), "children": clean_children, "constraints": clean_constraints}
 
 
 @dataclass
@@ -25,16 +61,13 @@ class AgentSession:
     turn: int = 0
     reality_epoch: int = 0
     observation_ledger: Dict[str, Any] = field(default_factory=empty_observation_ledger)
-    decision_ledger: Dict[str, Any] = field(default_factory=empty_decision_ledger)
-    investigation: List[Dict[str, Any]] = field(default_factory=list)
-    tasks: List[Dict[str, Any]] = field(default_factory=list)
+    evidence: Dict[str, Dict[str, Any]] = field(default_factory=empty_evidence)
+    memory_focus: List[str] = field(default_factory=empty_memory_focus)
+    objective_state: Optional[Dict[str, Any]] = None
     conversation_background: List[Dict[str, Any]] = field(default_factory=list)
     request_context: List[Dict[str, Any]] = field(default_factory=list)
-    task_memory: Dict[str, Any] = field(default_factory=empty_task_memory)
-    pending_capability: Dict[str, Any] = field(default_factory=dict)
-
-    def grounding_index(self) -> List[Dict[str, Any]]:
-        return material_index_view(self.observation_ledger)
+    runtime_feedback: List[Dict[str, Any]] = field(default_factory=list)
+    pending_operation: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -44,92 +77,59 @@ class AgentSession:
             "turn": int(self.turn),
             "reality_epoch": int(self.reality_epoch),
             "observation_ledger": persisted_observations(self.observation_ledger),
-            "decision_ledger": persisted_decisions(self.decision_ledger),
-            "investigation": [dict(item) for item in self.investigation if isinstance(item, dict)],
-            "tasks": [dict(item) for item in self.tasks if isinstance(item, dict)],
-            "conversation_background": [dict(item) for item in self.conversation_background if isinstance(item, dict)],
-            "request_context": [dict(item) for item in self.request_context if isinstance(item, dict)],
-            "task_memory": persisted_task_memory(self.task_memory),
-            "pending_capability": dict(self.pending_capability or {}),
+            "evidence": validate_evidence(self.evidence),
+            "memory_focus": [str(v) for v in self.memory_focus[:12] if str(v).strip()],
+            "objective_state": _validated_objective_state(self.objective_state),
+            "conversation_background": [dict(v) for v in self.conversation_background if isinstance(v, dict)],
+            "request_context": [dict(v) for v in self.request_context if isinstance(v, dict)],
+            "runtime_feedback": [dict(v) for v in self.runtime_feedback[-20:] if isinstance(v, dict)],
+            "pending_operation": dict(self.pending_operation or {}),
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AgentSession":
-        expected_top_level = {
+        expected = {
             "session_schema_version", "request", "execution_id", "turn", "reality_epoch",
-            "observation_ledger", "decision_ledger", "investigation", "tasks",
-            "conversation_background", "request_context", "task_memory", "pending_capability",
+            "observation_ledger", "evidence", "memory_focus", "objective_state", "conversation_background", "request_context",
+            "runtime_feedback", "pending_operation",
         }
-        if not isinstance(data, dict) or data.get("session_schema_version") != SESSION_SCHEMA_VERSION:
+        if not isinstance(data, dict) or data.get("session_schema_version") != SESSION_SCHEMA_VERSION or set(data) != expected:
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-        if set(data) != expected_top_level:
+        if not isinstance(data.get("request"), str):
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-        if not isinstance(data["request"], str):
-            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-        if data["execution_id"] is not None and not isinstance(data["execution_id"], str):
-            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-        if not isinstance(data["turn"], int) or isinstance(data["turn"], bool) or data["turn"] < 0:
-            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-        if not isinstance(data["reality_epoch"], int) or isinstance(data["reality_epoch"], bool) or data["reality_epoch"] < 0:
-            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-
-        obs = data["observation_ledger"]
-        expected_observation = {"entries", "events", "replay_count", "pending_results", "handles", "snapshots", "frontiers", "materials"}
-        if not isinstance(obs, dict) or set(obs) != expected_observation:
-            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-        for key in ("entries", "handles", "snapshots", "frontiers", "materials"):
-            if not isinstance(obs[key], dict) or not all(isinstance(v, dict) for v in obs[key].values()):
-                raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-        for key in ("events", "pending_results"):
-            if not isinstance(obs[key], list) or not all(isinstance(item, dict) for item in obs[key]):
-                raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-        if not isinstance(obs["replay_count"], int) or isinstance(obs["replay_count"], bool) or obs["replay_count"] < 0:
-            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-
-        decisions = data["decision_ledger"]
-        if not isinstance(decisions, dict) or set(decisions) != {"events"}:
-            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-        if not isinstance(decisions["events"], list) or not all(isinstance(item, dict) for item in decisions["events"]):
-            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-        if not isinstance(data["investigation"], list) or not all(isinstance(item, dict) for item in data["investigation"]):
-            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-        if not isinstance(data["tasks"], list) or not all(isinstance(item, dict) for item in data["tasks"]):
-            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-        if not isinstance(data["conversation_background"], list) or not all(isinstance(item, dict) for item in data["conversation_background"]):
-            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-        if not isinstance(data["request_context"], list) or not all(isinstance(item, dict) for item in data["request_context"]):
-            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        session = cls(data["request"], execution_id=data.get("execution_id"))
         try:
-            task_memory = validate_task_memory_state(data["task_memory"])
-        except ValueError as error:
-            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE") from error
-        if not isinstance(data["pending_capability"], dict):
+            session.turn = int(data.get("turn", 0)); session.reality_epoch = int(data.get("reality_epoch", 0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE") from exc
+        if session.turn < 0 or session.reality_epoch < 0:
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-
-        session = cls(request=data["request"], execution_id=data["execution_id"])
-        session.turn = data["turn"]
-        session.reality_epoch = data["reality_epoch"]
+        obs = data.get("observation_ledger")
+        required_obs = {"entries", "events", "replay_count", "pending_results", "handles", "snapshots", "frontiers", "materials"}
+        if not isinstance(obs, dict) or set(obs) != required_obs:
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
         session.observation_ledger = {
-            "entries": {str(k): dict(v) for k, v in obs["entries"].items()},
-            "events": [dict(item) for item in obs["events"]],
-            "replay_count": int(obs["replay_count"]),
-            "pending_results": [dict(item) for item in obs["pending_results"]],
-            "handles": {str(k): dict(v) for k, v in obs["handles"].items()},
-            "snapshots": {str(k): dict(v) for k, v in obs["snapshots"].items()},
-            "frontiers": {str(k): dict(v) for k, v in obs["frontiers"].items()},
-            "materials": {str(k): dict(v) for k, v in obs["materials"].items()},
+            "entries": {str(k): dict(v) for k, v in (obs.get("entries") or {}).items()},
+            "events": [dict(v) for v in (obs.get("events") or [])],
+            "replay_count": int(obs.get("replay_count") or 0),
+            "pending_results": [],
+            "handles": {str(k): dict(v) for k, v in (obs.get("handles") or {}).items()},
+            "snapshots": {str(k): dict(v) for k, v in (obs.get("snapshots") or {}).items()},
+            "frontiers": {str(k): dict(v) for k, v in (obs.get("frontiers") or {}).items()},
+            "materials": {str(k): dict(v) for k, v in (obs.get("materials") or {}).items()},
         }
-        session.decision_ledger = {"events": [dict(item) for item in decisions["events"]]}
-        try:
-            session.investigation = validate_investigation_state(data["investigation"])
-        except ValueError as error:
-            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE") from error
-        try:
-            session.tasks = validate_task_state(data["tasks"])
-        except ValueError as error:
-            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE") from error
-        session.conversation_background = [dict(item) for item in data["conversation_background"]]
-        session.request_context = [dict(item) for item in data["request_context"]]
-        session.task_memory = task_memory
-        session.pending_capability = dict(data["pending_capability"])
+        session.evidence = validate_evidence(data.get("evidence"))
+        focus = data.get("memory_focus")
+        if not isinstance(focus, list) or any(not isinstance(v, str) for v in focus):
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        session.memory_focus = [str(v) for v in focus[:12] if str(v).strip()]
+        session.objective_state = _validated_objective_state(data.get("objective_state"))
+        for field_name in ("conversation_background", "request_context", "runtime_feedback"):
+            value = data.get(field_name)
+            if not isinstance(value, list) or not all(isinstance(v, dict) for v in value):
+                raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+            setattr(session, field_name, [dict(v) for v in value])
+        if not isinstance(data.get("pending_operation"), dict):
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        session.pending_operation = dict(data.get("pending_operation") or {})
         return session

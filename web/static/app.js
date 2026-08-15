@@ -7,6 +7,7 @@
   const sendBtn = document.getElementById("sendBtn");
   const connDot = document.getElementById("connDot");
   const tokenBtn = document.getElementById("tokenBtn");
+  const clearConversationBtn = document.getElementById("clearConversationBtn");
   const projectInfo = document.getElementById("projectInfo");
   const activityEl = document.getElementById("activity");
   const jobStateEl = document.getElementById("jobState");
@@ -32,7 +33,7 @@
   let tokenPromptCancelado = false;
   let queueInstanceId = sessionStorage.getItem(INSTANCE_STORAGE_KEY) || "";
   let trackedJobs = carregarJobsAcompanhados();
-  let activeAwaitUser = null;
+  let activeConfirmation = null;
 
   function carregarJobsAcompanhados() {
     try {
@@ -219,35 +220,25 @@
     panel.appendChild(head);
 
     const agent = history.agent || {};
-    const summary = historySection("Execução");
+    const summary = historySection("Execução ECC");
     [
       historyLine("turnos", agent.turns),
-      historyLine("capabilities executadas", agent.capability_calls),
+      historyLine("operações físicas", agent.physical_capability_calls),
+      historyLine("replays compactos", agent.operation_replays),
+      historyLine("objetivo", agent.objective_present === true ? "presente" : (agent.objective_present === false ? "nenhum" : null)),
+      historyLine("objetivo · filhos", agent.objective_present === true ? agent.objective_children : null),
+      historyLine("memória · nós", agent.memory_nodes),
+      historyLine("memória · arestas", agent.memory_edges),
+      historyLine("memória · fresh", agent.memory_fresh_nodes),
+      historyLine("memória · degradada", agent.memory_degraded_nodes),
+      historyLine("evidências", agent.evidence_items),
       historyLine("groundings", agent.grounding_count_total),
       historyLine("observation ledger", agent.observation_ledger_size),
-      historyLine("replays/rehydrations", agent.observation_replays),
       historyLine("reality epoch", agent.reality_epoch),
       historyLine("duração", history.duration_seconds != null ? `${history.duration_seconds}s` : null),
       historyLine("falha", agent.failure_code),
     ].filter(Boolean).forEach((line) => summary.appendChild(line));
     panel.appendChild(summary);
-
-    const taskTotals = agent.task_totals || {};
-    if (Object.keys(taskTotals).length && (
-      taskTotals.turns !== agent.turns || taskTotals.capability_calls !== agent.capability_calls ||
-      taskTotals.grounding_count !== agent.grounding_count_total || taskTotals.observation_replays !== agent.observation_replays
-    )) {
-      const taskSection = historySection("Tarefa acumulada");
-      [
-        historyLine("turnos acumulados", taskTotals.turns),
-        historyLine("capabilities acumuladas", taskTotals.capability_calls),
-        historyLine("groundings acumulados", taskTotals.grounding_count),
-        historyLine("observações acumuladas", taskTotals.observation_events),
-        historyLine("replays acumulados", taskTotals.observation_replays),
-        historyLine("decisões acumuladas", taskTotals.decision_events),
-      ].filter(Boolean).forEach((line) => taskSection.appendChild(line));
-      panel.appendChild(taskSection);
-    }
 
     const tokens = history.tokens || {};
     if (Object.keys(tokens).length) {
@@ -281,15 +272,22 @@
         historyLine("provider prompt total", summaryData.provider_prompt_tokens),
         historyLine("provider/local", summaryData.provider_to_local_estimate_ratio),
         historyLine("imposto fixo repetido", summaryData.fixed_repeat_tax_estimated_tokens),
-        historyLine("resultados frescos", summaryData.fresh_observation_estimated_tokens),
-        historyLine("contexto retido", summaryData.retained_context_estimated_tokens),
-        historyLine("estado de observação", summaryData.observation_state_estimated_tokens),
-        historyLine("estado epistêmico", summaryData.epistemic_state_estimated_tokens),
-        historyLine("estado intencional", summaryData.intentional_state_estimated_tokens),
+        historyLine("resultados atuais", summaryData.current_runtime_results_estimated_tokens),
+        historyLine("memória projetada", summaryData.memory_state_estimated_tokens),
+        historyLine("navegação física", summaryData.physical_navigation_estimated_tokens),
+        historyLine("background", summaryData.background_context_estimated_tokens),
+        historyLine("operações ECC", summaryData.ecc_contract_estimated_tokens),
+        historyLine("observações físicas", diagnostics.physical_observations),
+        historyLine("operações físicas", diagnostics.physical_capability_calls),
+        historyLine("replays compactos", diagnostics.operation_replays),
+        historyLine("memória · nós", diagnostics.memory_nodes),
+        historyLine("memória · arestas", diagnostics.memory_edges),
+        historyLine("memória · fresh", diagnostics.memory_fresh_nodes),
+        historyLine("memória · degradada", diagnostics.memory_degraded_nodes),
+        historyLine("memória · semântica", diagnostics.memory_semantic_nodes),
+        historyLine("evidências", diagnostics.evidence_items),
         historyLine("grounding por observação", diagnostics.grounding_per_observation),
-        historyLine("taxa de replay", diagnostics.replay_capability_rate),
-        historyLine("grounding sem referência estrutural", diagnostics.unreferenced_grounding_count),
-        historyLine("capabilities sem referência estrutural", diagnostics.structurally_unreferenced_capability_actions),
+        historyLine("taxa de replay", diagnostics.replay_operation_rate),
       ].filter(Boolean).forEach((line) => costSection.appendChild(line));
 
       const details = document.createElement("details");
@@ -454,7 +452,7 @@
 
   function syncAwaitUserPanels() {
     Array.from(logEl.querySelectorAll(".await-user-panel[data-pending-id]")).forEach((panel) => {
-      const active = Boolean(activeAwaitUser && String(activeAwaitUser.id) === panel.dataset.pendingId);
+      const active = Boolean(activeConfirmation && String(activeConfirmation.id) === panel.dataset.pendingId);
       panel.classList.toggle("inactive", !active);
       panel.querySelectorAll("button, input").forEach((control) => {
         control.disabled = !active;
@@ -478,7 +476,7 @@
         mensagem_id: data.mensagem_id,
         texto_resumo: value,
       });
-      activeAwaitUser = null;
+      activeConfirmation = null;
       syncAwaitUserPanels();
       return true;
     } finally {
@@ -488,15 +486,15 @@
     }
   }
 
-  function buildAwaitUserPanel(awaitUser) {
-    if (!awaitUser || !awaitUser.id) return null;
+  function buildConfirmationPanel(confirmation) {
+    if (!confirmation || !confirmation.id) return null;
     const panel = document.createElement("div");
     panel.className = "await-user-panel";
-    panel.dataset.pendingId = String(awaitUser.id);
+    panel.dataset.pendingId = String(confirmation.id);
 
     const choices = document.createElement("div");
     choices.className = "await-user-choices";
-    (Array.isArray(awaitUser.options) ? awaitUser.options : []).forEach((option, index) => {
+    (Array.isArray(confirmation.options) ? confirmation.options : []).forEach((option, index) => {
       const label = String(option && option.label || "").trim();
       if (!label) return;
       const button = document.createElement("button");
@@ -538,7 +536,7 @@
     cancel.className = "await-user-cancel";
     cancel.textContent = "Cancelar tarefa";
     cancel.addEventListener("click", async () => {
-      try { await submitText(`cancelar ${awaitUser.id}`); } catch (err) { /* permanece disponível */ }
+      try { await submitText(`cancelar ${confirmation.id}`); } catch (err) { /* permanece disponível */ }
     });
     panel.appendChild(cancel);
     return panel;
@@ -554,8 +552,8 @@
     renderMarkdownSafe(bubble, msg.text);
     wrap.appendChild(bubble);
 
-    if (msg.role === "assistant" && msg.await_user) {
-      const panel = buildAwaitUserPanel(msg.await_user);
+    if (msg.role === "assistant" && msg.confirmation) {
+      const panel = buildConfirmationPanel(msg.confirmation);
       if (panel) wrap.appendChild(panel);
     }
 
@@ -788,6 +786,42 @@
     fetchStatus();
   }
 
+  async function limparConversaPreservandoMemoria() {
+    if (pending) {
+      window.alert("Existe uma tarefa em andamento. Aguarde a conclusao antes de limpar a conversa.");
+      return;
+    }
+    const confirmado = window.confirm(
+      "Limpar todas as mensagens desta conversa?\n\n" +
+      "A Memory Graph sera preservada. Jobs e historico operacional tambem nao serao apagados."
+    );
+    if (!confirmado) return;
+
+    clearConversationBtn.disabled = true;
+    try {
+      const res = await apiFetch("/conversa", { method: "DELETE" });
+      const dados = await res.json().catch(() => ({}));
+      if (res.status === 409) {
+        window.alert("Ainda existe uma tarefa ativa. Aguarde e tente novamente.");
+        return;
+      }
+      if (!res.ok) throw new Error(dados.motivo || dados.error_code || "falha ao limpar conversa");
+
+      trackedJobs = [];
+      sessionStorage.removeItem(JOBS_STORAGE_KEY);
+      renderedIds = new Set();
+      activeConfirmation = null;
+      Array.from(logEl.querySelectorAll(".msg, .job-notice, .live-response, .execution-history")).forEach((el) => el.remove());
+      await fetchConversa();
+      updatePendingState();
+      inputEl.focus();
+    } catch (err) {
+      window.alert(`Nao foi possivel limpar a conversa: ${err.message || err}`);
+    } finally {
+      clearConversationBtn.disabled = false;
+    }
+  }
+
   class RateLimitError extends Error {
     constructor(retryMs) {
       super("limite de requisicoes; aguardando Retry-After");
@@ -923,7 +957,7 @@
   }
 
   function renderProjectInfo(data) {
-    activeAwaitUser = data && data.await_user ? data.await_user : null;
+    activeConfirmation = data && data.confirmation ? data.confirmation : null;
     syncAwaitUserPanels();
     const p = data.projeto;
     if (!p || !p.disponivel) {
@@ -980,6 +1014,7 @@
 
   sendBtn.addEventListener("click", sendMessage);
   tokenBtn.addEventListener("click", solicitarNovoToken);
+  clearConversationBtn.addEventListener("click", limparConversaPreservandoMemoria);
 
   // ---------- boot ----------
 

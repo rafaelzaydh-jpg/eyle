@@ -30,6 +30,7 @@ class Provider:
     describe: Callable[[Dict[str, Any]], Dict[str, Any]] | None = None
     rehydrate: Callable[[Dict[str, Any], Dict[str, Any]], None] | None = None
     validate_config: Callable[[Dict[str, Any]], None] | None = None
+    ecc_guidance: tuple[str, ...] = ()
 
 
 class CapabilityRegistry:
@@ -68,6 +69,11 @@ class CapabilityRegistry:
                 if not isinstance(value, list) or any(not isinstance(v, str) or not v.strip() for v in value):
                     raise ValueError(f"CAPABILITY_CAUSAL_DESCRIPTION_INVALID:{canonical}:{semantic_field}")
                 spec[semantic_field] = [v.strip() for v in value]
+            ecc_name = str(spec.get("ecc_name") or "").strip()
+            if ecc_name:
+                if _LOCAL_ID_RE.fullmatch(ecc_name) is None:
+                    raise ValueError(f"CAPABILITY_ECC_NAME_INVALID:{canonical}")
+                spec["ecc_name"] = ecc_name
             raw_effect = str(spec.get("effect") or "observe").strip().lower()
             if raw_effect not in {"observe", "execute", "mutate"}:
                 raise ValueError(f"CAPABILITY_EFFECT_INVALID:{canonical}")
@@ -105,6 +111,30 @@ class CapabilityRegistry:
 
     def names(self) -> list[str]:
         return list(self._index)
+
+    def ecc_guidance(self, allowed_names: Iterable[str] | None = None) -> list[str]:
+        """Return deduplicated provider-owned ECC guidance for the active surface."""
+        allowed = None if allowed_names is None else {str(value) for value in allowed_names}
+        active_provider_ids = set()
+        if allowed is None:
+            active_provider_ids.update(self._providers)
+        else:
+            for name in allowed:
+                item = self._item(name)
+                if item is not None:
+                    active_provider_ids.add(item[0].provider_id)
+        out = []
+        seen = set()
+        for provider_id in self._providers:
+            if provider_id not in active_provider_ids:
+                continue
+            provider = self._providers[provider_id]
+            for raw in provider.ecc_guidance or ():
+                text = str(raw or "").strip()
+                if text and text not in seen:
+                    seen.add(text)
+                    out.append(text)
+        return out
 
     def environment(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
         providers: Dict[str, Any] = {}
@@ -343,35 +373,10 @@ class CapabilityRegistry:
             value["grounding_id"] = grounding_ids[0]
         return value
 
-    def rematerialize(
-        self,
-        name: str,
-        arguments: Dict[str, Any],
-        entry: Dict[str, Any],
-        grounding: Dict[str, Any],
-        config: Dict[str, Any],
-    ) -> Any:
-        """Ask the owning capability to rematerialize an already observed request.
-
-        This is cognitive cache projection, not a new physical execution. Core
-        never interprets provider locators or source ranges.
-        """
-        hook = self.hook(name, "rematerialize")
-        if not callable(hook):
-            return None
-        detail = hook(arguments or {}, entry or {}, grounding or {}, config or {})
-        if detail is None:
-            return None
-        grounding_ids = [
-            str(value) for value in (entry.get("grounding_ids") or [])
-            if str(value) in (grounding or {})
-        ]
-        return self.model_detail(name, detail, grounding_ids, config or {})
-
     def select_evidence(self, material: Dict[str, Any], selector: Dict[str, Any]) -> Dict[str, Any]:
         """Validate one Main-selected EvidenceSpan through its provider contract."""
         if not isinstance(material, dict) or not isinstance(selector, dict):
-            raise ValueError("TASK_MEMORY_SELECTOR_INVALID")
+            raise ValueError("EVIDENCE_SELECTOR_INVALID")
         source_capability = str(material.get("source_capability") or "")
         item = self._item(source_capability)
         if item is None and "." in source_capability:
@@ -380,14 +385,138 @@ class CapabilityRegistry:
         if callable(hook):
             value = hook(material, selector)
             if not isinstance(value, dict):
-                raise ValueError("TASK_MEMORY_SELECTOR_INVALID")
+                raise ValueError("EVIDENCE_SELECTOR_INVALID")
             return value
         if selector:
-            raise ValueError("TASK_MEMORY_SELECTOR_UNSUPPORTED")
+            raise ValueError("EVIDENCE_SELECTOR_UNSUPPORTED")
         return {
             "locator": copy.deepcopy(material.get("locator") or {}),
             "content_hash": str(material.get("content_hash") or ""),
         }
+
+
+    def freshness_arguments(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Return the opaque arguments needed to revalidate a provider token later.
+
+        Providers may narrow this with ``freshness_arguments``. Runtime does not
+        interpret keys such as path, device, router, workbook or sensor.
+        """
+        hook = self.hook(name, "freshness_arguments")
+        if callable(hook):
+            try:
+                value = hook(copy.deepcopy(arguments or {}))
+            except Exception:
+                return {}
+            return copy.deepcopy(value) if isinstance(value, dict) else {}
+        return {}
+
+    def freshness_token(self, name: str, arguments: Dict[str, Any], ctx: Dict[str, Any]) -> str | None:
+        """Return provider-owned physical state token for cache validation.
+
+        This is mechanical identity only. Providers may fingerprint a source tree,
+        file, index, device state, etc. A missing hook means no extra token.
+        """
+        hook = self.hook(name, "freshness_token")
+        if not callable(hook):
+            return None
+        try:
+            value = hook(arguments or {}, ctx or {})
+        except Exception:
+            return None
+        text = str(value or "").strip()
+        return text or None
+
+    def material_freshness(
+        self, material: Dict[str, Any], ctx: Dict[str, Any], *, token_cache: Dict[str, str | None] | None = None,
+    ) -> tuple[bool, str]:
+        """Validate one retained Material against provider-owned physical state.
+
+        Exact material freshness is preferred over broad source tokens. This lets a
+        fact about an unchanged file survive an unrelated write elsewhere while
+        aggregate/negative observations still depend on the whole-source token.
+        The reason distinguishes an actual physical proof from epoch-only validity.
+        """
+        if not isinstance(material, dict):
+            return False, "material_unavailable"
+        name = str(material.get("source_capability") or "")
+        if self._item(name) is None:
+            return False, "capability_unavailable"
+
+        hook = self.hook(name, "freshness")
+        if callable(hook):
+            try:
+                fresh, reason = hook(material, ctx or {})
+            except Exception as exc:
+                material["stale"] = True
+                return False, f"freshness_error:{type(exc).__name__}"
+            if fresh is False:
+                material["stale"] = True
+                return False, str(reason or "stale")
+            if fresh is True:
+                material.pop("stale", None)
+                return True, "exact_current"
+            # None means this exact-material hook does not apply; fall through to
+            # a provider source-state token if one exists.
+
+        token_hook = self.hook(name, "freshness_token")
+        if callable(token_hook):
+            expected = str(material.get("freshness_token") or "").strip()
+            if not expected:
+                material["stale"] = True
+                return False, "freshness_token_missing"
+            token_args = material.get("freshness_arguments") if isinstance(material.get("freshness_arguments"), dict) else {}
+            cache_key = json.dumps({"capability": name, "arguments": token_args}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+            if token_cache is not None and cache_key in token_cache:
+                current = token_cache[cache_key]
+            else:
+                current = self.freshness_token(name, token_args, ctx or {})
+                if token_cache is not None:
+                    token_cache[cache_key] = current
+            if not current or current != expected:
+                material["stale"] = True
+                return False, "physical_source_changed"
+            material.pop("stale", None)
+            return True, "token_current"
+
+        material.pop("stale", None)
+        return True, "no_freshness_contract"
+
+    def entry_freshness(
+        self, name: str, entry: Dict[str, Any], materials: Dict[str, Any], ctx: Dict[str, Any],
+    ) -> tuple[bool, str]:
+        """Validate cached grounding against provider-owned physical freshness.
+
+        A cache entry with no grounding has no provider-declared freshness proof and
+        remains eligible only under the current Runtime reality epoch. Grounded
+        entries must pass every available material freshness hook before replay.
+        """
+        token_hook = self.hook(name, "freshness_token")
+        if callable(token_hook):
+            expected = str(entry.get("freshness_token") or "").strip()
+            if not expected:
+                return False, "freshness_token_missing"
+            current = self.freshness_token(name, dict(entry.get("arguments") or {}), ctx or {})
+            if not current or current != expected:
+                return False, "physical_source_changed"
+
+        hook = self.hook(name, "freshness")
+        if not callable(hook):
+            return True, "token_ok" if callable(token_hook) else "no_hook"
+        grounding_ids = [str(v) for v in (entry.get("grounding_ids") or []) if str(v)]
+        for material_id in grounding_ids:
+            material = materials.get(material_id) if isinstance(materials, dict) else None
+            if not isinstance(material, dict):
+                return False, "material_unavailable"
+            try:
+                fresh, reason = hook(material, ctx or {})
+            except Exception as exc:
+                return False, f"freshness_error:{type(exc).__name__}"
+            if fresh is False:
+                material["stale"] = True
+                return False, str(reason or "stale")
+            if fresh is True:
+                material.pop("stale", None)
+        return True, "ok"
 
     def find_covering(self, name: str, arguments: Dict[str, Any], entries: Dict[str, Any], reality_epoch: int):
         hook = self.hook(name, "covers")

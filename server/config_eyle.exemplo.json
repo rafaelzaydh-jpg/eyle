@@ -1,9 +1,0 @@
-{
-  "llm": {
-    "provider": "openai_compatible",
-    "base_url": "http://127.0.0.1:8080/v1",
-    "model": "qwen3.8-max",
-    "api_key": "local-sem-chave",
-    "stream_responses": true
-  }
-}

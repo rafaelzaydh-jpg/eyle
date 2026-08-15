@@ -542,7 +542,7 @@ html, body {
   .execution-history { width: 92vw; }
 }
 
-/* ---------- supervised await_user ---------- */
+/* ---------- runtime confirmation ---------- */
 .await-user-panel {
   width: min(520px, 100%);
   margin-top: 7px;

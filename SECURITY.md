@@ -37,7 +37,7 @@ Execution trace is an internal diagnostic projection over canonical runtime hist
 
 ## Compatibility
 
-Reintroducing a removed Core contract requires a concrete current failure and a regression test/metric demonstrating the need. Git and `CHANGELOG.md` are the historical archive.
+Reintroducing a removed Core contract requires a concrete current failure and a regression test/metric demonstrating the need. Git history is the historical archive.
 
 
 ## Rev1.4.3 model-facing safety boundary

@@ -9,6 +9,7 @@ import time
 import pytest
 
 import eyle.core.agent as core_agent
+from eyle.runtime.ecc_runtime import project_result
 from eyle.runtime import observation
 from eyle.providers import standard as tools
 from eyle.runtime.observation import record
@@ -28,8 +29,8 @@ def _ctx(root, session=None, *, max_ranges=2, max_matches=2):
 
 
 def _observe(session, name, arguments, result, cfg):
-    projected = core_agent._model_capability_result(session, name, result, standard_registry(), cfg, arguments)
-    record(session, tools.capability_observation_signature(name, arguments), name, arguments, result, projected)
+    projected = project_result(session, name, result, standard_registry(), cfg)
+    record(session, standard_registry().observation_signature(name, arguments), name, arguments, result, projected)
     return projected
 
 
@@ -54,7 +55,7 @@ def test_invalid_coverage_shape_fails_capability_contract(monkeypatch):
         "coverage": lambda arguments, result: {"banana": 123},
         "frontier": lambda arguments, result: [], "limits": {},
     })
-    result = standard_registry().execute(name, {}, {})
+    result = standard_registry().execute(f"standard.{name}", {}, {})
     assert result["ok"] is False
     assert result["error_code"] == "CAPABILITY_COVERAGE_INVALID"
     assert "missing field" in str(result["detail"])
@@ -65,7 +66,7 @@ def test_find_symbol_exhausts_scope_and_frontiers_materialization(tmp_path):
         (tmp_path / f"f{index:02d}.py").write_text("def repeated():\n    return 1\n", encoding="utf-8")
     session = AgentSession("locate")
     ctx = _ctx(tmp_path, session)
-    raw = standard_registry().execute("find_symbol", {"symbol": "repeated"}, ctx)
+    raw = standard_registry().execute("standard.find_symbol", {"symbol": "repeated"}, ctx)
     assert raw["ok"] is True
     assert raw["coverage"]["examined"]["files"] == 40
     assert raw["coverage"]["examined"]["matches"] == 40
@@ -76,7 +77,7 @@ def test_find_symbol_exhausts_scope_and_frontiers_materialization(tmp_path):
 
     model = _observe(session, "find_symbol", {"symbol": "repeated"}, raw, ctx["config"])
     frontier = model["frontiers"][0]["id"]
-    continued = standard_registry().execute("continue_observation", {"frontier": frontier}, ctx)
+    continued = standard_registry().execute("standard.continue_observation", {"frontier": frontier}, ctx)
     assert continued["ok"] is True
     assert continued["coverage"]["facts"]["snapshot_exhausted"] is True
     assert continued["coverage"]["facts"]["source_materialization_complete"] is True
@@ -88,18 +89,18 @@ def test_continuation_does_not_confuse_snapshot_exhaustion_with_source_materiali
     session = AgentSession("search")
     ctx = _ctx(tmp_path, session, max_ranges=1, max_matches=1)
     args = {"query": "needle"}
-    raw = standard_registry().execute("search_code", args, ctx)
+    raw = standard_registry().execute("standard.search_code", args, ctx)
     model = _observe(session, "search_code", args, raw, ctx["config"])
     frontier = model["frontiers"][0]["id"]
     # Remaining snapshot locators point at f1/f2. Remove both before continuation.
     for path in (tmp_path / "f1.py", tmp_path / "f2.py"):
         path.unlink()
 
-    first = standard_registry().execute("continue_observation", {"frontier": frontier}, ctx)
+    first = standard_registry().execute("standard.continue_observation", {"frontier": frontier}, ctx)
     assert first["ok"] is True
     first_model = _observe(session, "continue_observation", {"frontier": frontier}, first, ctx["config"])
     next_frontier = first_model["frontiers"][0]["id"]
-    second = standard_registry().execute("continue_observation", {"frontier": next_frontier}, ctx)
+    second = standard_registry().execute("standard.continue_observation", {"frontier": next_frontier}, ctx)
     assert second["ok"] is True
     facts = second["coverage"]["facts"]
     assert facts["snapshot_exhausted"] is True
@@ -124,15 +125,16 @@ def test_capability_specific_dispatch_is_registry_owned(monkeypatch):
         "normalize": lambda arguments: {**arguments, "normalized": True},
     }
     monkeypatch.setitem(tools.CAPABILITIES, name, spec)
-    assert tools.capability_public_arguments(name, {}) == {"owned": True}
-    assert tools.capability_public_result(name, tools._sucesso({"raw": "x"}))["projection"] == "public"
-    assert tools.capability_model_detail(name, {}, [], {}) == {"projection": "model"}
-    assert tools.capability_find_covering(name, {}, {}, 0) == {"owned": "cover"}
-    assert tools.capability_find_resource_failure(name, {}, {}, 0) == {"owned": "failure"}
-    normalized, error = standard_registry().validate(name, {})
+    registry = standard_registry()
+    assert registry.public_arguments(f"standard.{name}", {}) == {"owned": True}
+    assert registry.public_result(f"standard.{name}", tools._sucesso({"raw": "x"}))["projection"] == "public"
+    assert registry.model_detail(f"standard.{name}", {}, [], {}) == {"projection": "model"}
+    assert registry.find_covering(f"standard.{name}", {}, {}, 0) == {"owned": "cover"}
+    assert registry.find_resource_failure(f"standard.{name}", {}, {}, 0) == {"owned": "failure"}
+    normalized, error = standard_registry().validate(f"standard.{name}", {})
     assert error is None and normalized["normalized"] is True
 
-    source = inspect.getsource(tools.capability_public_arguments) + inspect.getsource(tools.capability_public_result) + inspect.getsource(tools.capability_model_detail) + inspect.getsource(tools.capability_find_covering)
+    source = inspect.getsource(registry.public_arguments) + inspect.getsource(registry.public_result) + inspect.getsource(registry.model_detail) + inspect.getsource(registry.find_covering)
     assert "if tool" not in source and "if name" not in source
 
 

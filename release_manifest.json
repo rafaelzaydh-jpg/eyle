@@ -1,44 +1,50 @@
 {
   "release": "2.7.5",
   "app_version": "2.7.5",
-  "config_schema_version": "2.7.5-r1.5.3",
-  "revision": "rev1.5.3-cognitive-task-memory",
-  "released_at": "2026-08-13",
-  "title": "Rev1.5.3 Cognitive Task Memory",
+  "config_schema_version": "2.7.5-r2.5.2-ecc",
+  "revision": "rev2.5.3-ecc",
+  "released_at": "2026-08-14",
+  "title": "Rev2.5.3 ECC Clear Cognitive Prompt",
   "compatibility": {
     "backward_compatible": false,
-    "session_schema": "2.7.5-r1.5.3",
-    "queue_schema": "2.7.5-r1.4.3",
-    "pending_continuation_schema": "4",
+    "session_schema": "2.7.5-r2.5.2-ecc",
+    "pending_continuation_schema": "9-ecc",
     "benchmark_schema": "2",
-    "policy": "Clean break at the persisted Session boundary from Rev1.5.2: Rev1.5.3 adds task-scoped cognitive memory while preserving the Host-injected Provider architecture, Main semantic authority, Tasks/Investigation and universal physical contracts."
+    "policy": "Rev2.5.3 changes prompt wording, observability and public documentation only. The persisted AgentSession schema remains 2.7.5-r2.5.2-ecc and the pending continuation schema remains 9-ecc."
   },
   "architecture": {
-    "main": "Sole semantic authority. Interprets immutable request plus authoritative request_context, freely chooses provider capabilities, user supervision, optional Investigation/Tasks, or completion.",
-    "runtime": "Domain-neutral mechanical authority. Validates capability/result/effect coherence, confirmation, persistence, budgets and continuation identity; confirmed results always return to Main.",
-    "providers": "Independent owners of domain mechanics and private runtime state. Providers register local capability IDs; Registry exposes provider.local canonical IDs and validates their physical contracts.",
-    "capability_contract": "Capabilities self-describe purpose, inputs, returns, caveats, limits, effect class and confirmation. Providers may also publish establishes/does_not_establish causal boundaries; Registry validates their shape and exposes them without interpreting domain meaning.",
-    "actions": "Exactly capability_calls, await_user, complete. Workspace mutation is workspace_transaction from the bundled standard provider, not a special Core action.",
-    "completion": "Complete has answer, limitations, grounding_ids and effect_ids. There is no Direct/Observed/Effect classification phase. Main must compare requested world changes against actual effect resource, changed state and persistence; Runtime still checks coordinate existence/identity only.",
-    "effects": "Universal physical_effect shape is resource, operation, persistence and changed. Main is explicitly taught that successful execution is not automatically task success and that temporary/isolated/different-resource effects cannot stand in for requested persistent/external effects.",
-    "continuation": "await_user answers are retained as authoritative request_context for the same active task. Capability confirmation executes mechanically, records observation/effect, then resumes Main.",
-    "provider_context": "Host injects Registry and opaque provider_context. Runtime/service does not import or discover the standard provider domain directly.",
-    "runtime_state": "ExecutionContext exposes provider-private runtime state and generic cleanup callbacks; sandbox/container/session state belongs to the provider that created it.",
-    "configuration": "Runtime validates universal host fields and delegates providers.* validation to the registered provider. Provider-specific search/sandbox/test limits are opaque to Core.",
-    "standard_provider": "Bundled workspace/code/Git/sandbox provider only. Persistent cognitive Memory is a separate bundled memory provider.",
-    "semantic_freedom": "Capabilities remain optional resources rather than workflow stages. Causal-effect literacy is generic and domain-neutral: no keyword router, forced capability choice or prose classifier is introduced.",
-    "contracts": "Universal capability, Observation, Coverage and physical-effect contracts live below Core and Providers; provider implementations do not import eyle.core.*.",
-    "http_retry": "Transient OpenAI-compatible HTTP statuses (408/425/429/500/502/503/504) retain retryability through backend error translation.",
-    "host_description": "Host may expose opaque presentation/status metadata through describe(); Runtime passes it through without domain interpretation, while bundled CLI/Web choose which fields to render.",
-    "action_semantics": "await_user means active progress is blocked on user input; complete means the current turn/task is adequately answered or finished and does not terminate the conversation itself.",
-    "task_memory": "Task-scoped cognitive memory stores Main-selected EvidenceSpan coordinates plus semantic Findings and Conclusions. Raw Observation remains canonical and is not duplicated into prompt memory.",
-    "observation_replay": "Physical Coverage memoizes external observation, while provider-owned rematerialization may project the exact requested already-observed range back to Main without physical re-execution. Physical coverage is not treated as cognitive availability.",
-    "presentation": "Provider model projections report presentation completeness/ranges when a physically observed source is only partially shown to Main; silent source truncation is not treated as full cognitive coverage.",
-    "memory_separation": "Persistent Memory provider remains separate from task-scoped cognitive memory. Task knowledge is active-task state and is not automatically promoted to longitudinal Memory."
+    "cognitive_protocol": [
+      "explorar",
+      "construir",
+      "concluir"
+    ],
+    "main": "Sole semantic authority. Chooses ECC action, objective_state meaning/evolution, and all semantic Memory Graph content/relations/disposition.",
+    "runtime": "Non-semantic mechanical authority: schemas, budgets, Evidence, IDs, persistence, objective-state storage, revisions, anchors/freshness, graph topology, permissions, confirmation, transactions, rollback and deterministic execution. It never interprets objective status or gates completion.",
+    "capability_body": "Providers are replaceable deterministic bodies. Core has no desktop/robot/network/workspace domain branch.",
+    "world_scope": "Host supplies opaque core_memory.world_scope_id; Core hashes it into world:* without interpreting filesystem/device/network semantics.",
+    "memory": "Persistent internal graph transversal to all three ECC moves; not a capability or fourth action. Each move declares focus, disposition and semantic operations.",
+    "memory_disposition": "unchanged means Main judged persistent understanding unchanged and operations are empty; updated means Main judged a semantic model change and supplies graph operations.",
+    "memory_freshness": "Provider-owned Material anchors retain opaque locator, version/hash, freshness token and freshness_arguments. Changed reality degrades affected anchors without deleting semantic memory.",
+    "memory_topology": "Runtime exposes only mechanical graph structure/retrieval signals; it never assigns semantic importance, dead-code status, architectural role or relevance.",
+    "memory_retention": "Main may keep anything that can plausibly help later, without waiting for an explicit remember command; it stores compact meaning rather than raw observations.",
+    "memory_retrieval": "Before every ECC decision Runtime retrieves a bounded world+user graph view from current_request/focus, lexical/tag matches, graph neighborhood and topology fallback.",
+    "evidence": "Every physical Material automatically becomes active-session Evidence. Narrow provider selectors may create additional exact spans. Persistent Memory remains a separate LLM semantic choice.",
+    "selectors": "Memory Material support uses an optional opaque selector object validated by the originating provider evidence_selector hook.",
+    "freshness_arguments": "Providers own the opaque arguments required to recompute source tokens; Runtime persists and replays them without domain interpretation.",
+    "explorar": "Observe or non-persistently execute through attached providers.",
+    "construir": "Request persistent world changes through attached deterministic providers and Runtime safeguards.",
+    "concluir": "Terminal response chosen by Main; Runtime does not inspect objective status as a completion gate. Objective and memory cognition may accompany Concluir without creating phases.",
+    "context_separation": "current_request, objective_state, conversation_background, memory_graph, exploration_map, latest_observations/Evidence and runtime_feedback remain distinct.",
+    "provider_boundary": "Bundled Standard is only one Host body; alternative products can attach other providers without changing Core/Memory.",
+    "frontier_boundary": "Continuation mechanics remain provider/runtime-internal and are not a public ECC cognition primitive.",
+    "transport_cost_safety": "Provider/adaptor timeout and structured failure cost protections from Rev2.2+ remain fail-closed.",
+    "objective_state": "Transient LLM-owned semantic state separate from canonical current_request. It may be null, replaced or cleared; compound goals may contain bounded semantic children/constraints/outcomes, never execution steps or Runtime planning.",
+    "request_identity": "current_request is the immutable canonical user input for the AgentSession. Objective State is an interpretation of what remains to be achieved, not a rewrite of that input.",
+    "benchmark_background_ablation": "Diagnostic-only env switch EYLE_BENCHMARK_SUPPRESS_CONVERSATION_BACKGROUND suppresses prompt projection of conversation_background without deleting stored history or changing Memory, Objective, ECC, capabilities, or provider cache behavior.",
+    "prompt_style": "Simple direct language: understand intent and implications, remember reusable knowledge without waiting for explicit commands, keep freshness separate from semantic correctness, and require enough support before broad negative claims."
   },
   "bundled_providers": [
-    "standard",
-    "memory"
+    "standard"
   ],
   "public_capabilities": [
     "standard.calculate",
@@ -56,37 +62,61 @@
     "standard.run_tests",
     "standard.git_status",
     "standard.git_diff",
-    "standard.workspace_transaction",
-    "memory.search",
-    "memory.store"
+    "standard.workspace_transaction"
   ],
+  "ecc_operations": {
+    "explorar": [
+      "calculate",
+      "count_tokens",
+      "find_symbol",
+      "git_diff",
+      "git_status",
+      "inspect_project",
+      "list_tree",
+      "project_stats",
+      "read_file",
+      "run_command",
+      "run_tests",
+      "search",
+      "symbol_relations",
+      "recall"
+    ],
+    "construir": [
+      "export_sandbox_zip",
+      "transaction"
+    ],
+    "concluir": [
+      "concluir"
+    ]
+  },
   "removed": [
-    "eyle/core/tools.py and the Core-owned domain registry",
-    "special Agent patches action and Core write-transaction state",
-    "tool_calls naming in the Main protocol",
-    "completion_mode direct/observed/effect classification",
-    "active_tools progressive-disclosure state",
-    "workspace_epoch; replaced by domain-neutral reality_epoch",
-    "project_hash pending identity; replaced by provider_context_hash",
-    "Core-owned workspace/Git/sandbox/symbol/search/memory implementation modules",
-    "Core-owned sandbox Docker/Microsandbox runtime state",
-    "Runtime knowledge of provider search/test/sandbox configuration",
-    "provider-specific project payload in Core; replaced by opaque provider_context",
-    "global default_registry ownership in Core",
-    "provider confirmation_message terminal responses",
-    "Memory capabilities embedded in the standard provider",
-    "Provider imports of eyle.core observation/execution contracts",
-    "mandatory empty investigation_updates/task_updates on every Main turn",
-    "Rev1.5.2 cached source replay semantics that returned only a tiny generic recall excerpt when the provider can exactly rematerialize the requested observed range",
-    "Persisted Session schema 2.7.5-r1.5.1; Rev1.5.3 persists task_memory under session schema 2.7.5-r1.5.3"
+    "eyle/core/knowledge.py",
+    "eyle/providers/memory.py",
+    "eyle/providers/memory_impl/",
+    "public memory.search",
+    "public memory.store",
+    "learned[] ECC checkpoint protocol",
+    "eyle/core/decision.py",
+    "eyle/core/investigation.py",
+    "eyle/core/tasks.py",
+    "eyle/core/task_memory.py",
+    "eyle/core/validation.py",
+    "eyle/core/continuation.py",
+    "eyle/core/token_budget.py",
+    "Main-authored await_user action",
+    "completion grounding gate",
+    "task/investigation update protocol",
+    "broad cached observation rematerialization",
+    "project-scoped Core Memory contract",
+    "core_memory.scope_root",
+    "line_start/line_end as universal Memory support selector",
+    "memory sidecar with implicit empty/updated meaning",
+    "Evidence creation conditional on Memory anchoring"
   ],
   "publication": {
-    "requires_extracted_artifact_verification": true,
-    "target_tag": "v2.7.5-rev1.5.3"
+    "requires_extracted_artifact_verification": true
   },
-  "agent_action_kinds": [
-    "capability_calls",
-    "await_user",
-    "complete"
-  ]
+  "contracts": {
+    "benchmark_clean_transcript": "Authenticated Web DELETE /conversa clears only conversation transcript/pending confirmation when no job is active; persistent core_memory.sqlite3 Memory Graph is preserved."
+  }
 }

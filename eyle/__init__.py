@@ -1,4 +1,4 @@
-"""Eyle 2.7.5 Rev1.5.3 — Cognitive Task Memory."""
+"""Eyle 2.7.5 Rev2.5.3 ECC."""
 __version__ = "2.7.5"
-__schema_version__ = "2.7.5-r1.5.3"
-__revision__ = "rev1.5.3-cognitive-task-memory"
+__schema_version__ = "2.7.5-r2.5.2-ecc"
+__revision__ = "rev2.5.3-ecc"

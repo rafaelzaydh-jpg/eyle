@@ -189,7 +189,7 @@ def test_runtime_assigns_confirmation_metadata_once(monkeypatch, tmp_path):
     monkeypatch.setattr(service_mod.secrets, "token_hex", lambda size: "a1b2")
 
     core_pending = {
-        "pending_schema_version": "4",
+        "pending_schema_version": "9-ecc",
         "continuation_kind": "capability_confirmation",
         "question": "Proposal ready.",
         "session": {"request": "change the file"},

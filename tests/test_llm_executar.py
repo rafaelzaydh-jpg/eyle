@@ -59,11 +59,7 @@ def _capture(monkeypatch, response):
 
 
 def _agent_json(answer="ok"):
-    return json.dumps({
-        "action": {"kind": "complete", "answer": answer, "limitations": [], "grounding_ids": [], "effect_ids": []},
-        "investigation_updates": [],
-        "task_updates": [],
-    })
+    return json.dumps({"type": "concluir", "response": answer, "objective": {"disposition": "unchanged", "state": None}, "memory": {"focus": [], "disposition": "unchanged", "operations": []}})
 
 
 def test_ollama_uses_num_predict(monkeypatch):
@@ -81,14 +77,14 @@ def test_openai_uses_max_tokens(monkeypatch):
 def test_structured_openai_uses_strict_profile_schema(monkeypatch):
     body = _agent_json()
     calls = _capture(monkeypatch, {"choices": [{"message": {"content": body}}]})
-    parsed = llm_mod._chamar_llm("s", "u", _config(), perfil="agent")
-    assert parsed["action"]["kind"] == "complete"
-    assert parsed["action"]["answer"] == "ok"
+    parsed = llm_mod._chamar_llm("s", "u", _config(), perfil="ecc")
+    assert parsed["type"] == "concluir"
+    assert parsed["response"] == "ok"
     fmt = calls[0][1]["response_format"]
     assert fmt["type"] == "json_schema"
     assert fmt["json_schema"]["strict"] is True
-    assert set(fmt["json_schema"]["schema"]["required"]) == {"action"}
-    assert "anyOf" in fmt["json_schema"]["schema"]["properties"]["action"]
+    assert "oneOf" in fmt["json_schema"]["schema"]
+    assert len(fmt["json_schema"]["schema"]["oneOf"]) == 3
 
 
 def test_structured_json_schema_is_required_and_fails_closed(monkeypatch):
@@ -104,7 +100,7 @@ def test_structured_json_schema_is_required_and_fails_closed(monkeypatch):
 
     monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(llm_mod.ErroLLM) as exc:
-        llm_mod._chamar_llm("s", "u", _config(retry_max_attempts=1), perfil="agent")
+        llm_mod._chamar_llm("s", "u", _config(retry_max_attempts=1), perfil="ecc")
     assert exc.value.error_code == "LLM_STRUCTURED_OUTPUT_UNAVAILABLE"
     assert len(calls) == 1
     assert calls[0]["response_format"]["type"] == "json_schema"
@@ -115,7 +111,7 @@ def test_reasoning_content_is_never_executable(monkeypatch):
         "choices": [{"message": {"content": "", "reasoning_content": _agent_json()}}]
     })
     with pytest.raises(llm_mod.ErroLLM) as exc:
-        llm_mod._chamar_llm("s", "u", _config(), perfil="agent")
+        llm_mod._chamar_llm("s", "u", _config(), perfil="ecc")
     assert exc.value.error_code == "EMPTY_MODEL_RESPONSE"
 
 
@@ -165,8 +161,8 @@ def test_structured_parser_rejects_markdown_or_multiple_json_objects(monkeypatch
     content = '```json\n' + _agent_json() + '\n```\n' + _agent_json("second")
     _capture(monkeypatch, {"choices": [{"message": {"content": content}}]})
     with pytest.raises(llm_mod.ErroLLM) as exc:
-        llm_mod._chamar_llm("s", "u", _config(), perfil="agent")
-    assert str(exc.value.error_code).startswith("STRUCTURED_RESPONSE_INVALID:agent:")
+        llm_mod._chamar_llm("s", "u", _config(), perfil="ecc")
+    assert str(exc.value.error_code).startswith("STRUCTURED_RESPONSE_INVALID:ecc:")
 
 
 def test_http_error_keeps_backend_detail(monkeypatch):
@@ -243,7 +239,7 @@ def test_transport_timeout_is_recorded_as_started_physical_attempt_not_preflight
 
     monkeypatch.setattr(llm_mod.urllib.request, "urlopen", timeout_urlopen)
     with pytest.raises(llm_mod.ErroLLM) as exc:
-        llm_mod._chamar_llm("s", "u", cfg, execution, perfil="agent")
+        llm_mod._chamar_llm("s", "u", cfg, execution, perfil="ecc")
     assert exc.value.error_code == "READ_TIMEOUT"
     attempt = execution.llm_calls[-1]["attempts"][0]
     assert attempt["request_status"] == "read_timeout"
@@ -275,7 +271,7 @@ def test_true_preflight_rejection_has_no_physical_attempt(monkeypatch):
 
     monkeypatch.setattr(llm_mod.urllib.request, "urlopen", should_not_send)
     with pytest.raises(llm_mod.ErroLLM) as exc:
-        llm_mod._chamar_llm("system contract", "user request", cfg, execution, perfil="agent")
+        llm_mod._chamar_llm("system contract", "user request", cfg, execution, perfil="ecc")
     assert exc.value.error_code == "PROMPT_CONTEXT_BUDGET_EXCEEDED"
     assert calls == []
     assert execution.llm_calls[-1]["attempts"] == []
@@ -340,3 +336,124 @@ def test_transient_openai_http_error_retries_after_backend_translation(monkeypat
     )
     assert llm_mod._chamar_llm("s", "u", cfg) == "ok"
     assert calls["n"] == 2
+
+
+def test_rev22_adapter_structured_502_is_not_retried_and_error_usage_is_accounted(monkeypatch):
+    from eyle.runtime.execution_context import ExecutionContext
+    from tests.canonical import base_config
+
+    cfg = base_config()
+    cfg["llm"].update({
+        "base_url": "http://localhost:8080", "model": "modelo-teste", "openai_compatible": True,
+        "retry_max_attempts": 3, "retry_base_delay_seconds": 0, "retry_max_delay_seconds": 0,
+        "retry_jitter_seconds": 0, "cooldown_seconds": 0,
+    })
+    execution = ExecutionContext.from_config(cfg)
+    calls = {"n": 0}
+    body = json.dumps({
+        "error": {"type": "structured_contract_unsatisfied", "message": "bad schema"},
+        "usage": {"prompt_tokens": 5000, "completion_tokens": 120, "total_tokens": 5120},
+    }).encode()
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        raise urllib.error.HTTPError(req.full_url, 502, "Bad Gateway", {}, io.BytesIO(body))
+
+    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(llm_mod.ErroLLM) as exc:
+        llm_mod._chamar_llm("s", "u", cfg, execution, perfil="ecc")
+    assert exc.value.error_code == "LLM_STRUCTURED_RESPONSE_UNSATISFIED"
+    assert exc.value.transient is False
+    assert calls["n"] == 1
+    usage = execution.usage_view()
+    assert usage["prompt_tokens_actual"] == 5000
+    assert usage["completion_tokens_actual"] == 120
+    attempt = execution.llm_calls[-1]["attempts"][0]
+    assert attempt["provider_usage_from_error"] is True
+
+
+def test_rev251_adapter_structured_failure_surfaces_repair_diagnostics(monkeypatch):
+    from eyle.runtime.execution_context import ExecutionContext
+    from tests.canonical import base_config
+
+    cfg = base_config()
+    cfg["llm"].update({
+        "base_url": "http://localhost:8080", "model": "modelo-teste", "openai_compatible": True,
+        "retry_max_attempts": 3, "retry_base_delay_seconds": 0, "retry_max_delay_seconds": 0,
+        "retry_jitter_seconds": 0, "cooldown_seconds": 0,
+    })
+    execution = ExecutionContext.from_config(cfg)
+    calls = {"n": 0}
+    body = json.dumps({
+        "error": {
+            "type": "structured_contract_unsatisfied",
+            "message": "bad memory operation",
+            "validation_errors": [
+                "$.memory.operations[0].scope: required property missing",
+                "$.memory.operations[0].kind: required property missing",
+            ],
+            "repairs": 1,
+            "upstream_attempts": 2,
+        },
+        "usage": {"prompt_tokens": 8000, "completion_tokens": 700, "total_tokens": 8700},
+    }).encode()
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        raise urllib.error.HTTPError(req.full_url, 502, "Bad Gateway", {}, io.BytesIO(body))
+
+    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(llm_mod.ErroLLM) as exc:
+        llm_mod._chamar_llm("s", "u", cfg, execution, perfil="ecc")
+    assert exc.value.error_code == "LLM_STRUCTURED_RESPONSE_UNSATISFIED"
+    assert "$.memory.operations[0].scope" in str(exc.value)
+    assert calls["n"] == 1
+    attempt = execution.llm_calls[-1]["attempts"][0]
+    assert attempt["adapter_upstream_attempts"] == 2
+    assert attempt["adapter_structured_repairs"] == 1
+    assert attempt["adapter_validation_errors"][0].startswith("$.memory.operations[0].scope")
+    assert attempt["prompt_tokens"] == 8000
+    assert attempt["completion_tokens"] == 700
+
+
+def test_rev22_adapter_upstream_timeout_http_504_is_not_blindly_retried(monkeypatch):
+    from eyle.runtime.execution_context import ExecutionContext
+    from tests.canonical import base_config
+
+    cfg = base_config()
+    cfg["llm"].update({
+        "base_url": "http://localhost:8080", "model": "modelo-teste", "openai_compatible": True,
+        "retry_max_attempts": 3, "retry_read_timeouts": False,
+        "retry_base_delay_seconds": 0, "retry_max_delay_seconds": 0,
+        "retry_jitter_seconds": 0, "cooldown_seconds": 0,
+    })
+    execution = ExecutionContext.from_config(cfg)
+    calls = {"n": 0}
+    body = json.dumps({"error": {"type": "upstream_timeout", "message": "Timeout no upstream."}}).encode()
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        raise urllib.error.HTTPError(req.full_url, 504, "Gateway Timeout", {}, io.BytesIO(body))
+
+    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(llm_mod.ErroLLM) as exc:
+        llm_mod._chamar_llm("s", "u", cfg, execution, perfil="ecc")
+    assert exc.value.error_code == "READ_TIMEOUT"
+    assert exc.value.transient is False
+    assert calls["n"] == 1
+
+
+def test_structured_call_records_real_system_prompt_size(monkeypatch):
+    from eyle.runtime.execution_context import ExecutionContext
+
+    body = _agent_json()
+    _capture(monkeypatch, {"choices": [{"message": {"content": body}}]})
+    cfg = _config()
+    execution = ExecutionContext.from_config(cfg)
+    execution.begin_call(mode="ecc", turn=1, prompt={"characters": 2, "estimated_tokens": 1})
+
+    parsed = llm_mod._chamar_llm("short system", "{}", cfg, execution=execution, perfil="ecc")
+    assert parsed["type"] == "concluir"
+    prompt = execution.latest_call()["prompt"]
+    assert prompt["system_prompt_characters"] > len("short system")
+    assert prompt["system_prompt_estimated_tokens"] > 0

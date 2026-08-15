@@ -7,7 +7,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from eyle.runtime import persistence  # noqa: E402
+from eyle.runtime import storage as persistence  # noqa: E402
 
 
 def test_salvar_json_atomico_substitui_destino_e_preserva_permissao(tmp_path):

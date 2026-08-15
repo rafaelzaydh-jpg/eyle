@@ -4,7 +4,9 @@ This module locates symbols, performs atomic writes, substitutes line ranges,
 and runs detected test suites. Transaction planning/apply/rollback lives in
 ``eyle.core.transactions``; transaction execution has one canonical path.
 """
+import ast
 import json
+import re
 import os
 import shlex
 import shutil
@@ -12,9 +14,50 @@ import stat
 import tempfile
 
 from .workspace_policy import PASTAS_IGNORADAS, build_protected_resource_index, is_protected_workspace_resource
-from .symbols import extract_python_definitions, extract_symbols
 from .security import _resolver_caminho_seguro
 from .sandbox import executar_no_sandbox
+
+RE_DEF_JS = re.compile(r"^\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)|^\s*(?:export\s+)?class\s+(\w+)|^\s*const\s+(\w+)\s*=\s*(?:async\s*)?\(")
+
+
+def extract_python_definitions(lines):
+    try:
+        tree = ast.parse("\n".join(lines))
+    except (SyntaxError, ValueError, TypeError):
+        return []
+    definitions = []
+
+    def visit(body, prefix=""):
+        for node in body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            name = f"{prefix}.{node.name}" if prefix else node.name
+            decorators = getattr(node, "decorator_list", None) or []
+            start = min([node.lineno] + [d.lineno for d in decorators])
+            end = getattr(node, "end_lineno", None) or node.lineno
+            definitions.append({
+                "nome": name, "line_start": start, "line_end": end,
+                "type": "classe" if isinstance(node, ast.ClassDef) else "funcao_assincrona" if isinstance(node, ast.AsyncFunctionDef) else "funcao",
+            })
+            if isinstance(node, ast.ClassDef):
+                visit(node.body, name)
+
+    visit(tree.body)
+    definitions.sort(key=lambda d: (d["line_start"], d["line_end"], d["nome"]))
+    return definitions
+
+
+def extract_symbols(lines, extension):
+    if extension == ".py":
+        return [(d["nome"], d["line_start"]) for d in extract_python_definitions(lines)]
+    result = []
+    if extension in (".js", ".ts", ".jsx", ".tsx"):
+        for i, line in enumerate(lines, 1):
+            match = RE_DEF_JS.match(line)
+            if match:
+                result.append((next(group for group in match.groups() if group), i))
+    return result
+
 
 
 def localizar_simbolo(caminho_projeto, caminho_relativo, simbolo):
@@ -83,7 +126,9 @@ def localizar_simbolo(caminho_projeto, caminho_relativo, simbolo):
     }
 
 
-def localizar_simbolo_no_projeto(caminho_projeto, simbolo, extensoes=None, limite=None, *, return_metadata=False):
+def localizar_simbolo_no_projeto(
+    caminho_projeto, simbolo, extensoes=None, limite=None, *, return_metadata=False, excluded_top_level=None,
+):
     """Exhaustively locate a symbol across the current safe source workspace.
 
     ``limite`` bounds only returned matches when explicitly requested; the scan
@@ -99,11 +144,14 @@ def localizar_simbolo_no_projeto(caminho_projeto, simbolo, extensoes=None, limit
     resultados = []
     files_examined = 0
     protected_excluded = 0
+    excluded_roots = {str(value).strip().lower() for value in (excluded_top_level or ()) if str(value).strip()}
     protected_index = build_protected_resource_index(raiz)
     for diretorio, subdirs, arquivos in os.walk(raiz, followlinks=False):
+        at_root = os.path.realpath(diretorio) == raiz
         subdirs[:] = sorted(
             nome for nome in subdirs
             if nome not in PASTAS_IGNORADAS and not nome.startswith(".")
+            and not (at_root and nome.lower() in excluded_roots)
         )
         for nome in sorted(arquivos):
             if os.path.splitext(nome)[1].lower() not in permitidas:
@@ -140,8 +188,15 @@ def _substituir_linhas(conteudo, linha_inicio, linha_fim, codigo_novo):
     linhas = conteudo.split("\n")
     if linha_inicio < 1 or linha_fim > len(linhas) or linha_inicio > linha_fim:
         return None
-    novas_linhas = linhas[:linha_inicio - 1] + codigo_novo.split("\n") + linhas[linha_fim:]
-    return "\n".join(novas_linhas)
+    prefixo = linhas[:linha_inicio - 1]
+    sufixo = linhas[linha_fim:]
+    substituicao = codigo_novo.split("\n")
+    # ``join`` already creates the boundary newline before a remaining suffix.
+    # Keeping the synthetic terminal empty item from ``"x\n".split`` would
+    # therefore insert an unintended blank line on every normal line update.
+    if sufixo and substituicao and substituicao[-1] == "":
+        substituicao = substituicao[:-1]
+    return "\n".join(prefixo + substituicao + sufixo)
 
 
 def _escrever_arquivo_atomico(caminho, conteudo):

@@ -80,7 +80,8 @@ def _enrich(arguments: Dict[str, Any], ctx: Dict[str, Any]) -> Tuple[Dict[str, A
         patch["operation"] = operation
         exists = os.path.isfile(absolute)
         material = freshest_material_for_locator(
-            session.observation_ledger, {"kind": "file", "path": path}, match_fields=("kind", "path")
+            session.observation_ledger, {"kind": "file", "source": "workspace", "path": path},
+            match_fields=("kind", "source", "path"),
         )
         locator = dict(material.get("locator") or {}) if isinstance(material, dict) else {}
         if operation in {"replace", "create"} and not isinstance(patch.get("content"), str):
@@ -166,9 +167,10 @@ def _run_tests(ctx: Dict[str, Any]) -> Dict[str, Any]:
     if not enabled:
         return {"status": "skipped", "ok": True, "executed": False, "error_code": "TESTS_DISABLED", "detail": "Execução de testes desativada explicitamente."}
     registry = (ctx or {}).get("registry")
-    if registry is None or "run_tests" not in registry.names():
+    capability = "standard.run_tests"
+    if registry is None or capability not in registry.names():
         return {"status": "skipped", "ok": True, "executed": False, "error_code": "TESTS_NOT_FOUND", "detail": "Capability de testes indisponível."}
-    return registry.execute("run_tests", {}, ctx)
+    return registry.execute(capability, {"source": "workspace"}, ctx)
 
 
 def confirm(state: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:

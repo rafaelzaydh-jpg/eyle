@@ -103,8 +103,7 @@
           "allow_trusted_local": true
         }
       }
-    },
-    "memory": {}
+    }
   },
   "confirmacoes": {
     "expiracao_segundos": 3600
@@ -127,6 +126,6 @@
     "window_seconds": 3600
   },
   "app_version": "2.7.5",
-  "config_schema_version": "2.7.5-r1.5.3",
-  "revision": "rev1.5.3-cognitive-task-memory"
+  "config_schema_version": "2.7.5-r2.5.2-ecc",
+  "revision": "rev2.5.3-ecc"
 }

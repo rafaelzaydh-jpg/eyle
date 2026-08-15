@@ -18,13 +18,6 @@ from .security import _resolver_caminho_seguro
 from .text_hash import hash_texto
 
 
-
-def _tests_config(config):
-    providers = (config or {}).get("providers") or {}
-    standard = providers.get("standard") or {} if isinstance(providers, dict) else {}
-    tests = standard.get("tests") or {} if isinstance(standard, dict) else {}
-    return tests if isinstance(tests, dict) else {}
-
 def _unique_python_paths(paths: Iterable[str]) -> List[str]:
     result: List[str] = []
     seen = set()
@@ -129,27 +122,6 @@ def run_compileall_for_changes(project_root: str, paths: Iterable[str], timeout_
             "detail": f"compileall passou para {len(copied)} arquivo(s) Python.",
             "files": copied,
         }
-
-
-def verify_after_write(config: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
-    """Run the configured project test capability after a confirmed write.
-
-    This code-domain verification policy belongs to the post-write boundary,
-    not Agent's capability-selection logic.
-    """
-    enabled = bool(_tests_config(config).get("enabled", False))
-    if not enabled:
-        return {
-            "status": "skipped", "ok": True, "executed": False,
-            "error_code": "TESTS_DISABLED", "detail": "Execução de testes desativada explicitamente.",
-        }
-    registry = (context or {}).get("registry")
-    if registry is None or "run_tests" not in registry.names():
-        return {
-            "status": "skipped", "ok": True, "executed": False,
-            "error_code": "TESTS_NOT_FOUND", "detail": "Capability de testes indisponível.",
-        }
-    return registry.execute("run_tests", {}, context)
 
 
 def expected_outputs_from_patches(applied_patches: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:

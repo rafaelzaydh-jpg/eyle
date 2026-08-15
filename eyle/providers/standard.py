@@ -11,7 +11,7 @@ import os
 import re
 import subprocess
 
-from eyle.contracts.capability import RESULT_FIELDS, physical_effect as _universal_physical_effect
+from eyle.contracts.capability import RESULT_FIELDS, physical_effect, result as capability_result
 from eyle.capabilities.registry import Provider
 from eyle.providers import workspace_transaction as _workspace_transaction
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -69,54 +69,15 @@ def _standard_tests_config(config):
 _CAMPOS_RESULTADO = RESULT_FIELDS
 
 
-def physical_effect(resource, persistence, *, operation="capability", changed=False, real_workspace_changed=False, real_eyle_changed=False):
-    """Provider-local convenience wrapper over the universal effect contract.
-
-    Legacy boolean inputs are accepted only inside this provider so its domain
-    implementation can migrate independently; they are collapsed into the
-    universal ``changed`` fact before the effect reaches Core.
-    """
-    changed = bool(changed or real_workspace_changed or real_eyle_changed)
-    return _universal_physical_effect(resource, operation, persistence, changed=changed)
-
-
-def _normalize_physical_effect(value):
-    if value is None:
-        return None
-    if not isinstance(value, dict):
-        raise ValueError("PHYSICAL_EFFECT_INVALID")
-    if set(value) == {"resource", "operation", "persistence", "changed"}:
-        return _universal_physical_effect(value.get("resource"), value.get("operation"), value.get("persistence"), changed=value.get("changed", False))
-    # Provider-internal migration tolerance; never exposed as the public shape.
-    return physical_effect(
-        value.get("target"), value.get("persistence"),
-        operation=value.get("operation") or "capability",
-        real_workspace_changed=value.get("real_workspace_changed", False),
-        real_eyle_changed=value.get("real_eyle_changed", False),
-        changed=value.get("changed", False),
-    )
-
-
 def _resultado(status, ok, executed, changed=False, error_code=None, detail=None, retryable=None,
                failure_scope=None, failure_resource=None, observations=None, coverage=None, frontiers=None, physical_effect=None):
-    """Canonical current tool result envelope.
-
-    The physical status fields remain mandatory. Objective observation fields are
-    always present but may be empty, so every capability shares one Runtime
-    contract without forcing domain-specific payloads onto simple tools.
-    """
-    observation_fields = result_observation_fields(
+    """Small provider convenience wrapper over the universal result contract."""
+    return capability_result(
+        status, ok, executed, changed=changed, error_code=error_code, detail=detail,
+        retryable=retryable, failure_scope=failure_scope, failure_resource=failure_resource,
         observations=observations, coverage=coverage, frontiers=frontiers,
+        physical_effect_value=physical_effect,
     )
-    return {
-        "status": status, "ok": bool(ok), "executed": bool(executed),
-        "changed": bool(changed), "error_code": error_code, "detail": detail,
-        "retryable": None if retryable is None else bool(retryable),
-        "failure_scope": str(failure_scope) if failure_scope else None,
-        "failure_resource": str(failure_resource) if failure_resource else None,
-        "physical_effect": _normalize_physical_effect(physical_effect),
-        **observation_fields,
-    }
 
 
 def _sucesso(detail=None, changed=False, *, observations=None, coverage=None, frontiers=None, physical_effect=None):
@@ -143,12 +104,6 @@ def _pulado(detail, error_code=None, *, physical_effect=None):
     return _resultado("skipped", True, False, error_code=error_code, detail=detail, physical_effect=physical_effect)
 
 
-def _caminho_projeto(ctx):
-    """Return the dedicated user-workspace root. Writes always use this root."""
-    projeto = _standard_context(ctx)
-    return projeto.get("caminho_origem")
-
-
 def _source_name(arguments):
     raw = str((arguments or {}).get("source") or "workspace").strip().lower()
     return raw if raw in {"workspace", "eyle"} else "workspace"
@@ -163,6 +118,19 @@ def _caminho_fonte(ctx, arguments):
     else:
         root = projeto.get("caminho_origem")
     return os.path.realpath(root) if root and os.path.isdir(root) else None
+
+
+def _source_unavailable(arguments):
+    source = _source_name(arguments)
+    return _falha(
+        "SOURCE_NOT_AVAILABLE",
+        {
+            "source": source,
+            "source_scope": "eyle_application_source" if source == "eyle" else "dedicated_user_workspace",
+            "message": f"requested physical source '{source}' is unavailable",
+        },
+        retryable=False, failure_scope="request", failure_resource=source,
+    )
 
 
 def _self_runtime_path_blocked(arguments, relative_path):
@@ -184,7 +152,6 @@ def _protected_resource_failure(root, relative_path, *, executed=True):
         executed=executed, retryable=False, failure_scope="resource",
         failure_resource=str(relative_path or "").replace("\\", "/"),
     )
-
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +239,85 @@ def _search_capability_universe(root):
                 continue
             files.append(os.path.relpath(path, root).replace("\\", "/"))
     return sorted(files), {key: value for key, value in ignored_counts.items() if value}
+
+
+def _source_tree_freshness_token(arguments, ctx):
+    """Mechanical source-tree token used only to validate cached observations.
+
+    It intentionally tracks path/size/mtime metadata rather than semantic
+    relevance. Provider-specific Material freshness still verifies exact file
+    content for grounded reads. The tree token is especially important for
+    negative observations, which otherwise have no Material to validate.
+    """
+    root = _caminho_fonte(ctx, arguments)
+    if not root:
+        return None
+    rows = []
+    ignored = set(_SEARCH_IGNORED_DIRS)
+    for current, dirs, names in os.walk(root, followlinks=False):
+        rel_current = os.path.relpath(current, root).replace("\\", "/")
+        if rel_current == ".":
+            rel_current = ""
+        kept = []
+        for name in sorted(dirs):
+            if name in ignored:
+                continue
+            rel = f"{rel_current}/{name}".strip("/")
+            if _self_runtime_path_blocked(arguments, rel):
+                continue
+            kept.append(name)
+            try:
+                st = os.stat(os.path.join(current, name), follow_symlinks=False)
+                rows.append(["d", rel, int(st.st_mtime_ns)])
+            except OSError:
+                rows.append(["d", rel, None])
+        dirs[:] = kept
+        for name in sorted(names):
+            rel = f"{rel_current}/{name}".strip("/")
+            if _self_runtime_path_blocked(arguments, rel):
+                continue
+            path = os.path.join(current, name)
+            try:
+                st = os.stat(path, follow_symlinks=False)
+            except OSError:
+                rows.append(["f", rel, None, None])
+                continue
+            if not os.path.isfile(path):
+                continue
+            rows.append(["f", rel, int(st.st_size), int(st.st_mtime_ns)])
+    payload = {"source": _source_name(arguments), "root": os.path.realpath(root), "rows": rows}
+    return hash_texto(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str))
+
+
+def _git_freshness_token(arguments, ctx):
+    """Mechanical Git/worktree token for retained Git observations."""
+    root = _caminho_fonte(ctx, arguments)
+    if not root:
+        return None
+    tree = _source_tree_freshness_token(arguments, ctx) or ""
+    pieces = [tree]
+    try:
+        head = subprocess.run(
+            ["git", "-C", root, "rev-parse", "--verify", "HEAD"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=3, check=False,
+        )
+        pieces.append(head.stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        pieces.append("")
+    try:
+        index = subprocess.run(
+            ["git", "-C", root, "rev-parse", "--git-path", "index"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=3, check=False,
+        )
+        index_path = index.stdout.strip()
+        if index_path and not os.path.isabs(index_path):
+            index_path = os.path.join(root, index_path)
+        if index_path and os.path.exists(index_path):
+            st = os.stat(index_path, follow_symlinks=False)
+            pieces.append(f"{int(st.st_size)}:{int(st.st_mtime_ns)}")
+    except (OSError, subprocess.SubprocessError):
+        pieces.append("")
+    return hash_texto("\n".join(pieces))
 
 
 def _searchable_files(root, *, include_paths=None, exclude_paths=None):
@@ -484,7 +530,7 @@ def _tool_search_code(arguments, ctx):
     query = arguments["query"].strip()
     root = _caminho_fonte(ctx, arguments)
     if not root:
-        return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
+        return _source_unavailable(arguments)
     config = (ctx or {}).get("config") or {}
     agent_cfg = _standard_config(config)
     max_lines = max(7, int(agent_cfg.get("max_search_range_lines", 16) or 16))
@@ -506,6 +552,11 @@ def _tool_search_code(arguments, ctx):
             search_scope = dict(search_scope)
             search_scope["self_runtime_files_excluded"] = before - len(searchable_files)
             search_scope["files_scanned"] = len(searchable_files)
+        search_scope = dict(search_scope)
+        search_scope["source"] = _source_name(arguments)
+        search_scope["source_scope"] = (
+            "eyle_application_source" if _source_name(arguments) == "eyle" else "dedicated_user_workspace"
+        )
     except ObjectiveScopeError as error:
         return _falha(
             error.code, error.detail, executed=False, retryable=False,
@@ -563,7 +614,7 @@ def _tool_search_code(arguments, ctx):
             )
             frontiers.append({
                 "kind": "material_continuation",
-                "at": "workspace_search",
+                "at": "source_search",
                 "count": len(remaining_ranges),
                 "reason": "additional objectively matched source ranges remain behind a continuation handle",
                 "handle": handle["id"],
@@ -571,20 +622,20 @@ def _tool_search_code(arguments, ctx):
         else:
             frontiers.append({
                 "kind": "material_boundary",
-                "at": "workspace_search",
+                "at": "source_search",
                 "count": len(remaining_ranges),
                 "reason": "additional objectively matched source ranges were not materialized",
             })
 
     if protected_resources:
         frontiers.append({
-            "kind": "protected_resource_boundary", "at": "workspace_search",
+            "kind": "protected_resource_boundary", "at": "source_search",
             "count": int(protected_resources),
             "reason": "protected resources were excluded from content search",
         })
     if read_failures:
         frontiers.append({
-            "kind": "read_failure_boundary", "at": "workspace_search",
+            "kind": "read_failure_boundary", "at": "source_search",
             "count": len(read_failures),
             "reason": "one or more readable candidates could not be materialized",
         })
@@ -624,7 +675,7 @@ def _tool_search_code(arguments, ctx):
         "coverage_scope": (
             ("declared_search_scope" if protected_resources == 0 else "readable_declared_search_scope")
             if (include_paths or exclude_paths)
-            else ("all_workspace_files" if protected_resources == 0 else "readable_workspace_files")
+            else ("all_source_files" if protected_resources == 0 else "readable_source_files")
         ),
         "protected_resources_excluded": protected_resources,
         "backend": backend,
@@ -637,7 +688,7 @@ def _tool_symbol_relations(arguments, ctx):
     """Return local relations or a query-shaped structural reachability observation."""
     root = _caminho_fonte(ctx, arguments)
     if not root:
-        return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
+        return _source_unavailable(arguments)
     path = arguments.get("path")
     if path and _self_runtime_path_blocked(arguments, path):
         return _falha("SELF_RUNTIME_STATE_READ_BLOCKED", "self analysis cannot read live workspace/memory/context runtime state", retryable=False, failure_scope="resource", failure_resource=str(path))
@@ -687,7 +738,6 @@ def _tool_symbol_relations(arguments, ctx):
         return _sucesso(detail, frontiers=detail.get("frontiers"))
     except (OSError, ValueError) as error:
         return _falha("RELATION_SCAN_FAILED", str(error), executed=True)
-
 
 
 def _continue_search_code_page(payload, ctx):
@@ -875,8 +925,9 @@ def _tool_find_symbol(arguments, ctx):
     """Locate a symbol while separating exhaustive scan Coverage from bounded materialization."""
     root = _caminho_fonte(ctx, arguments)
     if not root:
-        return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
+        return _source_unavailable(arguments)
     symbol = arguments["symbol"]
+    source = _source_name(arguments)
     rel = arguments.get("path")
     if rel and _self_runtime_path_blocked(arguments, rel):
         return _falha("SELF_RUNTIME_STATE_READ_BLOCKED", "self analysis cannot read live workspace/memory/context runtime state", retryable=False, failure_scope="resource", failure_resource=str(rel))
@@ -885,12 +936,15 @@ def _tool_find_symbol(arguments, ctx):
         return _protected_resource_failure(root, str(rel))
 
     if not rel:
-        scan = localizar_simbolo_no_projeto(root, symbol, limite=None, return_metadata=True)
+        scan = localizar_simbolo_no_projeto(
+            root, symbol, limite=None, return_metadata=True,
+            excluded_top_level={"workspace", "memory", "context", "agent_memory"} if source == "eyle" else None,
+        )
         all_matches = []
         for item in scan.get("all_matches") or []:
             if not isinstance(item, dict):
                 continue
-            # The search exhausts the workspace, but the model-facing result and
+            # The search exhausts the selected source, but the model-facing result and
             # continuation snapshot retain only objective locators, not duplicate
             # source bodies. Source bytes can be read explicitly when needed.
             all_matches.append({
@@ -905,7 +959,7 @@ def _tool_find_symbol(arguments, ctx):
         if protected:
             boundaries.append({"kind": "protected_resource", "count": protected})
         coverage = _coverage_record(
-            scope={"kind": "symbol_lookup", "symbol": symbol, "path": None},
+            scope={"kind": "symbol_lookup", "source": source, "symbol": symbol, "path": None},
             examined={
                 "files": int(scan.get("files_examined") or 0),
                 "matches": int(scan.get("matches_observed") or len(all_matches)),
@@ -930,6 +984,8 @@ def _tool_find_symbol(arguments, ctx):
             except (ErroLeituraProjeto, TypeError, ValueError):
                 pass
             only.update({
+                "source": source,
+                "source_scope": "eyle_application_source" if source == "eyle" else "dedicated_user_workspace",
                 "simbolo": symbol, "matches_observed": 1, "matches_materialized": 1,
                 "files_examined": int(scan.get("files_examined") or 0),
                 "protected_resources_excluded": protected,
@@ -938,13 +994,15 @@ def _tool_find_symbol(arguments, ctx):
 
         if not all_matches:
             detail = {
+                "message": f"símbolo '{symbol}' não encontrado nesta fonte",
+                "source": source,
+                "source_scope": "eyle_application_source" if source == "eyle" else "dedicated_user_workspace",
                 "symbol": symbol, "matches": [],
                 "matches_observed": 0, "files_examined": int(scan.get("files_examined") or 0),
                 "protected_resources_excluded": protected,
             }
             return _falha(
-                "SYMBOL_NOT_FOUND", f"símbolo '{symbol}' não encontrado", executed=True,
-                coverage=coverage, detail=detail,
+                "SYMBOL_NOT_FOUND", detail, executed=True, coverage=coverage,
             )
 
         frontiers = []
@@ -971,6 +1029,8 @@ def _tool_find_symbol(arguments, ctx):
                 "reason": "additional objectively located symbol definitions were not materialized",
             })
         detail = {
+            "source": source,
+            "source_scope": "eyle_application_source" if source == "eyle" else "dedicated_user_workspace",
             "symbol": symbol, "matches": selected,
             "matches_observed": int(scan.get("matches_observed") or len(all_matches)),
             "matches_materialized": len(selected),
@@ -983,11 +1043,22 @@ def _tool_find_symbol(arguments, ctx):
     result = localizar_simbolo(root, rel, symbol)
     if result is None:
         coverage = _coverage_record(
-            scope={"kind": "file_symbol_lookup", "path": rel, "symbol": symbol},
+            scope={"kind": "file_symbol_lookup", "source": source, "path": rel, "symbol": symbol},
             examined={"files": 1}, complete=True,
         )
-        return _falha("SYMBOL_NOT_FOUND", f"símbolo '{symbol}' não encontrado", executed=True, coverage=coverage)
+        return _falha(
+            "SYMBOL_NOT_FOUND",
+            {
+                "message": f"símbolo '{symbol}' não encontrado nesta fonte/arquivo",
+                "source": source,
+                "source_scope": "eyle_application_source" if source == "eyle" else "dedicated_user_workspace",
+                "symbol": symbol, "path": rel, "matches": [], "files_examined": 1,
+            },
+            executed=True, coverage=coverage,
+        )
     result = dict(result); result["file"] = result.get("file") or rel; result["simbolo"] = symbol
+    result["source"] = source
+    result["source_scope"] = "eyle_application_source" if source == "eyle" else "dedicated_user_workspace"
     try:
         reading = ler_faixa_projeto(
             root, rel, int(result["line_start"]), int(result["line_end"]),
@@ -1006,7 +1077,7 @@ def _tool_read_file(arguments, ctx):
     """Read one fresh bounded file window; omitted range means the initial window."""
     caminho_projeto = _caminho_fonte(ctx, arguments)
     if not caminho_projeto:
-        return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
+        return _source_unavailable(arguments)
     caminho_relativo = arguments["path"]
     if _self_runtime_path_blocked(arguments, caminho_relativo):
         return _falha("SELF_RUNTIME_STATE_READ_BLOCKED", "self analysis cannot read live workspace/memory/context runtime state", retryable=False, failure_scope="resource", failure_resource=str(caminho_relativo))
@@ -1043,7 +1114,7 @@ def _tool_list_tree(arguments, ctx):
     """Lista a arvore fresca do projeto com limites e motivos ignorados."""
     caminho_projeto = _caminho_fonte(ctx, arguments)
     if not caminho_projeto:
-        return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
+        return _source_unavailable(arguments)
     cfg_agente = _standard_config((ctx or {}).get("config") or {})
     max_entradas = cfg_agente.get("max_tree_entries", 200)
     max_profundidade = cfg_agente.get("max_tree_depth", 6)
@@ -1087,7 +1158,7 @@ def _tool_project_stats(arguments, ctx):
     """Measure objective project size/statistics over the safe text workspace."""
     root = _caminho_fonte(ctx, arguments)
     if not root:
-        return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
+        return _source_unavailable(arguments)
     try:
         return _sucesso(measure_project_stats(root, (ctx or {}).get("config") or {}))
     except ErroLeituraProjeto as erro:
@@ -1098,7 +1169,7 @@ def _tool_count_tokens(arguments, ctx):
     """Measure project text and convert it to a truthful token estimate."""
     root = _caminho_fonte(ctx, arguments)
     if not root:
-        return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
+        return _source_unavailable(arguments)
     try:
         detail = count_project_tokens(
             root, (ctx or {}).get("config") or {},
@@ -1114,13 +1185,11 @@ def _tool_inspect_project(arguments, ctx):
     """Return objective structural/relation signals without ranking file importance."""
     root = _caminho_fonte(ctx, arguments)
     if not root:
-        return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
+        return _source_unavailable(arguments)
     try:
         return _sucesso(inspect_project_signals(root, (ctx or {}).get("config") or {}))
     except ErroLeituraProjeto as erro:
         return _falha(erro.error_code, erro.detail, executed=True)
-
-
 
 
 def _pytest_summary(output):
@@ -1135,9 +1204,9 @@ def _pytest_summary(output):
 
 def _tool_run_tests(arguments, ctx):
     """Run the real suite, optionally focused to a safe pytest file/directory."""
-    caminho_projeto = _caminho_projeto(ctx)
+    caminho_projeto = _caminho_fonte(ctx, arguments)
     if not caminho_projeto:
-        return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
+        return _source_unavailable(arguments)
     cfg_testes = _standard_tests_config((ctx or {}).get("config") or {})
     if not cfg_testes.get("enabled", False):
         return _pulado(
@@ -1157,6 +1226,8 @@ def _tool_run_tests(arguments, ctx):
         "command": resultado.get("comando"),
         "returncode": resultado.get("codigo"),
         "scope": resultado.get("scope"),
+        "source": _source_name(arguments),
+        "source_scope": "eyle_application_source" if _source_name(arguments) == "eyle" else "dedicated_user_workspace",
         "backend": resultado.get("backend"),
         "runner": resultado.get("runner"),
         "tests_detected": bool(resultado.get("tests_detected")),
@@ -1165,7 +1236,7 @@ def _tool_run_tests(arguments, ctx):
     }
     if resultado.get("executado") is not True and resultado.get("ok") is True:
         return _pulado(detail, error_code="TESTS_NOT_FOUND")
-    execution_effect = physical_effect("isolated_test_sandbox", "call", operation="run_tests")
+    execution_effect = physical_effect("isolated_test_sandbox", "run_tests", "call")
     if resultado.get("ok") is True:
         return _sucesso(detail, physical_effect=execution_effect)
     error_code = resultado.get("error_code") or (
@@ -1177,13 +1248,11 @@ def _tool_run_tests(arguments, ctx):
     )
 
 
-
-
 def _tool_git_status(arguments, ctx):
     """Inspect Git working-tree state without modifying the repository."""
     root = _caminho_fonte(ctx, arguments)
     if not root:
-        return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
+        return _source_unavailable(arguments)
     result = inspect_git_status(root, max_entries=int(arguments.get("max_entries") or 200))
     if result.get("ok"):
         return _sucesso(result)
@@ -1194,7 +1263,7 @@ def _tool_git_diff(arguments, ctx):
     """Inspect a bounded Git diff; raw diff is available to the LLM but not public history."""
     root = _caminho_fonte(ctx, arguments)
     if not root:
-        return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
+        return _source_unavailable(arguments)
     cfg_agent = _standard_config((ctx or {}).get("config") or {})
     result = inspect_git_diff(
         root,
@@ -1212,7 +1281,7 @@ def _tool_run_command(arguments, ctx):
     """Run any shell command inside the isolated, writable per-job sandbox snapshot."""
     root = _caminho_fonte(ctx, arguments)
     if not root:
-        return _falha("WORKSPACE_NOT_AVAILABLE", "nenhum workspace ativo")
+        return _source_unavailable(arguments)
     config = (ctx or {}).get("config") or {}
     sandbox_cfg = dict((_standard_config(config).get("sandbox") or {}))
     result = executar_comando_livre_no_sandbox(
@@ -1234,7 +1303,7 @@ def _tool_run_command(arguments, ctx):
         "protected_resources_omitted": int(result.get("protected_resources_omitted") or 0),
         "real_workspace_changed": False,
     }
-    effect = physical_effect("isolated_snapshot", "job", operation="run_command")
+    effect = physical_effect("isolated_snapshot", "run_command", "job")
     if result.get("ok") is True:
         return _sucesso(detail, changed=False, physical_effect=effect)
     detail["error"] = result.get("erro")
@@ -1262,10 +1331,8 @@ def _tool_export_sandbox_zip(arguments, ctx):
         return _falha("SANDBOX_EXPORT_FAILED", detail, retryable=False)
     return _sucesso(
         detail, changed=True,
-        physical_effect=physical_effect("artifact", "persistent", operation="export", changed=True),
+        physical_effect=physical_effect("artifact", "export", "persistent", changed=True),
     )
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -1286,13 +1353,19 @@ def _tool_export_sandbox_zip(arguments, ctx):
 # ---------------------------------------------------------------------------
 
 def _norm_capability_path(value):
-    return str(value or "").replace("\\", "/").strip().lstrip("./").lower()
+    text = str(value or "").replace("\\", "/").strip()
+    while text.startswith("./"):
+        text = text[2:]
+    text = re.sub(r"/+", "/", text)
+    if text.endswith("/") and text != "/":
+        text = text.rstrip("/")
+    return text
 
 
 def _sig_list_tree(arguments):
     return "tree:" + json.dumps({
         "source": _source_name(arguments),
-        "filter": str(arguments.get("filter") or "").strip().lower(),
+        "filter": str(arguments.get("filter") or "").strip(),
         "depth": arguments.get("depth"), "limit": arguments.get("limit"),
     }, sort_keys=True, separators=(",", ":"), default=str)
 
@@ -1300,21 +1373,21 @@ def _sig_list_tree(arguments):
 def _sig_search_code(arguments):
     return "search:" + json.dumps({
         "source": _source_name(arguments),
-        "query": " ".join(str(arguments.get("query") or "").lower().split()),
+        "query": str(arguments.get("query") or ""),
         "include_paths": sorted(normalize_scope_selectors(arguments.get("include_paths"))),
         "exclude_paths": sorted(normalize_scope_selectors(arguments.get("exclude_paths"))),
     }, sort_keys=True, separators=(",", ":"), default=str)
 
 
 def _sig_find_symbol(arguments):
-    return f"symbol:{_source_name(arguments)}:{_norm_capability_path(arguments.get('path'))}:{str(arguments.get('symbol') or '').strip().lower()}"
+    return f"symbol:{_source_name(arguments)}:{_norm_capability_path(arguments.get('path'))}:{str(arguments.get('symbol') or '').strip()}"
 
 
 def _sig_symbol_relations(arguments):
     query = str(arguments.get("query") or "relations").strip().lower()
     identity = {
         "source": _source_name(arguments),
-        "symbol": str(arguments.get("symbol") or "").strip().lower(),
+        "symbol": str(arguments.get("symbol") or "").strip(),
         "path": _norm_capability_path(arguments.get("path")),
         "roots": [str(x) for x in (arguments.get("roots") or [])],
         "include_text_references": bool(arguments.get("include_text_references", False)),
@@ -1341,22 +1414,10 @@ def _sig_count_tokens(arguments):
     return "count_tokens:" + json.dumps({
         "source": _source_name(arguments),
         "path": _norm_capability_path(arguments.get("path") or "."),
-        "tokenizer": str(arguments.get("tokenizer") or "").strip().lower(),
+        "tokenizer": str(arguments.get("tokenizer") or "").strip(),
     }, sort_keys=True, separators=(",", ":"))
 
 
-def _sig_run_tests(arguments):
-    return "run_tests:" + json.dumps({"scope": _norm_capability_path(arguments.get("scope") or ".")}, sort_keys=True, separators=(",", ":"))
-
-
-def _sig_git_diff(arguments):
-    return "git_diff:" + json.dumps(arguments, sort_keys=True, separators=(",", ":"), default=str)
-
-
-def capability_observation_signature(name, arguments):
-    entry = CAPABILITIES.get(str(name or "")) or {}
-    fn = entry.get("signature")
-    return fn(arguments or {}) if callable(fn) else None
 
 
 def _file_material(detail, *, source_type, source="workspace"):
@@ -1399,22 +1460,22 @@ def _slice_file_material(material, line_start, line_end):
     and carries the opaque selector chosen by Main.
     """
     if not isinstance(material, dict):
-        raise ValueError("TASK_MEMORY_SELECTOR_INVALID")
+        raise ValueError("EVIDENCE_SELECTOR_INVALID")
     locator = material.get("locator") if isinstance(material.get("locator"), dict) else {}
     if locator.get("kind") != "file":
-        raise ValueError("TASK_MEMORY_SELECTOR_UNSUPPORTED")
+        raise ValueError("EVIDENCE_SELECTOR_UNSUPPORTED")
     try:
         parent_start = int(locator.get("line_start"))
         parent_end = int(locator.get("line_end"))
         start = int(line_start)
         end = int(line_end)
     except (TypeError, ValueError) as exc:
-        raise ValueError("TASK_MEMORY_SELECTOR_INVALID") from exc
+        raise ValueError("EVIDENCE_SELECTOR_INVALID") from exc
     if start < parent_start or end > parent_end or start > end:
-        raise ValueError("TASK_MEMORY_SELECTOR_OUT_OF_RANGE")
+        raise ValueError("EVIDENCE_SELECTOR_OUT_OF_RANGE")
     text = material.get("content")
     if not isinstance(text, str):
-        raise ValueError("TASK_MEMORY_MATERIAL_NOT_MATERIALIZED")
+        raise ValueError("EVIDENCE_MATERIAL_NOT_MATERIALIZED")
     lines = text.splitlines(keepends=True)
     offset_start = start - parent_start
     offset_end = end - parent_start + 1
@@ -1441,62 +1502,11 @@ def _evidence_selector_file(material, selector):
             "content_hash": str(material.get("content_hash") or ""),
         }
     if set(selector) != {"line_start", "line_end"}:
-        raise ValueError("TASK_MEMORY_SELECTOR_INVALID")
+        raise ValueError("EVIDENCE_SELECTOR_INVALID")
     return _slice_file_material(material, selector.get("line_start"), selector.get("line_end"))
 
 
-def _rematerialize_read_file(arguments, entry, materials, config):
-    """Serve an exact requested file range from canonical Observation Material."""
-    if arguments.get("line_start") is None or arguments.get("line_end") is None:
-        return None
-    path = _norm_capability_path(arguments.get("path"))
-    source = _source_name(arguments)
-    try:
-        requested_start = int(arguments.get("line_start"))
-        requested_end = int(arguments.get("line_end"))
-    except (TypeError, ValueError):
-        return None
-    candidates = []
-    for grounding_id in entry.get("grounding_ids") or []:
-        material = materials.get(str(grounding_id)) if isinstance(materials, dict) else None
-        if not isinstance(material, dict):
-            continue
-        locator = material.get("locator") if isinstance(material.get("locator"), dict) else {}
-        if locator.get("kind") != "file":
-            continue
-        if _norm_capability_path(locator.get("path")) != path:
-            continue
-        if str(locator.get("source") or "workspace") != str(source or "workspace"):
-            continue
-        try:
-            start = int(locator.get("line_start")); end = int(locator.get("line_end"))
-        except (TypeError, ValueError):
-            continue
-        if start <= requested_start and end >= requested_end:
-            candidates.append((end - start, material))
-    if not candidates:
-        return None
-    material = min(candidates, key=lambda item: item[0])[1]
-    selected = _slice_file_material(material, requested_start, requested_end)
-    locator = selected["locator"]
-    total_lines = int(locator.get("total_lines") or material.get("locator", {}).get("total_lines") or requested_end)
-    return {
-        "file": locator.get("path"),
-        "line_start": requested_start,
-        "line_end": requested_end,
-        "requested_line_end": requested_end,
-        "total_lines": total_lines,
-        "numbered_content": selected["numbered_content"],
-        "content": selected["content"],
-        "content_hash": selected["content_hash"],
-        "file_hash": str(material.get("source_version") or ""),
-        "end_clamped": False,
-        "truncated": bool(requested_start > 1 or requested_end < total_lines),
-        "rematerialized_from_observation": True,
-    }
-
-
-def _json_material(source_type, locator_name, detail, *, source="workspace"):
+def _json_material(source_type, locator_name, detail, *, source="runtime"):
     if not isinstance(detail, dict):
         return []
     content = json.dumps(detail, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
@@ -1565,7 +1575,7 @@ def _observe_tree(arguments, result):
         "complete_scan": bool(detail.get("varredura_completa")),
         "filter": detail.get("filter"),
     }
-    return _json_material("workspace_tree", "list_tree", inventory, source=_source_name(arguments))
+    return _json_material("source_tree", "list_tree", inventory, source=_source_name(arguments))
 
 
 def _observe_json(name):
@@ -1576,17 +1586,14 @@ def _observe_json(name):
         payload = copy.deepcopy(detail)
         if isinstance(result.get("physical_effect"), dict):
             payload["physical_effect"] = copy.deepcopy(result.get("physical_effect"))
-        return _json_material(name, name, payload, source=_source_name(arguments))
+        source = _source_name(arguments) if "source" in (arguments or {}) else "runtime"
+        return _json_material(name, name, payload, source=source)
     return observe
-
-
 
 
 def _observe_none(arguments, result):
     """Explicit capability-owned declaration that no Material is produced."""
     return []
-
-
 
 
 def _observe_passthrough(arguments, result):
@@ -1605,21 +1612,6 @@ def _observe_continue(arguments, result):
     return _json_material("continue_observation", "continue_observation", detail) if detail else []
 
 
-def _capability_observations(name, arguments, result):
-    entry = CAPABILITIES.get(str(name or "")) or {}
-    observer = entry.get("observe")
-    values = observer(arguments or {}, result or {}) if callable(observer) else []
-    out = []
-    for raw in values or []:
-        if not isinstance(raw, dict):
-            continue
-        item = copy.deepcopy(raw)
-        item.setdefault("source_capability", str(name or ""))
-        item.setdefault("source_type", str(name or "capability"))
-        out.append(item)
-    return out
-
-
 def _coverage_record(*, scope, examined=None, complete=False, boundaries=None, facts=None):
     """Canonical capability-owned Coverage shape.
 
@@ -1635,25 +1627,6 @@ def _coverage_record(*, scope, examined=None, complete=False, boundaries=None, f
     if isinstance(facts, dict) and facts:
         value["facts"] = copy.deepcopy(facts)
     return value
-
-
-def _capability_coverage(name, arguments, result):
-    entry = CAPABILITIES.get(str(name or "")) or {}
-    coverage = entry.get("coverage")
-    if callable(coverage):
-        value = coverage(arguments or {}, result or {})
-    else:
-        value = result.get("coverage") if isinstance(result, dict) else None
-    return normalize_coverage(value, allow_empty=True)
-
-
-def _capability_frontiers(name, arguments, result):
-    entry = CAPABILITIES.get(str(name or "")) or {}
-    projector = entry.get("frontier")
-    if callable(projector):
-        value = projector(arguments or {}, result or {})
-        return [copy.deepcopy(item) for item in (value or []) if isinstance(item, dict)]
-    return [copy.deepcopy(item) for item in (result.get("frontiers") or []) if isinstance(item, dict)] if isinstance(result, dict) else []
 
 
 def _frontier_passthrough(arguments, result):
@@ -1736,7 +1709,7 @@ def _coverage_search(arguments, result):
 def _coverage_tree(arguments, result):
     detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
     scope = {
-        "kind": "workspace_tree",
+        "kind": "source_tree",
         "source": _source_name(arguments),
         "depth": arguments.get("depth"), "filter": arguments.get("filter"),
     }
@@ -1755,7 +1728,7 @@ def _coverage_project_stats(arguments, result):
     skipped = detail.get("skipped") if isinstance(detail.get("skipped"), dict) else {}
     boundaries = [{"kind": key, "count": int(value or 0)} for key, value in skipped.items() if int(value or 0)]
     return _coverage_record(
-        scope={"kind": "workspace_text", "source": _source_name(arguments)},
+        scope={"kind": "source_text", "source": _source_name(arguments)},
         examined={"files": int(detail.get("measured_files") or 0), "directories": int(detail.get("directories") or 0)},
         complete=bool(detail.get("scan_complete")), boundaries=boundaries,
         facts={"coverage_scope": detail.get("coverage_scope")},
@@ -1824,11 +1797,20 @@ def _coverage_continue(arguments, result):
     return _coverage_record(scope={"kind": "frontier_continuation", "frontier": arguments.get("frontier")}, complete=result.get("ok") is True)
 
 
-
-def _validate_file_material_freshness(material, project_root):
+def _validate_file_material_freshness(material, ctx):
     locator = material.get("locator") if isinstance(material.get("locator"), dict) else {}
     if locator.get("kind") != "file" or not locator.get("path") or not material.get("source_version"):
-        return True, "ok"
+        return None, "not_applicable"
+    if isinstance(ctx, (str, os.PathLike)):
+        project_root = os.path.realpath(os.fspath(ctx)) if os.path.isdir(os.fspath(ctx)) else None
+    else:
+        project = _standard_context(ctx)
+        project_root = _material_source_root(material, {
+            "workspace": project.get("caminho_origem"),
+            "eyle": project.get("eyle_root"),
+        })
+    if not project_root:
+        return False, "source_unavailable"
     try:
         start = int(locator.get("line_start") or 1)
         end = int(locator.get("line_end") or start)
@@ -1838,7 +1820,8 @@ def _validate_file_material_freshness(material, project_root):
         )
     except (ErroLeituraProjeto, TypeError, ValueError):
         return False, "stale"
-    return (str(reading.get("file_hash") or "") == str(material.get("source_version") or ""), "ok")
+    fresh = str(reading.get("file_hash") or "") == str(material.get("source_version") or "")
+    return (True, "ok") if fresh else (False, "stale")
 
 
 def _rehydrate_file_material(material, project_root, max_lines):
@@ -1870,30 +1853,10 @@ def _material_source_root(material, roots):
     locator = material.get("locator") if isinstance(material, dict) and isinstance(material.get("locator"), dict) else {}
     source = str(locator.get("source") or "workspace")
     if isinstance(roots, dict):
-        root = roots.get(source) or roots.get("workspace")
+        root = roots.get(source)
     else:
         root = roots
     return os.path.realpath(os.fspath(root)) if root and os.path.isdir(os.fspath(root)) else None
-
-
-def capability_validate_material_freshness(materials, material_ids, source_roots):
-    """Dispatch freshness against the physical source recorded by each Material."""
-    store = materials if isinstance(materials, dict) else {}
-    for material_id in [str(value) for value in (material_ids or []) if str(value)]:
-        material = store.get(material_id)
-        if not isinstance(material, dict):
-            continue
-        owner = str(material.get("source_capability") or "")
-        checker = (CAPABILITIES.get(owner.split(".", 1)[-1]) or {}).get("freshness")
-        if not callable(checker):
-            continue
-        root = _material_source_root(material, source_roots)
-        if root is None:
-            return False, f"GROUNDING_STALE:{material_id}:source_unavailable"
-        ok, reason = checker(material, root)
-        if not ok:
-            return False, f"GROUNDING_STALE:{material_id}:{reason}"
-    return True, "ok"
 
 
 def capability_rehydrate_materials(materials, source_roots, *, max_lines):
@@ -1914,15 +1877,6 @@ def capability_rehydrate_materials(materials, source_roots, *, max_lines):
         ok, reason = rehydrator(material, root, int(max_lines or 1))
         if not ok:
             material["rehydration_error"] = str(reason or "OBSERVATION_REEXECUTION_REQUIRED")
-
-
-def _public_arguments_default(arguments):
-    arguments = arguments if isinstance(arguments, dict) else {}
-    return {
-        str(key): (str(value)[:240] if not isinstance(value, (int, float, bool)) else value)
-        for key, value in list(arguments.items())[:12]
-        if key not in {"content", "new_code", "file_hash_expected", "range_hash_expected"}
-    }
 
 
 def _public_arguments_keys(*keys):
@@ -1950,38 +1904,6 @@ def _public_arguments_command(arguments):
         if arguments.get(key) is not None:
             out[key] = arguments.get(key)
     return out
-
-
-
-
-def capability_public_arguments(name, arguments):
-    """User-visible bounded arguments projected by the capability registry."""
-    entry = CAPABILITIES.get(str(name or "")) or {}
-    projector = entry.get("public_arguments")
-    return projector(arguments or {}) if callable(projector) else _public_arguments_default(arguments or {})
-
-
-def _public_result_base(result):
-    result = result if isinstance(result, dict) else {}
-    public = {
-        "status": result.get("status"), "ok": bool(result.get("ok")),
-        "executed": bool(result.get("executed")), "changed": bool(result.get("changed")),
-    }
-    for key, limit in (("error_code", 120), ("failure_scope", 40), ("failure_resource", 240)):
-        if result.get(key):
-            public[key] = str(result.get(key))[:limit]
-    if result.get("retryable") is not None:
-        public["retryable"] = bool(result.get("retryable"))
-    if result.get("coverage"):
-        public["coverage"] = copy.deepcopy(result.get("coverage"))
-    if isinstance(result.get("physical_effect"), dict):
-        public["physical_effect"] = copy.deepcopy(result.get("physical_effect"))
-    if result.get("frontiers"):
-        public["frontiers"] = [
-            {key: value for key, value in item.items() if key != "handle"}
-            for item in list(result.get("frontiers") or [])[:12] if isinstance(item, dict)
-        ]
-    return public
 
 
 def _public_result_fields(*keys):
@@ -2015,8 +1937,19 @@ def _public_result_search(result):
 def _public_result_find_symbol(result):
     detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
     if isinstance(detail.get("matches"), list):
-        return {"matches": len(detail.get("matches") or []), "matches_observed": int(detail.get("matches_observed") or len(detail.get("matches") or [])), "files_examined": int(detail.get("files_examined") or 0)}
-    return _public_result_file(result)
+        return {key: value for key, value in {
+            "source": detail.get("source"),
+            "source_scope": detail.get("source_scope"),
+            "matches": len(detail.get("matches") or []),
+            "matches_observed": int(detail.get("matches_observed") or len(detail.get("matches") or [])),
+            "files_examined": int(detail.get("files_examined") or 0),
+        }.items() if value is not None}
+    out = _public_result_file(result)
+    if detail.get("source") is not None:
+        out["source"] = detail.get("source")
+    if detail.get("source_scope") is not None:
+        out["source_scope"] = detail.get("source_scope")
+    return out
 
 
 def _public_result_relations(result):
@@ -2056,23 +1989,6 @@ def _public_result_git_diff(result):
     return out
 
 
-def capability_public_result(name, result):
-    """User-visible result summary projected by the capability registry."""
-    result = result if isinstance(result, dict) else {}
-    public = _public_result_base(result)
-    detail = result.get("detail")
-    if isinstance(detail, str):
-        public["detail"] = detail[:500]
-        return public
-    entry = CAPABILITIES.get(str(name or "")) or {}
-    projector = entry.get("public_result")
-    if callable(projector):
-        extra = projector(result)
-        if isinstance(extra, dict):
-            public.update(extra)
-    return {key: value for key, value in public.items() if value is not None}
-
-
 def _model_projection_default(detail, grounding_ids, config):
     if not isinstance(detail, dict):
         return detail
@@ -2084,18 +2000,47 @@ def _model_projection_default(detail, grounding_ids, config):
 
 
 def _model_projection_search(detail, grounding_ids, config):
+    """Project literal search as a navigation index, never a broad source replay.
+
+    Full matched ranges remain canonical Material in Observation. Main sees only
+    coordinates, small previews and objective counts, then chooses a targeted
+    read/find_symbol/search if more source text is semantically useful.
+    """
     clone = copy.deepcopy(detail) if isinstance(detail, dict) else {}
     ids = list(grounding_ids or [])
-    copied = {key: value for key, value in clone.items() if key != "results"}
     rows = []
     for index, item in enumerate(clone.get("results") or []):
-        row = dict(item)
-        if index < len(ids): row["grounding_id"] = ids[index]
-        text = str(row.get("numbered_content") or row.get("content") or "")
-        if text:
-            row["numbered_content"] = text[:1200]; row.pop("content", None)
-        rows.append(row)
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("numbered_content") or item.get("content") or "")
+        preview_lines = [line.strip() for line in text.splitlines() if line.strip()]
+        preview = " ".join(preview_lines[:2])[:280]
+        row = {
+            "file": item.get("file"),
+            "line_start": item.get("line_start"),
+            "line_end": item.get("line_end"),
+            "match_lines": list(item.get("match_lines") or [])[:8],
+        }
+        if index < len(ids):
+            row["grounding_id"] = ids[index]
+        if preview:
+            row["preview"] = preview
+        rows.append({k: v for k, v in row.items() if v not in (None, "", [], {})})
+
+    keep = (
+        "query", "search_scope", "materialized_files", "matches_observed",
+        "matches_materialized", "files_with_matches", "file_match_distribution",
+        "distribution_truncated", "ranges_observed", "ranges_materialized",
+        "scope_complete", "coverage_complete", "coverage_scope",
+        "protected_resources_excluded", "backend", "read_failures",
+    )
+    copied = {key: copy.deepcopy(clone.get(key)) for key in keep if clone.get(key) not in (None, "", [], {})}
     copied["results"] = rows
+    raw_frontiers = [item for item in (clone.get("frontiers") or []) if isinstance(item, dict)]
+    if raw_frontiers:
+        copied["more_results_available"] = True
+        copied["remaining_result_groups"] = sum(max(0, int(item.get("count") or 0)) for item in raw_frontiers)
+        copied["navigation_hint"] = "Refine search or read a listed file/range; broad continuation is intentionally not an ECC operation."
     return copied
 
 
@@ -2193,14 +2138,13 @@ def _model_projection_command(detail, grounding_ids, config):
     return clone
 
 
-def capability_model_detail(name, detail, grounding_ids, config):
-    """Compact model projection dispatched only through capability-owned hooks."""
-    entry = CAPABILITIES.get(str(name or "")) or {}
-    projector = entry.get("model_projection")
-    return projector(detail, grounding_ids, config or {}) if callable(projector) else _model_projection_default(detail, grounding_ids, config or {})
-
-
 def _covering_read_file(arguments, entries, reality_epoch):
+    """Return cached coverage when the union of observed ranges covers the request.
+
+    Coverage is physical interval knowledge. It must compose adjacent/overlapping
+    observations instead of requiring one historical read to contain the whole
+    requested range.
+    """
     if arguments.get("line_start") is None or arguments.get("line_end") is None:
         return None
     path = _norm_capability_path(arguments.get("path"))
@@ -2209,19 +2153,82 @@ def _covering_read_file(arguments, entries, reality_epoch):
         requested_start = int(arguments.get("line_start")); requested_end = int(arguments.get("line_end"))
     except (TypeError, ValueError):
         return None
-    candidates = []
+
+    ranges = []
     for item in (entries or {}).values():
-        if not isinstance(item, dict) or int(item.get("reality_epoch", -1)) != int(reality_epoch or 0): continue
-        if str(item.get("capability") or "") not in {"read_file", "standard.read_file"}: continue
+        if not isinstance(item, dict) or int(item.get("reality_epoch", -1)) != int(reality_epoch or 0):
+            continue
+        if str(item.get("capability") or "") not in {"read_file", "standard.read_file"}:
+            continue
         item_args = item.get("arguments") or {}
-        if _source_name(item_args) != source: continue
-        if _norm_capability_path(item_args.get("path")) != path: continue
+        if _source_name(item_args) != source or _norm_capability_path(item_args.get("path")) != path:
+            continue
         coverage = item.get("coverage") if isinstance(item.get("coverage"), dict) else {}
         examined = coverage.get("examined") if isinstance(coverage.get("examined"), dict) else {}
-        try: start = int(examined.get("line_start")); end = int(examined.get("line_end"))
-        except (TypeError, ValueError): continue
-        if start <= requested_start and end >= requested_end: candidates.append((end - start, -int(item.get("turn") or 0), item))
-    return copy.deepcopy(min(candidates, key=lambda value: (value[0], value[1]))[2]) if candidates else None
+        try:
+            start = int(examined.get("line_start")); end = int(examined.get("line_end"))
+        except (TypeError, ValueError):
+            continue
+        if end < requested_start or start > requested_end:
+            continue
+        ranges.append((start, end, int(item.get("turn") or 0), item))
+
+    if not ranges:
+        return None
+    ranges.sort(key=lambda row: (row[0], row[1], -row[2]))
+
+    cursor = requested_start
+    selected = []
+    while cursor <= requested_end:
+        candidates = [row for row in ranges if row[0] <= cursor <= row[1]]
+        if not candidates:
+            return None
+        best = max(candidates, key=lambda row: (row[1], row[2]))
+        selected.append(best)
+        cursor = best[1] + 1
+
+    # Preserve a normal historical entry when one range alone covers everything.
+    unique_items = []
+    seen = set()
+    for _, _, _, item in selected:
+        marker = id(item)
+        if marker not in seen:
+            seen.add(marker); unique_items.append(item)
+    if len(unique_items) == 1:
+        return copy.deepcopy(unique_items[0])
+
+    grounding_ids = []
+    frontier_ids = []
+    for item in unique_items:
+        for value in item.get("grounding_ids") or []:
+            value = str(value)
+            if value and value not in grounding_ids:
+                grounding_ids.append(value)
+        for value in item.get("frontier_ids") or []:
+            value = str(value)
+            if value and value not in frontier_ids:
+                frontier_ids.append(value)
+    newest_turn = max(int(item.get("turn") or 0) for item in unique_items)
+    tokens = {str(item.get("freshness_token") or "") for item in unique_items}
+    composed_freshness_token = next(iter(tokens)) if len(tokens) == 1 else None
+    return {
+        "observation_signature": None,
+        "reality_epoch": int(reality_epoch or 0),
+        "capability": "standard.read_file",
+        "arguments": copy.deepcopy(arguments),
+        "public_arguments": copy.deepcopy(arguments),
+        "grounding_ids": grounding_ids,
+        "frontier_ids": frontier_ids,
+        "freshness_token": composed_freshness_token,
+        "coverage": {
+            "kind": "file_range_union",
+            "examined": {"line_start": requested_start, "line_end": requested_end},
+            "complete": True,
+            "facts": {"composed_from_observations": len(unique_items)},
+        },
+        "turn": newest_turn,
+        "composed_coverage": True,
+    }
 
 
 def _resource_failure_by_path(owner):
@@ -2242,17 +2249,6 @@ def _resource_failure_by_path(owner):
     return find
 
 
-def capability_find_covering(name, arguments, entries, reality_epoch):
-    entry = CAPABILITIES.get(str(name or "")) or {}
-    hook = entry.get("covers")
-    return hook(arguments or {}, entries or {}, reality_epoch) if callable(hook) else None
-
-
-def capability_find_resource_failure(name, arguments, entries, reality_epoch):
-    entry = CAPABILITIES.get(str(name or "")) or {}
-    hook = entry.get("resource_failure")
-    return hook(arguments or {}, entries or {}, reality_epoch) if callable(hook) else None
-
 def _normalize_symbol_relations_arguments(arguments):
     normalized = dict(arguments or {})
     if str(normalized.get("query") or "relations").strip().lower() == "reachability":
@@ -2272,144 +2268,147 @@ def _schema_objeto(properties=None, required=None):
 
 _CAMINHO = {
     "type": "string", "minLength": 1,
-    "description": "Project-relative path.",
+    "description": "Path inside the project.",
 }
-_LINHA = {"type": "integer", "minimum": 1, "description": "1-based file line."}
+_LINHA = {"type": "integer", "minimum": 1, "description": "File line, starting at 1."}
 _SOURCE = {
     "type": "string", "enum": ["workspace", "eyle"],
-    "description": "workspace=user workspace; eyle=Eyle source (read-only except isolated command snapshots).",
+    "description": "workspace=user files; eyle=Eyle code.",
 }
 
 CAPABILITIES = {
     "calculate": {
-        "description": "Evaluate an arithmetic expression deterministically.",
+        "description": "Calculate an arithmetic expression.",
         "availability": "global",
         "produces_grounding": True,
         "effect": "observe",
-        "returns": "Numeric result with exactness and precision metadata.",
+        "returns": "Result.",
         "input_schema": _schema_objeto({
             "expression": {"type": "string", "minLength": 1, "maxLength": 500, "description": "Arithmetic expression."},
         }, ["expression"]),
         "fn": _tool_calculate,
     },
     "project_stats": {
-        "description": "Measure project text and language statistics.",
-        "availability": "workspace",
+        "description": "Count project files, lines, bytes, and languages.",
+        "availability": "source",
         "produces_grounding": True,
         "effect": "observe",
-        "returns": "File, directory, line, character, byte and language counts.",
-        "caveats": ["Measurement only; no semantic ranking or runtime proof."],
+        "returns": "File, folder, line, byte, and language counts.",
+        "caveats": ["Counts do not tell what matters or what runs."],
         "input_schema": _schema_objeto({"source": _SOURCE}),
         "fn": _tool_project_stats,
     },
     "count_tokens": {
-        "description": "Measure or estimate tokens for project text.",
-        "availability": "workspace",
+        "description": "Count or estimate tokens in project text.",
+        "availability": "source",
         "produces_grounding": True,
         "effect": "observe",
-        "returns": "Token count/estimate, method, exactness and scan coverage.",
-        "caveats": ["Project-text tokens, not LLM request usage."],
+        "returns": "Token count or estimate and what was counted.",
+        "caveats": ["Not LLM request usage."],
         "input_schema": _schema_objeto({
             "source": _SOURCE,
-            "path": {"type": "string", "minLength": 1, "description": "Optional file or directory scope."},
-            "tokenizer": {"type": "string", "minLength": 1, "description": "Optional tokenizer/model identifier."},
+            "path": {"type": "string", "minLength": 1, "description": "Optional file or folder."},
+            "tokenizer": {"type": "string", "minLength": 1, "description": "Optional tokenizer or model name."},
         }),
         "fn": _tool_count_tokens,
     },
     "inspect_project": {
-        "description": "Inspect static project structure and implementation signals.",
-        "availability": "workspace",
+        "description": "Get a quick map of the project.",
+        "availability": "source",
         "produces_grounding": True,
         "effect": "observe",
-        "returns": "Languages, entrypoints, imports, tests, CI, frameworks and relation signals.",
-        "caveats": ["Static signals only; no semantic ranking or runtime proof."],
+        "returns": "Languages, entry points, imports, tests, CI, frameworks.",
+        "caveats": ["Code structure does not prove runtime behavior."],
         "input_schema": _schema_objeto({"source": _SOURCE}),
         "fn": _tool_inspect_project,
     },
     "list_tree": {
-        "description": "List a bounded project tree.",
-        "availability": "workspace",
+        "description": "List files and folders.",
+        "availability": "source",
         "produces_grounding": True,
         "effect": "observe",
-        "returns": "Tree entries with depth, truncation and boundary metadata.",
+        "returns": "Files, folders, and whether the list was cut short.",
         "input_schema": _schema_objeto({
             "source": _SOURCE,
-            "limit": {"type": "integer", "minimum": 1, "description": "Maximum returned entries."},
-            "depth": {"type": "integer", "minimum": 1, "description": "Maximum traversal depth."},
+            "limit": {"type": "integer", "minimum": 1, "description": "Max items."},
+            "depth": {"type": "integer", "minimum": 1, "description": "Max folder levels."},
             "filter": {"type": "string", "minLength": 1, "description": "Optional path filter."},
         }),
         "fn": _tool_list_tree,
     },
     "search_code": {
-        "description": "Find exact literal matches in project files.",
-        "availability": "workspace",
+        "ecc_returns": "Files and lines that contain the text.",
+        "ecc_caveats": ["A text match does not explain what the code means; read it when needed."],
+        "description": "Search for exact text in files.",
+        "availability": "source",
         "produces_grounding": True,
         "effect": "observe",
-        "returns": "Literal-match Material, Coverage and optional Frontier.",
-        "caveats": ["Literal search only; protected resources remain a Coverage boundary."],
+        "returns": "Match Material, Coverage and optional Frontier.",
+        "caveats": ["Literal only; protected resources are a Coverage boundary."],
         "input_schema": _schema_objeto(
             {
                 "source": _SOURCE,
-            "query": {"type": "string", "minLength": 1, "description": "Exact literal query."},
-                "include_paths": {"type": "array", "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 300}, "description": "Optional file, directory or explicit-glob scopes."},
-                "exclude_paths": {"type": "array", "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 300}, "description": "Optional file, directory or explicit-glob exclusions."},
+            "query": {"type": "string", "minLength": 1, "description": "Exact text to find."},
+                "include_paths": {"type": "array", "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 300}, "description": "Only search these paths."},
+                "exclude_paths": {"type": "array", "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 300}, "description": "Skip these paths."},
             }, ["query"],
         ),
         "fn": _tool_search_code,
     },
     "symbol_relations": {
-        "description": "Inspect static structural relations around a code symbol.",
-        "availability": "workspace",
+        "description": "See where a code symbol is connected.",
+        "availability": "source",
         "produces_grounding": True,
         "effect": "observe",
-        "returns": "Structural relations, optional root paths and Coverage.",
-        "caveats": ["Static relations can be incomplete for dynamic behavior."],
+        "returns": "Code connections and paths.",
+        "caveats": ["Static code links may miss runtime behavior."],
         "input_schema": _schema_objeto({
             "source": _SOURCE,
-            "symbol": {"type": "string", "minLength": 1, "description": "Code symbol name."},
-            "query": {"type": "string", "enum": ["relations", "reachability"], "description": "relations=local graph; reachability=root-to-symbol path."},
+            "symbol": {"type": "string", "minLength": 1, "description": "Symbol name."},
+            "query": {"type": "string", "enum": ["relations", "reachability"], "description": "relations=links; reachability=path from a root."},
             "path": _CAMINHO,
-            "roots": {"type": "array", "items": {"type": "string", "minLength": 1}, "description": "Optional reachability roots."},
-            "direction": {"type": "string", "enum": ["incoming", "outgoing", "both"], "description": "Relation direction."},
-            "include_text_references": {"type": "boolean", "description": "Include literal text references."},
-            "max_depth": {"type": "integer", "minimum": 1, "maximum": 32, "description": "Local-relation depth hint."},
-            "max_edges": {"type": "integer", "minimum": 10, "maximum": 500, "description": "Local-relation output limit."},
+            "roots": {"type": "array", "items": {"type": "string", "minLength": 1}, "description": "Optional starting symbols."},
+            "direction": {"type": "string", "enum": ["incoming", "outgoing", "both"], "description": "Which link direction."},
+            "include_text_references": {"type": "boolean", "description": "Also include text mentions."},
+            "max_depth": {"type": "integer", "minimum": 1, "maximum": 32, "description": "Max link depth."},
+            "max_edges": {"type": "integer", "minimum": 10, "maximum": 500, "description": "Max links."},
         }, ["symbol"]),
         "fn": _tool_symbol_relations,
     },
     "continue_observation": {
-        "description": "Continue an Observation Frontier.",
-        "availability": "workspace",
+        "ecc_hidden": True,
+        "description": "Continue a result that was cut short.",
+        "availability": "source",
         "produces_grounding": True,
         "effect": "observe",
-        "returns": "Next bounded Observation page, Coverage and optional Frontier.",
-        "caveats": ["Frontier expires when its Observation snapshot becomes stale."],
+        "returns": "Next part of the result.",
+        "caveats": ["Works only while its saved snapshot is valid."],
         "input_schema": _schema_objeto({
-            "frontier": {"type": "string", "minLength": 4, "pattern": r"^fr-[0-9]+$", "description": "Observation Frontier id."},
+            "frontier": {"type": "string", "minLength": 4, "pattern": r"^fr-[0-9]+$", "description": "Continuation id."},
         }, ["frontier"]),
         "fn": _tool_continue_observation,
     },
     "find_symbol": {
-        "description": "Locate a code symbol definition.",
-        "availability": "workspace",
+        "description": "Find where a code symbol is defined.",
+        "availability": "source",
         "produces_grounding": True,
         "effect": "observe",
-        "returns": "Symbol location and source-range metadata.",
-        "caveats": ["Definition lookup is not runtime reachability proof."],
+        "returns": "File and lines where the symbol is defined.",
+        "caveats": ["A definition does not prove runtime use."],
         "input_schema": _schema_objeto({
             "source": _SOURCE,
             "path": _CAMINHO,
-            "symbol": {"type": "string", "minLength": 1, "description": "Exact symbol name."},
+            "symbol": {"type": "string", "minLength": 1, "description": "Symbol name."},
         }, ["symbol"]),
         "fn": _tool_find_symbol,
     },
     "read_file": {
-        "description": "Read a bounded project-file range.",
-        "availability": "workspace",
+        "description": "Read a file or part of a file.",
+        "availability": "source",
         "produces_grounding": True,
         "effect": "observe",
-        "returns": "Bounded file content, truncation state, line metadata and hashes.",
-        "caveats": ["Read limits may truncate content; protected resources deny content access."],
+        "returns": "File text, lines read, truncation, and hashes.",
+        "caveats": ["Large files may be cut short; protected content is blocked."],
         "input_schema": _schema_objeto({
             "source": _SOURCE,
             "path": _CAMINHO,
@@ -2419,82 +2418,74 @@ CAPABILITIES = {
         "fn": _tool_read_file,
     },
     "run_command": {
-        "description": "Execute or experiment with a shell command inside an isolated writable snapshot for the current job.",
-        "availability": "workspace",
+        "description": "Run a shell command in a safe copy made for this job.",
+        "availability": "source",
         "produces_grounding": True,
         "effect": "execute",
-        "returns": "Exit code, bounded output, isolation facts and a job-scoped isolated-snapshot physical effect.",
-        "establishes": [
-            "That the command executed with the reported result inside the isolated job snapshot.",
-            "Behavior and files observed inside that snapshot for the lifetime of the current job.",
-        ],
-        "does_not_establish": [
-            "Persistent creation or modification of files in the real workspace.",
-            "That state created only in the snapshot exists outside the current job.",
-        ],
-        "caveats": [
-            "Sandbox state persists only for the current job; the real workspace and running Eyle source stay unchanged.",
-            "Use this capability to experiment or validate in isolation, not as proof of persistent workspace mutation.",
-        ],
+        "returns": "Exit code and output from the job copy.",
+        "establishes": ["Command result inside the job copy."],
+        "does_not_establish": ["Changes to the real workspace."],
+        "caveats": ["Runs in a copy; the real workspace stays unchanged."],
         "input_schema": _schema_objeto({
             "source": _SOURCE,
             "command": {"type": "string", "minLength": 1, "maxLength": 8000, "description": "Shell command."},
-            "cwd": {"type": "string", "minLength": 1, "description": "Optional sandbox working directory."},
-            "timeout_seconds": {"type": "integer", "minimum": 1, "description": "Optional timeout."},
+            "cwd": {"type": "string", "minLength": 1, "description": "Optional folder inside the job copy."},
+            "timeout_seconds": {"type": "integer", "minimum": 1, "description": "Optional time limit."},
         }, ["command"]),
         "fn": _tool_run_command,
     },
     "export_sandbox_zip": {
-        "description": "Export the current sandbox snapshot as a ZIP artifact.",
+        "description": "Save the current job copy as a ZIP file.",
         "availability": "workspace",
         "produces_grounding": True,
         "effect": "mutate",
-        "returns": "Artifact name, size, SHA-256 and sandbox source.",
-        "caveats": ["Requires sandbox state; existing artifact names are not overwritten."],
+        "returns": "ZIP name, size, SHA-256.",
+        "caveats": ["A job copy must already exist. An existing ZIP is not overwritten."],
         "input_schema": _schema_objeto({
             "filename": {"type": "string", "minLength": 5, "maxLength": 160, "pattern": r"^[A-Za-z0-9._-]+\.zip$", "description": "ZIP filename."},
-            "archive_root": {"type": "string", "minLength": 1, "maxLength": 120, "pattern": r"^[A-Za-z0-9._-]+$", "description": "Optional archive root name."},
-            "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600, "description": "Export timeout."},
+            "archive_root": {"type": "string", "minLength": 1, "maxLength": 120, "pattern": r"^[A-Za-z0-9._-]+$", "description": "Optional top folder name in the ZIP."},
+            "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600, "description": "Time limit."},
         }, ["filename"]),
         "fn": _tool_export_sandbox_zip,
     },
     "run_tests": {
-        "description": "Run detected tests in the isolated sandbox.",
-        "availability": "tests",
+        "description": "Run the project tests in a safe copy.",
+        "availability": "tests_source",
         "produces_grounding": True,
         "effect": "execute",
-        "returns": "Runner status, return code, summary and bounded output.",
-        "caveats": ["Tests only cover executed cases; runner may be unavailable."],
+        "returns": "Test status, exit code, summary, output.",
+        "caveats": ["Only tests that actually ran count as evidence."],
         "input_schema": _schema_objeto({
-            "scope": {"type": "string", "minLength": 1, "description": "Optional test file or directory scope."},
+            "source": _SOURCE,
+            "scope": {"type": "string", "minLength": 1, "description": "Optional test file or folder."},
         }),
         "fn": _tool_run_tests,
     },
     "git_status": {
-        "description": "Read Git working-tree status.",
-        "availability": "workspace",
+        "description": "Check Git status.",
+        "availability": "source",
         "produces_grounding": True,
         "effect": "observe",
-        "returns": "Branch, clean state and bounded changed paths.",
-        "caveats": ["Status metadata excludes patch contents."],
+        "returns": "Branch and changed paths.",
+        "caveats": ["This does not include the changed text itself."],
         "input_schema": _schema_objeto({
             "source": _SOURCE,
-            "max_entries": {"type": "integer", "minimum": 1, "maximum": 500, "description": "Maximum returned paths."},
+            "max_entries": {"type": "integer", "minimum": 1, "maximum": 500, "description": "Max paths."},
         }),
         "fn": _tool_git_status,
     },
     "git_diff": {
-        "description": "Read a bounded Git diff.",
-        "availability": "workspace",
+        "description": "Read Git changes.",
+        "availability": "source",
         "produces_grounding": True,
         "effect": "observe",
-        "returns": "Changed files, line counts and bounded diff text.",
-        "caveats": ["Output may be truncated."],
+        "returns": "Changed files and changed text.",
+        "caveats": ["Large diffs may be cut short."],
         "input_schema": _schema_objeto({
             "source": _SOURCE,
-            "path": {"type": "string", "minLength": 1, "description": "Optional path scope."},
-            "staged": {"type": "boolean", "description": "Select staged or unstaged diff."},
-            "context_lines": {"type": "integer", "minimum": 0, "maximum": 10, "description": "Diff context lines."},
+            "path": {"type": "string", "minLength": 1, "description": "Optional path."},
+            "staged": {"type": "boolean", "description": "Use staged changes."},
+            "context_lines": {"type": "integer", "minimum": 0, "maximum": 10, "description": "Extra lines around each change."},
         }),
         "fn": _tool_git_diff,
     },
@@ -2503,6 +2494,26 @@ CAPABILITIES = {
 # Capability-owned physical observation hooks. Agent/Observation consume only
 # this registry contract; adding a new observational capability must not require
 # capability-name branches in either core module.
+_ECC_NAMES = {
+    "calculate": "calculate", "project_stats": "project_stats", "count_tokens": "count_tokens",
+    "inspect_project": "inspect_project", "list_tree": "list_tree", "search_code": "search",
+    "symbol_relations": "symbol_relations", "continue_observation": "continue", "find_symbol": "find_symbol",
+    "read_file": "read_file", "run_command": "run_command", "run_tests": "run_tests",
+    "git_status": "git_status", "git_diff": "git_diff", "workspace_transaction": "transaction",
+    "export_sandbox_zip": "export_sandbox_zip",
+}
+for _local_name, _ecc_name in _ECC_NAMES.items():
+    if _local_name in CAPABILITIES:
+        CAPABILITIES[_local_name]["ecc_name"] = _ecc_name
+
+_ECC_EXPLICIT_SOURCE = {
+    "project_stats", "count_tokens", "inspect_project", "list_tree", "search_code",
+    "symbol_relations", "find_symbol", "read_file", "run_command", "run_tests",
+    "git_status", "git_diff",
+}
+for _local_name in _ECC_EXPLICIT_SOURCE:
+    CAPABILITIES[_local_name]["ecc_require_explicit_source"] = True
+
 CAPABILITIES["list_tree"].update(signature=_sig_list_tree, observe=_observe_tree, coverage=_coverage_tree)
 CAPABILITIES["search_code"].update(signature=_sig_search_code, observe=_observe_search, coverage=_coverage_search)
 CAPABILITIES["search_code"]["continue"] = _continue_search_code_page
@@ -2514,9 +2525,9 @@ CAPABILITIES["read_file"].update(signature=_sig_read_file, observe=_observe_file
 CAPABILITIES["project_stats"].update(signature=lambda arguments: f"project_stats:{_source_name(arguments)}:root", observe=_observe_json("project_stats"), coverage=_coverage_project_stats)
 CAPABILITIES["inspect_project"].update(signature=lambda arguments: f"inspect_project:{_source_name(arguments)}:root", observe=_observe_json("inspect_project"), coverage=_coverage_inspect_project)
 CAPABILITIES["count_tokens"].update(signature=_sig_count_tokens, observe=_observe_json("count_tokens"), coverage=_coverage_count_tokens)
-CAPABILITIES["run_tests"].update(signature=_sig_run_tests, observe=_observe_json("run_tests"), coverage=_coverage_atomic("test_execution", lambda a, d: {"kind":"test_execution", "scope": d.get("scope") or a.get("scope") or "."}, lambda a, d: {"returncode": d.get("returncode")}))
-CAPABILITIES["git_status"].update(signature=lambda arguments: f"git_status:{_source_name(arguments)}:root", observe=_observe_json("git_status"), coverage=_coverage_git_status)
-CAPABILITIES["git_diff"].update(signature=_sig_git_diff, observe=_observe_json("git_diff"), coverage=_coverage_git_diff)
+CAPABILITIES["run_tests"].update(observe=_observe_json("run_tests"), coverage=_coverage_atomic("test_execution", lambda a, d: {"kind":"test_execution", "scope": d.get("scope") or a.get("scope") or "."}, lambda a, d: {"returncode": d.get("returncode")}))
+CAPABILITIES["git_status"].update(observe=_observe_json("git_status"), coverage=_coverage_git_status)
+CAPABILITIES["git_diff"].update(observe=_observe_json("git_diff"), coverage=_coverage_git_diff)
 CAPABILITIES["continue_observation"].update(observe=_observe_continue, coverage=_coverage_continue)
 CAPABILITIES["calculate"].update(observe=_observe_json("calculate"), coverage=_coverage_atomic("calculation", lambda a, d: {"kind":"calculation", "expression": a.get("expression")}))
 CAPABILITIES["run_command"].update(observe=_observe_json("run_command"), coverage=_coverage_atomic("sandbox_command", lambda a, d: {"kind":"sandbox_command", "source": _source_name(a), "cwd": a.get("cwd") or "."}, lambda a, d: {"returncode": d.get("returncode")}))
@@ -2527,7 +2538,7 @@ CAPABILITIES["export_sandbox_zip"].update(observe=_observe_json("export_sandbox_
 CAPABILITIES["read_file"].update(
     public_arguments=_public_arguments_read_file, public_result=_public_result_file,
     model_projection=_model_projection_read_file, covers=_covering_read_file,
-    rematerialize=_rematerialize_read_file, evidence_selector=_evidence_selector_file,
+    evidence_selector=_evidence_selector_file,
     resource_failure=_resource_failure_by_path("read_file"),
 )
 CAPABILITIES["list_tree"].update(
@@ -2536,6 +2547,7 @@ CAPABILITIES["list_tree"].update(
 CAPABILITIES["search_code"].update(
     public_arguments=_public_arguments_search, public_result=_public_result_search,
     model_projection=_model_projection_search, evidence_selector=_evidence_selector_file,
+    ecc_hide_frontiers=True,
 )
 CAPABILITIES["find_symbol"].update(
     public_arguments=_public_arguments_keys("source", "symbol", "path"), public_result=_public_result_find_symbol,
@@ -2562,7 +2574,7 @@ CAPABILITIES["project_stats"].update(
 )
 CAPABILITIES["inspect_project"].update(public_arguments=_public_arguments_keys("source"), public_result=_public_result_inspect, model_projection=_model_projection_inspect)
 CAPABILITIES["run_tests"].update(
-    public_arguments=lambda arguments: {"scope": arguments.get("scope")} if arguments.get("scope") else {},
+    public_arguments=_public_arguments_keys("source", "scope"),
     public_result=_public_result_fields("command", "returncode", "scope", "backend", "tests_detected", "summary"),
 )
 CAPABILITIES["run_command"].update(public_arguments=_public_arguments_command, public_result=_public_result_command, model_projection=_model_projection_command)
@@ -2580,24 +2592,14 @@ CAPABILITIES["git_diff"].update(public_arguments=_public_arguments_keys("source"
 # Workspace mutation is a provider capability, not an Agent action. The generic
 # Runtime only sees confirmation=required and delegates prepare/confirm here.
 CAPABILITIES["workspace_transaction"] = {
-    "description": "Apply an atomic set of persistent file changes to the real user workspace after deterministic dry-run and explicit user confirmation.",
+    "description": "Change the real user workspace only after a preview and user confirmation.",
     "availability": "workspace",
     "produces_grounding": False,
     "effect": "mutate",
-    "returns": "Applied files, compile/test/reread verification state, rollback diagnostics and a persistent real-workspace physical effect.",
-    "establishes": [
-        "After successful confirmation/execution, the reported file mutation was applied to the real user workspace with persistent lifetime.",
-        "The provider-reported verification and rollback state for that real-workspace transaction.",
-    ],
-    "does_not_establish": [
-        "Any real-workspace mutation before explicit confirmation and successful execution.",
-        "Correctness beyond the verification results actually reported by the provider.",
-    ],
-    "caveats": [
-        "Existing files must be observed first so freshness preconditions can be attached.",
-        "Confirmation is required before real workspace mutation.",
-        "Verification policy belongs to this provider; Core does not know file or code semantics.",
-    ],
+    "returns": "Files changed, checks, rollback, lasting effect.",
+    "establishes": ["A confirmed successful real-workspace change lasts after the job."],
+    "does_not_establish": ["Correctness beyond checks that actually ran."],
+    "caveats": ["Read existing files fresh. The user must confirm before the real workspace changes."],
     "confirmation": "required",
     "input_schema": _workspace_transaction.schema(),
     "prepare": _workspace_transaction.prepare,
@@ -2615,9 +2617,23 @@ for _capability_entry in CAPABILITIES.values():
     for _hook_name in (
         "freshness", "rehydrate", "public_arguments", "public_result",
         "model_projection", "covers", "resource_failure", "normalize", "continue",
-        "rematerialize", "evidence_selector",
+        "evidence_selector", "freshness_arguments",
     ):
         _capability_entry.setdefault(_hook_name, None)
+
+for _source_cached_capability in (
+    "project_stats", "count_tokens", "inspect_project", "list_tree", "search_code",
+    "symbol_relations", "find_symbol", "read_file",
+):
+    CAPABILITIES[_source_cached_capability]["freshness_token"] = _source_tree_freshness_token
+    CAPABILITIES[_source_cached_capability]["freshness_arguments"] = lambda arguments: {"source": arguments.get("source")} if arguments.get("source") is not None else {}
+
+for _execution_source_capability in ("run_command", "run_tests"):
+    CAPABILITIES[_execution_source_capability]["freshness_token"] = _source_tree_freshness_token
+    CAPABILITIES[_execution_source_capability]["freshness_arguments"] = lambda arguments: {"source": arguments.get("source")} if arguments.get("source") is not None else {}
+for _git_capability in ("git_status", "git_diff"):
+    CAPABILITIES[_git_capability]["freshness_token"] = _git_freshness_token
+    CAPABILITIES[_git_capability]["freshness_arguments"] = lambda arguments: {"source": arguments.get("source")} if arguments.get("source") is not None else {}
 
 for _file_capability in ("read_file", "search_code", "find_symbol"):
     CAPABILITIES[_file_capability]["freshness"] = _validate_file_material_freshness
@@ -2628,6 +2644,8 @@ for _file_capability in ("read_file", "search_code", "find_symbol"):
 for _entrada_tool in CAPABILITIES.values():
     _entrada_tool.setdefault("limits", {})
     _entrada_tool["effect"] = normalize_effect(_entrada_tool.get("effect"))
+CAPABILITIES["workspace_transaction"]["ecc_name"] = "transaction"
+
 CAPABILITIES["list_tree"]["limits"] = {
     "max_entradas": {"config_key": "providers.standard.max_tree_entries", "default": 200},
     "max_profundidade": {"config_key": "providers.standard.max_tree_depth", "default": 6},
@@ -2642,21 +2660,24 @@ CAPABILITIES["read_file"]["limits"] = {
 }
 
 
-
 def _provider_available(name, spec, ctx):
     """Provider-owned physical availability; Core never interprets domain labels."""
     availability = str((spec or {}).get("availability") or "workspace")
     project = _standard_context(ctx)
     config = (ctx or {}).get("config") or {}
     workspace_root = project.get("caminho_origem")
+    eyle_root = project.get("eyle_root")
     workspace_available = bool(workspace_root and os.path.isdir(workspace_root))
+    eyle_available = bool(eyle_root and os.path.isdir(eyle_root))
     if availability == "global":
         return True
     if availability == "workspace":
         return workspace_available
-    if availability == "tests":
+    if availability == "source":
+        return workspace_available or eyle_available
+    if availability in {"tests", "tests_source"}:
         tests_enabled = bool(_standard_tests_config(config).get("enabled", False))
-        return workspace_available and tests_enabled
+        return tests_enabled and (workspace_available if availability == "tests" else (workspace_available or eyle_available))
     return False
 
 
@@ -2758,4 +2779,8 @@ def get_provider():
         provider_id="standard", capabilities=CAPABILITIES, available=_provider_available,
         describe=_provider_description, rehydrate=_provider_rehydrate,
         validate_config=_validate_provider_config,
+        ecc_guidance=(
+            "Use source=workspace for the user's files. Use source=eyle for Eyle's own source code. "
+            "If the user asks about Eyle itself, look at source=eyle.",
+        ),
     )

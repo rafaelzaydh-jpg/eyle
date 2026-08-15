@@ -6,13 +6,10 @@ import pytest
 
 from eyle.runtime.execution_context import ExecutionContext, bind_execution, reset_execution
 from eyle.providers.standard_impl.sandbox import _copiar_projeto, export_active_sandbox_zip, ErroSandbox
-from eyle.providers.standard import (
-    CAPABILITIES,
-    capability_observation_signature,
-    capability_validate_material_freshness,
-)
+from eyle.providers.standard import CAPABILITIES, _material_source_root
+from tests.canonical import standard_registry
 from eyle.providers.standard_impl.workspace import discover_project
-from llm.executar import PROMPT_AGENTE
+from llm.executar import PROMPT_ECC
 from tests.canonical import base_config
 
 
@@ -89,8 +86,8 @@ def test_self_analysis_blocks_live_runtime_state_content(tmp_path):
 
 
 def test_observation_identity_distinguishes_workspace_from_self_source():
-    a = capability_observation_signature("read_file", {"source": "workspace", "path": "main.py", "line_start": 1, "line_end": 2})
-    b = capability_observation_signature("read_file", {"source": "eyle", "path": "main.py", "line_start": 1, "line_end": 2})
+    a = standard_registry().observation_signature("standard.read_file", {"source": "workspace", "path": "main.py", "line_start": 1, "line_end": 2})
+    b = standard_registry().observation_signature("standard.read_file", {"source": "eyle", "path": "main.py", "line_start": 1, "line_end": 2})
     assert a != b
     assert "workspace" in a and "eyle" in b
 
@@ -106,18 +103,16 @@ def test_self_material_freshness_uses_recorded_source_root(tmp_path):
     material["id"] = "mat-1"
     material["source_capability"] = "read_file"
 
-    ok, reason = capability_validate_material_freshness(
-        {"mat-1": material}, ["mat-1"],
-        {"workspace": str(workspace), "eyle": str(tmp_path)},
-    )
+    roots = {"workspace": str(workspace), "eyle": str(tmp_path)}
+    root = _material_source_root(material, roots)
+    ok, reason = CAPABILITIES["read_file"]["freshness"](material, root)
     assert (ok, reason) == (True, "ok")
 
     (tmp_path / "main.py").write_text("self changed\n", encoding="utf-8")
-    ok, reason = capability_validate_material_freshness(
-        {"mat-1": material}, ["mat-1"],
-        {"workspace": str(workspace), "eyle": str(tmp_path)},
-    )
-    assert ok is False and reason.startswith("GROUNDING_STALE:mat-1")
+    roots = {"workspace": str(workspace), "eyle": str(tmp_path)}
+    root = _material_source_root(material, roots)
+    ok, reason = CAPABILITIES["read_file"]["freshness"](material, root)
+    assert (ok, reason) == (False, "stale")
 
 
 def test_self_sandbox_snapshot_omits_live_runtime_state_but_keeps_source(tmp_path):
@@ -183,12 +178,12 @@ def test_export_packages_only_active_snapshot_and_never_overwrites(tmp_path):
 
 
 def test_prompt_is_not_hardwired_to_workspace_self_boundary():
-    lowered = PROMPT_AGENTE.lower()
+    lowered = PROMPT_ECC.lower()
     assert "source=eyle" not in lowered
     assert "sandbox" not in lowered
     assert "patches" not in lowered
-    assert "an available capability is not evidence that it was called" in lowered
-    assert "capabilities come from independent providers" in lowered
+    assert "does not mean it was run" in lowered
+    assert "capabilities are eyle's replaceable body" in lowered
 
 
 def test_run_command_source_conflict_is_request_scoped_not_terminal(monkeypatch, tmp_path):
