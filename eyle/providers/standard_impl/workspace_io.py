@@ -148,7 +148,7 @@ def listar_arvore_projeto(caminho_projeto, limite=200, profundidade=6, filtro=No
 
     def adicionar(caminho_rel, tipo, nivel, *, protected_content=False):
         nonlocal truncado
-        if len(entradas) >= limite:
+        if limite is not None and len(entradas) >= int(limite):
             truncado = True
             return False
         item = {

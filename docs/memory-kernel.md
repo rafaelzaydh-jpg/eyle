@@ -1,55 +1,137 @@
-# Persistent Memory Graph
+# Intrinsic Memory Graph
 
-Memory is Eyle's persistent knowledge. It is shared by Explorar, Construir, and Concluir. It is not a provider, tool, fourth action, or Runtime-authored knowledge base.
+Memory is a first-class cognitive layer of Eyle. It is not a fourth ECC move, not a raw conversation transcript, and not a separate memory agent.
 
-## What belongs in Memory
+## Continuous learning
 
-Anything that may help again later can be a memory candidate: user facts and preferences, decisions, rules, important identifiers, useful facts about a world/project, relationships, and conclusions that save future work.
+Every cognition turn may emit `memory_delta` beside the ECC decision. Main decides what an experience means and whether it may matter later.
 
-Main chooses what is worth keeping. Runtime never decides semantic importance.
+Memory changes are atomic graph operations:
 
-## Scopes
+- `remember`
+- `revise`
+- `relate`
+- `revise_relation`
+- `archive`
+- `supersede`
+- `retire_relation`
 
-Nodes use two broad scopes:
+The Runtime validates shape/referential integrity and persists the change; it does not decide what should be learned.
 
-- `world` — knowledge tied to the Host's opaque `world_scope_id`;
-- `user` — knowledge that may follow the user across world scopes.
+## Retention is not truth
 
-Core does not require filesystem or project semantics.
+All learned nodes live in one graph and may use:
 
-## Memory operations
+- `retention=temporary`
+- `retention=persistent`
 
-Each ECC decision contains a Memory sidecar with `focus`, `disposition`, and `operations`.
+Retention answers **how worth preserving the representation is**, not whether it is true, stable, current, or universal.
 
-- `unchanged` — persistent understanding did not change.
-- `updated` — Main supplies one or more graph changes.
+A persistent memory may still be a weak/volatile hypothesis. A temporary memory may be a high-confidence observation that Main does not yet consider durably useful.
 
-Main may `remember`, `revise`, `relate`, `archive`, `supersede`, and `retire_relation`.
+Temporary memory is not conversation-local and is not silently trimmed by a small fixed-capacity policy.
 
-## Support and provenance
+## Epistemic state
 
-A memory revision can be supported by:
+Nodes and relations may carry open Main-authored metadata:
 
-- the current request;
-- another memory node;
-- current Material, with an optional provider-owned selector.
+- `nature`
+- optional `confidence`
+- `volatility`
+- `temporal`
+- `context`
+- `last_evidenced_at`
 
-Runtime stores provenance, IDs, revisions, anchors, and freshness data without interpreting their meaning.
+The vocabulary is deliberately open. Runtime does not impose a closed ontology of “facts”, “beliefs”, or “preferences”.
 
-## Freshness is not truth
+`confidence` describes the current strength of an interpretation/application, not a mathematically certified probability of truth.
 
-If a physical source changes, Runtime marks affected support stale/degraded. It does not delete the semantic memory.
+## History and changing states
 
-A memory can also be fresh and still be wrong because Main interpreted its source badly. Only Main can revise that semantic mistake after seeing better Evidence.
+Human preferences, beliefs and world states can change. The preferred model is normally to preserve the old state and represent the new state/context rather than rewrite history into a single timeless value.
 
-## Evidence is separate
-
-Every physical Material can automatically create active-session Evidence. Memory is optional semantic learning from that Evidence.
+For example:
 
 ```text
-Material → Evidence → Main interpretation → optional Memory change
+mem-old: "Beatles are a primary preference" (earlier context)
+mem-new: "Beatles are mostly nostalgic listening" (later context)
+
+mem-new --changed_from--> mem-old
 ```
 
-## Graph mechanics
+Node and relation revisions remain inspectable through Memory history operations.
 
-Runtime may expose degree, in/out edges, connected-component size, relation diversity, articulation status, retrieval count, and exposure tier. These are structural signals only. Main decides what they mean.
+## Material provenance
+
+Large source bodies do not belong inside memory nodes.
+
+```text
+Document / file / sensor body
+            ↓
+        Material mat-*
+            │
+            ├── mem-* atomic interpretation
+            ├── mem-* hypothesis
+            ├── mem-* decision
+            └── ...
+```
+
+One artifact may support thousands of learned nodes without duplicating the artifact into Memory.
+
+## Main-authored recall cues
+
+A node may include future retrieval handles:
+
+```json
+{
+  "recall": {
+    "aliases": ["The Beatles"],
+    "concepts": ["music preference"],
+    "cues": ["when discussing favorite artists"]
+  }
+}
+```
+
+These strings are authored by Main. They are **not evidence**, do not increase confidence, and are not generated by a hidden embedding/ranking subsystem.
+
+Runtime only cleans, stores, indexes, and matches the strings Main authored.
+
+## Scalable recall
+
+Recall uses SQLite FTS5 when available and a literal SQL fallback otherwise.
+
+```text
+memory_activate
+      ↓
+lexical/literal candidate selection
+      ↓
+persist exact match universe in SQLite
+      ↓
+materialize one page
+      ↓
+fr-* cursor for the exact remainder
+```
+
+The Session does not store the full matching `mem-*` list. Frontier contains only cursor/snapshot metadata, keeping navigation state independent of match count.
+
+`memory_activate` can use:
+
+- one query or several Main-authored query variants;
+- exact IDs/tags;
+- `nature` / `volatility` filters;
+- exact relation labels;
+- optional neighbor expansion.
+
+Runtime does not treat lexical rank as semantic importance.
+
+## Memory directory
+
+`memory_overview` exposes body-free descriptive counts such as node/edge totals, retention/epistemic breakdowns, isolated nodes, revised/evidenced nodes, relation labels and association coverage.
+
+These metrics help Main decide where to inspect; they are never automatic maintenance commands.
+
+## Navigation lifecycle
+
+Recall snapshots are navigation state, not learned knowledge. Exact Frontiers survive a `confirmation_required` pause because they belong to the same logical execution. Once the task reaches a terminal state, unreachable recall snapshots are released mechanically.
+
+Learned nodes, relations and histories are never deleted by navigation cleanup.

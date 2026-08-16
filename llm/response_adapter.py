@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Canonical response decoders for the two supported Eyle LLM transports.
+"""Canonical response decoder for the Eyle Adapter boundary.
 
-The runtime supports exactly two backend envelopes: OpenAI-compatible Chat
-Completions and Ollama ``/api/chat``.  The decoders do not guess alternate
-provider shapes, recover partial JSON, or promote reasoning into executable
-content.
+Eyle accepts one transport envelope: OpenAI-compatible Chat Completions from
+the local Adapter. Provider/model-specific translation belongs behind the
+Adapter, never in Core.
 """
 from __future__ import annotations
 
@@ -43,7 +42,14 @@ def _openai_usage(payload: dict[str, Any]) -> tuple[int | None, int | None, int 
     prompt = _int_or_none(usage.get("prompt_tokens"))
     completion = _int_or_none(usage.get("completion_tokens"))
     details = usage.get("prompt_tokens_details")
-    cached = _int_or_none(details.get("cached_tokens")) if isinstance(details, dict) else None
+    cached_candidates = [
+        _int_or_none(details.get("cached_tokens")) if isinstance(details, dict) else None,
+        _int_or_none(usage.get("prompt_cache_hit_tokens")),
+        _int_or_none(usage.get("cached_prompt_tokens")),
+        _int_or_none(usage.get("cached_tokens")),
+    ]
+    cached_values = [value for value in cached_candidates if value is not None and value >= 0]
+    cached = min(prompt, max(cached_values)) if cached_values and prompt is not None else (max(cached_values) if cached_values else None)
     completion_details = usage.get("completion_tokens_details")
     reasoning = _int_or_none(completion_details.get("reasoning_tokens")) if isinstance(completion_details, dict) else None
     return prompt, cached, completion, reasoning
@@ -78,23 +84,3 @@ def normalize_openai_chat_response(payload: Any, *, streaming: bool = False) -> 
         response_id=str(payload.get("id")) if payload.get("id") is not None else None,
     )
 
-
-def normalize_ollama_chat_response(payload: Any, *, streaming: bool = False) -> NormalizedModelResponse:
-    if not isinstance(payload, dict):
-        raise ResponseEnvelopeError("Ollama response must be a JSON object")
-    message = payload.get("message")
-    if not isinstance(message, dict):
-        raise ResponseEnvelopeError("Ollama response requires message")
-    content = message.get("content", "")
-    if content is None:
-        content = ""
-    if not isinstance(content, str):
-        raise ResponseEnvelopeError("Ollama message content must be a string")
-    return NormalizedModelResponse(
-        content=content,
-        streaming=streaming,
-        finish_reason=str(payload.get("done_reason")) if payload.get("done_reason") is not None else None,
-        prompt_tokens=_int_or_none(payload.get("prompt_eval_count")),
-        completion_tokens=_int_or_none(payload.get("eval_count")),
-        model=str(payload.get("model")) if payload.get("model") is not None else None,
-    )

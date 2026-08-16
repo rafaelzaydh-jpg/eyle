@@ -6,6 +6,7 @@ opaque here and delegated to the capability provider that owns that domain.
 from __future__ import annotations
 
 import json
+from urllib.parse import urlparse
 
 from eyle import __revision__, __schema_version__, __version__
 from eyle.capabilities.registry import CapabilityRegistry
@@ -20,15 +21,16 @@ _TOP_LEVEL_FIELDS = {
     "worker", "telemetry", "app_version", "config_schema_version", "revision",
 }
 _LLM_FIELDS = {
-    "base_url", "model", "openai_compatible", "temperature", "max_tokens",
+    "base_url", "model", "temperature", "generated_token_fuse",
     "context_window_tokens", "connect_timeout_seconds", "read_timeout_seconds",
-    "model_discovery_timeout_seconds", "model_discovery_negative_ttl_seconds",
+    "model_discovery_timeout_seconds",
     "retry_max_attempts", "retry_base_delay_seconds", "retry_max_delay_seconds",
     "retry_jitter_seconds", "max_concurrent_requests", "cooldown_seconds",
-    "retry_read_timeouts", "stream_responses", "agent_max_tokens",
+    "retry_read_timeouts", "stream_responses",
+    "structured_output_mode", "cache_mode", "cache_warmup",
 }
 _AGENT_FIELDS = {"task_deadline_seconds"}
-_CONTEXT_FIELDS = {"safety_margin_tokens", "chars_per_token_fallback", "cached_prompt_weight"}
+_CONTEXT_FIELDS = {"safety_margin_tokens", "chars_per_token_fallback"}
 _WORKER_FIELDS = {
     "heartbeat_interval_seconds", "queue_error_backoff_seconds",
     "max_invalid_jobs_per_reservation", "max_parallel_jobs", "isolate_jobs",
@@ -71,23 +73,66 @@ def validar_config(config, registry: CapabilityRegistry):
         "config_schema_version": __schema_version__,
         "revision": __revision__,
     }
-    for key, expected in expected_identity.items():
-        if config.get(key) != expected:
-            raise ConfigError(f"CONFIG_IDENTITY_INCOMPATIBLE:{key}:{config.get(key)!r}")
+    observed_identity = {key: config.get(key) for key in expected_identity}
+    previous_identities = [
+        {"app_version": "2.7.5", "config_schema_version": "2.7.5-r2.9-ecc", "revision": "rev2.9-ecc"},
+        {"app_version": "2.7.5", "config_schema_version": "2.7.5-r2.8.8-ecc", "revision": "rev2.8.8-ecc"},
+        {"app_version": "2.7.5", "config_schema_version": "2.7.5-r2.8.7-ecc", "revision": "rev2.8.7-ecc"},
+        {"app_version": "2.7.5", "config_schema_version": "2.7.5-r2.8.6-ecc", "revision": "rev2.8.6-ecc"},
+        {"app_version": "2.7.5", "config_schema_version": "2.7.5-r2.8.5-ecc", "revision": "rev2.8.5-ecc"},
+        {"app_version": "2.7.5", "config_schema_version": "2.7.5-r2.8.4-ecc", "revision": "rev2.8.4-ecc"},
+        {"app_version": "2.7.5", "config_schema_version": "2.7.5-r2.8.3-ecc", "revision": "rev2.8.3-ecc"},
+    ]
+    if observed_identity in previous_identities:
+        # Rev3 is a publication/consolidation identity change. Accept clean late-Rev2.x configs in memory, preserve operator fields, and advance only release identity.
+        config = dict(config)
+        config.update(expected_identity)
+    else:
+        for key, expected in expected_identity.items():
+            if config.get(key) != expected:
+                raise ConfigError(f"CONFIG_IDENTITY_INCOMPATIBLE:{key}:{config.get(key)!r}")
 
     llm = config.get("llm") or {}
     if not isinstance(llm, dict):
         raise ConfigError("llm precisa ser um objeto")
     _reject_unknown(llm, _LLM_FIELDS, "llm")
+    base_url = str(llm.get("base_url") or "http://127.0.0.1:8080").strip()
+    try:
+        parsed_adapter = urlparse(base_url)
+        adapter_port = parsed_adapter.port
+    except ValueError as exc:
+        raise ConfigError("llm.base_url precisa apontar para o Adapter local em 127.0.0.1:8080") from exc
+    adapter_host = str(parsed_adapter.hostname or "").lower()
+    adapter_path = str(parsed_adapter.path or "").rstrip("/")
+    if (
+        parsed_adapter.scheme not in {"http", "https"}
+        or adapter_host not in {"127.0.0.1", "localhost", "::1"}
+        or adapter_port != 8080
+        or adapter_path not in {"", "/v1"}
+        or parsed_adapter.username is not None
+        or parsed_adapter.password is not None
+        or bool(parsed_adapter.query)
+        or bool(parsed_adapter.fragment)
+    ):
+        raise ConfigError("llm.base_url precisa apontar para o Adapter local em 127.0.0.1:8080 (ou localhost/[::1], com /v1 opcional)")
     if "stream_responses" in llm and not isinstance(llm.get("stream_responses"), bool):
         raise ConfigError("llm.stream_responses precisa ser booleano")
+    if "cache_warmup" in llm and not isinstance(llm.get("cache_warmup"), bool):
+        raise ConfigError("llm.cache_warmup precisa ser booleano")
+    if str(llm.get("structured_output_mode") or "auto") not in {"auto", "native_json_schema", "json_object", "prompt_json"}:
+        raise ConfigError("llm.structured_output_mode inválido")
+    if str(llm.get("cache_mode") or "auto") not in {"auto", "none", "implicit", "explicit", "session"}:
+        raise ConfigError("llm.cache_mode inválido")
     for key, default in (
         ("connect_timeout_seconds", 5),
-        ("read_timeout_seconds", 120),
         ("model_discovery_timeout_seconds", 3),
     ):
         _validate_positive_number(llm, key, default, "llm")
-    _validate_int(llm, "context_window_tokens", 38000, minimum=1, prefix="llm")
+    if llm.get("read_timeout_seconds") is not None:
+        _validate_positive_number(llm, "read_timeout_seconds", 1, "llm")
+    if llm.get("context_window_tokens") is not None:
+        _validate_int(llm, "context_window_tokens", 1, minimum=1, prefix="llm")
+    _validate_int(llm, "generated_token_fuse", 120000, minimum=1, prefix="llm")
 
     worker = config.get("worker") or {}
     if not isinstance(worker, dict):
@@ -123,9 +168,6 @@ def validar_config(config, registry: CapabilityRegistry):
     if not isinstance(context, dict):
         raise ConfigError("context_engine precisa ser um objeto")
     _reject_unknown(context, _CONTEXT_FIELDS, "context_engine")
-    cached_weight = context.get("cached_prompt_weight", 0.2)
-    if not isinstance(cached_weight, (int, float)) or isinstance(cached_weight, bool) or not 0 <= float(cached_weight) <= 1:
-        raise ConfigError("context_engine.cached_prompt_weight precisa estar entre 0 e 1")
     for key, default in (("safety_margin_tokens", 500), ("chars_per_token_fallback", 3)):
         _validate_int(context, key, default, minimum=1, prefix="context_engine")
 

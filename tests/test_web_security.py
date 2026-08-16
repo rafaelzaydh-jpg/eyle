@@ -25,7 +25,7 @@ def _cliente(monkeypatch):
         routes,
         "_carregar_projeto",
         lambda: {
-            "projeto": "Teste",
+            "nome": "Teste",
             "caminho_origem": "/tmp/segredo/projeto",
             "arquivos": 3,
             "chunks": 5,
@@ -65,7 +65,7 @@ def test_shell_visual_e_publico_mas_api_exige_bearer(monkeypatch):
 
     autorizado = cliente.get("/status", headers=_cabecalho())
     assert autorizado.status_code == 200
-    assert autorizado.get_json()["projeto"]["projeto"] == "Teste"
+    assert autorizado.get_json()["projeto"]["nome"] == "Teste"
     assert autorizado.headers["Cache-Control"] == "no-store"
     assert autorizado.headers["X-Frame-Options"] == "DENY"
 
@@ -135,7 +135,8 @@ def test_token_aleatorio_e_persistente_com_permissao_restrita(monkeypatch, tmp_p
 
     assert primeiro == segundo
     assert len(primeiro) >= 32
-    assert stat.S_IMODE(os.stat(caminho).st_mode) == 0o600
+    if os.name == "posix":
+        assert stat.S_IMODE(os.stat(caminho).st_mode) == 0o600
 
 
 def test_job_expoe_estado_real_sem_payload_nem_resultado(monkeypatch):

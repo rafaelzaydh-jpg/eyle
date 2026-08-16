@@ -18,7 +18,8 @@ def test_salvar_json_atomico_substitui_destino_e_preserva_permissao(tmp_path):
     persistence.salvar_json_atomico(caminho, {"depois": True})
 
     assert json.loads(caminho.read_text(encoding="utf-8")) == {"depois": True}
-    assert stat.S_IMODE(caminho.stat().st_mode) == 0o640
+    if os.name == "posix":
+        assert stat.S_IMODE(caminho.stat().st_mode) == 0o640
     assert not list(tmp_path.glob(".memoria.json.*.tmp"))
 
 

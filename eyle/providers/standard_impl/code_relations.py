@@ -26,7 +26,7 @@ def _rel(root: str, path: str) -> str:
     return os.path.relpath(path, root).replace(os.sep, "/")
 
 
-def _source_files(root: str, *, max_files: int, max_bytes: int) -> Tuple[List[str], bool, int]:
+def _source_files(root: str, *, max_files: int | None, max_bytes: int) -> Tuple[List[str], bool, int]:
     files: List[str] = []
     truncated = False
     protected_skipped = 0
@@ -47,7 +47,7 @@ def _source_files(root: str, *, max_files: int, max_bytes: int) -> Tuple[List[st
             except OSError:
                 continue
             files.append(path)
-            if len(files) >= max_files:
+            if max_files is not None and len(files) >= max(1, int(max_files)):
                 truncated = True
                 return files, truncated, protected_skipped
     return files, truncated, protected_skipped
@@ -268,7 +268,7 @@ def _python_index(root: str, files: Iterable[str]) -> Dict[str, Any]:
     }
 
 
-def _text_references(root: str, files: Iterable[str], symbol: str, *, limit: int) -> Tuple[List[Dict[str, Any]], bool]:
+def _text_references(root: str, files: Iterable[str], symbol: str, *, limit: int | None) -> Tuple[List[Dict[str, Any]], bool]:
     out: List[Dict[str, Any]] = []
     truncated = False
     for path in files:
@@ -284,7 +284,7 @@ def _text_references(root: str, files: Iterable[str], symbol: str, *, limit: int
                 if col < 0:
                     break
                 out.append({"file": relpath, "line": line_no, "column": col + 1, "kind": "text_reference"})
-                if len(out) >= limit:
+                if limit is not None and len(out) >= max(1, int(limit)):
                     return out, True
                 start = col + max(1, len(symbol))
     return out, truncated
@@ -462,7 +462,7 @@ def _reachable_nodes(adjacency: Dict[str, List[str]], starts: List[str], max_dep
 def analyze_symbol_relations(
     root: str, symbol: str, *, path: Optional[str] = None, roots: Optional[List[str]] = None,
     direction: str = "both", include_text_references: bool = False,
-    max_depth: int = 6, max_edges: int = 120, max_files: int = 20000,
+    max_depth: int = 6, max_edges: int | None = 120, max_files: int | None = 20000,
     max_file_bytes: int = 4 * 1024 * 1024, query: str = "relations",
 ) -> Dict[str, Any]:
     """Return objective structural observations for one symbol.
@@ -536,7 +536,9 @@ def analyze_symbol_relations(
 
     imports = [item for item in py["imports"] if item.get("name") == symbol or item.get("alias") == symbol]
     if include_text_references:
-        text_refs, text_truncated = _text_references(root, files, symbol, limit=max_edges * 2)
+        text_refs, text_truncated = _text_references(
+            root, files, symbol, limit=None if max_edges is None else max(1, int(max_edges)) * 2,
+        )
     else:
         text_refs, text_truncated = [], False
 
@@ -567,7 +569,7 @@ def analyze_symbol_relations(
             **({"path_edges": _path_edges(path_found, edge_lookup)} if path_found else {}),
         })
 
-    edge_truncated = len(incoming) > max_edges or len(outgoing) > max_edges
+    edge_truncated = bool(max_edges is not None and (len(incoming) > int(max_edges) or len(outgoing) > int(max_edges)))
     all_unresolved = unresolved + py["dynamic"]
     resolved_root_nodes = [
         node for item in root_results for node in (item.get("resolved_nodes") or []) if str(node)
@@ -608,7 +610,7 @@ def analyze_symbol_relations(
 
     base_coverage = {
         "files_scanned": len(files), "python_files_scanned": py["python_files"], "protected_resources_skipped": protected_skipped,
-        "parse_errors": py["parse_errors"][:20],
+        "parse_errors": list(py["parse_errors"]),
         "file_scan_truncated": bool(file_truncated), "text_references_truncated": bool(text_truncated),
         "relation_edges_truncated": bool(edge_truncated),
         "static_resolution_complete": not bool(file_truncated or text_truncated or edge_truncated or py["parse_errors"] or all_unresolved or protected_skipped),
@@ -745,11 +747,11 @@ def analyze_symbol_relations(
             "direction": direction,
             "include_text_references": bool(include_text_references),
             "backend": "python_ast+text",
-            "definitions": definitions[:min(max_edges, 8)],
+            "definitions": list(definitions) if max_edges is None else definitions[:min(int(max_edges), 8)],
             "incoming": [], "outgoing": [], "structural_references": [], "imports": [], "text_references": [],
             "root_reachability": ([{"root": shortest.get("root"), "reachable": True}] if shortest else [
                 {"root": item.get("root"), "reachable": bool(item.get("reachable"))}
-                for item in root_results[:min(max_edges, 12)]
+                for item in (root_results if max_edges is None else root_results[:min(int(max_edges), 12)])
             ]),
             "reachability_edge_kinds": ["call", "registry_binding", "assignment_binding", "callback_argument", "decorator", "inherits", "python_main_guard"],
             "unresolved_dynamic": [],
@@ -760,11 +762,21 @@ def analyze_symbol_relations(
             "semantics": "structural_facts_only",
         }
 
-    incoming = incoming[:max_edges] if direction in {"incoming", "both"} else []
-    outgoing = outgoing[:max_edges] if direction in {"outgoing", "both"} else []
-    structural_refs = structural_refs[:max_edges]
-    imports = imports[:max_edges]
-    unresolved_view = all_unresolved[:max_edges]
+    if max_edges is None:
+        incoming_view = list(incoming) if direction in {"incoming", "both"} else []
+        outgoing_view = list(outgoing) if direction in {"outgoing", "both"} else []
+        structural_refs_view = list(structural_refs)
+        imports_view = list(imports)
+        unresolved_view = list(all_unresolved)
+        definitions_view = list(definitions)
+    else:
+        cap = max(1, int(max_edges))
+        incoming_view = incoming[:cap] if direction in {"incoming", "both"} else []
+        outgoing_view = outgoing[:cap] if direction in {"outgoing", "both"} else []
+        structural_refs_view = structural_refs[:cap]
+        imports_view = imports[:cap]
+        unresolved_view = all_unresolved[:cap]
+        definitions_view = definitions[:cap]
 
     return {
         "symbol": symbol,
@@ -772,11 +784,11 @@ def analyze_symbol_relations(
         "query": "relations",
         "direction": direction, "include_text_references": bool(include_text_references),
         "backend": "python_ast+text",
-        "definitions": definitions[:max_edges],
-        "incoming": incoming,
-        "outgoing": outgoing,
-        "structural_references": structural_refs,
-        "imports": imports,
+        "definitions": definitions_view,
+        "incoming": incoming_view,
+        "outgoing": outgoing_view,
+        "structural_references": structural_refs_view,
+        "imports": imports_view,
         "text_references": text_refs,
         "root_reachability": root_results,
         "reachability_edge_kinds": ["call", "registry_binding", "assignment_binding", "callback_argument", "decorator", "inherits", "python_main_guard"],

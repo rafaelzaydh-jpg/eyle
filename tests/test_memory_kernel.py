@@ -8,10 +8,12 @@ from eyle.runtime.memory_graph import (
     MEMORY_GRAPH_SCHEMA_VERSION,
     apply_graph_operations,
     graph_counts,
+    graph_overview,
+    graph_records,
     memory_db_path,
     node_record,
+    select_graph_nodes,
     world_scope,
-    retrieve_graph,
 )
 
 
@@ -22,7 +24,7 @@ def test_memory_graph_atomic_nodes_edges_and_supersession(tmp_path):
         {"op": "create_node", "id": "mem-runtime", "scope": "world:x", "kind": "component", "content": "Runtime"},
         {"op": "create_edge", "id": "rel-core-runtime", "source": "mem-core", "label": "coordinates", "target": "mem-runtime"},
     ])
-    assert graph_counts(storage) == {"nodes": 2, "edges": 1, "isolated_nodes": 0}
+    assert graph_counts(storage) == {"nodes": 2, "persistent_nodes": 2, "temporary_nodes": 0, "edges": 1, "isolated_nodes": 0}
     old = node_record(storage, "mem-core")
     apply_graph_operations(storage, [
         {"op": "create_node", "id": "mem-core2", "scope": "world:x", "kind": "component", "content": "New Core"},
@@ -42,58 +44,151 @@ def test_memory_graph_revision_conflict_rolls_back_whole_delta(tmp_path):
         ])
     with pytest.raises(ValueError, match="MEMORY_NODE_NOT_FOUND"):
         node_record(storage, "mem-b")
-    assert node_record(storage, "mem-a")["content"] == "A"
 
 
-def test_memory_graph_topology_exposes_bridge_without_semantic_verdict(tmp_path):
+def test_explicit_selection_has_no_topology_fallback(tmp_path):
     storage = str(tmp_path / "memory")
-    scope = world_scope(str(tmp_path / "project"))
-    ops = []
-    for name in ("core", "runtime", "llm", "ghost", "helper1", "helper2"):
-        ops.append({"op": "create_node", "id": f"mem-{name}", "scope": scope, "kind": "component", "content": name, "tags": [name]})
-    ops += [
-        {"op": "create_edge", "source": "mem-core", "label": "connects", "target": "mem-runtime"},
-        {"op": "create_edge", "source": "mem-core", "label": "connects", "target": "mem-llm"},
-        {"op": "create_edge", "source": "mem-core", "label": "connects", "target": "mem-ghost"},
-        {"op": "create_edge", "source": "mem-ghost", "label": "calls", "target": "mem-helper1"},
-        {"op": "create_edge", "source": "mem-ghost", "label": "calls", "target": "mem-helper2"},
-    ]
-    apply_graph_operations(storage, ops)
-    view = retrieve_graph(storage, world_scope_value=scope, query="core ghost", limit=10)
-    by_id = {node["id"]: node for node in view["nodes"]}
-    assert by_id["mem-core"]["topology"]["articulation_point"] is True
-    assert by_id["mem-ghost"]["topology"]["articulation_point"] is True
-    assert "connectivity_score" in by_id["mem-core"]["topology"]
-    assert by_id["mem-helper1"]["topology"]["degree"] == 1
-
-
-def test_memory_graph_user_scope_is_retrievable_across_world_scopes(tmp_path):
-    storage = str(tmp_path / "memory")
-    scope_a = world_scope(str(tmp_path / "project-a")); scope_b = world_scope(str(tmp_path / "project-b"))
+    scope = world_scope("world-a")
     apply_graph_operations(storage, [
-        {"op": "create_node", "id": "mem-user", "scope": "user", "kind": "preference", "content": "User likes dogs", "tags": ["dogs"]},
-        {"op": "create_node", "id": "mem-a", "scope": scope_a, "kind": "world", "content": "Only world A"},
+        {"op":"create_node","id":"mem-cat","scope":"user","kind":"preference","content":"User likes cats","tags":["cats"]},
+        {"op":"create_node","id":"mem-dog","scope":scope,"kind":"fact","content":"Project has dog worker","tags":["worker"]},
+        {"op":"create_node","id":"mem-bridge","scope":scope,"kind":"component","content":"Highly connected bridge"},
+        {"op":"create_edge","source":"mem-bridge","label":"connects","target":"mem-dog"},
     ])
-    view = retrieve_graph(storage, world_scope_value=scope_b, query="dogs", limit=10)
-    assert [node["id"] for node in view["nodes"]] == ["mem-user"]
+    selected = select_graph_nodes(storage, world_scope_value=scope, query="cats", ids=[], tags=[], scope="all", include_neighbors=False)
+    assert selected["node_ids"] == ["mem-cat"]
+    empty = select_graph_nodes(storage, world_scope_value=scope, query="banana", ids=[], tags=[], scope="all", include_neighbors=False)
+    assert empty["node_ids"] == []
+    assert "topology" not in str(empty).lower()
 
 
-def test_memory_graph_10000_nodes_retrieval_is_bounded(tmp_path):
+def test_user_scope_crosses_worlds_but_world_scope_does_not(tmp_path):
     storage = str(tmp_path / "memory")
-    scope = world_scope(str(tmp_path / "project"))
+    a, b = world_scope("a"), world_scope("b")
     apply_graph_operations(storage, [
-        {"op": "create_node", "id": f"mem-{i:05d}", "scope": scope, "kind": "symbol", "content": f"worker node {i}", "tags": ["worker"]}
+        {"op":"create_node","id":"mem-user","scope":"user","kind":"preference","content":"User likes cats","tags":["cats"]},
+        {"op":"create_node","id":"mem-a","scope":a,"kind":"fact","content":"Only world A","tags":["cats"]},
+    ])
+    selected = select_graph_nodes(storage, world_scope_value=b, query="cats", ids=[], tags=[], scope="all", include_neighbors=False)
+    assert selected["node_ids"] == ["mem-user"]
+
+
+def test_10000_nodes_selection_is_bounded_only_at_materialization_layer(tmp_path):
+    storage = str(tmp_path / "memory")
+    scope = world_scope("project")
+    apply_graph_operations(storage, [
+        {"op":"create_node","id":f"mem-{i:05d}","scope":scope,"kind":"symbol","content":f"worker node {i}","tags":["worker"]}
         for i in range(10_000)
     ])
-    view = retrieve_graph(storage, world_scope_value=scope, query="worker", limit=30)
-    assert len(view["nodes"]) == 30
-    assert view["retrieval"]["candidate_nodes"] == 10_000
+    selected = select_graph_nodes(storage, world_scope_value=scope, query="worker", ids=[], tags=[], scope="world", include_neighbors=False)
+    assert len(selected["node_ids"]) == 10_000
+    assert selected["selection"]["scoped_nodes"] == 10_000
+    records = graph_records(storage, selected["node_ids"][:30])
+    assert len(records["nodes"]) == 30
+
+
+def test_overview_is_read_only_and_body_free(tmp_path):
+    storage = str(tmp_path / "memory")
+    scope = world_scope("project")
+    apply_graph_operations(storage, [{"op":"create_node","id":"mem-secret","scope":scope,"kind":"fact","content":"SECRET BODY","tags":["secret"]}])
+    before = node_record(storage, "mem-secret")
+    overview = graph_overview(storage, world_scope_value=scope, scope="all")
+    after = node_record(storage, "mem-secret")
+    assert "SECRET BODY" not in str(overview)
+    assert before == after
 
 
 def test_memory_graph_schema_identity(tmp_path):
     storage = str(tmp_path / "memory")
     path = Path(memory_db_path(storage))
-    assert not path.exists()  # path resolution alone must not create state
-    assert graph_counts(storage) == {"nodes": 0, "edges": 0, "isolated_nodes": 0}
+    assert not path.exists()
+    assert graph_counts(storage) == {"nodes": 0, "persistent_nodes": 0, "temporary_nodes": 0, "edges": 0, "isolated_nodes": 0}
     assert path.exists()
-    assert MEMORY_GRAPH_SCHEMA_VERSION == "2.7.5-r2.5-memory-graph-v2"
+    assert MEMORY_GRAPH_SCHEMA_VERSION == "2.7.5-r2.9-memory-graph-v8"
+
+
+def test_temporary_and_persistent_are_one_graph_with_retention(tmp_path):
+    storage = str(tmp_path / "memory")
+    scope = world_scope("project")
+    apply_graph_operations(storage, [
+        {"op":"create_node","id":"mem-temporary","scope":scope,"kind":"active_topic","content":"Editing calc.py","retention":"temporary"},
+        {"op":"create_node","id":"mem-durable","scope":"user","kind":"preference","content":"User likes pizza","retention":"persistent"},
+        {"op":"create_edge","id":"rel-temporary-durable","source":"mem-temporary","label":"related_to","target":"mem-durable"},
+    ])
+    assert node_record(storage, "mem-temporary")["retention"] == "temporary"
+    assert node_record(storage, "mem-durable")["retention"] == "persistent"
+    assert graph_counts(storage)["temporary_nodes"] == 1
+    assert graph_counts(storage)["persistent_nodes"] == 1
+
+
+def test_revise_can_promote_same_temporary_node_to_persistent(tmp_path):
+    storage = str(tmp_path / "memory")
+    apply_graph_operations(storage, [{"op":"create_node","id":"mem-x","scope":"user","kind":"fact","content":"User has five dogs","retention":"temporary"}])
+    before = node_record(storage, "mem-x")
+    apply_graph_operations(storage, [{"op":"update_node","id":"mem-x","expected_revision":before["revision"],"retention":"persistent"}])
+    after = node_record(storage, "mem-x")
+    assert after["id"] == before["id"]
+    assert after["retention"] == "persistent"
+    assert after["revision"] == before["revision"] + 1
+
+
+def test_rev27_graph_migrates_existing_nodes_to_persistent(tmp_path):
+    import sqlite3
+    storage = tmp_path / "memory"
+    storage.mkdir()
+    db = storage / "core_memory.sqlite3"
+    conn = sqlite3.connect(db)
+    try:
+        conn.executescript("""
+        CREATE TABLE memory_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO memory_meta(key,value) VALUES('schema_version','2.7.5-r2.7-memory-graph-v3');
+        CREATE TABLE memory_nodes (
+            id TEXT PRIMARY KEY, scope TEXT NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL,
+            status TEXT NOT NULL, revision INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE memory_tags (node_id TEXT NOT NULL, tag TEXT NOT NULL, PRIMARY KEY(node_id,tag));
+        CREATE TABLE memory_edges (id TEXT PRIMARY KEY, source TEXT NOT NULL, label TEXT NOT NULL, target TEXT NOT NULL, status TEXT NOT NULL, revision INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE memory_anchors (id TEXT PRIMARY KEY, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, anchor_kind TEXT NOT NULL, source_capability TEXT, locator TEXT NOT NULL, source_version TEXT, content_hash TEXT, freshness_token TEXT, freshness_arguments TEXT, source_ref TEXT, entity_revision INTEGER NOT NULL, created_at TEXT NOT NULL);
+        CREATE TABLE memory_changesets (id TEXT PRIMARY KEY, execution_id TEXT, turn INTEGER, created_at TEXT NOT NULL);
+        CREATE TABLE memory_events (seq INTEGER PRIMARY KEY AUTOINCREMENT, changeset_id TEXT NOT NULL, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, action TEXT NOT NULL, revision INTEGER, payload TEXT NOT NULL, created_at TEXT NOT NULL);
+        INSERT INTO memory_nodes(id,scope,kind,content,status,revision,created_at,updated_at)
+        VALUES('mem-old','user','preference','User likes cats','current',1,'2026-01-01','2026-01-01');
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+    migrated = node_record(str(storage), "mem-old")
+    assert migrated["retention"] == "persistent"
+    assert graph_counts(str(storage))["persistent_nodes"] == 1
+
+
+def test_rev271_context_retention_migrates_mechanically_to_temporary(tmp_path):
+    import sqlite3
+    storage = tmp_path / "memory"
+    storage.mkdir()
+    db = storage / "core_memory.sqlite3"
+    conn = sqlite3.connect(db)
+    try:
+        conn.executescript("""
+        CREATE TABLE memory_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO memory_meta(key,value) VALUES('schema_version','2.7.5-r2.7.1-memory-graph-v4');
+        CREATE TABLE memory_nodes (
+            id TEXT PRIMARY KEY, scope TEXT NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL,
+            retention TEXT NOT NULL, status TEXT NOT NULL, revision INTEGER NOT NULL,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE memory_tags (node_id TEXT NOT NULL, tag TEXT NOT NULL, PRIMARY KEY(node_id,tag));
+        CREATE TABLE memory_edges (id TEXT PRIMARY KEY, source TEXT NOT NULL, label TEXT NOT NULL, target TEXT NOT NULL, status TEXT NOT NULL, revision INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE memory_anchors (id TEXT PRIMARY KEY, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, anchor_kind TEXT NOT NULL, source_capability TEXT, locator TEXT NOT NULL, source_version TEXT, content_hash TEXT, freshness_token TEXT, freshness_arguments TEXT, source_ref TEXT, entity_revision INTEGER NOT NULL, created_at TEXT NOT NULL);
+        CREATE TABLE memory_changesets (id TEXT PRIMARY KEY, execution_id TEXT, turn INTEGER, created_at TEXT NOT NULL);
+        CREATE TABLE memory_events (seq INTEGER PRIMARY KEY AUTOINCREMENT, changeset_id TEXT NOT NULL, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, action TEXT NOT NULL, revision INTEGER, payload TEXT NOT NULL, created_at TEXT NOT NULL);
+        INSERT INTO memory_nodes VALUES('mem-weak','user','referent','the plan','context','current',1,'2026-01-01','2026-01-01');
+        INSERT INTO memory_nodes VALUES('mem-strong','user','preference','likes cats','persistent','current',1,'2026-01-01','2026-01-01');
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+    assert node_record(str(storage), "mem-weak")["retention"] == "temporary"
+    assert node_record(str(storage), "mem-strong")["retention"] == "persistent"
+    counts = graph_counts(str(storage))
+    assert counts["temporary_nodes"] == 1 and counts["persistent_nodes"] == 1

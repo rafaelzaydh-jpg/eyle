@@ -177,12 +177,12 @@ def test_export_packages_only_active_snapshot_and_never_overwrites(tmp_path):
         reset_execution(token)
 
 
-def test_prompt_is_not_hardwired_to_workspace_self_boundary():
+def test_prompt_keeps_workspace_and_running_eyle_identity_explicit():
     lowered = PROMPT_ECC.lower()
-    assert "source=eyle" not in lowered
-    assert "sandbox" not in lowered
-    assert "patches" not in lowered
-    assert "does not mean it was run" in lowered
+    assert "workspace = the user-selected/open project" in lowered
+    assert "eyle = the source tree of the eyle instance" in lowered
+    assert "even if it is a copy, fork, old revision, or repository containing eyle code" in lowered
+    assert "never fall back from an empty workspace to eyle" in lowered
     assert "capabilities are eyle's replaceable body" in lowered
 
 

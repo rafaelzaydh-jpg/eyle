@@ -4,16 +4,15 @@ main.py
 -------
 Fluxo principal da Eyle:
 
-  Projeto de 30k-100k+ tokens
+  Current Request + paged Memory View + Runtime observations
             |
             v
-  Memória externa sob demanda (memory/agent_memory)
+       MAIN LLM cognition
+       /        |        \
+  Explorar  Construir  Concluir
             |
             v
-  Eyle Agent -> Runtime observations -> validation
-            |
-            v
-  Persiste conversa e confirmação pendente
+  Runtime mechanical laws + intrinsic Memory Graph learning
 
 Comandos:
     python main.py perguntar "sua pergunta aqui"
@@ -193,6 +192,26 @@ def cmd_compare_efficiency(args):
         raise SystemExit(1)
 
 
+
+def _executar_cache_warmup(config):
+    from eyle.core.agent import compile_cache_warmup_prompt
+    from eyle.runtime.service import HOST
+    from llm.executar import warmup_provider_cache
+
+    prompt = compile_cache_warmup_prompt(config, HOST.provider_context(), HOST.registry)
+    return warmup_provider_cache(prompt, config)
+
+
+def cmd_cache_warmup(args):
+    config = carregar_config()
+    # Explicit CLI invocation opts in for this call without rewriting config.json.
+    config = json.loads(json.dumps(config))
+    config.setdefault("llm", {})["cache_warmup"] = True
+    result = _executar_cache_warmup(config)
+    print("[cache-warmup] " + json.dumps(result, ensure_ascii=False))
+    if result.get("status") == "failed":
+        raise SystemExit(1)
+
 def cmd_serve(args):
     # Sobe o Worker permanente (thread) + o Flask (web/routes.py). O
     # navegador so fala com o Flask a partir daqui; fechar a aba nao
@@ -210,24 +229,31 @@ def cmd_serve(args):
     if diagnostico_llm.get("ok"):
         modelos = diagnostico_llm.get("models") or []
         modelo_txt = f" | modelo(s): {', '.join(modelos[:3])}" if modelos else " | nenhum modelo listado"
+        protocolo = diagnostico_llm.get("adapter_protocol") or "unknown"
+        versao_adapter = diagnostico_llm.get("adapter_version") or "unknown"
         print(
-            f"[main] Backend LLM online: {diagnostico_llm.get('base_url')}"
+            f"[main] Adapter LLM online: {diagnostico_llm.get('base_url')}"
             f" ({diagnostico_llm.get('latency_ms')}ms){modelo_txt}"
+            f" | protocolo: {protocolo} | adapter: {versao_adapter}"
         )
     else:
         if diagnostico_llm.get("reachable"):
             print(
-                f"[main][AVISO] Backend LLM respondeu, mas o preflight falhou: "
+                f"[main][AVISO] Adapter respondeu, mas o preflight LLM falhou: "
                 f"{diagnostico_llm.get('detail')}"
             )
         else:
             print(
-                f"[main][AVISO] Backend LLM indisponivel: {diagnostico_llm.get('detail')}"
+                f"[main][AVISO] Adapter LLM indisponivel: {diagnostico_llm.get('detail')}"
             )
         print(
             "[main][AVISO] O painel e o Worker vao iniciar, mas perguntas podem falhar ate "
-            "llm.base_url/model estarem corretos e o servidor ficar pronto."
+            "llm.base_url/model estarem corretos e o Adapter/upstream ficar pronto."
         )
+
+    if bool((config.get("llm") or {}).get("cache_warmup", False)):
+        warmup = _executar_cache_warmup(config)
+        print(f"[main] Cache warmup: {json.dumps(warmup, ensure_ascii=False)}")
 
     token_api = obter_api_token()
     print(f"[main] Iniciando Worker permanente...")
@@ -298,6 +324,9 @@ def main():
     )
     p_efficiency.add_argument("--output", default=None, help="Save the comparison as JSON")
     p_efficiency.set_defaults(func=cmd_compare_efficiency)
+
+    p_warmup = sub.add_parser("cache-warmup", help="Faz um warmup opcional do prefixo estável usando o transporte LLM configurado")
+    p_warmup.set_defaults(func=cmd_cache_warmup)
 
     p_serve = sub.add_parser("serve", help="Sobe o agente persistente (Worker + Flask) -- requer 'pip install flask'")
     p_serve.add_argument("--host", default="127.0.0.1")

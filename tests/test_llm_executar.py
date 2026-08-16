@@ -4,6 +4,7 @@ import threading
 import time
 import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
@@ -11,10 +12,11 @@ import llm.executar as llm_mod
 
 
 @pytest.fixture(autouse=True)
-def _clear_model_discovery():
-    llm_mod._MODELOS_OPENAI.clear()
-    yield
-    llm_mod._MODELOS_OPENAI.clear()
+def _adapter_handshake_already_verified(monkeypatch):
+    monkeypatch.setattr(
+        llm_mod, "_ensure_adapter_handshake",
+        lambda config: {"adapter_protocol": llm_mod.ADAPTER_TRANSPORT_PROTOCOL},
+    )
 
 
 class _FakeResponse:
@@ -35,10 +37,10 @@ def _config(**overrides):
     llm = {
         "base_url": "http://localhost:8080",
         "model": "modelo-teste",
-        "openai_compatible": True,
         "temperature": 0.2,
+        "generated_token_fuse": 120000,
         "connect_timeout_seconds": 5,
-        "read_timeout_seconds": 120,
+        "read_timeout_seconds": None,
         "retry_max_attempts": 1,
         "max_concurrent_requests": 1,
     }
@@ -59,22 +61,23 @@ def _capture(monkeypatch, response):
 
 
 def _agent_json(answer="ok"):
-    return json.dumps({"type": "concluir", "response": answer, "objective": {"disposition": "unchanged", "state": None}, "memory": {"focus": [], "disposition": "unchanged", "operations": []}})
+    return json.dumps({"decision":{"type":"concluir","response":answer},"memory_delta":[]})
 
 
-def test_ollama_uses_num_predict(monkeypatch):
-    calls = _capture(monkeypatch, {"message": {"content": "ok"}})
-    assert llm_mod._chamar_llm("s", "u", _config(openai_compatible=False, max_tokens=700)) == "ok"
-    assert calls[0][1]["options"]["num_predict"] == 700
+def test_rev282_has_no_ollama_transport_or_local_model_fallback():
+    assert not hasattr(llm_mod, "_chamar_ollama")
+    source = Path(llm_mod.__file__).read_text(encoding="utf-8").lower()
+    assert "localhost:11434" not in source
+    assert "/api/chat" not in source
 
 
-def test_openai_uses_max_tokens(monkeypatch):
+def test_rev282_adapter_request_has_no_arbitrary_per_call_max_tokens(monkeypatch):
     calls = _capture(monkeypatch, {"choices": [{"message": {"content": "ok"}}]})
-    assert llm_mod._chamar_llm("s", "u", _config(max_tokens=512)) == "ok"
-    assert calls[0][1]["max_tokens"] == 512
+    assert llm_mod._chamar_llm("s", "u", _config()) == "ok"
+    assert "max_tokens" not in calls[0][1]
 
 
-def test_structured_openai_uses_strict_profile_schema(monkeypatch):
+def test_structured_openai_uses_tolerant_wire_schema(monkeypatch):
     body = _agent_json()
     calls = _capture(monkeypatch, {"choices": [{"message": {"content": body}}]})
     parsed = llm_mod._chamar_llm("s", "u", _config(), perfil="ecc")
@@ -82,9 +85,13 @@ def test_structured_openai_uses_strict_profile_schema(monkeypatch):
     assert parsed["response"] == "ok"
     fmt = calls[0][1]["response_format"]
     assert fmt["type"] == "json_schema"
-    assert fmt["json_schema"]["strict"] is True
-    assert "oneOf" in fmt["json_schema"]["schema"]
-    assert len(fmt["json_schema"]["schema"]["oneOf"]) == 3
+    assert fmt["json_schema"]["strict"] is False
+    wire = fmt["json_schema"]["schema"]
+    assert wire["type"] == "object"
+    assert wire["additionalProperties"] is True
+    assert {"decision", "type", "memory_delta"} <= set(wire["properties"])
+    # Provider sees only a forgiving wire object; strict ECC lives inside Eyle.
+    assert "oneOf" not in wire.get("properties", {}).get("decision", {})
 
 
 def test_structured_json_schema_is_required_and_fails_closed(monkeypatch):
@@ -112,7 +119,7 @@ def test_reasoning_content_is_never_executable(monkeypatch):
     })
     with pytest.raises(llm_mod.ErroLLM) as exc:
         llm_mod._chamar_llm("s", "u", _config(), perfil="ecc")
-    assert exc.value.error_code == "EMPTY_MODEL_RESPONSE"
+    assert exc.value.error_code == "STRUCTURED_RESPONSE_INVALID:ecc:STRUCTURED_EMPTY"
 
 
 def test_explicit_openai_model_is_not_silently_replaced(monkeypatch):
@@ -123,31 +130,24 @@ def test_explicit_openai_model_is_not_silently_replaced(monkeypatch):
     assert calls[0][1]["model"] == "explicit-model"
 
 
-def test_auto_model_uses_model_discovery(monkeypatch):
-    calls = []
-
-    def fake_urlopen(req, timeout=None):
-        if req.full_url.endswith("/v1/models"):
-            calls.append((req.full_url, None))
-            return _FakeResponse({"data": [{"id": "loaded-model"}]})
-        payload = json.loads(req.data.decode("utf-8"))
-        calls.append((req.full_url, payload))
-        return _FakeResponse({"choices": [{"message": {"content": "ok"}}]})
-
-    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
+def test_rev282_auto_model_is_forwarded_to_adapter_without_discovery(monkeypatch):
+    calls = _capture(monkeypatch, {"choices": [{"message": {"content": "ok"}}]})
     assert llm_mod._chamar_llm("s", "u", _config(model="auto")) == "ok"
-    assert calls[0][0].endswith("/v1/models")
-    assert calls[1][1]["model"] == "loaded-model"
+    assert len(calls) == 1
+    assert calls[0][0].endswith("/v1/chat/completions")
+    assert calls[0][1]["model"] == "auto"
 
 
-def test_auto_model_fails_if_discovery_is_unavailable(monkeypatch):
+def test_rev282_empty_model_fails_before_adapter_call(monkeypatch):
+    called = {"n": 0}
     def fake_urlopen(req, timeout=None):
-        raise urllib.error.URLError("offline")
-
+        called["n"] += 1
+        raise AssertionError("HTTP must not start")
     monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(llm_mod.ErroLLM) as exc:
-        llm_mod._chamar_llm("s", "u", _config(model="auto"))
-    assert exc.value.error_code == "MODEL_DISCOVERY_REQUIRED"
+        llm_mod._chamar_llm("s", "u", _config(model=""))
+    assert exc.value.error_code == "MODEL_REQUIRED"
+    assert called["n"] == 0
 
 
 def test_invalid_openai_envelope_fails_at_transport_boundary(monkeypatch):
@@ -157,12 +157,12 @@ def test_invalid_openai_envelope_fails_at_transport_boundary(monkeypatch):
     assert exc.value.error_code == "BACKEND_RESPONSE_INVALID"
 
 
-def test_structured_parser_rejects_markdown_or_multiple_json_objects(monkeypatch):
+def test_structured_parser_recovers_first_json_object_from_markdown_or_prose(monkeypatch):
     content = '```json\n' + _agent_json() + '\n```\n' + _agent_json("second")
     _capture(monkeypatch, {"choices": [{"message": {"content": content}}]})
-    with pytest.raises(llm_mod.ErroLLM) as exc:
-        llm_mod._chamar_llm("s", "u", _config(), perfil="ecc")
-    assert str(exc.value.error_code).startswith("STRUCTURED_RESPONSE_INVALID:ecc:")
+    parsed = llm_mod._chamar_llm("s", "u", _config(), perfil="ecc")
+    assert parsed["type"] == "concluir"
+    assert parsed["response"] == "ok"
 
 
 def test_http_error_keeps_backend_detail(monkeypatch):
@@ -225,8 +225,7 @@ def test_transport_timeout_is_recorded_as_started_physical_attempt_not_preflight
     cfg["llm"].update({
         "base_url": "http://localhost:8080",
         "model": "modelo-teste",
-        "openai_compatible": True,
-        "connect_timeout_seconds": 1,
+                "connect_timeout_seconds": 1,
         "read_timeout_seconds": 1,
         "retry_max_attempts": 1,
         "retry_read_timeouts": False,
@@ -257,8 +256,7 @@ def test_true_preflight_rejection_has_no_physical_attempt(monkeypatch):
     cfg["llm"].update({
         "base_url": "http://localhost:8080",
         "model": "modelo-teste",
-        "openai_compatible": True,
-        "context_window_tokens": 8,
+                "context_window_tokens": 8,
         "retry_max_attempts": 1,
         "max_concurrent_requests": 1,
     })
@@ -287,8 +285,7 @@ def test_unstructured_job_streaming_uses_execution_context_not_config_dict(monke
     cfg["llm"].update({
         "base_url": "http://localhost:8080",
         "model": "modelo-teste",
-        "openai_compatible": True,
-        "stream_responses": True,
+                "stream_responses": True,
         "retry_max_attempts": 1,
         "max_concurrent_requests": 1,
     })
@@ -344,7 +341,7 @@ def test_rev22_adapter_structured_502_is_not_retried_and_error_usage_is_accounte
 
     cfg = base_config()
     cfg["llm"].update({
-        "base_url": "http://localhost:8080", "model": "modelo-teste", "openai_compatible": True,
+        "base_url": "http://localhost:8080", "model": "modelo-teste",
         "retry_max_attempts": 3, "retry_base_delay_seconds": 0, "retry_max_delay_seconds": 0,
         "retry_jitter_seconds": 0, "cooldown_seconds": 0,
     })
@@ -378,7 +375,7 @@ def test_rev251_adapter_structured_failure_surfaces_repair_diagnostics(monkeypat
 
     cfg = base_config()
     cfg["llm"].update({
-        "base_url": "http://localhost:8080", "model": "modelo-teste", "openai_compatible": True,
+        "base_url": "http://localhost:8080", "model": "modelo-teste",
         "retry_max_attempts": 3, "retry_base_delay_seconds": 0, "retry_max_delay_seconds": 0,
         "retry_jitter_seconds": 0, "cooldown_seconds": 0,
     })
@@ -422,7 +419,7 @@ def test_rev22_adapter_upstream_timeout_http_504_is_not_blindly_retried(monkeypa
 
     cfg = base_config()
     cfg["llm"].update({
-        "base_url": "http://localhost:8080", "model": "modelo-teste", "openai_compatible": True,
+        "base_url": "http://localhost:8080", "model": "modelo-teste",
         "retry_max_attempts": 3, "retry_read_timeouts": False,
         "retry_base_delay_seconds": 0, "retry_max_delay_seconds": 0,
         "retry_jitter_seconds": 0, "cooldown_seconds": 0,
@@ -457,3 +454,254 @@ def test_structured_call_records_real_system_prompt_size(monkeypatch):
     prompt = execution.latest_call()["prompt"]
     assert prompt["system_prompt_characters"] > len("short system")
     assert prompt["system_prompt_estimated_tokens"] > 0
+
+
+def test_rev286_eyle_always_sends_wire_schema_and_adapter_owns_upstream_mode(monkeypatch):
+    body=_agent_json()
+    for legacy_override in ("json_object", "prompt_json"):
+        calls=_capture(monkeypatch,{"choices":[{"message":{"content":body}}]})
+        parsed=llm_mod._chamar_llm("s","u",_config(structured_output_mode=legacy_override),perfil="ecc")
+        assert parsed["response"]=="ok"
+        fmt=calls[-1][1]["response_format"]
+        assert fmt["type"]=="json_schema"
+        assert fmt["json_schema"]["name"]=="eyle_cognition_wire"
+        assert fmt["json_schema"]["strict"] is False
+
+
+def test_rev28_canonical_prompt_sends_stable_message_before_dynamic(monkeypatch):
+    from llm.protocol import CanonicalPrompt
+    body=_agent_json()
+    calls=_capture(monkeypatch,{"choices":[{"message":{"content":body}}]})
+    prompt=CanonicalPrompt(stable={"ecc_operations":{"x":1}},dynamic={"current_request":"hello","runtime_feedback":[]})
+    parsed=llm_mod._chamar_llm("system",prompt,_config(),perfil="ecc")
+    assert parsed["response"]=="ok"
+    messages=calls[0][1]["messages"]
+    assert [m["role"] for m in messages]==["system","user","user"]
+    assert "ecc_operations" in messages[1]["content"]
+    assert "current_request" in messages[2]["content"]
+
+
+def test_rev281_success_adapter_headers_are_observable(monkeypatch):
+    from eyle.runtime.execution_context import ExecutionContext
+
+    class Response(_FakeResponse):
+        def __init__(self, payload):
+            super().__init__(payload)
+            self.headers = {
+                "X-Eyle-Adapter-Profile": "eyle-rev281-provider-neutral-v1",
+                "X-Eyle-Structured-Upstream-Mode": "json_object",
+                "X-Eyle-Structured-Configured-Mode": "json_object",
+                "X-Eyle-Cache-Mode": "implicit",
+                "X-Eyle-Schema-Enforcement": "adapter_valid",
+                "X-Eyle-Upstream-Attempts": "1",
+                "X-Eyle-Max-Upstream-Attempts": "2",
+                "X-Eyle-Structured-Repairs": "0",
+                "X-Eyle-Local-Normalized": "0",
+            }
+
+    body = _agent_json()
+    payload = {
+        "choices": [{"message": {"content": body}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 20},
+        "model": "modelo-real",
+    }
+    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", lambda req, timeout=None: Response(payload))
+    cfg = _config(retry_max_attempts=3)
+    execution = ExecutionContext.from_config(cfg)
+    parsed = llm_mod._chamar_llm("s", "u", cfg, execution, perfil="ecc")
+    assert parsed["type"] == "concluir"
+    attempt = execution.llm_calls[-1]["attempts"][0]
+    assert attempt["adapter_upstream_attempts"] == 1
+    assert attempt["adapter_structured_repairs"] == 0
+    assert attempt["adapter_structured_upstream_mode"] == "json_object"
+    assert attempt["adapter_cache_mode"] == "implicit"
+    assert attempt["canonical_contract_mode"] == "wire_json+local_canonical"
+
+
+def test_rev281_billed_adapter_transport_failure_is_not_retried(monkeypatch):
+    from eyle.runtime.execution_context import ExecutionContext
+
+    cfg = _config(
+        retry_max_attempts=3,
+        retry_base_delay_seconds=0,
+        retry_max_delay_seconds=0,
+        retry_jitter_seconds=0,
+        cooldown_seconds=0,
+    )
+    execution = ExecutionContext.from_config(cfg)
+    calls = {"n": 0}
+    body = json.dumps({
+        "error": {
+            "type": "upstream_connection_error",
+            "detail": "connection reset after repair started",
+            "upstream_attempts": 2,
+            "billing_may_have_occurred": True,
+            "retry_cost_risk": True,
+        },
+        "usage": {"prompt_tokens": 4200, "completion_tokens": 180},
+    }).encode()
+    headers = {
+        "X-Eyle-Upstream-Attempts": "2",
+        "X-Eyle-Usage-Prompt-Tokens": "4200",
+        "X-Eyle-Usage-Completion-Tokens": "180",
+        "X-Eyle-Billing-May-Have-Occurred": "1",
+        "X-Eyle-Retry-Cost-Risk": "1",
+    }
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        raise urllib.error.HTTPError(req.full_url, 502, "Bad Gateway", headers, io.BytesIO(body))
+
+    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(llm_mod.ErroLLM) as exc:
+        llm_mod._chamar_llm("s", "u", cfg, execution, perfil="ecc")
+    assert exc.value.error_code == "TRANSPORT_ERROR"
+    assert exc.value.transient is False
+    assert calls["n"] == 1
+    attempt = execution.llm_calls[-1]["attempts"][0]
+    assert attempt["retry_cost_risk"] is True
+    assert attempt["prompt_tokens"] == 4200
+    assert attempt["completion_tokens"] == 180
+
+
+def test_rev281_zero_usage_adapter_transport_failure_keeps_bounded_outer_retry(monkeypatch):
+    cfg = _config(
+        retry_max_attempts=3,
+        retry_base_delay_seconds=0,
+        retry_max_delay_seconds=0,
+        retry_jitter_seconds=0,
+        cooldown_seconds=0,
+    )
+    calls = {"n": 0}
+    body = json.dumps({"error": {"type": "upstream_connection_error", "upstream_attempts": 1}, "usage": {}}).encode()
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        raise urllib.error.HTTPError(req.full_url, 502, "Bad Gateway", {"X-Eyle-Upstream-Attempts": "1"}, io.BytesIO(body))
+
+    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(llm_mod.ErroLLM) as exc:
+        llm_mod._chamar_llm("s", "u", cfg, perfil="ecc")
+    assert exc.value.error_code == "TRANSPORT_ERROR"
+    assert calls["n"] == 3
+
+
+def test_rev282_generated_token_fuse_counts_completion_not_prompt(monkeypatch):
+    from eyle.runtime.execution_context import ExecutionContext
+
+    calls = _capture(monkeypatch, {
+        "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 200000, "completion_tokens": 5},
+    })
+    cfg = _config(generated_token_fuse=10)
+    execution = ExecutionContext.from_config(cfg)
+    assert llm_mod._chamar_llm("s", "u", cfg, execution) == "ok"
+    assert len(calls) == 1
+    usage = execution.usage_view()
+    assert usage["prompt_tokens_actual"] == 200000
+    assert usage["completion_tokens_actual"] == 5
+    assert usage["generated_tokens_remaining"] == 5
+
+
+def test_rev282_generated_token_fuse_blocks_new_llm_call_once_reached(monkeypatch):
+    from eyle.runtime.execution_context import ExecutionContext
+
+    called = {"n": 0}
+    def fake_urlopen(req, timeout=None):
+        called["n"] += 1
+        return _FakeResponse({"choices": [{"message": {"content": "never"}}]})
+    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
+    cfg = _config(generated_token_fuse=10)
+    execution = ExecutionContext.from_config(cfg)
+    execution.completion_tokens_actual = 10
+    with pytest.raises(llm_mod.ErroLLM) as exc:
+        llm_mod._chamar_llm("s", "u", cfg, execution)
+    assert exc.value.error_code == "GENERATED_TOKEN_FUSE_REACHED"
+    assert called["n"] == 0
+
+
+def test_rev282_generated_token_fuse_fails_closed_if_provider_reports_overshoot(monkeypatch):
+    from eyle.runtime.execution_context import ExecutionContext
+
+    _capture(monkeypatch, {
+        "choices": [{"message": {"content": "too much"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 2, "completion_tokens": 11},
+    })
+    cfg = _config(generated_token_fuse=10)
+    execution = ExecutionContext.from_config(cfg)
+    with pytest.raises(llm_mod.ErroLLM) as exc:
+        llm_mod._chamar_llm("s", "u", cfg, execution)
+    assert exc.value.error_code == "GENERATED_TOKEN_FUSE_EXCEEDED"
+    assert execution.completion_tokens_actual == 11
+
+
+def test_rev288_diagnosticar_backend_uses_formal_handshake_then_ready_not_models(monkeypatch):
+    calls = []
+    handshake = {
+        "status": "ok",
+        "handshake_schema": llm_mod.ADAPTER_HANDSHAKE_SCHEMA,
+        "adapter_protocol": llm_mod.ADAPTER_TRANSPORT_PROTOCOL,
+        "adapter_profile": "eyle-provider-transport-v3",
+        "adapter_version": "2.7.5-rev3",
+        "authority": "transport-only",
+        "semantic_protocol": "client-owned",
+        "endpoints": {"chat_completions": "/v1/chat/completions", "readiness": "/ready", "models": "/v1/models"},
+        "capabilities": {
+            "chat_completions": True,
+            "client_json_schema_hint": True,
+            "json_candidate_passthrough": True,
+            "syntactic_json_recovery": True,
+        },
+    }
+
+    def fake_get(endpoint, timeout, *, protocol=False):
+        calls.append((endpoint, protocol))
+        if endpoint.endswith("/v1/eyle/handshake"):
+            return handshake, {}
+        if endpoint.endswith("/ready"):
+            return {"status": "ready_configured", "model": "provider-model"}, {}
+        raise AssertionError(endpoint)
+
+    monkeypatch.setattr(llm_mod, "_get_json", fake_get)
+    result = llm_mod.diagnosticar_backend(_config())
+    assert result["ok"] is True
+    assert result["adapter_protocol"] == llm_mod.ADAPTER_TRANSPORT_PROTOCOL
+    assert result["models"] == ["provider-model"]
+    assert [item[0] for item in calls] == [
+        "http://localhost:8080/v1/eyle/handshake",
+        "http://localhost:8080/ready",
+    ]
+    assert all(item[1] is True for item in calls)
+
+
+def test_rev288_handshake_incompatibility_blocks_before_paid_generation(monkeypatch):
+    monkeypatch.undo()  # remove autouse stub for this test only
+    llm_mod._ADAPTER_COMPATIBILITY_CACHE.clear()
+    calls = []
+    bad = {
+        "status": "ok",
+        "handshake_schema": llm_mod.ADAPTER_HANDSHAKE_SCHEMA,
+        "adapter_protocol": "old-protocol",
+        "authority": "transport-only",
+        "semantic_protocol": "client-owned",
+        "endpoints": {"chat_completions": "/v1/chat/completions", "readiness": "/ready"},
+        "capabilities": {
+            "chat_completions": True,
+            "client_json_schema_hint": True,
+            "json_candidate_passthrough": True,
+            "syntactic_json_recovery": True,
+        },
+    }
+
+    def fake_get(endpoint, timeout, *, protocol=False):
+        calls.append(endpoint)
+        return bad, {}
+
+    monkeypatch.setattr(llm_mod, "_get_json", fake_get)
+    paid = {"n": 0}
+    monkeypatch.setattr(llm_mod, "_chamar_openai_compatible", lambda *a, **k: paid.__setitem__("n", paid["n"] + 1))
+    with pytest.raises(llm_mod.ErroLLM) as exc:
+        llm_mod._chamar_llm_impl("s", "u", _config(), execution=None)
+    assert exc.value.error_code == "ADAPTER_PROTOCOL_INCOMPATIBLE"
+    assert paid["n"] == 0
+    assert calls == ["http://localhost:8080/v1/eyle/handshake"]

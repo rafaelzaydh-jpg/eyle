@@ -1,52 +1,77 @@
-# Eyle DeepSeek Adapter Rev2.5.2
+# Eyle Adapter — Transport Only
 
-Adapter dedicado à Eyle Rev2.5.2 ECC para o endpoint estável OpenAI-compatible da DeepSeek.
-
-## Contrato estruturado
-
-A Eyle envia seu contrato canônico como `response_format.type=json_schema` para o adapter. O adapter **não encaminha `json_schema` à DeepSeek**. Ele converte a chamada para `response_format={"type":"json_object"}`, injeta uma gramática JSON compacta derivada do schema recebido e valida a resposta localmente com JSON Schema Draft 2020-12.
-
-Rev2.5.2 estende essa gramática com o sidecar de **Objective State** além da Memory Graph:
-
-```json
-{"objective":{"disposition":"unchanged","state":null}}
-```
-
-ou:
-
-```json
-{
-  "objective": {
-    "disposition": "updated",
-    "state": {
-      "summary": "Satisfy the compound request",
-      "status": "active",
-      "children": [],
-      "constraints": []
-    }
-  }
-}
-```
-
-A gramática Objective e a gramática Memory (`remember`, `revise`, `relate`, `archive`, `supersede`, `retire_relation`, aliases e supports) são derivadas do **schema canônico recebido**, não de uma lista paralela simplificada.
-
-## Repair
-
-Quando a resposta não satisfaz o schema, o adapter discrimina primeiro o ramo ECC real por `type`, depois valida Objective e Memory em seus ramos específicos. Assim os repairs recebem erros acionáveis como:
+The Adapter is Eyle's single provider boundary. Eyle connects locally to port `8080`; the Adapter forwards requests to a configured remote OpenAI-compatible API.
 
 ```text
-$.objective.state.status: required property missing
-$.memory.operations[0].scope: required property missing
+Eyle -> http://127.0.0.1:8080 -> Adapter -> remote provider -> model
 ```
 
-em vez de mensagens genéricas de `oneOf`.
+No local LLM, port `8000`, or Ollama fallback is required.
 
-O repair é limitado por `STRUCTURED_REPAIR_ATTEMPTS`, preserva a decisão ECC e é instruído a não apagar uma atualização genuína de Objective/Memory apenas para passar na validação.
+## Authority boundary
 
-## Testes
+The Adapter does **not** know Eyle semantics. It contains no grammar for ECC moves, Memory operations, epistemic metadata, consolidation, or `on_success`.
+
+Eyle owns:
+
+- tolerant wire canonicalization;
+- canonical ECC schema;
+- semantic validation;
+- Memory meaning.
+
+Adapter owns:
+
+- provider URL/key/model routing;
+- authentication/headers/body extras;
+- OpenAI-compatible transport;
+- structured transport capability selection;
+- usage/cache metadata;
+- syntactic JSON recovery;
+- readiness/handshake endpoints.
+
+## Configuration
+
+Install:
 
 ```bash
-python -m pytest -q
+python -m pip install -r server/requirements.txt
 ```
 
-A suíte usa `tests/fixtures/eyle_rev252_ecc_schema.json`, snapshot do **schema ECC canônico completo** gerado de `llm/structured.py` da Eyle Rev2.5.2.
+Copy `server/.env.example` to `server/.env`:
+
+```dotenv
+UPSTREAM_BASE_URL=https://your-provider.example/v1
+UPSTREAM_API_KEY=YOUR_KEY
+DEFAULT_MODEL=YOUR_MODEL_ID
+PORT=8080
+UPSTREAM_STRUCTURED_MODE=auto
+```
+
+Start:
+
+```bash
+python server/server.py
+```
+
+Windows launch helpers are also provided in this directory.
+
+## Structured transport policy
+
+`UPSTREAM_STRUCTURED_MODE=auto` prefers:
+
+```text
+native_json_schema -> json_object -> prompt_json
+```
+
+A mode is downgraded only when the provider technically rejects it. Semantically wrong model content does not change the cached provider capability.
+
+The Adapter performs deterministic syntax-only JSON recovery. When necessary it may attempt one cheap format-only repair in the same accepted transport mode. If semantic content is incomplete, Eyle—not Adapter—handles recovery with the same Main execution.
+
+## Handshake and diagnostics
+
+- `GET /v1/eyle/handshake` — formal `eyle-adapter-handshake-v1` / `eyle-adapter-transport-v1` negotiation;
+- `GET /ready` — provider/model readiness without paid generation;
+- `GET /health` — Adapter configuration/capability policy;
+- `GET /v1/models` — optional model surface, not used to infer Eyle compatibility.
+
+Every response advertises the Adapter protocol/profile headers.

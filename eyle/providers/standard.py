@@ -43,8 +43,8 @@ from eyle.providers.standard_impl.sandbox import executar_comando_livre_no_sandb
 from eyle.providers.standard_impl.workspace_policy import (  # noqa: E402
     build_protected_resource_index, is_protected_workspace_resource, protected_resource_info,
 )
-from eyle.providers.standard_impl.objective_scope import (  # noqa: E402
-    ObjectiveScopeError, normalize_scope_selectors, resolve_objective_file_scope,
+from eyle.providers.standard_impl.file_scope import (  # noqa: E402
+    FileScopeError, normalize_scope_selectors, resolve_file_scope,
 )
 
 PROJECT_BASE_DIR = os.path.dirname(BASE_DIR)
@@ -328,12 +328,12 @@ def _searchable_files(root, *, include_paths=None, exclude_paths=None):
         parts = [part for part in selector.replace("\\", "/").split("/") if part]
         blocked = next((part for part in parts if part in _SEARCH_IGNORED_DIRS), None)
         if blocked is not None:
-            raise ObjectiveScopeError(
+            raise FileScopeError(
                 "SEARCH_SCOPE_OUTSIDE_CAPABILITY_BOUNDARY",
                 f"objective search include selector targets capability-excluded directory '{blocked}': {selector}",
                 selector=selector,
             )
-    scoped_files, scope = resolve_objective_file_scope(
+    scoped_files, scope = resolve_file_scope(
         root, universe, include_paths=include, exclude_paths=exclude_paths,
     )
     protected_index = build_protected_resource_index(root)
@@ -557,7 +557,7 @@ def _tool_search_code(arguments, ctx):
         search_scope["source_scope"] = (
             "eyle_application_source" if _source_name(arguments) == "eyle" else "dedicated_user_workspace"
         )
-    except ObjectiveScopeError as error:
+    except FileScopeError as error:
         return _falha(
             error.code, error.detail, executed=False, retryable=False,
             failure_scope="request", failure_resource=error.selector,
@@ -685,7 +685,12 @@ def _tool_search_code(arguments, ctx):
     return _sucesso(detail, frontiers=frontiers)
 
 def _tool_symbol_relations(arguments, ctx):
-    """Return local relations or a query-shaped structural reachability observation."""
+    """Inspect symbol structure exhaustively, then page what Main materializes.
+
+    ``max_edges`` is retained as a backwards-compatible page-size name.  It is
+    not a scan ceiling: the full finite structural result is computed first and
+    every omitted row is retained behind exact Frontiers.
+    """
     root = _caminho_fonte(ctx, arguments)
     if not root:
         return _source_unavailable(arguments)
@@ -697,23 +702,59 @@ def _tool_symbol_relations(arguments, ctx):
     config = (ctx or {}).get("config") or {}
     agent_cfg = _standard_config(config)
     query = str(arguments.get("query") or "relations")
-    # Reachability depth is Runtime-owned in Eyle 2.7.5 Rev1.4.3. The resolved graph is
-    # exhausted mechanically; only local relation queries honor max_depth.
     default_depth = 6
+    page_size = max(1, int(arguments.get("max_edges") or 60))
+    raw_scan_limit = agent_cfg.get("max_project_scan_entries")
+    scan_limit = None if raw_scan_limit is None else max(1, int(raw_scan_limit))
     try:
         detail = analyze_symbol_relations(
             root, arguments["symbol"], path=path, roots=list(arguments.get("roots") or []),
             direction=str(arguments.get("direction") or "both"),
             include_text_references=bool(arguments.get("include_text_references", False)),
             max_depth=int(arguments.get("max_depth") or default_depth),
-            max_edges=int(arguments.get("max_edges") or 60),
-            max_files=max(1, int(agent_cfg.get("max_project_scan_entries", 20000) or 20000)),
+            max_edges=None,
+            max_files=scan_limit,
             max_file_bytes=max(1024, int(agent_cfg.get("max_project_file_bytes", 4 * 1024 * 1024) or 4 * 1024 * 1024)),
             query=query,
         )
+
+        payloads = list(detail.pop("continuation_payloads", []) or [])
+        frontiers = [copy.deepcopy(item) for item in (detail.get("frontiers") or []) if isinstance(item, dict)]
+
+        if query == "relations":
+            # Page each objective relation family independently.  This avoids a
+            # semantically arbitrary global top-N while preserving exact category
+            # identity behind continuation.
+            for field in (
+                "definitions", "incoming", "outgoing", "structural_references",
+                "imports", "text_references", "root_reachability", "unresolved_dynamic",
+            ):
+                values = [copy.deepcopy(item) for item in (detail.get(field) or []) if isinstance(item, dict)]
+                detail[field] = values[:page_size]
+                remaining = values[page_size:]
+                if not remaining:
+                    continue
+                payloads.append({
+                    "frontier_kind": f"relations.{field}",
+                    "items": remaining,
+                    "summary": {"count": len(remaining), "field": field},
+                })
+                frontiers.append({
+                    "kind": "material_continuation",
+                    "at": f"symbol_relations.{field}",
+                    "reason": f"{len(remaining)} additional {field} row(s) remain after this page",
+                    "continuation_index": len(payloads) - 1,
+                    "count": len(remaining),
+                })
+            coverage = detail.get("coverage") if isinstance(detail.get("coverage"), dict) else {}
+            coverage = dict(coverage)
+            coverage["materialization_page_size"] = page_size
+            coverage["materialization_frontiers"] = sum(1 for item in frontiers if item.get("continuation_index") is not None)
+            detail["coverage"] = coverage
+
+        detail["frontiers"] = frontiers
         ledger = (ctx or {}).get("observation_ledger")
         handle_store = ledger.setdefault("handles", {}) if isinstance(ledger, dict) else None
-        payloads = list(detail.pop("continuation_payloads", []) or [])
         if isinstance(handle_store, dict):
             for index, payload in enumerate(payloads):
                 if not isinstance(payload, dict):
@@ -723,8 +764,8 @@ def _tool_symbol_relations(arguments, ctx):
                     ledger, kind=f"symbol_relations.{payload.get('frontier_kind') or 'continuation'}",
                     payload=payload, reality_epoch=int((ctx or {}).get("reality_epoch") or 0),
                     source_capability="symbol_relations",
-                    description=f"Continuation from symbol_relations for {arguments.get('symbol')}",
-                    page_size=12,
+                    description=f"Continue symbol_relations for {arguments.get('symbol')}",
+                    page_size=page_size,
                 )
                 for frontier in detail.get("frontiers") or []:
                     if isinstance(frontier, dict) and frontier.get("continuation_index") == index:
@@ -734,11 +775,102 @@ def _tool_symbol_relations(arguments, ctx):
                             frontier.setdefault("count", summary.get("count"))
         else:
             for frontier in detail.get("frontiers") or []:
-                if isinstance(frontier, dict): frontier.pop("continuation_index", None)
+                if isinstance(frontier, dict):
+                    frontier.pop("continuation_index", None)
         return _sucesso(detail, frontiers=detail.get("frontiers"))
     except (OSError, ValueError) as error:
         return _falha("RELATION_SCAN_FAILED", str(error), executed=True)
 
+
+def _continue_read_file_page(payload, ctx):
+    """Materialize the exact next file range behind a read_file Frontier."""
+    if not isinstance(payload, dict) or payload.get("kind") != "read_file_ranges":
+        return {}
+    source = str(payload.get("source") or "workspace")
+    root = _caminho_fonte(ctx, {"source": source})
+    if not root:
+        return {}
+    projected = []
+    materials = []
+    failures = []
+    for item in payload.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            start = int(item.get("line_start") or 1); end = int(item.get("line_end") or start)
+            reading = ler_faixa_projeto(root, str(payload.get("path") or ""), start, end, max_linhas=max(1, end-start+1))
+        except (ErroLeituraProjeto, TypeError, ValueError) as error:
+            failures.append({"line_start": item.get("line_start"), "line_end": item.get("line_end"), "error_code": getattr(error, "error_code", "READ_FAILED")})
+            continue
+        projected.append(dict(reading))
+        material = _file_material(reading, source_type="read_file", source=source)
+        if material:
+            material["source_capability"] = "read_file"
+            materials.append(material)
+    return {
+        "observations": materials,
+        "coverage": _coverage_record(
+            scope={"kind": "file_range_continuation", "source": source, "path": payload.get("path")},
+            examined={"ranges": len(payload.get("items") or []), "materialized": len(projected)},
+            complete=not failures,
+            boundaries=[{"kind": "read_failure", "count": len(failures)}] if failures else [],
+        ),
+        "detail": {"source_capability": "read_file", "path": payload.get("path"), "ranges": projected, "read_failures": failures},
+    }
+
+
+def _continue_list_tree_page(payload, ctx):
+    """Materialize the exact next tree entries behind a list_tree Frontier."""
+    if not isinstance(payload, dict) or payload.get("kind") != "list_tree_entries":
+        return {}
+    items = [copy.deepcopy(v) for v in payload.get("items") or [] if isinstance(v, dict)]
+    source = str(payload.get("source") or "workspace")
+    content = json.dumps(items, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    material = {
+        "locator": {"kind": "source_tree_page", "source": source, "depth": payload.get("depth"), "filter": payload.get("filter")},
+        "content_hash": hash_texto(content), "content": content,
+        "source_type": "list_tree", "source_capability": "list_tree",
+    }
+    return {
+        "observations": [material],
+        "coverage": _coverage_record(
+            scope={"kind": "source_tree_continuation", "source": source, "depth": payload.get("depth"), "filter": payload.get("filter")},
+            examined={"entries": len(items)}, complete=True,
+        ),
+        "detail": {"source_capability": "list_tree", "entries": items},
+    }
+
+
+def _continue_git_status_page(payload, ctx):
+    if not isinstance(payload, dict) or payload.get("kind") != "git_status_entries":
+        return {}
+    items = [copy.deepcopy(v) for v in payload.get("items") or [] if isinstance(v, dict)]
+    return {
+        "observations": [{
+            "locator": {"kind": "git_status_page", "source": payload.get("source", "workspace")},
+            "content_hash": hash_texto(json.dumps(items, ensure_ascii=False, sort_keys=True, default=str)),
+            "content": json.dumps(items, ensure_ascii=False, sort_keys=True, default=str),
+            "source_type": "git_status", "source_capability": "git_status",
+        }],
+        "coverage": _coverage_record(scope={"kind":"git_status_continuation","source":payload.get("source","workspace")}, examined={"entries":len(items)}, complete=True),
+        "detail": {"source_capability":"git_status","entries":items},
+    }
+
+
+def _continue_git_diff_page(payload, ctx):
+    if not isinstance(payload, dict) or payload.get("kind") != "git_diff_chunks":
+        return {}
+    chunks = [str(v.get("text") or "") for v in payload.get("items") or [] if isinstance(v, dict)]
+    text = "".join(chunks)
+    return {
+        "observations": [{
+            "locator": {"kind":"git_diff_page","source":payload.get("source","workspace"),"path":payload.get("path"),"staged":bool(payload.get("staged"))},
+            "content_hash": hash_texto(text), "content": text,
+            "source_type":"git_diff", "source_capability":"git_diff",
+        }],
+        "coverage": _coverage_record(scope={"kind":"git_diff_continuation","source":payload.get("source","workspace"),"path":payload.get("path")}, examined={"characters":len(text)}, complete=True),
+        "detail": {"source_capability":"git_diff","diff":text},
+    }
 
 def _continue_search_code_page(payload, ctx):
     """Materialize search-range locators owned by search_code into file Material candidates."""
@@ -1074,7 +1206,7 @@ def _tool_find_symbol(arguments, ctx):
 
 
 def _tool_read_file(arguments, ctx):
-    """Read one fresh bounded file window; omitted range means the initial window."""
+    """Read fresh source. Default size is a page; explicit ranges are Main-owned choices."""
     caminho_projeto = _caminho_fonte(ctx, arguments)
     if not caminho_projeto:
         return _source_unavailable(arguments)
@@ -1082,69 +1214,67 @@ def _tool_read_file(arguments, ctx):
     if _self_runtime_path_blocked(arguments, caminho_relativo):
         return _falha("SELF_RUNTIME_STATE_READ_BLOCKED", "self analysis cannot read live workspace/memory/context runtime state", retryable=False, failure_scope="resource", failure_resource=str(caminho_relativo))
     config = (ctx or {}).get("config") or {}
-    max_linhas = _standard_config(config).get("max_file_read_lines", 400)
+    default_page = max(1, int(_standard_config(config).get("max_file_read_lines", 400) or 400))
     has_start = arguments.get("line_start") is not None
     has_end = arguments.get("line_end") is not None
     if has_start != has_end:
         return _falha("INVALID_ARGUMENT", "line_start e line_end devem ser informados juntos")
     line_start = int(arguments.get("line_start") or 1)
-    line_end = int(arguments.get("line_end") or max_linhas)
+    line_end = int(arguments.get("line_end") or (line_start + default_page - 1))
+    requested_lines = max(1, line_end-line_start+1)
     try:
-        leitura = ler_faixa_projeto(
-            caminho_projeto, caminho_relativo, line_start, line_end,
-            max_linhas=max_linhas,
-        )
+        leitura = ler_faixa_projeto(caminho_projeto, caminho_relativo, line_start, line_end, max_linhas=requested_lines)
     except ErroLeituraProjeto as erro:
-        codigo = "INVALID_ARGUMENT" if erro.error_code in {
-            "INVALID_ARGUMENT", "INVALID_RANGE", "RANGE_TOO_LARGE",
-            "RANGE_OUT_OF_BOUNDS",
-        } else erro.error_code
+        codigo = "INVALID_ARGUMENT" if erro.error_code in {"INVALID_ARGUMENT", "INVALID_RANGE", "RANGE_TOO_LARGE", "RANGE_OUT_OF_BOUNDS"} else erro.error_code
         if codigo == "PROTECTED_RESOURCE_READ_BLOCKED":
             return _protected_resource_failure(caminho_projeto, caminho_relativo)
         return _falha(codigo, erro.detail, executed=True)
     leitura = dict(leitura)
-    leitura["truncated"] = bool(
-        leitura.get("line_start", 1) > 1
-        or leitura.get("line_end", 0) < leitura.get("total_lines", 0)
-    )
-    return _sucesso(leitura)
-
+    physical_end = int(leitura.get("line_end") or line_end)
+    total = int(leitura.get("total_lines") or physical_end)
+    leitura["truncated"] = physical_end < total
+    frontiers=[]
+    ledger=(ctx or {}).get("observation_ledger")
+    if physical_end < total and isinstance(ledger,dict):
+        ranges=[]
+        cursor=physical_end+1
+        while cursor<=total:
+            finish=min(total,cursor+default_page-1)
+            ranges.append({"line_start":cursor,"line_end":finish})
+            cursor=finish+1
+        handle=register_snapshot_handle(
+            ledger, kind="read_file.ranges",
+            payload={"kind":"read_file_ranges","source":_source_name(arguments),"path":caminho_relativo,"items":ranges},
+            reality_epoch=int((ctx or {}).get("reality_epoch") or 0), source_capability="read_file",
+            description=f"Continue {caminho_relativo} after line {physical_end}", page_size=1,
+        )
+        frontiers.append({"kind":"material_continuation","at":"file","count":total-physical_end,"reason":f"file continues after line {physical_end}","handle":handle["id"]})
+    return _sucesso(leitura, frontiers=frontiers)
 
 def _tool_list_tree(arguments, ctx):
-    """Lista a arvore fresca do projeto com limites e motivos ignorados."""
+    """List a live tree page. Page size is not a scan/knowledge ceiling."""
     caminho_projeto = _caminho_fonte(ctx, arguments)
     if not caminho_projeto:
         return _source_unavailable(arguments)
     cfg_agente = _standard_config((ctx or {}).get("config") or {})
-    max_entradas = cfg_agente.get("max_tree_entries", 200)
-    max_profundidade = cfg_agente.get("max_tree_depth", 6)
-    limite = arguments.get("limit", max_entradas)
-    profundidade = arguments.get("depth", max_profundidade)
-    if limite > max_entradas:
-        return _falha(
-            "INVALID_ARGUMENT",
-            f"limite={limite} excede providers.standard.max_tree_entries={max_entradas}",
-        )
-    if profundidade > max_profundidade:
-        return _falha(
-            "INVALID_ARGUMENT",
-            f"profundidade={profundidade} excede agent.max_tree_depth={max_profundidade}",
-        )
+    page_size = max(1, int(arguments.get("limit") or cfg_agente.get("max_tree_entries", 200) or 200))
+    profundidade = max(1, int(arguments.get("depth") or cfg_agente.get("max_tree_depth", 6) or 6))
     try:
-        resultado = listar_arvore_projeto(
-            caminho_projeto,
-            limite=limite,
-            profundidade=profundidade,
-            filtro=arguments.get("filter"),
-        )
+        full = listar_arvore_projeto(caminho_projeto, limite=None, profundidade=profundidade, filtro=arguments.get("filter"))
     except ErroLeituraProjeto as erro:
-        codigo = "INVALID_ARGUMENT" if erro.error_code in {
-            "INVALID_ARGUMENT", "INVALID_RANGE", "RANGE_TOO_LARGE",
-            "RANGE_OUT_OF_BOUNDS",
-        } else erro.error_code
+        codigo = "INVALID_ARGUMENT" if erro.error_code in {"INVALID_ARGUMENT", "INVALID_RANGE", "RANGE_TOO_LARGE", "RANGE_OUT_OF_BOUNDS"} else erro.error_code
         return _falha(codigo, erro.detail, executed=True)
-    return _sucesso(resultado)
-
+    all_entries=list(full.get("entries") or [])
+    page=all_entries[:page_size]; remaining=all_entries[page_size:]
+    result=dict(full); result["entries"]=page; result["total_retornado"]=len(page); result["truncated"]=bool(remaining); result["varredura_completa"]=True; result["complete_scan"]=True
+    frontiers=[]; ledger=(ctx or {}).get("observation_ledger")
+    if remaining and isinstance(ledger,dict):
+        handle=register_snapshot_handle(
+            ledger,kind="list_tree.entries",payload={"kind":"list_tree_entries","source":_source_name(arguments),"depth":profundidade,"filter":arguments.get("filter"),"items":remaining},
+            reality_epoch=int((ctx or {}).get("reality_epoch") or 0),source_capability="list_tree",description="Continue exact source tree entries",page_size=page_size,
+        )
+        frontiers.append({"kind":"material_continuation","at":"source_tree","count":len(remaining),"reason":f"{len(remaining)} tree entries remain after this page","handle":handle["id"]})
+    return _sucesso(result, frontiers=frontiers)
 
 def _tool_calculate(arguments, ctx):
     """Evaluate arithmetic deterministically instead of asking the LLM to do it mentally."""
@@ -1249,33 +1379,41 @@ def _tool_run_tests(arguments, ctx):
 
 
 def _tool_git_status(arguments, ctx):
-    """Inspect Git working-tree state without modifying the repository."""
+    """Inspect one page of complete working-tree state; remainder becomes Frontier."""
     root = _caminho_fonte(ctx, arguments)
     if not root:
         return _source_unavailable(arguments)
-    result = inspect_git_status(root, max_entries=int(arguments.get("max_entries") or 200))
-    if result.get("ok"):
-        return _sucesso(result)
-    return _falha(result.get("error_code") or "GIT_STATUS_FAILED", result.get("detail"), executed=True)
-
+    page_size=max(1,int(arguments.get("max_entries") or 200))
+    result = inspect_git_status(root, max_entries=page_size)
+    if not result.get("ok"):
+        return _falha(result.get("error_code") or "GIT_STATUS_FAILED", result.get("detail"), executed=True)
+    all_entries=list(result.get("entries") or [])
+    page=all_entries[:page_size]; remaining=all_entries[page_size:]
+    result=dict(result); result["entries"]=page; result["returned_count"]=len(page); result["truncated"]=bool(remaining)
+    frontiers=[]; ledger=(ctx or {}).get("observation_ledger")
+    if remaining and isinstance(ledger,dict):
+        handle=register_snapshot_handle(ledger,kind="git_status.entries",payload={"kind":"git_status_entries","source":_source_name(arguments),"items":remaining},reality_epoch=int((ctx or {}).get("reality_epoch") or 0),source_capability="git_status",description="Continue Git status paths",page_size=page_size)
+        frontiers.append({"kind":"material_continuation","at":"git_status","count":len(remaining),"reason":"more changed paths remain","handle":handle["id"]})
+    return _sucesso(result,frontiers=frontiers)
 
 def _tool_git_diff(arguments, ctx):
-    """Inspect a bounded Git diff; raw diff is available to the LLM but not public history."""
+    """Inspect Git diff as a continuable character stream, not a hard truncation."""
     root = _caminho_fonte(ctx, arguments)
     if not root:
         return _source_unavailable(arguments)
     cfg_agent = _standard_config((ctx or {}).get("config") or {})
-    result = inspect_git_diff(
-        root,
-        path=arguments.get("path"),
-        staged=bool(arguments.get("staged", False)),
-        context_lines=int(arguments.get("context_lines") or 3),
-        max_chars=int(cfg_agent.get("max_git_diff_chars", 6000) or 6000),
-    )
-    if result.get("ok"):
-        return _sucesso(result)
-    return _falha(result.get("error_code") or "GIT_DIFF_FAILED", result.get("detail"), executed=True)
-
+    page_chars=max(1,int(cfg_agent.get("max_git_diff_chars",6000) or 6000))
+    result=inspect_git_diff(root,path=arguments.get("path"),staged=bool(arguments.get("staged",False)),context_lines=int(arguments.get("context_lines") or 3),max_chars=None)
+    if not result.get("ok"):
+        return _falha(result.get("error_code") or "GIT_DIFF_FAILED",result.get("detail"),executed=True)
+    raw=str(result.get("diff") or ""); first=raw[:page_chars]; rest=raw[page_chars:]
+    result=dict(result); result["diff"]=first; result["truncated"]=bool(rest); result["diff_characters"]=len(raw)
+    frontiers=[]; ledger=(ctx or {}).get("observation_ledger")
+    if rest and isinstance(ledger,dict):
+        chunks=[{"text":rest[i:i+page_chars]} for i in range(0,len(rest),page_chars)]
+        handle=register_snapshot_handle(ledger,kind="git_diff.chunks",payload={"kind":"git_diff_chunks","source":_source_name(arguments),"path":arguments.get("path"),"staged":bool(arguments.get("staged",False)),"items":chunks},reality_epoch=int((ctx or {}).get("reality_epoch") or 0),source_capability="git_diff",description="Continue exact Git diff text",page_size=1)
+        frontiers.append({"kind":"material_continuation","at":"git_diff","count":len(rest),"reason":f"{len(rest)} diff characters remain","handle":handle["id"]})
+    return _sucesso(result,frontiers=frontiers)
 
 def _tool_run_command(arguments, ctx):
     """Run any shell command inside the isolated, writable per-job sandbox snapshot."""
@@ -1296,7 +1434,7 @@ def _tool_run_command(arguments, ctx):
         return _falha("SANDBOX_UNAVAILABLE", error, retryable=False)
     detail = {
         "command": arguments["command"], "source": _source_name(arguments), "cwd": result.get("cwd"), "returncode": result.get("codigo"),
-        "output": str(result.get("saida") or "")[-12000:], "backend": result.get("backend"),
+        "output": str(result.get("saida") or ""), "backend": result.get("backend"),
         "network_enabled": bool(result.get("network_enabled")),
         "workspace_isolated": bool(result.get("workspace_isolated")),
         "snapshot_persists_for_job": bool(result.get("snapshot_persists_for_job")),
@@ -1589,6 +1727,108 @@ def _observe_json(name):
         source = _source_name(arguments) if "source" in (arguments or {}) else "runtime"
         return _json_material(name, name, payload, source=source)
     return observe
+
+
+def _observe_workspace_transaction(arguments, result):
+    """Materialize the verified post-write world, never the pre-write blob.
+
+    Memory may later point at these Materials as provenance.  The transaction
+    result can carry large rollback snapshots internally, but only final file
+    bodies (or an explicit absence record for deletes) become canonical
+    Material.
+    """
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        return []
+    detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
+    patches = detail.get("applied_patches") if isinstance(detail.get("applied_patches"), list) else []
+    materials = []
+    for patch in patches:
+        if not isinstance(patch, dict):
+            continue
+        path = str(patch.get("path") or "").replace("\\", "/").strip()
+        operation = str(patch.get("operation") or "").strip().lower()
+        if not path:
+            continue
+        content = patch.get("result_content")
+        if operation != "delete" and isinstance(content, str):
+            total_lines = len(content.splitlines())
+            material = _file_material({
+                "file": path,
+                "file_hash": hash_texto(content),
+                "content_hash": hash_texto(content),
+                "content": content,
+                "line_start": 1,
+                "line_end": total_lines,
+                "total_lines": total_lines,
+            }, source_type="workspace_transaction", source="workspace")
+            if material:
+                material.setdefault("metadata", {})["operation"] = operation
+                materials.append(material)
+            continue
+        if operation == "delete":
+            payload = {"path": path, "operation": "delete", "state": "absent"}
+            text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            materials.append({
+                "locator": {"kind": "file", "source": "workspace", "path": path, "state": "absent"},
+                "content_hash": hash_texto(text),
+                "content": text,
+                "source_type": "workspace_transaction",
+                "metadata": payload,
+            })
+    return materials
+
+
+def _model_projection_workspace_transaction(detail, grounding_ids, config):
+    """Return verified post-write artifacts to Main with Material provenance.
+
+    Eyle intentionally does NOT hide the final artifact body behind a second
+    read.  Main needs the verified body and its ``mat-*`` coordinate in the same
+    cognition turn to decompose what it actually created into atomic Memory.
+    Pre-write/rollback snapshots remain private and are never projected.
+    """
+    value = detail if isinstance(detail, dict) else {}
+    reread = value.get("reread") if isinstance(value.get("reread"), dict) else {}
+    tests = value.get("tests") if isinstance(value.get("tests"), dict) else {}
+    compile_result = value.get("compile") if isinstance(value.get("compile"), dict) else {}
+    ids = [str(v) for v in (grounding_ids or []) if str(v).strip()]
+    verified_artifacts = []
+    material_index = 0
+    for patch in value.get("applied_patches") or []:
+        if not isinstance(patch, dict):
+            continue
+        path = str(patch.get("path") or "").replace("\\", "/")
+        operation = str(patch.get("operation") or "").lower()
+        if not path:
+            continue
+        row = {"path": path, "operation": operation}
+        if material_index < len(ids):
+            row["material_id"] = ids[material_index]
+            material_index += 1
+        if operation == "delete":
+            row["state"] = "absent"
+        elif isinstance(patch.get("result_content"), str):
+            content = patch.get("result_content")
+            row["content"] = content
+            row["content_hash"] = hash_texto(content)
+            row["bytes"] = len(content.encode("utf-8"))
+        verified_artifacts.append(row)
+    return {
+        "files": list(value.get("files") or []),
+        "verification_state": value.get("verification_state"),
+        "limitations": list(value.get("limitations") or []),
+        "verified_artifacts": verified_artifacts,
+        "compile": {k: compile_result.get(k) for k in ("ok", "status", "executed", "error_code") if compile_result.get(k) is not None},
+        "tests": {k: tests.get(k) for k in ("ok", "status", "executed", "error_code", "detail") if tests.get(k) is not None},
+        "reread": {
+            "ok": reread.get("ok"),
+            "checked": [
+                {k: item.get(k) for k in ("path", "operation", "state", "file_hash", "bytes") if item.get(k) is not None}
+                for item in (reread.get("checked") or []) if isinstance(item, dict)
+            ],
+            "failures": list(reread.get("failures") or []),
+        },
+        "grounding_ids": ids,
+    }
 
 
 def _observe_none(arguments, result):
@@ -1913,6 +2153,14 @@ def _public_result_fields(*keys):
     return projector
 
 
+def _public_result_workspace_transaction(result):
+    detail = result.get("detail") if isinstance(result, dict) else None
+    if isinstance(detail, str):
+        return {"detail": detail[:1000]}
+    detail = detail if isinstance(detail, dict) else {}
+    return {key: detail.get(key) for key in ("files", "verification_state", "limitations") if detail.get(key) is not None}
+
+
 def _public_result_file(result):
     detail = result.get("detail") if isinstance(result.get("detail"), dict) else {}
     return {key: value for key, value in {
@@ -2040,102 +2288,62 @@ def _model_projection_search(detail, grounding_ids, config):
     if raw_frontiers:
         copied["more_results_available"] = True
         copied["remaining_result_groups"] = sum(max(0, int(item.get("count") or 0)) for item in raw_frontiers)
-        copied["navigation_hint"] = "Refine search or read a listed file/range; broad continuation is intentionally not an ECC operation."
+        copied["navigation_hint"] = "Use continue on an exposed Frontier to materialize the next exact matched ranges, or refine/read directly if you prefer."
     return copied
 
 
 def _model_projection_read_file(detail, grounding_ids, config):
     clone = _model_projection_default(detail, grounding_ids, config)
-    if not isinstance(clone, dict): return clone
-    text = str(clone.get("numbered_content") or clone.get("content") or "")
-    if text:
-        max_chars = 6000
-        lines = text.splitlines()
-        selected = []
-        used = 0
-        partial_last_line = False
-        for line in lines:
-            cost = len(line) + (1 if selected else 0)
-            if selected and used + cost > max_chars:
-                break
-            if not selected and cost > max_chars:
-                selected.append(line[:max_chars])
-                used = max_chars
-                partial_last_line = True
-                break
-            selected.append(line)
-            used += cost
-        projected_text = "\n".join(selected)
-        clone["numbered_content"] = projected_text
-        clone.pop("content", None)
-        physical_start = clone.get("line_start")
-        physical_end = clone.get("line_end")
-        try:
-            presented_start = int(physical_start)
-            presented_end = presented_start + max(0, len(selected) - 1)
-            physical_end_int = int(physical_end)
-            presentation_complete = presented_end >= physical_end_int and not partial_last_line
-            clone["presentation"] = {
-                "line_start": presented_start,
-                "line_end": min(presented_end, physical_end_int),
-                "complete": bool(presentation_complete),
-            }
-            if partial_last_line:
-                clone["presentation"]["partial_line"] = min(presented_end, physical_end_int)
-            if not presentation_complete:
-                remaining_start = presented_end if partial_last_line else presented_end + 1
-                clone["presentation"]["remaining_lines"] = [remaining_start, physical_end_int]
-        except (TypeError, ValueError):
-            clone["presentation"] = {"complete": len(projected_text) >= len(text)}
+    if isinstance(clone, dict):
+        clone.pop("content", None) if clone.get("numbered_content") else None
     return clone
 
 
 def _model_projection_find_symbol(detail, grounding_ids, config):
     clone = _model_projection_default(detail, grounding_ids, config)
-    if not isinstance(clone, dict): return clone
-    for key in ("content", "numbered_content", "codigo_original"): clone.pop(key, None)
-    if isinstance(clone.get("matches"), list): clone["matches"] = [dict(item) for item in clone.get("matches")[:20] if isinstance(item, dict)]
+    if not isinstance(clone, dict):
+        return clone
+    # find_symbol is a navigation capability, so source bodies stay in Material,
+    # but every row in the CURRENT materialized page must remain visible to Main.
+    # Any additional rows belong behind Frontier; never hide a second top-N here.
+    for key in ("content", "numbered_content", "codigo_original"):
+        clone.pop(key, None)
+    if isinstance(clone.get("matches"), list):
+        clone["matches"] = [dict(item) for item in clone.get("matches") if isinstance(item, dict)]
     return clone
 
 
 def _model_projection_inspect(detail, grounding_ids, config):
-    clone = detail if isinstance(detail, dict) else {}
-    ids = list(grounding_ids or [])
-    view = {key: copy.deepcopy(clone.get(key)) for key in ("file_count", "directory_count", "languages", "scan_complete") if clone.get(key) is not None}
-    if ids: view["grounding_id"] = ids[0]
-    if isinstance(clone.get("entrypoint_signals"), list): view["entrypoint_signals"] = [dict(item) for item in clone.get("entrypoint_signals")[:12] if isinstance(item, dict)]
-    if isinstance(clone.get("framework_signals"), list): view["framework_signals"] = [dict(item) for item in clone.get("framework_signals")[:12] if isinstance(item, dict)]
-    tests = clone.get("test_signals") if isinstance(clone.get("test_signals"), dict) else {}
-    if tests: view["test_signals"] = {key: tests.get(key) for key in ("has_tests", "count") if key in tests}
-    ci = clone.get("ci_signals") if isinstance(clone.get("ci_signals"), dict) else {}
-    if ci: view["ci_signals"] = {"has_ci": ci.get("has_ci"), "files": list(ci.get("files") or [])[:8]}
-    rel = clone.get("relation_signals") if isinstance(clone.get("relation_signals"), dict) else {}
-    if rel:
-        view["relation_signals"] = {key: copy.deepcopy(rel.get(key)) for key in ("local_import_edge_count", "local_import_edges_truncated", "route_file_count", "syntax_error_file_count") if key in rel}
-        if isinstance(rel.get("most_imported_files"), list): view["relation_signals"]["most_imported_files"] = [dict(item) for item in rel.get("most_imported_files")[:12] if isinstance(item, dict)]
-    return view
+    return _model_projection_default(detail, grounding_ids, config)
 
 
 def _model_projection_relations(detail, grounding_ids, config):
     clone = detail if isinstance(detail, dict) else {}
     ids = list(grounding_ids or [])
-    sequence_keys = ("definitions", "incoming", "outgoing", "structural_references", "imports", "text_references", "unresolved_dynamic")
-    view = {key: copy.deepcopy(clone.get(key)) for key in ("symbol", "path_filter", "query", "direction", "include_text_references", "backend", "coverage") if key in clone}
-    if ids: view["grounding_id"] = ids[0]
+    sequence_keys = (
+        "definitions", "incoming", "outgoing", "structural_references",
+        "imports", "text_references", "root_reachability", "unresolved_dynamic",
+    )
+    view = {
+        key: copy.deepcopy(clone.get(key))
+        for key in ("symbol", "path_filter", "query", "direction", "include_text_references", "backend", "coverage")
+        if key in clone
+    }
+    if ids:
+        view["grounding_id"] = ids[0]
+    # The tool already pages every finite relation family and puts the exact
+    # remainder behind Frontier.  A model projection must therefore expose the
+    # WHOLE current page; a second hidden slice would make rows unreachable.
     view["counts"] = {key: len(clone.get(key) or []) for key in sequence_keys}
-    limits = {"definitions": 8, "incoming": 12, "outgoing": 12, "structural_references": 8, "imports": 8, "text_references": 8, "unresolved_dynamic": 8}
-    for key, limit in limits.items():
-        if isinstance(clone.get(key), list): view[key] = copy.deepcopy(clone.get(key)[:limit])
-    if isinstance(clone.get("root_reachability"), list): view["root_reachability"] = copy.deepcopy(clone.get("root_reachability")[:12])
+    for key in sequence_keys:
+        if isinstance(clone.get(key), list):
+            view[key] = copy.deepcopy(clone.get(key))
     view["semantics"] = "structural_facts_only"
     return view
 
 
 def _model_projection_command(detail, grounding_ids, config):
-    clone = _model_projection_default(detail, grounding_ids, config)
-    if isinstance(clone, dict) and clone.get("output") is not None:
-        clone["output"] = str(clone.get("output") or "")[-5000:]
-    return clone
+    return _model_projection_default(detail, grounding_ids, config)
 
 
 def _covering_read_file(arguments, entries, reality_epoch):
@@ -2273,7 +2481,7 @@ _CAMINHO = {
 _LINHA = {"type": "integer", "minimum": 1, "description": "File line, starting at 1."}
 _SOURCE = {
     "type": "string", "enum": ["workspace", "eyle"],
-    "description": "workspace=user files; eyle=Eyle code.",
+    "description": "workspace=the user-selected/open project, even when it is a copy/fork/version of Eyle; eyle=the source tree of the Eyle instance currently running.",
 }
 
 CAPABILITIES = {
@@ -2327,11 +2535,11 @@ CAPABILITIES = {
         "availability": "source",
         "produces_grounding": True,
         "effect": "observe",
-        "returns": "Files, folders, and whether the list was cut short.",
+        "returns": "Current tree page, complete Coverage, and Frontier when more entries remain.",
         "input_schema": _schema_objeto({
             "source": _SOURCE,
-            "limit": {"type": "integer", "minimum": 1, "description": "Max items."},
-            "depth": {"type": "integer", "minimum": 1, "description": "Max folder levels."},
+            "limit": {"type": "integer", "minimum": 1, "description": "Page size; remaining tree entries become Frontier."},
+            "depth": {"type": "integer", "minimum": 1, "description": "Folder levels to scan for this tree request; this is request scope, not a global reading ceiling."},
             "filter": {"type": "string", "minLength": 1, "description": "Optional path filter."},
         }),
         "fn": _tool_list_tree,
@@ -2349,8 +2557,8 @@ CAPABILITIES = {
             {
                 "source": _SOURCE,
             "query": {"type": "string", "minLength": 1, "description": "Exact text to find."},
-                "include_paths": {"type": "array", "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 300}, "description": "Only search these paths."},
-                "exclude_paths": {"type": "array", "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 300}, "description": "Skip these paths."},
+                "include_paths": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 300}, "description": "Only search these paths."},
+                "exclude_paths": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 300}, "description": "Skip these paths."},
             }, ["query"],
         ),
         "fn": _tool_search_code,
@@ -2370,13 +2578,12 @@ CAPABILITIES = {
             "roots": {"type": "array", "items": {"type": "string", "minLength": 1}, "description": "Optional starting symbols."},
             "direction": {"type": "string", "enum": ["incoming", "outgoing", "both"], "description": "Which link direction."},
             "include_text_references": {"type": "boolean", "description": "Also include text mentions."},
-            "max_depth": {"type": "integer", "minimum": 1, "maximum": 32, "description": "Max link depth."},
-            "max_edges": {"type": "integer", "minimum": 10, "maximum": 500, "description": "Max links."},
+            "max_depth": {"type": "integer", "minimum": 1, "description": "Traversal depth for the local relations view; Main chooses it."},
+            "max_edges": {"type": "integer", "minimum": 1, "description": "Page size for relation rows; remaining rows become Frontier."},
         }, ["symbol"]),
         "fn": _tool_symbol_relations,
     },
     "continue_observation": {
-        "ecc_hidden": True,
         "description": "Continue a result that was cut short.",
         "availability": "source",
         "produces_grounding": True,
@@ -2407,8 +2614,8 @@ CAPABILITIES = {
         "availability": "source",
         "produces_grounding": True,
         "effect": "observe",
-        "returns": "File text, lines read, truncation, and hashes.",
-        "caveats": ["Large files may be cut short; protected content is blocked."],
+        "returns": "Requested file range/page, hashes, and Frontier when the file continues.",
+        "caveats": ["Default reads are paged; continue the Frontier to read the rest. Protected content is blocked."],
         "input_schema": _schema_objeto({
             "source": _SOURCE,
             "path": _CAMINHO,
@@ -2470,7 +2677,7 @@ CAPABILITIES = {
         "caveats": ["This does not include the changed text itself."],
         "input_schema": _schema_objeto({
             "source": _SOURCE,
-            "max_entries": {"type": "integer", "minimum": 1, "maximum": 500, "description": "Max paths."},
+            "max_entries": {"type": "integer", "minimum": 1, "description": "Page size for changed paths; remaining paths become Frontier."},
         }),
         "fn": _tool_git_status,
     },
@@ -2480,7 +2687,7 @@ CAPABILITIES = {
         "produces_grounding": True,
         "effect": "observe",
         "returns": "Changed files and changed text.",
-        "caveats": ["Large diffs may be cut short."],
+        "caveats": ["Diffs are paged; continue the Frontier to read the rest."],
         "input_schema": _schema_objeto({
             "source": _SOURCE,
             "path": {"type": "string", "minLength": 1, "description": "Optional path."},
@@ -2515,6 +2722,7 @@ for _local_name in _ECC_EXPLICIT_SOURCE:
     CAPABILITIES[_local_name]["ecc_require_explicit_source"] = True
 
 CAPABILITIES["list_tree"].update(signature=_sig_list_tree, observe=_observe_tree, coverage=_coverage_tree)
+CAPABILITIES["list_tree"]["continue"] = _continue_list_tree_page
 CAPABILITIES["search_code"].update(signature=_sig_search_code, observe=_observe_search, coverage=_coverage_search)
 CAPABILITIES["search_code"]["continue"] = _continue_search_code_page
 CAPABILITIES["find_symbol"].update(signature=_sig_find_symbol, observe=_observe_find_symbol, coverage=_coverage_find_symbol)
@@ -2522,12 +2730,15 @@ CAPABILITIES["find_symbol"]["continue"] = _continue_find_symbol_page
 CAPABILITIES["symbol_relations"].update(signature=_sig_symbol_relations, observe=_observe_json("symbol_relations"), coverage=_coverage_relations)
 CAPABILITIES["symbol_relations"]["continue"] = _continue_structured_page
 CAPABILITIES["read_file"].update(signature=_sig_read_file, observe=_observe_file("read_file"), coverage=_coverage_file)
+CAPABILITIES["read_file"]["continue"] = _continue_read_file_page
 CAPABILITIES["project_stats"].update(signature=lambda arguments: f"project_stats:{_source_name(arguments)}:root", observe=_observe_json("project_stats"), coverage=_coverage_project_stats)
 CAPABILITIES["inspect_project"].update(signature=lambda arguments: f"inspect_project:{_source_name(arguments)}:root", observe=_observe_json("inspect_project"), coverage=_coverage_inspect_project)
 CAPABILITIES["count_tokens"].update(signature=_sig_count_tokens, observe=_observe_json("count_tokens"), coverage=_coverage_count_tokens)
 CAPABILITIES["run_tests"].update(observe=_observe_json("run_tests"), coverage=_coverage_atomic("test_execution", lambda a, d: {"kind":"test_execution", "scope": d.get("scope") or a.get("scope") or "."}, lambda a, d: {"returncode": d.get("returncode")}))
 CAPABILITIES["git_status"].update(observe=_observe_json("git_status"), coverage=_coverage_git_status)
+CAPABILITIES["git_status"]["continue"] = _continue_git_status_page
 CAPABILITIES["git_diff"].update(observe=_observe_json("git_diff"), coverage=_coverage_git_diff)
+CAPABILITIES["git_diff"]["continue"] = _continue_git_diff_page
 CAPABILITIES["continue_observation"].update(observe=_observe_continue, coverage=_coverage_continue)
 CAPABILITIES["calculate"].update(observe=_observe_json("calculate"), coverage=_coverage_atomic("calculation", lambda a, d: {"kind":"calculation", "expression": a.get("expression")}))
 CAPABILITIES["run_command"].update(observe=_observe_json("run_command"), coverage=_coverage_atomic("sandbox_command", lambda a, d: {"kind":"sandbox_command", "source": _source_name(a), "cwd": a.get("cwd") or "."}, lambda a, d: {"returncode": d.get("returncode")}))
@@ -2547,7 +2758,6 @@ CAPABILITIES["list_tree"].update(
 CAPABILITIES["search_code"].update(
     public_arguments=_public_arguments_search, public_result=_public_result_search,
     model_projection=_model_projection_search, evidence_selector=_evidence_selector_file,
-    ecc_hide_frontiers=True,
 )
 CAPABILITIES["find_symbol"].update(
     public_arguments=_public_arguments_keys("source", "symbol", "path"), public_result=_public_result_find_symbol,
@@ -2592,18 +2802,21 @@ CAPABILITIES["git_diff"].update(public_arguments=_public_arguments_keys("source"
 # Workspace mutation is a provider capability, not an Agent action. The generic
 # Runtime only sees confirmation=required and delegates prepare/confirm here.
 CAPABILITIES["workspace_transaction"] = {
-    "description": "Change the real user workspace only after a preview and user confirmation.",
+    "description": "Change the real user workspace only after preview and user confirmation; successful writes materialize the verified final artifacts for provenance.",
     "availability": "workspace",
-    "produces_grounding": False,
+    "produces_grounding": True,
     "effect": "mutate",
-    "returns": "Files changed, checks, rollback, lasting effect.",
-    "establishes": ["A confirmed successful real-workspace change lasts after the job."],
-    "does_not_establish": ["Correctness beyond checks that actually ran."],
-    "caveats": ["Read existing files fresh. The user must confirm before the real workspace changes."],
+    "returns": "Files changed, checks, verified post-write Materials, rollback metadata, lasting effect.",
+    "establishes": ["A confirmed successful real-workspace change lasts after the job.", "The verified final file state becomes Material that Memory may cite without copying the whole artifact into a memory node."],
+    "does_not_establish": ["Correctness beyond checks that actually ran.", "Semantic knowledge; Main decides what atomic memories to derive from the artifact."],
+    "caveats": ["Read existing files fresh. The user must confirm before the real workspace changes.", "After success Main receives the real post-write observation and decides what to learn from it."],
     "confirmation": "required",
     "input_schema": _workspace_transaction.schema(),
     "prepare": _workspace_transaction.prepare,
     "confirm": _workspace_transaction.confirm,
+    "observe": _observe_workspace_transaction,
+    "model_projection": _model_projection_workspace_transaction,
+    "public_result": _public_result_workspace_transaction,
 }
 
 for _capability_entry in CAPABILITIES.values():
@@ -2727,8 +2940,8 @@ _STANDARD_SANDBOX_FIELDS = {
 _STANDARD_SANDBOX_BACKENDS = {"auto", "microsandbox", "docker", "bwrap", "process", "trusted_local"}
 _STANDARD_LIMIT_DEFAULTS = {
     "max_tree_entries": 200, "max_tree_depth": 6, "max_file_read_lines": 400,
-    "max_project_scan_entries": 20000, "max_project_scan_depth": 32,
-    "max_project_file_bytes": 4194304, "max_inspect_relation_edges": 60,
+    "max_project_scan_entries": None, "max_project_scan_depth": None,
+    "max_project_file_bytes": 4194304, "max_inspect_relation_edges": None,
     "max_git_diff_chars": 6000, "max_search_matches": 40,
     "max_search_ranges": 12, "max_search_range_lines": 16,
 }
@@ -2756,6 +2969,8 @@ def _validate_provider_config(value):
     _reject_provider_unknown(value, _STANDARD_CONFIG_FIELDS, "standard")
     for key, default in _STANDARD_LIMIT_DEFAULTS.items():
         item = value.get(key, default)
+        if key in {"max_project_scan_entries", "max_project_scan_depth", "max_inspect_relation_edges"} and item is None:
+            continue
         if not isinstance(item, int) or isinstance(item, bool) or item < 1:
             raise ValueError(f"STANDARD_PROVIDER_CONFIG_INVALID:standard.{key}")
     _validate_provider_sandbox(value.get("sandbox") or {}, "standard.sandbox")

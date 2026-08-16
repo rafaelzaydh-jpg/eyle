@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Shared safe-path boundary tests."""
 import os
+import pytest
 
 from tests.canonical import standard_registry
 from eyle.providers.standard_impl.security import _resolver_caminho_seguro
@@ -66,7 +67,10 @@ def test_symlink_para_fora_do_projeto_e_rejeitado(tmp_path):
     segredo = tmp_path / "segredo.txt"
     segredo.write_text("NAO_LER", encoding="utf-8")
     atalho = raiz / "atalho.txt"
-    atalho.symlink_to(segredo)
+    try:
+        atalho.symlink_to(segredo)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation unavailable on this host")
 
     assert _resolver_caminho_seguro(raiz, "atalho.txt") is None
     resultado = standard_registry().execute(

@@ -1,48 +1,25 @@
 {
   "release": "2.7.5",
   "app_version": "2.7.5",
-  "config_schema_version": "2.7.5-r2.5.2-ecc",
-  "revision": "rev2.5.3-ecc",
-  "released_at": "2026-08-14",
-  "title": "Rev2.5.3 ECC Clear Cognitive Prompt",
-  "compatibility": {
-    "backward_compatible": false,
-    "session_schema": "2.7.5-r2.5.2-ecc",
-    "pending_continuation_schema": "9-ecc",
-    "benchmark_schema": "2",
-    "policy": "Rev2.5.3 changes prompt wording, observability and public documentation only. The persisted AgentSession schema remains 2.7.5-r2.5.2-ecc and the pending continuation schema remains 9-ecc."
-  },
+  "config_schema_version": "2.7.5-r3-ecc",
+  "revision": "rev3-ecc",
+  "title": "Rev3 — Consolidated ECC + Epistemic Memory",
+  "python": ">=3.11",
   "architecture": {
-    "cognitive_protocol": [
+    "semantic_authority": "Main LLM",
+    "cognitive_moves": [
       "explorar",
       "construir",
       "concluir"
     ],
-    "main": "Sole semantic authority. Chooses ECC action, objective_state meaning/evolution, and all semantic Memory Graph content/relations/disposition.",
-    "runtime": "Non-semantic mechanical authority: schemas, budgets, Evidence, IDs, persistence, objective-state storage, revisions, anchors/freshness, graph topology, permissions, confirmation, transactions, rollback and deterministic execution. It never interprets objective status or gates completion.",
-    "capability_body": "Providers are replaceable deterministic bodies. Core has no desktop/robot/network/workspace domain branch.",
-    "world_scope": "Host supplies opaque core_memory.world_scope_id; Core hashes it into world:* without interpreting filesystem/device/network semantics.",
-    "memory": "Persistent internal graph transversal to all three ECC moves; not a capability or fourth action. Each move declares focus, disposition and semantic operations.",
-    "memory_disposition": "unchanged means Main judged persistent understanding unchanged and operations are empty; updated means Main judged a semantic model change and supplies graph operations.",
-    "memory_freshness": "Provider-owned Material anchors retain opaque locator, version/hash, freshness token and freshness_arguments. Changed reality degrades affected anchors without deleting semantic memory.",
-    "memory_topology": "Runtime exposes only mechanical graph structure/retrieval signals; it never assigns semantic importance, dead-code status, architectural role or relevance.",
-    "memory_retention": "Main may keep anything that can plausibly help later, without waiting for an explicit remember command; it stores compact meaning rather than raw observations.",
-    "memory_retrieval": "Before every ECC decision Runtime retrieves a bounded world+user graph view from current_request/focus, lexical/tag matches, graph neighborhood and topology fallback.",
-    "evidence": "Every physical Material automatically becomes active-session Evidence. Narrow provider selectors may create additional exact spans. Persistent Memory remains a separate LLM semantic choice.",
-    "selectors": "Memory Material support uses an optional opaque selector object validated by the originating provider evidence_selector hook.",
-    "freshness_arguments": "Providers own the opaque arguments required to recompute source tokens; Runtime persists and replays them without domain interpretation.",
-    "explorar": "Observe or non-persistently execute through attached providers.",
-    "construir": "Request persistent world changes through attached deterministic providers and Runtime safeguards.",
-    "concluir": "Terminal response chosen by Main; Runtime does not inspect objective status as a completion gate. Objective and memory cognition may accompany Concluir without creating phases.",
-    "context_separation": "current_request, objective_state, conversation_background, memory_graph, exploration_map, latest_observations/Evidence and runtime_feedback remain distinct.",
-    "provider_boundary": "Bundled Standard is only one Host body; alternative products can attach other providers without changing Core/Memory.",
-    "frontier_boundary": "Continuation mechanics remain provider/runtime-internal and are not a public ECC cognition primitive.",
-    "transport_cost_safety": "Provider/adaptor timeout and structured failure cost protections from Rev2.2+ remain fail-closed.",
-    "objective_state": "Transient LLM-owned semantic state separate from canonical current_request. It may be null, replaced or cleared; compound goals may contain bounded semantic children/constraints/outcomes, never execution steps or Runtime planning.",
-    "request_identity": "current_request is the immutable canonical user input for the AgentSession. Objective State is an interpretation of what remains to be achieved, not a rewrite of that input.",
-    "benchmark_background_ablation": "Diagnostic-only env switch EYLE_BENCHMARK_SUPPRESS_CONVERSATION_BACKGROUND suppresses prompt projection of conversation_background without deleting stored history or changing Memory, Objective, ECC, capabilities, or provider cache behavior.",
-    "prompt_style": "Simple direct language: understand intent and implications, remember reusable knowledge without waiting for explicit commands, keep freshness separate from semantic correctness, and require enough support before broad negative claims."
+    "memory": "Intrinsic epistemic Memory Graph v8 with Main-authored consolidation and associative recall cues",
+    "runtime": "Mechanical truth, safety, persistence, Evidence/Material, Coverage/Frontier, budgets, transactions",
+    "adapter": "Transport-only local boundary on port 8080 for remote OpenAI-compatible APIs"
   },
+  "memory_graph_schema": "2.7.5-r2.9-memory-graph-v8",
+  "session_schema": "2.7.5-r2.8.3-ecc",
+  "adapter_protocol": "eyle-adapter-transport-v1",
+  "execution_continuity": "execution-continuity-v1",
   "bundled_providers": [
     "standard"
   ],
@@ -67,6 +44,7 @@
   "ecc_operations": {
     "explorar": [
       "calculate",
+      "continue",
       "count_tokens",
       "find_symbol",
       "git_diff",
@@ -79,7 +57,11 @@
       "run_tests",
       "search",
       "symbol_relations",
-      "recall"
+      "recall",
+      "memory_overview",
+      "memory_history",
+      "memory_relation_history",
+      "memory_activate"
     ],
     "construir": [
       "export_sandbox_zip",
@@ -89,34 +71,18 @@
       "concluir"
     ]
   },
-  "removed": [
-    "eyle/core/knowledge.py",
-    "eyle/providers/memory.py",
-    "eyle/providers/memory_impl/",
-    "public memory.search",
-    "public memory.store",
-    "learned[] ECC checkpoint protocol",
-    "eyle/core/decision.py",
-    "eyle/core/investigation.py",
-    "eyle/core/tasks.py",
-    "eyle/core/task_memory.py",
-    "eyle/core/validation.py",
-    "eyle/core/continuation.py",
-    "eyle/core/token_budget.py",
-    "Main-authored await_user action",
-    "completion grounding gate",
-    "task/investigation update protocol",
-    "broad cached observation rematerialization",
-    "project-scoped Core Memory contract",
-    "core_memory.scope_root",
-    "line_start/line_end as universal Memory support selector",
-    "memory sidecar with implicit empty/updated meaning",
-    "Evidence creation conditional on Memory anchoring"
-  ],
-  "publication": {
-    "requires_extracted_artifact_verification": true
-  },
   "contracts": {
-    "benchmark_clean_transcript": "Authenticated Web DELETE /conversa clears only conversation transcript/pending confirmation when no job is active; persistent core_memory.sqlite3 Memory Graph is preserved."
+    "wire": "Main emits tolerant simple wire; Eyle canonicalizes and semantically validates strict ECC locally.",
+    "memory": "Retention is lifecycle, not truth. Epistemic/temporal metadata and relations are Main-authored and historically revisable.",
+    "recall": "FTS5/SQL candidate discovery is literal/mechanical; exact match sets are DB-cursor paged and Main judges relevance.",
+    "frontier": "Frontier is exact continuation after the current materialized page, never a semantic reading limit.",
+    "adapter": "Adapter remains semantically blind and negotiates transport mechanics through the formal handshake.",
+    "execution": "Confirmation/resume preserves logical identity, absolute deadline, generated-token fuse, and provider usage.",
+    "source": "workspace and eyle are physical source identities, never inferred semantically."
+  },
+  "publication": {
+    "requires_extracted_artifact_verification": true,
+    "public_docs_are_revision_neutral": true,
+    "runtime_state_committed": false
   }
 }

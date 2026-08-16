@@ -58,11 +58,18 @@ JS_FRAMEWORK_PACKAGES = {
 }
 
 
-def _scan_limits(config: Dict[str, Any]) -> Tuple[int, int, int]:
+def _scan_limits(config: Dict[str, Any]) -> Tuple[int | None, int, int]:
     agent = ((((config or {}).get("providers") or {}).get("standard") or {}))
+    raw_entries = agent.get("max_project_scan_entries")
+    max_entries = None if raw_entries is None else max(100, int(raw_entries))
+    # Depth remains a physical traversal declaration. Current defaults are high
+    # enough to behave as unbounded for normal source trees; an operator may
+    # explicitly lower it for pathological filesystems.
+    raw_depth = agent.get("max_project_scan_depth")
+    max_depth = 10000 if raw_depth is None else max(1, int(raw_depth))
     return (
-        max(100, int(agent.get("max_project_scan_entries", 20000) or 20000)),
-        max(1, int(agent.get("max_project_scan_depth", 32) or 32)),
+        max_entries,
+        max_depth,
         max(1024, int(agent.get("max_project_file_bytes", 4 * 1024 * 1024) or 4 * 1024 * 1024)),
     )
 
@@ -411,7 +418,8 @@ def inspect_project(root: str, config: Dict[str, Any]) -> Dict[str, Any]:
         for rel, sources in imported_by.items() if sources
     ]
     imported_counts.sort(key=lambda item: (-item["imported_by_count"], item["path"]))
-    max_relations = max(10, int((config or {}).get("agent", {}).get("max_inspect_relation_edges", 60) or 60))
+    raw_relation_limit = ((((config or {}).get("providers") or {}).get("standard") or {}).get("max_inspect_relation_edges"))
+    max_relations = None if raw_relation_limit is None else max(10, int(raw_relation_limit))
     local_import_edges.sort(key=lambda item: (item["from"], item["to"]))
     structural = {
         "files": len(files), "directories": len(collected["directories"]),
@@ -436,18 +444,18 @@ def inspect_project(root: str, config: Dict[str, Any]) -> Dict[str, Any]:
         "entrypoint_signals": entrypoints,
         "dependency_manifests": sorted(manifests),
         "config_files": sorted(configs),
-        "test_signals": {"has_tests": bool(tests), "files": sorted(tests)[:40], "count": len(tests)},
+        "test_signals": {"has_tests": bool(tests), "files": sorted(tests), "count": len(tests)},
         "ci_signals": {"has_ci": bool(ci_files), "files": ci_files},
         "framework_signals": [
             {"name": name, "sources": sorted(paths)} for name, paths in sorted(framework_sources.items())
         ],
         "relation_signals": {
             "local_import_edge_count": len(local_import_edges),
-            "local_import_edges": local_import_edges[:max_relations],
-            "local_import_edges_truncated": len(local_import_edges) > max_relations,
-            "most_imported_files": imported_counts[:20],
-            "route_files": route_files[:40],
-            "syntax_error_files": syntax_error_files[:20],
+            "local_import_edges": local_import_edges if max_relations is None else local_import_edges[:max_relations],
+            "local_import_edges_truncated": False if max_relations is None else len(local_import_edges) > max_relations,
+            "most_imported_files": imported_counts,
+            "route_files": route_files,
+            "syntax_error_files": syntax_error_files,
         },
         "ignored_by_reason": inventory.get("ignorados_por_motivo") or {},
         "policy": "Objective signals only; counts/order are measurements, not an importance or relevance decision.",

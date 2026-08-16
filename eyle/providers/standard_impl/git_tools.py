@@ -68,7 +68,7 @@ def git_status(root: str, max_entries: int = 200) -> Dict[str, Any]:
     entries: List[Dict[str, str]] = []
     counts = {"modified": 0, "added": 0, "deleted": 0, "renamed": 0, "untracked": 0, "conflicted": 0, "other": 0}
     lines = [line for line in result.get("stdout", "").splitlines() if line]
-    for raw in lines[: max(1, int(max_entries))]:
+    for raw in lines:
         code = raw[:2]
         path = raw[3:] if len(raw) > 3 else ""
         if " -> " in path:
@@ -141,7 +141,7 @@ def git_diff(
             return {"ok": False, "error_code": "PROTECTED_RESOURCE_READ_BLOCKED", "detail": "content access is restricted for this protected resource"}
 
     context_lines = max(0, min(10, int(context_lines)))
-    max_chars = max(1000, min(12000, int(max_chars)))
+    max_chars = None if max_chars is None else max(1, int(max_chars))
     base = ["diff", "--no-ext-diff"]
     if staged:
         base.append("--cached")
@@ -176,7 +176,7 @@ def git_diff(
             "detail": (diff.get("stderr") or diff.get("detail") or "git diff falhou")[:500],
         }
     raw = diff.get("stdout", "")
-    clipped = raw[:max_chars]
+    clipped = raw if max_chars is None else raw[:max_chars]
     total_added = sum(item["added"] or 0 for item in files)
     total_removed = sum(item["removed"] or 0 for item in files)
     return {

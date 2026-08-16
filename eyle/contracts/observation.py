@@ -1,4 +1,4 @@
-"""Universal physical observation/result contract for Eyle 2.7.5 Rev1.4.3.
+"""Universal physical observation/result contract for Eyle.
 
 Capabilities own how reality is executed, identified and projected into Material,
 Coverage and Frontier. Observation stores those physical facts generically.
@@ -113,7 +113,7 @@ def register_snapshot_handle(
 ) -> Dict[str, Any]:
     """Store one immutable snapshot payload and return a lightweight cursor handle."""
     kind = str(kind or "continuation").strip() or "continuation"
-    page_size = max(1, min(100, int(page_size or 12)))
+    page_size = max(1, int(page_size or 12))
     offset = max(0, int(offset or 0))
     snapshot_identity = {
         "kind": kind, "payload": payload, "reality_epoch": int(reality_epoch or 0),

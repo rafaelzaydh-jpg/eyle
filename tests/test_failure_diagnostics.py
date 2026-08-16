@@ -31,10 +31,10 @@ def test_service_carries_execution_failure_into_agent_conversation_context(monke
 def test_follow_up_receives_prior_runtime_failure_as_current_observation(monkeypatch,tmp_path):
     prompts=[]
     def fake(prompt,_cfg):
-        payload=json.loads(prompt); prompts.append(payload)
+        payload=json.loads(str(prompt)); prompts.append(payload)
         observation=payload["latest_observations"][0]
         assert observation["detail"]["source_type"] == "runtime_failure"
-        return {"type":"concluir","response":"O roteador não respondeu.","memory":{"focus":[],"disposition":"unchanged","operations":[]}}
+        return {"type":"concluir","response":"O roteador não respondeu.","memory_delta":[]}
     monkeypatch.setattr(core_agent,"executar_ecc_llm",fake)
     context={"recent_messages":[{"role":"assistant","content":"falhou","execution_failure":{"capability":"router.restart","error_code":"OFFLINE","detail":"router did not answer"}}]}
     provider_context={"standard":{"caminho_origem":str(tmp_path)},"core_memory":{"storage_dir":str(tmp_path.parent/(tmp_path.name+"_memory")),"world_scope_id":f"workspace:{tmp_path.resolve()}"}}

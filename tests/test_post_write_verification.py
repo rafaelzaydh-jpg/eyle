@@ -56,7 +56,8 @@ def test_compileall_failure_rolls_back_whole_transaction(monkeypatch,tmp_path):
 
 def test_no_tests_means_partial_validation_not_verified(tmp_path):
     app=tmp_path/"app.py"; app.write_text("VALUE = 1\n",encoding="utf-8")
-    state={"patches":[{"operation":"replace","path":"app.py","content":"VALUE = 2\n","file_hash_expected":hashlib.sha256(app.read_bytes()).hexdigest()}]}
+    from eyle.providers.standard_impl.text_hash import hash_texto
+    state={"patches":[{"operation":"replace","path":"app.py","content":"VALUE = 2\n","file_hash_expected":hash_texto(app.read_text(encoding="utf-8"))}]}
     result=workspace_tx.confirm(state,_ctx(tmp_path,tests_enabled=False))
     assert result["ok"] is True and result["detail"]["verification_state"] == "applied_partial"
     assert result["detail"]["limitations"] and app.read_text(encoding="utf-8") == "VALUE = 2\n"

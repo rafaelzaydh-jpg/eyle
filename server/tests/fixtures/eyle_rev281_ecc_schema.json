@@ -1,0 +1,130 @@
+{
+  "type": "object",
+  "properties": {
+    "decision": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "explorar"
+              ]
+            },
+            "operations": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 4,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "operation": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)?$"
+                  },
+                  "arguments": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "operation",
+                  "arguments"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "type",
+            "operations"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "construir"
+              ]
+            },
+            "operation": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)?$"
+            },
+            "arguments": {
+              "type": "object"
+            },
+            "on_success": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "type",
+            "operation",
+            "arguments"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "concluir"
+              ]
+            },
+            "response": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "type",
+            "response"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "memory_delta": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "properties": {
+          "op": {
+            "type": "string",
+            "enum": [
+              "remember",
+              "revise",
+              "relate",
+              "archive",
+              "supersede",
+              "retire_relation"
+            ]
+          },
+          "arguments": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "op",
+          "arguments"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "decision",
+    "memory_delta"
+  ],
+  "additionalProperties": false
+}

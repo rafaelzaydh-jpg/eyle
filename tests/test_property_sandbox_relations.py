@@ -1,4 +1,9 @@
 from __future__ import annotations
+
+import os
+import shlex
+import subprocess
+import sys
 from tests.canonical import run_agent
 from tests.canonical import standard_registry
 
@@ -62,11 +67,14 @@ def test_run_command_snapshot_persists_for_job_without_touching_real_workspace(m
     execution = ExecutionContext.from_config(base_config())
     token = bind_execution(execution)
     try:
+        write_argv = [sys.executable, "-c", "from pathlib import Path; Path('generated.txt').write_text('sandbox', encoding='utf-8')"]
+        read_argv = [sys.executable, "-c", "from pathlib import Path; print(Path('generated.txt').read_text(encoding='utf-8'))"]
+        render = subprocess.list2cmdline if os.name == "nt" else shlex.join
         first = sandbox_mod.executar_comando_livre_no_sandbox(
-            str(tmp_path), "printf sandbox > generated.txt", cfg,
+            str(tmp_path), render(write_argv), cfg,
         )
         second = sandbox_mod.executar_comando_livre_no_sandbox(
-            str(tmp_path), "cat generated.txt", cfg,
+            str(tmp_path), render(read_argv), cfg,
         )
         assert first["ok"] is True and second["ok"] is True
         assert "sandbox" in second["saida"]

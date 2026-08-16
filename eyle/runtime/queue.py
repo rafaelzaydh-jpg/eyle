@@ -92,7 +92,7 @@ def _validate_schema(conexao):
 
 
 def _inicializar_schema(conexao, caminho_banco, *, new_database):
-    """Create exactly the Eyle 2.7.5 Rev1.4.3 queue schema or reject the existing database."""
+    """Create exactly the supported queue schema or reject the existing database."""
     with _schema_lock:
         if caminho_banco in _schemas_prontos:
             return

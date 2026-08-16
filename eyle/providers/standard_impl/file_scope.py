@@ -1,4 +1,4 @@
-"""Canonical physical path-scope semantics for objective capabilities.
+"""Canonical physical path-scope semantics for file-oriented capabilities.
 
 The Main LLM may declare where a capability should observe. Runtime resolves
 that declaration mechanically. A literal project-relative file means exactly
@@ -20,7 +20,7 @@ _GLOB_MAGIC = "*?["
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
 
 
-class ObjectiveScopeError(ValueError):
+class FileScopeError(ValueError):
     def __init__(self, code: str, detail: str, *, selector: str | None = None):
         super().__init__(detail)
         self.code = str(code)
@@ -67,9 +67,9 @@ def _classify_literal(root: str, selector: str) -> Tuple[str, str | None]:
         return "directory", os.path.realpath(root)
     absolute = _resolver_caminho_seguro(root, selector)
     if absolute is None:
-        raise ObjectiveScopeError(
+        raise FileScopeError(
             "SEARCH_SCOPE_PATH_UNSAFE",
-            f"objective search scope path is unsafe: {selector}",
+            f"file scope path is unsafe: {selector}",
             selector=selector,
         )
     if os.path.isfile(absolute):
@@ -95,9 +95,9 @@ def _literal_match(relpath: str, selector: str, kind: str) -> bool:
 
 def _resolve_selector(root: str, selector: str, files: Sequence[str], *, role: str) -> Dict[str, Any]:
     if _unsafe_selector(selector):
-        raise ObjectiveScopeError(
+        raise FileScopeError(
             "SEARCH_SCOPE_PATH_UNSAFE",
-            f"objective search scope selector is unsafe: {selector}",
+            f"file scope selector is unsafe: {selector}",
             selector=selector,
         )
 
@@ -121,15 +121,15 @@ def _resolve_selector(root: str, selector: str, files: Sequence[str], *, role: s
                 "matched_files": 0,
                 "files": [],
             }
-        raise ObjectiveScopeError(
+        raise FileScopeError(
             "SEARCH_SCOPE_PATH_NOT_FOUND",
-            f"objective search include path does not exist: {selector}",
+            f"file scope include path does not exist: {selector}",
             selector=selector,
         )
     if kind == "special":
-        raise ObjectiveScopeError(
+        raise FileScopeError(
             "SEARCH_SCOPE_PATH_UNSUPPORTED",
-            f"objective search scope path is not a regular file or directory: {selector}",
+            f"file scope path is not a regular file or directory: {selector}",
             selector=selector,
         )
     matches = [path for path in files if _literal_match(path, selector, kind)]
@@ -142,7 +142,7 @@ def _resolve_selector(root: str, selector: str, files: Sequence[str], *, role: s
     }
 
 
-def resolve_objective_file_scope(
+def resolve_file_scope(
     root: str,
     files: Sequence[str],
     *,

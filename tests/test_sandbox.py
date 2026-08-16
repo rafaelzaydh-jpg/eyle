@@ -100,6 +100,9 @@ def test_recusa_do_sandbox_nao_vira_teste_pulado(monkeypatch, tmp_path):
 
 
 def test_execucao_padrao_usa_copia_e_nao_altera_projeto_real(tmp_path):
+    if os.name != "posix":
+        import pytest
+        pytest.skip("process backend resource limits are POSIX-only")
     arquivo = tmp_path / "estado.txt"
     arquivo.write_text("original", encoding="utf-8")
     # Este teste mede isolamento por copia, nao pressao de memoria. Alguns
@@ -166,6 +169,9 @@ def test_safe_sandbox_cwd_rejects_escape(tmp_path):
 
 
 def test_process_backend_timeout_kills_execution(tmp_path):
+    if os.name != "posix":
+        import pytest
+        pytest.skip("process backend resource limits are POSIX-only")
     cfg = _cfg(
         comandos_permitidos=[[sys.executable]],
         timeout_segundos=1,
@@ -183,6 +189,9 @@ def test_process_backend_timeout_kills_execution(tmp_path):
 
 
 def test_process_backend_returns_only_bounded_output_tail(tmp_path):
+    if os.name != "posix":
+        import pytest
+        pytest.skip("process backend resource limits are POSIX-only")
     cfg = _cfg(
         comandos_permitidos=[[sys.executable]],
         max_saida_kb=16,

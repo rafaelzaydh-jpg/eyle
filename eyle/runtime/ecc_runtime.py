@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 
 from eyle.core.ecc import public_name, resolve
 from eyle.core.evidence import evidence_record, retain_observation_evidence, evidence_ids_for_materials
+from eyle.core.memory import memory_activate_result, memory_continue_result, memory_history_result, memory_overview_result, memory_relation_history_result
 from eyle.runtime.execution_context import current_execution
 from eyle.runtime.observation import (
     lookup as lookup_observation,
@@ -23,6 +24,7 @@ from eyle.runtime.observation import (
     navigation_view,
     physical_effect_index_view,
     equivalent_result_seen,
+    frontier_store,
 )
 
 
@@ -212,6 +214,7 @@ def dispatch(
     registry: Any,
     pending_schema_version: str,
     validate_pending: Any,
+    execution_state: Optional[Dict[str, Any]] = None,
 ) -> DispatchOutcome:
     """Execute exactly one ECC operation selected by Main."""
     if operation == "recall":
@@ -224,6 +227,56 @@ def dispatch(
             session, str(arguments.get("evidence_id") or ""), registry,
             _runtime_context(session, config, provider_context),
         ))
+
+    if operation == "memory_overview":
+        if action_kind != "explorar" or set(arguments) - {"scope"}:
+            return DispatchOutcome({"operation": operation, "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": "ECC_OPERATION_ARGUMENTS_INVALID"})
+        if "scope" in arguments and str(arguments.get("scope")) not in {"all", "user", "world"}:
+            return DispatchOutcome({"operation": operation, "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": "ECC_OPERATION_ARGUMENTS_INVALID"})
+        result = memory_overview_result(session, arguments=arguments, provider_context=provider_context)
+        return DispatchOutcome(result, physical_progress=result.get("ok") is True)
+
+    if operation == "memory_history":
+        if action_kind != "explorar" or set(arguments) != {"id"} or not isinstance(arguments.get("id"), str):
+            return DispatchOutcome({"operation": operation, "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": "ECC_OPERATION_ARGUMENTS_INVALID"})
+        result = memory_history_result(session, arguments=arguments, provider_context=provider_context)
+        return DispatchOutcome(result, physical_progress=result.get("ok") is True)
+
+    if operation == "memory_relation_history":
+        if action_kind != "explorar" or set(arguments) != {"id"} or not isinstance(arguments.get("id"), str):
+            return DispatchOutcome({"operation": operation, "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": "ECC_OPERATION_ARGUMENTS_INVALID"})
+        result = memory_relation_history_result(session, arguments=arguments, provider_context=provider_context)
+        return DispatchOutcome(result, physical_progress=result.get("ok") is True)
+
+    if operation == "memory_activate":
+        allowed_memory_args = {"query", "queries", "ids", "tags", "natures", "volatilities", "relation_labels", "scope", "retention", "include_neighbors", "limit"}
+        valid = action_kind == "explorar" and not (set(arguments) - allowed_memory_args)
+        valid = valid and ("query" not in arguments or isinstance(arguments.get("query"), str))
+        valid = valid and ("queries" not in arguments or (isinstance(arguments.get("queries"), list) and all(isinstance(v, str) for v in arguments.get("queries") or [])))
+        valid = valid and ("ids" not in arguments or (isinstance(arguments.get("ids"), list) and all(isinstance(v, str) for v in arguments.get("ids") or [])))
+        valid = valid and ("tags" not in arguments or (isinstance(arguments.get("tags"), list) and all(isinstance(v, str) for v in arguments.get("tags") or [])))
+        valid = valid and ("natures" not in arguments or (isinstance(arguments.get("natures"), list) and all(isinstance(v, str) for v in arguments.get("natures") or [])))
+        valid = valid and ("volatilities" not in arguments or (isinstance(arguments.get("volatilities"), list) and all(isinstance(v, str) for v in arguments.get("volatilities") or [])))
+        valid = valid and ("relation_labels" not in arguments or (isinstance(arguments.get("relation_labels"), list) and all(isinstance(v, str) for v in arguments.get("relation_labels") or [])))
+        valid = valid and ("scope" not in arguments or str(arguments.get("scope")) in {"all", "user", "world"})
+        valid = valid and ("retention" not in arguments or str(arguments.get("retention")) in {"all", "temporary", "persistent"})
+        valid = valid and ("include_neighbors" not in arguments or isinstance(arguments.get("include_neighbors"), bool))
+        valid = valid and ("limit" not in arguments or (isinstance(arguments.get("limit"), int) and not isinstance(arguments.get("limit"), bool) and int(arguments.get("limit")) >= 1))
+        if not valid:
+            return DispatchOutcome({"operation": operation, "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": "ECC_OPERATION_ARGUMENTS_INVALID"})
+        result = memory_activate_result(
+            session, arguments=arguments, registry=registry, config=config, provider_context=provider_context,
+        )
+        return DispatchOutcome(result, physical_progress=result.get("ok") is True)
+
+    if operation == "continue" and action_kind == "explorar" and set(arguments) == {"frontier"}:
+        frontier_id = str(arguments.get("frontier") or "")
+        frontier = frontier_store(session.observation_ledger).get(frontier_id)
+        if isinstance(frontier, dict) and str(frontier.get("source_capability") or "") == "core.memory":
+            result = memory_continue_result(
+                session, frontier_id=frontier_id, registry=registry, config=config, provider_context=provider_context,
+            )
+            return DispatchOutcome(result, physical_progress=result.get("ok") is True)
 
     available = available_internal(registry, config, provider_context)
     capability = resolve(operation, action_kind, registry, available)
@@ -270,6 +323,7 @@ def dispatch(
             "continuation_kind": "capability_confirmation",
             "question": str(prepared.get("question") or "").strip(),
             "session": session.to_dict(),
+            "execution_state": copy.deepcopy(execution_state),
             "capability": capability,
             "provider": str(prepared.get("provider") or ""),
             "confirmation_id": confirmation_id,
@@ -427,7 +481,7 @@ def exploration_map(session: Any, registry: Any | None = None) -> List[Dict[str,
     were complete. Continuation handles are intentionally not exposed here.
     """
     out: List[Dict[str, Any]] = []
-    for item in navigation_view(session)[-24:]:
+    for item in navigation_view(session):
         if not isinstance(item, dict):
             continue
         operation = public_name(str(item.get("capability") or ""), registry)
@@ -450,4 +504,4 @@ def exploration_map(session: Any, registry: Any | None = None) -> List[Dict[str,
 
 
 def effects_view(session: Any) -> List[Dict[str, Any]]:
-    return physical_effect_index_view(session.observation_ledger)[-16:]
+    return physical_effect_index_view(session.observation_ledger)

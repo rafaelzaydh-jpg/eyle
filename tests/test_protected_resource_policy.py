@@ -156,9 +156,12 @@ def test_symlink_and_hardlink_aliases_share_protected_physical_identity(tmp_path
     env = tmp_path / ".env"
     env.write_text("TOKEN=TOP_SECRET\n", encoding="utf-8")
     symlink = tmp_path / "alias.txt"
-    symlink.symlink_to(env.name)
     hardlink = tmp_path / "copy.txt"
-    hardlink.hardlink_to(env)
+    try:
+        symlink.symlink_to(env.name)
+        hardlink.hardlink_to(env)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink/hardlink creation unavailable on this host")
     for name in ("alias.txt", "copy.txt"):
         with pytest.raises(ErroLeituraProjeto) as exc:
             ler_faixa_projeto(tmp_path, name, 1, 1)
@@ -184,8 +187,11 @@ def test_search_negative_observation_preserves_protected_coverage_boundary(tmp_p
 
 def test_sandbox_omits_symlink_and_hardlink_aliases_of_protected_resource(tmp_path):
     (tmp_path / ".env").write_text("TOKEN=TOP_SECRET\n", encoding="utf-8")
-    (tmp_path / "alias.txt").symlink_to(".env")
-    (tmp_path / "copy.txt").hardlink_to(tmp_path / ".env")
+    try:
+        (tmp_path / "alias.txt").symlink_to(".env")
+        (tmp_path / "copy.txt").hardlink_to(tmp_path / ".env")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink/hardlink creation unavailable on this host")
     limits = sandbox_mod._limites({
         "timeout_segundos": 5, "cpu_segundos": 5, "memoria_mb": 256,
         "max_processos": 16, "max_arquivos_abertos": 32, "max_saida_kb": 32,
@@ -288,7 +294,10 @@ def test_resource_scoped_block_survives_session_serialization(tmp_path):
 
 def test_protected_symlink_does_not_hide_normal_target_source(tmp_path):
     (tmp_path / "app.py").write_text("value = 1\n", encoding="utf-8")
-    (tmp_path / ".env").symlink_to("app.py")
+    try:
+        (tmp_path / ".env").symlink_to("app.py")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation unavailable on this host")
     with pytest.raises(ErroLeituraProjeto) as exc:
         ler_faixa_projeto(tmp_path, ".env", 1, 1)
     assert exc.value.error_code == "PROTECTED_RESOURCE_READ_BLOCKED"

@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import copy
 import json
-import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from llm.executar import ErroLLM, PROMPT_ECC, executar_ecc as executar_ecc_llm
 from llm.structured import contract_instruction
+from llm.protocol import CanonicalPrompt
 from eyle.capabilities.registry import CapabilityRegistry
 from eyle.runtime.continuation import PENDING_SCHEMA_VERSION, validate_pending_continuation, confirmation_control
 from eyle.runtime.ecc_runtime import (
@@ -37,7 +37,10 @@ from eyle.runtime.observation import (
 )
 from eyle.runtime.token_budget import available_user_prompt_tokens, estimate_tokens
 from .ecc import catalog as ecc_catalog, public_name
-from .memory import apply_memory_sidecar, memory_environment, memory_graph_view
+from .memory import (
+    apply_memory_sidecar, memory_available, memory_environment, project_memory_view,
+    release_memory_navigation, sync_memory_lifecycle,
+)
 from .session import AgentSession
 
 
@@ -45,23 +48,17 @@ def _return(status: str, text: str, pending: Any, details: Dict[str, Any], full:
     return (status, text, pending, details) if full else (status, text, pending)
 
 
-def _conversation_history(context: Any) -> List[Dict[str, str]]:
-    messages = list((context or {}).get("recent_messages") or []) if isinstance(context, dict) else []
-    out: List[Dict[str, str]] = []
-    for item in messages[-12:]:
-        if not isinstance(item, dict) or set(item) != {"role", "content"}:
-            continue
-        role = str(item.get("role") or "")
-        content = item.get("content")
-        if role in {"user", "assistant"} and isinstance(content, str) and content.strip():
-            out.append({"role": role, "content": content.strip()})
-    return out
+def _terminal_return(
+    session: AgentSession, status: str, text: str, details: Dict[str, Any], full: bool,
+    *, provider_context: Dict[str, Any],
+):
+    """Finish one logical task and release navigation-only Memory snapshots.
 
-
-def _benchmark_suppress_conversation_background() -> bool:
-    """Diagnostic ablation switch; never mutates or deletes stored conversation history."""
-    value = str(os.getenv("EYLE_BENCHMARK_SUPPRESS_CONVERSATION_BACKGROUND", "") or "").strip().lower()
-    return value in {"1", "true", "yes", "on"}
+    Learned Memory survives. DB recall selections exist only to continue this
+    Session, so they are released when the logical task can no longer resume.
+    """
+    release_memory_navigation(session, provider_context)
+    return _return(status, text, None, details, full)
 
 
 def _bounded_text(value: Any, max_chars: int) -> str:
@@ -73,37 +70,32 @@ def _bounded_text(value: Any, max_chars: int) -> str:
     return text[:head] + "\n...[ECC context cropped at physical context boundary]...\n" + text[-(room-head):]
 
 
-def _shrink_payload(payload: Dict[str, Any], budget_tokens: int, chars_per_token: int) -> Dict[str, Any]:
+def _shrink_payload(payload: Dict[str, Any], budget_tokens: int | None, chars_per_token: int) -> Dict[str, Any]:
     """Mechanical context fitting; never semantic routing or relevance selection."""
     clone = copy.deepcopy(payload)
+    if budget_tokens is None:
+        return clone
     if estimate_tokens(clone, chars_per_token) <= budget_tokens:
         return clone
-
-    # Drop oldest conversation first; current request is never cropped away.
-    history = clone.get("conversation_background")
-    while isinstance(history, list) and len(history) > 2 and estimate_tokens(clone, chars_per_token) > budget_tokens:
-        history.pop(0)
 
     # Exploration map is physical navigation metadata and can be reduced by age.
     nav = clone.get("exploration_map")
     while isinstance(nav, list) and len(nav) > 8 and estimate_tokens(clone, chars_per_token) > budget_tokens:
         nav.pop(0)
 
-    # Persistent Memory is already a bounded graph view. Crop the least-ranked tail
-    # mechanically if a pathological prompt still exceeds the physical budget.
-    memory_graph = clone.get("memory_graph")
-    if isinstance(memory_graph, dict):
-        nodes = memory_graph.get("nodes")
+    # Active Memory View was explicitly chosen by Main. A configured physical
+    # provider context boundary may force serialization fitting, but there is no
+    # semantic node-count ceiling and Runtime never substitutes hidden retrieval.
+    memory_view = clone.get("memory_view")
+    if isinstance(memory_view, dict):
+        nodes = memory_view.get("nodes")
         while isinstance(nodes, list) and len(nodes) > 6 and estimate_tokens(clone, chars_per_token) > budget_tokens:
-            nodes.pop()
+            nodes.pop(0)
         if isinstance(nodes, list):
             keep = {str(item.get("id") or "") for item in nodes if isinstance(item, dict)}
-            edges = memory_graph.get("edges")
+            edges = memory_view.get("edges")
             if isinstance(edges, list):
-                memory_graph["edges"] = [
-                    item for item in edges if isinstance(item, dict)
-                    and str(item.get("source") or "") in keep and str(item.get("target") or "") in keep
-                ]
+                memory_view["edges"] = [item for item in edges if isinstance(item, dict) and str(item.get("source") or "") in keep and str(item.get("target") or "") in keep]
 
     # Raw latest observations are the only source body allowed to remain hot.
     latest = clone.get("latest_observations")
@@ -135,56 +127,59 @@ def _compile_prompt(
     provider_context: Dict[str, Any],
     conversation_context: Any,
     registry: CapabilityRegistry,
-) -> Tuple[str, set[str]]:
-    if not session.conversation_background:
-        session.conversation_background = _conversation_history(conversation_context)
+) -> Tuple[CanonicalPrompt, set[str]]:
     execution = current_execution()
     if execution is not None:
         execution.assert_canonical_request(session.request)
 
     available = available_internal(registry, config, provider_context)
-    surface = ecc_catalog(registry, config, available)
-    graph_view = memory_graph_view(
-        session, query=session.request, registry=registry, config=config, provider_context=provider_context, limit=14,
+    memory_enabled = memory_available(provider_context)
+    surface = ecc_catalog(registry, config, available, memory_enabled=memory_enabled)
+    active_memory = project_memory_view(
+        session, registry=registry, config=config, provider_context=provider_context, limit=30,
     )
-    # Keep the stable capability/environment prefix first for DeepSeek prefix cache.
-    # Memory is dynamic by design and therefore lives after request/background.
-    suppress_background = _benchmark_suppress_conversation_background()
-    projected_background = [] if suppress_background else session.conversation_background[-10:]
-    payload = {
+    # Eyle has one deterministic prompt template. Stable provider/body material
+    # is physically before all per-turn state, so any provider with prefix caching
+    # can reuse it without the Core knowing that provider's cache API.
+    stable_packet = {
         "ecc_operations": surface,
         "runtime_environment": registry.environment({"config": config or {}, "provider_context": provider_context or {}}),
+    }
+    dynamic_packet = {
         "current_request": session.request,
-        "objective_state": copy.deepcopy(session.objective_state),
-        "conversation_background": projected_background,
-        "request_context": session.request_context[-8:],
-        "memory_graph": graph_view,
+        "memory_environment": memory_environment(provider_context),
+        "memory_view": active_memory,
         "exploration_map": exploration_map(session, registry),
         "latest_observations": copy.deepcopy(pending_results(session)),
         "runtime_effects": effects_view(session),
-        "runtime_feedback": copy.deepcopy(session.runtime_feedback[-8:]),
+        # Keep repair feedback last among variable semantic state so a retry can
+        # preserve the longest possible prefix and append only repair facts.
         "turn": session.turn,
+        "runtime_feedback": copy.deepcopy(session.runtime_feedback[-8:]),
     }
+    payload = {**stable_packet, **dynamic_packet}
 
-    llm_cfg = config.get("llm") or {}
     context_cfg = config.get("context_engine") or {}
     chars_per_token = max(1, int(context_cfg.get("chars_per_token_fallback", 3) or 3))
-    output_tokens = int(llm_cfg.get("agent_max_tokens", 3600) or 3600)
     calibration = execution.prompt_token_calibration if execution is not None else 1.0
     full_system_prompt = PROMPT_ECC.rstrip() + "\n\n" + contract_instruction("ecc")
     prompt_budget = available_user_prompt_tokens(
-        config, full_system_prompt, output_tokens=output_tokens, token_estimate_multiplier=calibration,
+        config, full_system_prompt, output_tokens=0, token_estimate_multiplier=calibration,
     )
     pre_tokens = estimate_tokens(payload, chars_per_token)
     fitted = _shrink_payload(payload, prompt_budget, chars_per_token)
-    prompt = json.dumps(fitted, ensure_ascii=False, separators=(",", ":"), default=str)
-    post_tokens = estimate_tokens(prompt, chars_per_token)
+    fitted_stable = {name: fitted[name] for name in ("ecc_operations", "runtime_environment") if name in fitted}
+    fitted_dynamic = {name: fitted[name] for name in (
+        "current_request", "memory_environment", "memory_view", "exploration_map",
+        "latest_observations", "runtime_effects", "turn", "runtime_feedback",
+    ) if name in fitted}
+    prompt = CanonicalPrompt(stable=fitted_stable, dynamic=fitted_dynamic)
+    post_tokens = estimate_tokens(prompt.wire_text, chars_per_token)
     if execution is not None:
         components = {}
         for name in (
-            "current_request", "objective_state", "request_context", "conversation_background", "memory_graph",
-            "exploration_map", "latest_observations", "runtime_effects", "runtime_feedback",
-            "runtime_environment", "ecc_operations",
+            "current_request", "memory_view", "memory_environment", "exploration_map",
+            "latest_observations", "runtime_effects", "runtime_feedback", "runtime_environment", "ecc_operations",
         ):
             value = fitted.get(name)
             encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
@@ -196,19 +191,19 @@ def _compile_prompt(
                 metric["items"] = len(value)
             components[name] = metric
         execution.begin_call(mode="ecc", turn=session.turn, prompt={
-            "characters": len(prompt),
+            "characters": len(prompt.wire_text),
+            "stable_prefix_characters": len(prompt.stable_text),
+            "stable_prefix_hash": prompt.stable_hash,
             "estimated_tokens": post_tokens,
             "pre_crop_estimated_tokens": pre_tokens,
             "crop_applied": post_tokens < pre_tokens,
             "prompt_budget_tokens": prompt_budget,
+            "local_context_limit_enabled": prompt_budget is not None,
             "ecc_explore_operations": len(surface.get("explorar") or []),
             "ecc_build_operations": len(surface.get("construir") or []),
-            "memory_nodes_projected": len((fitted.get("memory_graph") or {}).get("nodes") or []) if isinstance(fitted.get("memory_graph"), dict) else 0,
-            "memory_edges_projected": len((fitted.get("memory_graph") or {}).get("edges") or []) if isinstance(fitted.get("memory_graph"), dict) else 0,
+            "memory_nodes_projected": len((fitted.get("memory_view") or {}).get("nodes") or []) if isinstance(fitted.get("memory_view"), dict) else 0,
+            "memory_edges_projected": len((fitted.get("memory_view") or {}).get("edges") or []) if isinstance(fitted.get("memory_view"), dict) else 0,
             "latest_observation_items": len(fitted.get("latest_observations") or []),
-            "conversation_background_suppressed_for_benchmark": suppress_background,
-            "conversation_background_stored_items": len(session.conversation_background),
-            "conversation_background_projected_items": len(fitted.get("conversation_background") or []),
             "components_after": components,
             "semantic_packet_fields": list(fitted.keys()),
         })
@@ -216,7 +211,17 @@ def _compile_prompt(
 
 
 def _structured_error(error: Exception) -> bool:
-    return str(getattr(error, "error_code", "") or "").startswith("STRUCTURED_RESPONSE_INVALID:ecc:")
+    code = str(getattr(error, "error_code", "") or "")
+    return code.startswith("STRUCTURED_RESPONSE_INVALID:ecc:") or code == "LLM_STRUCTURED_RESPONSE_UNSATISFIED"
+
+
+def _structured_fingerprint(error: Exception) -> str:
+    observed = getattr(error, "structured_observed", None)
+    try:
+        observed_text = json.dumps(observed, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    except Exception:
+        observed_text = str(observed or "")
+    return f"{getattr(error, 'error_code', '')}|{observed_text[:4000]}"
 
 
 def _feedback(session: AgentSession, code: str, **facts: Any) -> None:
@@ -239,10 +244,10 @@ def _details(
             used.append(name)
     materials = material_items(session.observation_ledger)
     evidence = session.evidence if isinstance(session.evidence, dict) else {}
-    graph_view = memory_graph_view(
-        session, query=session.request, registry=registry, config=config, provider_context=provider_context or {}, limit=30,
+    graph_view = project_memory_view(
+        session, registry=registry, config=config, provider_context=provider_context or {}, limit=30,
     )
-    graph_env = memory_environment(provider_context or {})
+    graph_counts_view = graph_view.get("graph") if isinstance(graph_view.get("graph"), dict) else {}
     memory_feedback = [
         item for item in session.runtime_feedback
         if isinstance(item, dict) and item.get("code") == "MEMORY_DELTA_REJECTED"
@@ -264,15 +269,15 @@ def _details(
         "operation_replays": replay_count(session),
         "observation_ledger_size": len(events),
         "grounding_count_total": len(materials),
-        "memory_nodes": int(graph_env.get("nodes") or 0),
-        "memory_edges": int(graph_env.get("edges") or 0),
-        "memory_isolated_nodes": int(graph_env.get("isolated_nodes") or 0),
+        "memory_nodes": int(graph_counts_view.get("nodes") or 0),
+        "memory_temporary_nodes": int(graph_counts_view.get("temporary_nodes") or 0),
+        "memory_persistent_nodes": int(graph_counts_view.get("persistent_nodes") or 0),
+        "memory_edges": int(graph_counts_view.get("edges") or 0),
+        "memory_isolated_nodes": int(graph_counts_view.get("isolated_nodes") or 0),
         "memory_projected_nodes": len(projected_nodes),
         "memory_fresh_nodes": sum(1 for item in projected_nodes if item.get("freshness") == "fresh"),
         "memory_degraded_nodes": sum(1 for item in projected_nodes if item.get("freshness") in {"degraded", "stale"}),
-        "memory_semantic_nodes": sum(1 for item in projected_nodes if item.get("freshness") in {"semantic", "unbound"}),
-        "objective_present": isinstance(session.objective_state, dict),
-        "objective_children": len((session.objective_state or {}).get("children") or []) if isinstance(session.objective_state, dict) else 0,
+        "memory_semantic_nodes": sum(1 for item in projected_nodes if item.get("freshness") in {None, "semantic", "unbound"}),
         "evidence_items": len(evidence or {}),
         "memory_rejection_events": len(memory_feedback),
         "memory_rejection_reasons": rejection_reasons[:12],
@@ -292,28 +297,6 @@ def _deadline_exceeded() -> bool:
     return execution is not None and time.monotonic() >= float(execution.deadline_monotonic)
 
 
-def _apply_objective_sidecar(session: AgentSession, raw: Any) -> bool:
-    """Apply LLM-authored objective state mechanically, without semantic interpretation.
-
-    The Runtime stores/replaces/clears exactly what Main declared. Objective status
-    never gates ECC completion or selects operations. Missing sidecars are tolerated
-    only for in-process test doubles; the canonical structured contract requires it.
-    """
-    if not isinstance(raw, dict):
-        return False
-    disposition = str(raw.get("disposition") or "")
-    if disposition == "updated" and isinstance(raw.get("state"), dict):
-        new_state = copy.deepcopy(raw["state"])
-        changed = new_state != session.objective_state
-        session.objective_state = new_state
-        return changed
-    if disposition == "cleared":
-        changed = session.objective_state is not None
-        session.objective_state = None
-        return changed
-    return False
-
-
 def _run(
     session: AgentSession,
     config: Dict[str, Any],
@@ -324,15 +307,16 @@ def _run(
     registry: CapabilityRegistry,
 ) -> tuple:
     execution = current_execution()
-    protocol_retry_streak = 0
+    protocol_failures: Dict[str, int] = {}
     last_signature: Optional[str] = None
     stagnant = 0
 
     while True:
         if _deadline_exceeded():
-            return _return(
-                "failed", "A tarefa excedeu o prazo de execução.", None,
+            return _terminal_return(
+                session, "failed", "A tarefa excedeu o prazo de execução.",
                 _details(session, "failed", config, registry, provider_context, failure_code="TASK_DEADLINE_EXCEEDED"), full,
+                provider_context=provider_context,
             )
         session.turn += 1
         if execution is not None:
@@ -342,35 +326,48 @@ def _run(
         try:
             decision = executar_ecc_llm(prompt, config)
         except ErroLLM as error:
-            if _structured_error(error) and protocol_retry_streak < 1:
-                protocol_retry_streak += 1
-                _feedback(session, "ECC_PROTOCOL_RETRY", rejected_code=error.error_code, state_unchanged=True)
+            if _structured_error(error):
+                # A malformed cognition envelope is a recoverable
+                # serialization event, not task death. The same Main receives
+                # feedback on the next turn with the same Session, ExecutionContext,
+                # generated-token fuse and deadline. Physical limits remain the
+                # only bounded stop conditions.
+                fingerprint = _structured_fingerprint(error)
+                repeat_count = protocol_failures.get(fingerprint, 0) + 1
+                protocol_failures[fingerprint] = repeat_count
+                observed = getattr(error, "structured_observed", None)
+                detail = str(getattr(getattr(error, "structured_error", None), "detail", "") or str(error))[:900]
+                guidance = (
+                    "Re-emit the same intended decision as the simplest valid wire JSON; do not repeat capabilities merely because serialization failed."
+                    if repeat_count < 3 else
+                    "The same envelope error repeated. Simplify aggressively: flat top-level type + required fields + memory_delta, preserving semantics."
+                )
+                _feedback(
+                    session, "ECC_PROTOCOL_RECOVERY", rejected_code=error.error_code,
+                    detail=detail, observed=observed if isinstance(observed, dict) else None,
+                    repeat_count=repeat_count, state_unchanged=True, guidance=guidance,
+                )
                 continue
             code = error.error_code or "LLM_FAILED"
-            return _return(
-                "failed", f"A chamada LLM falhou: {code}.", None,
+            return _terminal_return(
+                session, "failed", f"A chamada LLM falhou: {code}.",
                 _details(session, "failed", config, registry, provider_context, failure_code=code, limitations=[str(error)]), full,
+                provider_context=provider_context,
             )
         except Exception as error:
-            return _return(
-                "failed", "O runtime ECC encontrou um erro interno.", None,
+            return _terminal_return(
+                session, "failed", "O runtime ECC encontrou um erro interno.",
                 _details(session, "failed", config, registry, provider_context, failure_code="ECC_RUNTIME_ERROR", limitations=[str(error)]), full,
+                provider_context=provider_context,
             )
 
-        # A valid structured decision closes the current protocol-repair episode.
-        # A later malformed decision gets its own bounded repair chance instead of
-        # inheriting a retry already spent many turns earlier.
-        protocol_retry_streak = 0
+        # A valid structured decision closes the current serialization episode.
+        protocol_failures.clear()
 
-        # Objective State is transient semantic cognition owned by Main. Runtime
-        # only stores/replaces/clears the declared state; it never interprets
-        # objective status, turns it into a plan, or uses it as a completion gate.
-        _apply_objective_sidecar(session, decision.get("objective"))
-
-        # Persistent Memory is a transversal sidecar of the chosen ECC move.
-        # Main owns semantic graph edits; Runtime only validates/persists them.
+        # Persistent learning is transversal to the chosen ECC move. ``memory=[]``
+        # means nothing worth keeping changed; Runtime never chooses memory value.
         memory_outcome = apply_memory_sidecar(
-            session, decision.get("memory"), registry=registry, provider_context=provider_context,
+            session, decision.get("memory_delta"), registry=registry, provider_context=provider_context,
         )
         if memory_outcome.get("ok") is not True:
             _feedback(
@@ -383,36 +380,45 @@ def _run(
         kind = str(decision.get("type") or "")
         if kind == "concluir":
             clear_pending_results(session)
-            return _return(
-                "completed", str(decision.get("response") or "").strip(), None,
+            return _terminal_return(
+                session, "completed", str(decision.get("response") or "").strip(),
                 _details(session, "completed", config, registry, provider_context), full,
+                provider_context=provider_context,
             )
 
-        operation = str(decision.get("operation") or "")
-        arguments = dict(decision.get("arguments") or {})
-        signature = json.dumps({"type": kind, "operation": operation, "arguments": arguments}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
-        outcome = dispatch(
-            session,
-            action_kind=kind,
-            operation=operation,
-            arguments=arguments,
-            config=config,
-            provider_context=provider_context,
-            registry=registry,
-            pending_schema_version=PENDING_SCHEMA_VERSION,
-            validate_pending=validate_pending_continuation,
-        )
-        if outcome.pending is not None:
-            return _return(
-                "confirmation_required", str(outcome.pending.get("question") or ""), outcome.pending,
-                _details(session, "confirmation_required", config, registry, provider_context), full,
+        selected = decision.get("operations") if kind == "explorar" else [{
+            "operation": decision.get("operation"), "arguments": decision.get("arguments") or {},
+        }]
+        selected = [item for item in (selected or []) if isinstance(item, dict)]
+        signature = json.dumps({"type": kind, "operations": selected}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        outcomes = []
+        for selected_op in selected:
+            operation = str(selected_op.get("operation") or "")
+            arguments = dict(selected_op.get("arguments") or {})
+            outcome = dispatch(
+                session, action_kind=kind, operation=operation, arguments=arguments,
+                config=config, provider_context=provider_context, registry=registry,
+                pending_schema_version=PENDING_SCHEMA_VERSION, validate_pending=validate_pending_continuation,
+                execution_state=(execution.continuation_state() if execution is not None else None),
             )
-        set_pending_results(session, [outcome.result])
+            outcomes.append(outcome)
+            if outcome.pending is not None:
+                return _return(
+                    "confirmation_required", str(outcome.pending.get("question") or ""), outcome.pending,
+                    _details(session, "confirmation_required", config, registry, provider_context), full,
+                )
+        set_pending_results(session, [outcome.result for outcome in outcomes])
 
-        no_new_reality = not outcome.physical_progress and not memory_progress
+        physical_progress = any(outcome.physical_progress for outcome in outcomes)
+        # Every successful Build observation returns to Main.
+        # This lets the same brain learn from the real post-write Material/effect,
+        # attach provenance, and only then decide whether to conclude.
+
+        no_new_reality = not physical_progress and not memory_progress
+        statuses = [str(outcome.result.get("status") or "") for outcome in outcomes]
         if signature == last_signature and no_new_reality:
             stagnant += 1
-        elif no_new_reality and str(outcome.result.get("status") or "") == "already_observed":
+        elif no_new_reality and statuses and all(status == "already_observed" for status in statuses):
             stagnant += 1
         else:
             stagnant = 0
@@ -420,12 +426,11 @@ def _run(
         if stagnant >= 2:
             _feedback(
                 session, "NO_PROGRESS",
-                repeated_operation=operation,
-                physical_execution=bool(outcome.result.get("executed") is True),
-                new_physical_observation=bool(outcome.physical_progress),
-                new_memory=False,
+                repeated_operations=[str(item.get("operation") or "") for item in selected],
+                physical_execution=any(bool(outcome.result.get("executed") is True) for outcome in outcomes),
+                new_physical_observation=bool(physical_progress), new_memory=False,
                 reality_epoch=session.reality_epoch,
-                fact="Equivalent requests are producing no new physical observation or persistent memory change.",
+                fact="Equivalent requests are producing no new observation, memory navigation, or learned memory.",
             )
 
 
@@ -472,14 +477,22 @@ def _executar_agente_bound(
                 {"status": "failed", "failure_code": code, "architecture": "ECC"}, full,
             )
         if execution is not None:
-            execution.bind_session_baseline(session)
-            execution.bind_canonical_request(session.request)
+            execution.bind_session_baseline(session, reset_agent_turns=False)
+            execution.assert_canonical_request(session.request)
+        if _deadline_exceeded():
+            session.pending_operation = {}
+            return _terminal_return(
+                session, "failed", "A tarefa excedeu o prazo lógico de execução antes da confirmação.",
+                _details(session, "failed", config, registry, provider_context, failure_code="TASK_DEADLINE_EXCEEDED"), full,
+                provider_context=provider_context,
+            )
         control = confirmation_control(resposta_usuario)
         if control == "cancelar":
             session.pending_operation = {}
-            return _return(
-                "cancelled", "Ok, cancelado. A alteração pendente não foi aplicada.", None,
+            return _terminal_return(
+                session, "cancelled", "Ok, cancelado. A alteração pendente não foi aplicada.",
                 _details(session, "cancelled", config, registry, provider_context, failure_code="CANCELLED"), full,
+                provider_context=provider_context,
             )
         if control != "aplicar":
             return _return(
@@ -492,6 +505,10 @@ def _executar_agente_bound(
         )
         return _resume_confirmation(session, retomar, config, provider_context, full, registry)
 
+    # The host supplies only a physical conversation-boundary signal. Runtime
+    # never projects the raw transcript. temporary memory is not chat-local,
+    # so a conversation boundary does not erase the Memory Graph.
+    sync_memory_lifecycle(provider_context, conversation_context, execution_id=execution_id)
     session = AgentSession(str(objetivo or ""), execution_id=execution_id)
     if execution is not None:
         execution.bind_session_baseline(session)
@@ -499,6 +516,24 @@ def _executar_agente_bound(
     set_pending_results(session, seed_runtime_failure(session.observation_ledger, conversation_context))
     return _run(session, config, provider_context, full, conversation_context=conversation_context, registry=registry)
 
+
+
+def compile_cache_warmup_prompt(
+    config: Dict[str, Any], provider_context: Dict[str, Any], registry: CapabilityRegistry,
+) -> CanonicalPrompt:
+    """Build the stable prefix with a disposable dynamic suffix.
+
+    This is provider-neutral. Hosts may call it before serving traffic only when
+    their configured provider/cache policy makes prewarming worthwhile. No
+    decision returned by the warmup call is executed and no memory delta is
+    committed.
+    """
+    session = AgentSession(
+        "Provider cache warmup only. Conclude briefly and emit no memory_delta.",
+        execution_id="cache-warmup",
+    )
+    prompt, _ = _compile_prompt(session, config, provider_context, {"recent_messages": []}, registry)
+    return prompt
 
 def executar_agente(
     objetivo: str,
@@ -515,7 +550,21 @@ def executar_agente(
     """Public ECC entry point kept under the product-level agent name."""
     if registry is None:
         raise ValueError("CAPABILITY_REGISTRY_REQUIRED")
-    execution = ExecutionContext.from_config(config, execution_id=execution_id, source_job_id=source_job_id)
+    if retomar and isinstance(retomar, dict) and isinstance(retomar.get("execution_state"), dict):
+        try:
+            execution = ExecutionContext.from_continuation_state(
+                config, retomar["execution_state"], source_job_id=source_job_id,
+            )
+        except ValueError:
+            # The pending-continuation validator will return the canonical public
+            # incompatibility result; never silently start a fresh budget here.
+            execution = ExecutionContext.from_config(
+                config, execution_id=execution_id, source_job_id=source_job_id,
+            )
+    else:
+        execution = ExecutionContext.from_config(
+            config, execution_id=execution_id, source_job_id=source_job_id,
+        )
     token = bind_execution(execution)
     try:
         return _executar_agente_bound(

@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""Adaptador LLM da Eyle 2.7.5.
-
-Transporta o único protocolo AgentSession para o backend configurado.
-"""
+"""Provider-neutral Eyle->Adapter transport for structured cognition."""
 import hashlib
 import json
 import math
@@ -14,20 +11,20 @@ import time
 import urllib.request
 import urllib.error
 from contextlib import contextmanager
+from typing import Any
 
 from eyle.runtime.execution_context import ExecutionContext, current_execution  # noqa: E402
 from eyle.runtime.token_budget import estimate_tokens as estimar_tokens  # noqa: E402
 from eyle.runtime import telemetry  # noqa: E402
 from eyle.runtime import limiter  # noqa: E402
 from eyle.runtime import progress as job_progress  # noqa: E402
+from llm.protocol import CanonicalPrompt, prompt_messages, provider_policy  # noqa: E402
 from llm.response_adapter import (  # noqa: E402
-    NormalizedModelResponse, ResponseEnvelopeError,
-    normalize_ollama_chat_response, normalize_openai_chat_response,
+    NormalizedModelResponse, ResponseEnvelopeError, normalize_openai_chat_response,
 )
 from llm.structured import (  # noqa: E402
     StructuredResponseError, contract_instruction, json_schema_response_format,
     mandatory_top_level_keys, observed_top_level, parse_profile_response,
-    schema_for_profile,
 )
 
 
@@ -46,9 +43,6 @@ class ErroLLM(RuntimeError):
         self.structured_observed = structured_observed
 
 
-# Deteccao basica, somente em memoria, do servidor OpenAI-compativel.
-# Evita gravar estado novo no projeto e reaprende a cada reinicio da Eyle.
-_MODELOS_OPENAI = {}
 _SEMAFOROS_LLM = {}
 _SEMAFOROS_LOCK = threading.Lock()
 _COOLDOWN_ATE = {}
@@ -57,15 +51,10 @@ _LLM_RESPONSE_LOCAL = threading.local()
 # Structured schemas and validation live in llm.structured.  This transport
 # layer only chooses the empirically verified mechanism for the active connection.
 
-def _schema_para_perfil(perfil):
-    try:
-        return schema_for_profile(perfil)
-    except StructuredResponseError as exc:
-        raise ErroLLM(
-            f"Perfil estruturado desconhecido: {perfil}",
-            transient=False, error_code=exc.code,
-        ) from exc
-
+ADAPTER_TRANSPORT_PROTOCOL = "eyle-adapter-transport-v1"
+ADAPTER_HANDSHAKE_SCHEMA = "eyle-adapter-handshake-v1"
+_ADAPTER_COMPATIBILITY_CACHE: dict[str, dict[str, Any]] = {}
+_ADAPTER_HANDSHAKE_TTL_SECONDS = 300.0
 
 
 def _diagnostico(codigo, **campos):
@@ -77,16 +66,53 @@ def _diagnostico(codigo, **campos):
         pass
 
 
-def diagnosticar_backend(config, timeout=None):
-    """Testa somente a API do backend, sem gerar tokens nem alterar estado persistente.
+def _adapter_root(base_url: str) -> str:
+    base = str(base_url or "").rstrip("/")
+    return base[:-3] if base.endswith("/v1") else base
 
-    O diagnostico e usado no startup para diferenciar "Flask/Worker online" de
-    "servidor da LLM ausente". Nunca levanta para o chamador: devolve um objeto
-    pequeno, seguro e pronto para log.
+
+def _get_json(endpoint: str, timeout: float, *, protocol: bool = False):
+    headers = {"Accept": "application/json"}
+    if protocol:
+        headers["X-Eyle-Transport-Protocol"] = ADAPTER_TRANSPORT_PROTOCOL
+    req = urllib.request.Request(endpoint, headers=headers)
+    with _abrir_url(req, timeout, timeout) as resp:
+        raw = resp.read().decode("utf-8", errors="replace")
+        body = json.loads(raw)
+        response_headers = getattr(resp, "headers", None)
+    return body, response_headers
+
+
+def _validate_adapter_handshake(body: Any) -> dict[str, Any]:
+    if not isinstance(body, dict):
+        raise ValueError("ADAPTER_HANDSHAKE_INVALID")
+    if body.get("handshake_schema") != ADAPTER_HANDSHAKE_SCHEMA:
+        raise ValueError("ADAPTER_HANDSHAKE_SCHEMA_INCOMPATIBLE")
+    if body.get("adapter_protocol") != ADAPTER_TRANSPORT_PROTOCOL:
+        raise ValueError("ADAPTER_PROTOCOL_INCOMPATIBLE")
+    if body.get("authority") != "transport-only" or body.get("semantic_protocol") != "client-owned":
+        raise ValueError("ADAPTER_AUTHORITY_CONTRACT_INVALID")
+    capabilities = body.get("capabilities")
+    if not isinstance(capabilities, dict):
+        raise ValueError("ADAPTER_CAPABILITIES_INVALID")
+    required = ("chat_completions", "client_json_schema_hint", "json_candidate_passthrough", "syntactic_json_recovery")
+    if not all(capabilities.get(key) is True for key in required):
+        raise ValueError("ADAPTER_REQUIRED_CAPABILITY_MISSING")
+    endpoints = body.get("endpoints")
+    if not isinstance(endpoints, dict) or not str(endpoints.get("chat_completions") or "").strip() or not str(endpoints.get("readiness") or "").strip():
+        raise ValueError("ADAPTER_ENDPOINT_CONTRACT_INVALID")
+    return body
+
+
+def diagnosticar_backend(config, timeout=None):
+    """Formal no-generation Eyle<->Adapter handshake followed by readiness.
+
+    Eyle does not infer Adapter compatibility from /v1/models. The
+    handshake validates transport authority/capabilities first; /ready then
+    checks provider/model readiness without paid generation.
     """
     cfg_llm = (config or {}).get("llm", {})
-    base_url = str(cfg_llm.get("base_url") or "http://localhost:11434").rstrip("/")
-    openai_compatible = bool(cfg_llm.get("openai_compatible", False))
+    base_url = str(cfg_llm.get("base_url") or "http://127.0.0.1:8080").rstrip("/")
     limite = timeout
     if limite is None:
         limite = cfg_llm.get("model_discovery_timeout_seconds", 3)
@@ -95,65 +121,100 @@ def diagnosticar_backend(config, timeout=None):
     except (TypeError, ValueError):
         limite = 3.0
 
-    if openai_compatible:
-        endpoint = _endpoint_openai(base_url, "models")
-    else:
-        endpoint = base_url + "/api/tags"
-
+    handshake_endpoint = _endpoint_openai(base_url, "eyle/handshake")
     inicio = time.monotonic()
-    req = urllib.request.Request(endpoint, headers={"Accept": "application/json"})
     try:
-        with _abrir_url(req, limite, limite) as resp:
-            corpo = json.loads(resp.read().decode("utf-8"))
+        handshake, headers = _get_json(handshake_endpoint, limite, protocol=True)
+        _validate_adapter_handshake(handshake)
     except urllib.error.HTTPError as erro:
         detalhe = _mensagem_http_error(base_url, erro, _ler_corpo_http_error(erro))
         return {
-            "ok": False,
-            "reachable": True,
-            "base_url": base_url,
-            "endpoint": endpoint,
-            "error_code": "BACKEND_HTTP_ERROR",
-            "status_code": getattr(erro, "code", None),
-            "detail": detalhe,
-            "latency_ms": round((time.monotonic() - inicio) * 1000, 1),
+            "ok": False, "reachable": True, "base_url": base_url, "endpoint": handshake_endpoint,
+            "error_code": "ADAPTER_HANDSHAKE_HTTP_ERROR", "status_code": getattr(erro, "code", None),
+            "detail": detalhe, "latency_ms": round((time.monotonic() - inicio) * 1000, 1),
         }
     except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError) as erro:
         return {
-            "ok": False,
-            "reachable": False,
-            "base_url": base_url,
-            "endpoint": endpoint,
+            "ok": False, "reachable": False, "base_url": base_url, "endpoint": handshake_endpoint,
             "error_code": "BACKEND_UNREACHABLE",
-            "detail": f"Nao foi possivel acessar {endpoint}: {erro}",
+            "detail": f"Nao foi possivel acessar o Adapter em {handshake_endpoint}: {erro}",
             "latency_ms": round((time.monotonic() - inicio) * 1000, 1),
         }
     except Exception as erro:
         return {
-            "ok": False,
-            "base_url": base_url,
-            "endpoint": endpoint,
-            "error_code": "BACKEND_DIAGNOSTIC_ERROR",
-            "detail": f"Falha ao validar o backend: {type(erro).__name__}: {erro}",
+            "ok": False, "reachable": True, "base_url": base_url, "endpoint": handshake_endpoint,
+            "error_code": str(erro) if str(erro).startswith("ADAPTER_") else "ADAPTER_HANDSHAKE_INVALID",
+            "detail": f"Handshake incompatível: {type(erro).__name__}: {erro}",
             "latency_ms": round((time.monotonic() - inicio) * 1000, 1),
         }
 
-    modelos = []
-    itens = corpo.get("data", []) if openai_compatible else corpo.get("models", [])
-    if isinstance(itens, list):
-        for item in itens:
-            if isinstance(item, dict):
-                valor = item.get("id") if openai_compatible else (item.get("name") or item.get("model"))
-                if isinstance(valor, str) and valor.strip():
-                    modelos.append(valor.strip())
+    readiness_path = str((handshake.get("endpoints") or {}).get("readiness") or "/ready")
+    readiness_endpoint = _adapter_root(base_url) + "/" + readiness_path.lstrip("/")
+    try:
+        ready, ready_headers = _get_json(readiness_endpoint, limite, protocol=True)
+    except urllib.error.HTTPError as erro:
+        detalhe = _mensagem_http_error(base_url, erro, _ler_corpo_http_error(erro))
+        return {
+            "ok": False, "reachable": True, "handshake_ok": True, "base_url": base_url,
+            "endpoint": readiness_endpoint, "handshake": handshake,
+            "error_code": "ADAPTER_NOT_READY", "status_code": getattr(erro, "code", None),
+            "detail": detalhe, "latency_ms": round((time.monotonic() - inicio) * 1000, 1),
+        }
+    except Exception as erro:
+        return {
+            "ok": False, "reachable": True, "handshake_ok": True, "base_url": base_url,
+            "endpoint": readiness_endpoint, "handshake": handshake,
+            "error_code": "ADAPTER_READINESS_ERROR",
+            "detail": f"Adapter handshake passou, mas readiness falhou: {type(erro).__name__}: {erro}",
+            "latency_ms": round((time.monotonic() - inicio) * 1000, 1),
+        }
+
+    if not isinstance(ready, dict) or str(ready.get("status") or "") not in {"ready", "ready_configured"}:
+        return {
+            "ok": False, "reachable": True, "handshake_ok": True, "base_url": base_url,
+            "endpoint": readiness_endpoint, "handshake": handshake, "readiness": ready,
+            "error_code": "ADAPTER_NOT_READY", "detail": "Adapter handshake compatível, mas upstream/modelo não está pronto.",
+            "latency_ms": round((time.monotonic() - inicio) * 1000, 1),
+        }
+    models = []
+    if isinstance(ready.get("models"), list):
+        models = [str(v) for v in ready.get("models") if str(v).strip()]
+    elif str(ready.get("model") or "").strip():
+        models = [str(ready.get("model")).strip()]
     return {
-        "ok": True,
-        "reachable": True,
-        "base_url": base_url,
-        "endpoint": endpoint,
-        "models": modelos[:20],
-        "model_count": len(modelos),
+        "ok": True, "reachable": True, "handshake_ok": True, "base_url": base_url,
+        "endpoint": readiness_endpoint, "models": models[:20], "model_count": len(models),
+        "adapter_protocol": handshake.get("adapter_protocol"),
+        "adapter_profile": handshake.get("adapter_profile"),
+        "adapter_version": handshake.get("adapter_version"),
+        "handshake": handshake, "readiness": ready,
         "latency_ms": round((time.monotonic() - inicio) * 1000, 1),
     }
+
+
+def _ensure_adapter_handshake(config) -> dict[str, Any]:
+    cfg_llm = (config or {}).get("llm") or {}
+    base_url = str(cfg_llm.get("base_url") or "http://127.0.0.1:8080").rstrip("/")
+    now = time.monotonic()
+    cached = _ADAPTER_COMPATIBILITY_CACHE.get(base_url)
+    if isinstance(cached, dict) and float(cached.get("expires_at") or 0) > now:
+        return cached
+    diag = diagnosticar_backend(config)
+    if diag.get("ok") is not True:
+        code = str(diag.get("error_code") or "ADAPTER_HANDSHAKE_FAILED")
+        raise ErroLLM(
+            str(diag.get("detail") or "Adapter handshake/readiness failed."),
+            transient=code in {"BACKEND_UNREACHABLE", "ADAPTER_NOT_READY", "ADAPTER_READINESS_ERROR"},
+            status_code=diag.get("status_code"), error_code=code,
+        )
+    entry = {
+        "expires_at": now + _ADAPTER_HANDSHAKE_TTL_SECONDS,
+        "adapter_protocol": diag.get("adapter_protocol"),
+        "adapter_profile": diag.get("adapter_profile"),
+        "adapter_version": diag.get("adapter_version"),
+    }
+    _ADAPTER_COMPATIBILITY_CACHE[base_url] = entry
+    return entry
 
 
 def _retry_after_seconds(erro):
@@ -250,6 +311,18 @@ def _adapter_error_contract(erro, corpo_erro=""):
             metadata["adapter_profile"] = str(profile)
         if enforcement:
             metadata["adapter_schema_enforcement"] = str(enforcement)
+        metadata.update(_adapter_response_metadata(headers))
+    billed_or_risky = bool(
+        metadata.get("retry_cost_risk")
+        or metadata.get("billing_may_have_occurred")
+        or int(metadata.get("prompt_tokens") or 0) > 0
+        or int(metadata.get("completion_tokens") or 0) > 0
+        or bool(error_obj.get("retry_cost_risk"))
+        or bool(error_obj.get("billing_may_have_occurred"))
+    )
+    if billed_or_risky:
+        metadata["retry_cost_risk"] = True
+        metadata["billing_may_have_occurred"] = True
 
     if error_type == "structured_contract_unsatisfied":
         detail = f" Validação: {validation_errors[0]}" if validation_errors else ""
@@ -265,12 +338,51 @@ def _adapter_error_contract(erro, corpo_erro=""):
             error_code="READ_TIMEOUT",
         ), metadata
     if error_type == "upstream_connection_error":
+        detail = str(error_obj.get("detail") or "")[:240]
+        suffix = f" Detalhe: {detail}" if detail else ""
         return ErroLLM(
-            "O adaptador não conseguiu conectar ao provider.",
-            transient=True, status_code=getattr(erro, "code", None),
+            "O adaptador não conseguiu conectar ao provider." + suffix,
+            transient=not billed_or_risky, status_code=getattr(erro, "code", None),
             error_code="TRANSPORT_ERROR",
         ), metadata
     return None, metadata
+
+
+def _adapter_response_metadata(headers) -> dict[str, Any]:
+    """Read adapter-only physical telemetry from successful HTTP responses."""
+    if headers is None:
+        return {}
+    def get(name):
+        try:
+            return headers.get(name)
+        except Exception:
+            return None
+    def as_int(name):
+        raw = get(name)
+        try:
+            return int(raw) if raw is not None and str(raw).strip() else None
+        except (TypeError, ValueError):
+            return None
+    def as_bool(name):
+        raw = get(name)
+        if raw is None:
+            return None
+        return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+    mapping = {
+        "adapter_profile": get("X-Eyle-Adapter-Profile"),
+        "adapter_protocol": get("X-Eyle-Adapter-Protocol"),
+        "adapter_structured_upstream_mode": get("X-Eyle-Structured-Upstream-Mode"),
+        "adapter_structured_configured_mode": get("X-Eyle-Structured-Configured-Mode"),
+        "adapter_cache_mode": get("X-Eyle-Cache-Mode"),
+        "adapter_schema_enforcement": get("X-Eyle-Schema-Enforcement"),
+        "adapter_upstream_attempts": as_int("X-Eyle-Upstream-Attempts"),
+        "adapter_max_upstream_attempts": as_int("X-Eyle-Max-Upstream-Attempts"),
+        "adapter_structured_repairs": as_int("X-Eyle-Structured-Repairs"),
+        "adapter_local_normalized": as_bool("X-Eyle-Local-Normalized"),
+        "billing_may_have_occurred": as_bool("X-Eyle-Billing-May-Have-Occurred"),
+        "retry_cost_risk": as_bool("X-Eyle-Retry-Cost-Risk"),
+    }
+    return {key: value for key, value in mapping.items() if value is not None and value != ""}
 
 
 def _ajustar_timeout_leitura(resposta, read_timeout):
@@ -363,85 +475,6 @@ def _endpoint_openai(base_url, recurso):
     return base + "/v1/" + recurso.lstrip("/")
 
 
-def _detectar_modelos_openai(base_url, timeout, negative_ttl=60):
-    """Resolve the explicit ``model: auto`` contract through ``/v1/models``.
-
-    Discovery is never used to repair an explicit configured model name. A
-    failed or empty discovery is therefore an explicit configuration/runtime
-    error instead of a silent substitution path.
-    """
-    chave = str(base_url or "").rstrip("/")
-    if chave in _MODELOS_OPENAI:
-        cache = _MODELOS_OPENAI[chave]
-        if isinstance(cache, tuple):
-            return list(cache)
-        if isinstance(cache, dict):
-            if time.monotonic() < float(cache.get("expira", 0)):
-                return list(cache.get("modelos") or [])
-            _MODELOS_OPENAI.pop(chave, None)
-
-    req = urllib.request.Request(_endpoint_openai(base_url, "models"))
-    try:
-        limite = min(max(float(timeout), 0.1), 5.0)
-        with _abrir_url(req, limite, limite) as resp:
-            corpo = json.loads(resp.read().decode("utf-8"))
-    except Exception as erro:
-        _MODELOS_OPENAI[chave] = {
-            "modelos": (),
-            "expira": time.monotonic() + max(1.0, float(negative_ttl or 60)),
-            "erro": f"{type(erro).__name__}: {erro}",
-        }
-        _diagnostico(
-            "MODEL_DISCOVERY_FAILED", base_url=chave,
-            error=f"{type(erro).__name__}: {erro}",
-        )
-        telemetry.record(
-            "internal", "model_discovery", "failed",
-            metadata={
-                "base_url": chave,
-                "exception": type(erro).__name__,
-                "detail": str(erro)[:500],
-            },
-        )
-        return []
-
-    modelos = []
-    for item in corpo.get("data", []) if isinstance(corpo, dict) else []:
-        if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"].strip():
-            modelos.append(item["id"].strip())
-    if modelos:
-        _MODELOS_OPENAI[chave] = tuple(modelos)
-    else:
-        _MODELOS_OPENAI[chave] = {
-            "modelos": (),
-            "expira": time.monotonic() + max(1.0, float(negative_ttl or 60)),
-            "erro": "endpoint sem modelos",
-        }
-        telemetry.record(
-            "internal", "model_discovery", "empty",
-            metadata={"base_url": chave},
-        )
-    return modelos
-
-
-def _resolver_modelo_openai(base_url, model, timeout, negative_ttl=60):
-    """Use an explicit model verbatim; resolve only the explicit ``auto`` mode."""
-    configurado = str(model or "").strip()
-    if not configurado:
-        raise ErroLLM(
-            "Nenhum modelo foi configurado para o backend OpenAI-compatible.",
-            transient=False, error_code="MODEL_REQUIRED",
-        )
-    if configurado.lower() != "auto":
-        return configurado
-    modelos = _detectar_modelos_openai(base_url, timeout, negative_ttl=negative_ttl)
-    if not modelos:
-        raise ErroLLM(
-            "model='auto' exige que /v1/models retorne ao menos um modelo.",
-            transient=False, error_code="MODEL_DISCOVERY_REQUIRED",
-        )
-    return modelos[0]
-
 def _ler_corpo_http_error(erro):
     try:
         return erro.read().decode("utf-8", errors="replace")[:1000]
@@ -454,8 +487,8 @@ def _mensagem_http_error(base_url, erro, corpo_erro=""):
     return (
         f"O servidor em {base_url} respondeu, mas recusou o pedido "
         f"(HTTP {erro.code} {erro.reason}).{detalhe} "
-        "Verifique se o modelo configurado existe nesse servidor e se "
-        "'openai_compatible' em config.json bate com o tipo de backend rodando ali."
+        "Verifique se o Adapter em base_url esta pronto e se o modelo configurado "
+        "existe no upstream selecionado pelo Adapter."
     )
 
 
@@ -489,11 +522,6 @@ def _texto_openai_backend(valor, *, streaming=False):
     ).usable_text()
 
 
-def _texto_ollama_backend(valor, *, streaming=False):
-    return _registrar_metadata_backend(
-        normalize_ollama_chat_response(valor, streaming=streaming)
-    ).usable_text()
-
 
 def _finish_reason_truncado(metadata):
     reason = str((metadata or {}).get("finish_reason") or "").strip().lower()
@@ -518,7 +546,7 @@ def _latest_attempt(execution: ExecutionContext | None):
 
 
 def _registrar_inicio_tentativa_runtime(
-    execution: ExecutionContext | None, *, profile: str, max_tokens_requested: int | None,
+    execution: ExecutionContext | None, *, profile: str,
 ):
     """Record a physical backend attempt only after preflight has succeeded."""
     if execution is None:
@@ -530,7 +558,6 @@ def _registrar_inicio_tentativa_runtime(
         "logical_call_id": call.get("logical_call_id"),
         "profile": str(profile or "default"),
         "request_status": "started",
-        "max_tokens_requested": max_tokens_requested,
     })
 
 
@@ -542,10 +569,6 @@ def _registrar_metadata_runtime(execution: ExecutionContext | None, metadata, *,
         call = execution.begin_call(mode=str((metadata or {}).get("profile") or "default"), turn=0, prompt={})
     clean = {key: value for key, value in dict(metadata or {}).items() if value is not None}
     clean["logical_call_id"] = call.get("logical_call_id")
-    requested = clean.get("max_tokens_requested")
-    actual = clean.get("completion_tokens")
-    if isinstance(requested, (int, float)) and isinstance(actual, (int, float)):
-        clean["completion_tokens_ceiling_unused"] = max(0, int(requested) - max(0, int(actual)))
     if isinstance(attempt, dict):
         attempt.update(clean)
         attempt["request_status"] = str(clean.get("request_status") or "sent")
@@ -574,104 +597,38 @@ def _structured_response_format(profile):
     return json_schema_response_format(profile)
 
 
-def _chamar_ollama(
-    base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
-    max_tokens=None, read_timeout=None, on_chunk=None,
-    schema_estruturado=None, perfil=None,
-):
-    url = base_url.rstrip("/") + "/api/chat"
-    options = {"temperature": temperature}
-    if max_tokens:
-        options["num_predict"] = max_tokens
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": prompt_sistema},
-            {"role": "user", "content": prompt_usuario},
-        ],
-        "stream": bool(on_chunk),
-        "options": options,
-    }
-    if perfil is not None:
-        payload["format"] = schema_estruturado or _schema_para_perfil(perfil)
-    dados = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=dados, headers={"Content-Type": "application/json"})
-    with _abrir_url(req, timeout, read_timeout or timeout) as resp:
-        if on_chunk is None:
-            bruto = resp.read().decode("utf-8", errors="replace")
-            try:
-                corpo = json.loads(bruto)
-            except json.JSONDecodeError:
-                corpo = bruto
-            try:
-                text = _texto_ollama_backend(corpo)
-            except ResponseEnvelopeError as exc:
-                raise ErroLLM(
-                    f"Ollama returned an invalid /api/chat envelope: {exc}",
-                    transient=False, error_code="BACKEND_RESPONSE_INVALID",
-                ) from exc
-            meta = _ultima_metadata_backend()
-            meta.update({
-                "structured_profile": perfil,
-                "structured_mode": "json_schema" if perfil is not None else None,
-                "structured_transport": (
-                    "ollama_json_schema" if perfil is not None else "text"
-                ),
-                "structured_source": "content",
-            })
-            _LLM_RESPONSE_LOCAL.metadata = meta
-            return text
-
-        partes = []
-        ultimo = {}
-        for linha_bruta in resp:
-            linha = linha_bruta.decode("utf-8", errors="replace").strip()
-            if not linha:
-                continue
-            try:
-                corpo = json.loads(linha)
-            except json.JSONDecodeError:
-                corpo = linha
-            ultimo = corpo if isinstance(corpo, dict) else ultimo
-            delta = _texto_ollama_backend(corpo, streaming=True)
-            if delta:
-                partes.append(delta)
-            on_chunk(delta, ultimo, bool(ultimo.get("done")))
-        on_chunk("", ultimo, True)
-        return "".join(partes)
-
 
 def _chamar_openai_compatible(
     base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
-    max_tokens=None, read_timeout=None, on_chunk=None,
-    schema_estruturado=None, perfil=None, on_request=None,
+    read_timeout=None, on_chunk=None,
+    perfil=None, on_request=None,
 ):
-    """Call one OpenAI-compatible Chat Completions endpoint.
+    """Call the local OpenAI-compatible Adapter.
 
-    Structured profiles require strict JSON Schema transport.
+    For structured cognition Eyle sends only a tolerant wire-shape hint. The
+    Adapter owns provider transport choice; strict ECC semantics are validated
+    locally after deterministic canonicalization.
     """
     if on_request is not None:
         on_request()
     url = _endpoint_openai(base_url, "chat/completions")
     payload = {
         "model": model,
-        "messages": [
-            {"role": "system", "content": prompt_sistema},
-            {"role": "user", "content": prompt_usuario},
-        ],
+        "messages": prompt_messages(prompt_sistema, prompt_usuario),
         "temperature": temperature,
         "stream": bool(on_chunk),
     }
-    if max_tokens:
-        payload["max_tokens"] = max_tokens
     if perfil is not None:
+        # Eyle->Adapter has one stable wire protocol. Provider-specific structured
+        # transport selection belongs entirely to the Adapter.
         fmt = _structured_response_format(perfil)
         if fmt is not None:
             payload["response_format"] = fmt
     dados = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=dados, headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(url, data=dados, headers={"Content-Type": "application/json", "X-Eyle-Transport-Protocol": ADAPTER_TRANSPORT_PROTOCOL})
     try:
         with _abrir_url(req, timeout, read_timeout or timeout) as resp:
+            response_headers = getattr(resp, "headers", None)
             if on_chunk is not None:
                 partes = []
                 ultimo = {}
@@ -733,12 +690,17 @@ def _chamar_openai_compatible(
         ) from exc
     source = "content" if normalized.content.strip() else "empty"
     meta = _ultima_metadata_backend()
+    meta.update(_adapter_response_metadata(response_headers if 'response_headers' in locals() else None))
+    observed_protocol = meta.get("adapter_protocol")
+    if observed_protocol not in (None, "", ADAPTER_TRANSPORT_PROTOCOL):
+        raise ErroLLM(
+            f"Adapter protocol incompatível: {observed_protocol}",
+            transient=False, error_code="ADAPTER_PROTOCOL_INCOMPATIBLE",
+        )
     meta.update({
         "structured_profile": perfil,
-        "structured_mode": "json_schema" if perfil is not None else None,
-        "structured_transport": (
-            "openai_json_schema" if perfil is not None else "text"
-        ),
+        "structured_mode": ("adapter_wire_json_schema" if perfil is not None else None),
+        "structured_transport": ("openai_adapter_wire_json_schema" if perfil is not None else "text"),
         "structured_source": source,
     })
     _LLM_RESPONSE_LOCAL.metadata = meta
@@ -751,17 +713,8 @@ def _timeout_restante(execution: ExecutionContext | None):
     return max(0.0, float(execution.deadline_monotonic) - time.monotonic())
 
 
-def _prompt_cache_weight(config):
-    context = (config or {}).get("context_engine") or {}
-    try:
-        value = float(context.get("cached_prompt_weight", 0.2))
-    except (TypeError, ValueError):
-        value = 0.2
-    return min(1.0, max(0.0, value))
-
-
 def _reservar_requisicao_llm(
-    config, execution: ExecutionContext | None, prompt_sistema, prompt_usuario, max_tokens,
+    config, execution: ExecutionContext | None, prompt_sistema, prompt_usuario,
     *, profile=None,
 ):
     """Preflight and account one real backend request.
@@ -777,16 +730,18 @@ def _reservar_requisicao_llm(
     cfg_context = (config or {}).get("context_engine", {})
     chars_per_token = max(1, int(cfg_context.get("chars_per_token_fallback", 3) or 3))
     system_tokens = estimar_tokens(prompt_sistema, chars_per_token)
-    user_tokens = estimar_tokens(prompt_usuario, chars_per_token)
+    user_tokens = estimar_tokens(str(prompt_usuario), chars_per_token)
+    stable_tokens = estimar_tokens(prompt_usuario.stable_text, chars_per_token) if isinstance(prompt_usuario, CanonicalPrompt) else 0
     prompt_tokens = system_tokens + user_tokens
     multiplier = execution.prompt_token_calibration if execution is not None else 1.0
     calibrated_prompt_tokens = int(math.ceil(prompt_tokens * min(4.0, max(0.75, float(multiplier)))))
-    response_reserved = max(0, int(max_tokens or 0))
+    response_reserved = 0
     margin = max(0, int(cfg_context.get("safety_margin_tokens", 256) or 0))
-    window = max(1, int(cfg_llm.get("context_window_tokens", 38000) or 38000))
-    if calibrated_prompt_tokens + response_reserved + margin > window:
+    raw_window = cfg_llm.get("context_window_tokens")
+    window = int(raw_window) if isinstance(raw_window, int) and not isinstance(raw_window, bool) and raw_window > 0 else None
+    if window is not None and calibrated_prompt_tokens + response_reserved + margin > window:
         raise ErroLLM(
-            "O prompt e a saída reservada excedem a janela de contexto do modelo.",
+            "O prompt excede a janela de contexto local explicitamente configurada.",
             transient=False, error_code="PROMPT_CONTEXT_BUDGET_EXCEEDED",
         )
 
@@ -796,8 +751,10 @@ def _reservar_requisicao_llm(
     if not repeated_system:
         seen_hashes.append(system_hash)
         del seen_hashes[:-8]
-    cache_weight = _prompt_cache_weight(config)
-    effective_estimate = user_tokens + int(round(system_tokens * (cache_weight if repeated_system else 1.0)))
+    # Cache is provider-specific. Core never converts cached tokens into a
+    # vendor pricing-equivalent weight; physical and cached/uncached counts are
+    # reported separately.
+    effective_estimate = prompt_tokens
 
     current_prompt_effective = int(execution.prompt_tokens_effective or 0)
     current_prompt_physical = max(int(execution.prompt_tokens_budgeted_physical or 0), int(execution.prompt_tokens_actual or 0))
@@ -814,6 +771,7 @@ def _reservar_requisicao_llm(
         "estimated_effective_tokens": effective_estimate,
         "estimated_system_tokens": system_tokens,
         "estimated_user_tokens": user_tokens,
+        "estimated_stable_prefix_tokens": stable_tokens,
         "protected_tokens": protected,
         "repeated_system_prompt": repeated_system,
         "finalized": False,
@@ -841,14 +799,12 @@ def _finalizar_requisicao_llm(config, execution: ExecutionContext | None, reserv
         if isinstance(cached, (int, float)):
             cached = min(actual, max(0, int(cached)))
             uncached = max(0, actual - cached)
-            effective_actual = uncached + int(round(cached * _prompt_cache_weight(config)))
+            effective_actual = actual
             execution.prompt_tokens_cached += cached
             execution.prompt_tokens_uncached += uncached
         elif estimated_raw > 0:
-            # Preserve the repeated-prefix discount when the provider reports
-            # only the total prompt count and no cache breakdown.
-            ratio = estimated_effective / estimated_raw
-            effective_actual = int(round(actual * ratio))
+            # Without a provider cache breakdown, keep token accounting physical.
+            effective_actual = actual
             execution.prompt_tokens_uncached += actual
         else:
             effective_actual = actual
@@ -882,32 +838,50 @@ def _registrar_tokens_gerados(config, execution: ExecutionContext | None, respos
     execution.completion_tokens_actual = total
 
 
-def _max_tokens_da_chamada(cfg_llm, perfil):
-    """Resolve o teto de saida por perfil sem mudar o contrato do backend.
-
-    Decisoes do Agente usam JSON curto e nao devem herdar automaticamente o
-    teto grande de respostas finais/chat. Um teto separado impede modelos de
-    raciocinio locais de gastar centenas de tokens internos em cada passo.
-    """
-    valor_global = cfg_llm.get("max_tokens", 700)
-    chave = f"{perfil}_max_tokens" if perfil else None
-    valor = cfg_llm.get(chave, valor_global) if chave else valor_global
-    if valor is None:
-        return None
+def _generated_token_limit(config, execution: ExecutionContext | None = None) -> int:
+    if execution is not None and int(getattr(execution, "generated_token_limit", 0) or 0) > 0:
+        return int(execution.generated_token_limit)
+    raw = ((config or {}).get("llm") or {}).get("generated_token_fuse", 120000)
     try:
-        valor = int(valor)
+        return max(1, int(raw))
     except (TypeError, ValueError):
-        return valor_global
-    return valor if valor > 0 else None
+        return 120000
+
+
+def _ensure_generated_token_budget(config, execution: ExecutionContext | None) -> int:
+    """Stop new cognition once provider-counted completion usage reaches the fuse.
+
+    Prompt/cache tokens are intentionally excluded. The fuse is execution-wide,
+    not a tiny per-call output ceiling.
+    """
+    limit = _generated_token_limit(config, execution)
+    used = int(execution.completion_tokens_actual or 0) if execution is not None else 0
+    remaining = max(0, limit - used)
+    if remaining <= 0:
+        raise ErroLLM(
+            f"O fusivel fisico de geracao atingiu {limit} tokens nesta resposta/tarefa.",
+            transient=False, error_code="GENERATED_TOKEN_FUSE_REACHED",
+        )
+    return remaining
+
+
+def _enforce_generated_token_fuse_after_usage(config, execution: ExecutionContext | None) -> None:
+    if execution is None:
+        return
+    limit = _generated_token_limit(config, execution)
+    used = int(execution.completion_tokens_actual or 0)
+    if used > limit:
+        raise ErroLLM(
+            f"O provider reportou {used} tokens gerados, acima do fusivel de {limit}. "
+            "Nenhuma nova chamada LLM sera permitida nesta execucao.",
+            transient=False, error_code="GENERATED_TOKEN_FUSE_EXCEEDED",
+        )
 
 
 def _timeouts_da_chamada(cfg_llm, perfil, config, execution: ExecutionContext | None = None):
     connect_timeout = float(cfg_llm.get("connect_timeout_seconds", 5))
     perfil_chave = f"{perfil}_timeout_seconds" if perfil else None
-    read_timeout = float(
-        cfg_llm.get(perfil_chave, cfg_llm.get("read_timeout_seconds", 120))
-        if perfil_chave else cfg_llm.get("read_timeout_seconds", 120)
-    )
+    configured_read = cfg_llm.get(perfil_chave) if perfil_chave and perfil_chave in cfg_llm else cfg_llm.get("read_timeout_seconds")
     restante = _timeout_restante(execution)
     if restante is not None:
         if restante <= 0:
@@ -916,7 +890,10 @@ def _timeouts_da_chamada(cfg_llm, perfil, config, execution: ExecutionContext | 
                 transient=False, error_code="TASK_DEADLINE_EXCEEDED",
             )
         connect_timeout = min(connect_timeout, restante)
-        read_timeout = min(read_timeout, restante)
+        read_timeout = restante if configured_read is None else min(float(configured_read), restante)
+    else:
+        # Calls outside a normal ExecutionContext are still bounded mechanically.
+        read_timeout = float(configured_read) if configured_read is not None else 1800.0
     return max(0.1, connect_timeout), max(0.1, read_timeout), restante
 
 
@@ -996,25 +973,27 @@ def _chamar_llm_impl(
 ):
     """Chama o backend com limites, isolamento e retry transitório."""
     cfg_llm = config.get("llm", {})
-    base_url = cfg_llm.get("base_url", "http://localhost:11434")
-    configured_model = cfg_llm.get("model", "qwen2.5:7b-instruct-q4_0")
+    base_url = cfg_llm.get("base_url", "http://127.0.0.1:8080")
+    configured_model = cfg_llm.get("model", "auto")
     model = configured_model
     temperature = cfg_llm.get("temperature", 0.2)
-    openai_compatible = cfg_llm.get("openai_compatible", False)
-    max_tokens = _max_tokens_da_chamada(cfg_llm, perfil)
+    transport_policy = provider_policy(config)
+    # Prove the local Adapter transport contract before any paid
+    # generation. Success is cached mechanically per Adapter base URL.
+    _ensure_adapter_handshake(config)
+    _ensure_generated_token_budget(config, execution)
     connect_timeout, read_timeout, deadline_restante = _timeouts_da_chamada(
         cfg_llm, perfil, config, execution,
     )
 
-    if openai_compatible:
-        descoberta_timeout = min(
-            connect_timeout,
-            float(cfg_llm.get("model_discovery_timeout_seconds", 3)),
+    model = str(model or "").strip()
+    if not model:
+        raise ErroLLM(
+            "Nenhum modelo foi configurado para o Adapter.",
+            transient=False, error_code="MODEL_REQUIRED",
         )
-        model = _resolver_modelo_openai(
-            base_url, model, descoberta_timeout,
-            negative_ttl=cfg_llm.get("model_discovery_negative_ttl_seconds", 60),
-        )
+    # `auto` is an Adapter concern. Eyle forwards it verbatim instead of
+    # depending on a separate /models discovery round-trip before cognition.
 
     structured_mode = "json_schema" if perfil is not None else None
     if perfil is not None:
@@ -1031,23 +1010,22 @@ def _chamar_llm_impl(
             prompt_meta["system_prompt_estimated_tokens"] = estimar_tokens(prompt_sistema, chars_per_token)
 
     job_progress.publicar(
-        execution, "llm_wait", "Aguardando a LLM local",
+        execution, "llm_wait", "Aguardando o Adapter LLM",
         profile=perfil or "default",
     )
     latest_call = execution.latest_call() if execution is not None else None
     if isinstance(latest_call, dict):
         prompt_meta = latest_call.setdefault("prompt", {})
-        prompt_meta.setdefault("output_tokens_requested", int(max_tokens or 0))
-        prompt_meta["output_tokens_reserved"] = int(max_tokens or 0)
+        prompt_meta["output_ceiling"] = "execution_generated_token_fuse"
+        prompt_meta["generated_token_fuse"] = _generated_token_limit(config, execution)
+        prompt_meta["generated_tokens_before_call"] = int(execution.completion_tokens_actual or 0) if execution is not None else 0
 
     tentativas = max(1, int(cfg_llm.get("retry_max_attempts", 3)))
     base_delay = max(0.0, float(cfg_llm.get("retry_base_delay_seconds", 0.5)))
     max_delay = max(base_delay, float(cfg_llm.get("retry_max_delay_seconds", 2.0)))
     jitter = max(0.0, float(cfg_llm.get("retry_jitter_seconds", 0.2)))
     cooldown = max(0.0, float(cfg_llm.get("cooldown_seconds", 2.0)))
-    chave_backend = (
-        str(base_url).rstrip("/"), str(model), bool(openai_compatible),
-    )
+    chave_backend = (str(base_url).rstrip("/"), str(model), "adapter_openai_chat")
     semaforo = _semaforo_backend(
         chave_backend, cfg_llm.get("max_concurrent_requests", 1),
     )
@@ -1101,7 +1079,7 @@ def _chamar_llm_impl(
             connect_atual, read_atual, _ = _timeouts_da_chamada(cfg_llm, perfil, config, execution)
             job_progress.publicar(
                 execution, "llm_request",
-                "Solicitando geracao a LLM local" if tentativa == 1 else "Tentando a LLM novamente",
+                "Solicitando geracao ao Adapter" if tentativa == 1 else "Tentando o Adapter novamente",
                 profile=perfil or "default", attempt=tentativa, max_attempts=tentativas,
                 partial_text="" if stream_visible else None,
             )
@@ -1113,39 +1091,29 @@ def _chamar_llm_impl(
             )
             attempt_state = {"attempt": None, "started_at": None}
             try:
-                def chamar_backend(token_limit, callback):
+                def chamar_backend(callback):
                     _LLM_RESPONSE_LOCAL.metadata = {}
                     inicio_backend = time.monotonic()
                     reservations = []
 
                     def before_request():
                         reservation = _reservar_requisicao_llm(
-                            config, execution, prompt_sistema, prompt_usuario, token_limit,
+                            config, execution, prompt_sistema, prompt_usuario,
                             profile=perfil,
                         )
                         reservations.append(reservation)
                         attempt_state["reservation"] = reservation
                         attempt_state["started_at"] = time.monotonic()
                         attempt_state["attempt"] = _registrar_inicio_tentativa_runtime(
-                            execution, profile=perfil or "default", max_tokens_requested=token_limit,
+                            execution, profile=perfil or "default",
                         )
 
-                    if openai_compatible:
-                        resposta_backend = _chamar_openai_compatible(
-                            base_url, model, prompt_sistema, prompt_usuario, temperature,
-                            connect_atual, max_tokens=token_limit,
-                            read_timeout=read_atual, on_chunk=callback,
-                            on_request=before_request,
-                            schema_estruturado=(_schema_para_perfil(perfil) if perfil is not None else None), perfil=perfil,
-                        )
-                    else:
-                        before_request()
-                        resposta_backend = _chamar_ollama(
-                            base_url, model, prompt_sistema, prompt_usuario, temperature,
-                            connect_atual, max_tokens=token_limit,
-                            read_timeout=read_atual, on_chunk=callback,
-                            schema_estruturado=(_schema_para_perfil(perfil) if perfil is not None else None), perfil=perfil,
-                        )
+                    resposta_backend = _chamar_openai_compatible(
+                        base_url, model, prompt_sistema, prompt_usuario, temperature,
+                        connect_atual, read_timeout=read_atual, on_chunk=callback,
+                        on_request=before_request,
+                        perfil=perfil,
+                    )
                     metadata_backend = _ultima_metadata_backend()
                     if reservations:
                         _finalizar_requisicao_llm(config, execution, reservations[-1], metadata_backend)
@@ -1157,14 +1125,16 @@ def _chamar_llm_impl(
                     )
                     return resposta_backend, metadata_backend
 
-                resposta, metadata_resposta = chamar_backend(max_tokens, on_chunk)
+                resposta, metadata_resposta = chamar_backend(on_chunk)
                 metadata_resposta.update({
                     "configured_model": str(configured_model),
                     "resolved_model": str(metadata_resposta.get("provider_model") or model),
-                    "provider": ("openai_compatible" if openai_compatible else "ollama"),
+                    "provider": "adapter_openai_compatible",
                     "profile": perfil or "default",
-                    "max_tokens_requested": max_tokens,
-                    "structured_mode": "json_schema" if perfil is not None else None,
+                    "structured_mode": ("adapter_wire_json_schema" if perfil is not None else None),
+                    "canonical_contract_mode": ("wire_json+local_canonical" if perfil is not None else None),
+                    "canonical_transport_request_mode": ("wire_json_schema" if perfil is not None else None),
+                    "provider_cache_mode": transport_policy["cache_mode"],
                 })
                 if _finish_reason_truncado(metadata_resposta):
                     truncation = _classify_output_truncation()
@@ -1175,12 +1145,21 @@ def _chamar_llm_impl(
                     _registrar_metadata_runtime(execution, metadata_resposta, attempt=attempt_state["attempt"])
                     metadata_chamadas.append(dict(metadata_resposta))
                     _registrar_tokens_gerados(config, execution, resposta, metadata_chamadas)
+                    _enforce_generated_token_fuse_after_usage(config, execution)
                     raise ErroLLM(
                         truncation["message"], transient=False, error_code=truncation["error_code"],
                     )
                 _registrar_metadata_runtime(execution, metadata_resposta, attempt=attempt_state["attempt"])
                 metadata_chamadas.append(dict(metadata_resposta))
                 if not isinstance(resposta, str) or not resposta.strip():
+                    if perfil is not None:
+                        # A successful billed structured generation with an empty
+                        # assistant payload is a malformed cognition envelope, not
+                        # a transport retry signal. Let local parsing turn it into
+                        # ECC_PROTOCOL_RECOVERY on the same execution.
+                        resposta = ""
+                        ultimo_erro = None
+                        break
                     raise ErroLLM(
                         "O backend respondeu sem conteúdo utilizável.",
                         transient=True, error_code="EMPTY_MODEL_RESPONSE",
@@ -1206,7 +1185,7 @@ def _chamar_llm_impl(
                 repetir_timeout = bool(cfg_llm.get("retry_read_timeouts", False))
                 ultimo_erro = ErroLLM(
                     (
-                        f"A LLM local excedeu o timeout de leitura de {read_atual:.1f}s "
+                        f"O Adapter/backend excedeu o timeout de leitura de {read_atual:.1f}s "
                         f"em {base_url}."
                         if eh_timeout else
                         f"Nao foi possivel conectar/ler em {base_url}. Detalhe: {erro_rede}"
@@ -1216,7 +1195,7 @@ def _chamar_llm_impl(
                 )
             except (socket.timeout, TimeoutError) as erro_timeout:
                 ultimo_erro = ErroLLM(
-                    f"A LLM local excedeu o timeout de leitura de {read_atual:.1f}s "
+                    f"O Adapter/backend excedeu o timeout de leitura de {read_atual:.1f}s "
                     f"em {base_url}. Detalhe: {erro_timeout}",
                     transient=bool(cfg_llm.get("retry_read_timeouts", False)),
                     error_code="READ_TIMEOUT",
@@ -1230,11 +1209,15 @@ def _chamar_llm_impl(
                 ultimo_erro = erro_llm
             except Exception as erro_inesperado:
                 ultimo_erro = ErroLLM(
-                    f"Falha ao chamar a LLM local: {erro_inesperado}",
+                    f"Falha ao chamar o Adapter LLM: {erro_inesperado}",
                     transient=False, error_code="UNEXPECTED_LLM_ERROR",
                 )
 
             failed_metadata = _ultima_metadata_backend()
+            if (failed_metadata.get("retry_cost_risk") or failed_metadata.get("billing_may_have_occurred")
+                    or int(failed_metadata.get("prompt_tokens") or 0) > 0
+                    or int(failed_metadata.get("completion_tokens") or 0) > 0):
+                ultimo_erro.transient = False
             reservation = attempt_state.get("reservation")
             if failed_metadata.get("provider_usage_from_error") and isinstance(reservation, dict):
                 _finalizar_requisicao_llm(config, execution, reservation, failed_metadata)
@@ -1289,6 +1272,7 @@ def _chamar_llm_impl(
         semaforo.release()
 
     _registrar_tokens_gerados(config, execution, resposta, metadata_chamadas)
+    _enforce_generated_token_fuse_after_usage(config, execution)
     parsed_response = resposta
     if perfil is not None:
         try:
@@ -1378,55 +1362,138 @@ def _chamar_llm(
 
 
 
-PROMPT_ECC = """You are Eyle. Return only one valid ECC JSON object.
+PROMPT_ECC = """You are Eyle. Return one simple JSON cognition object. Do the semantic thinking; Eyle handles safe serialization details.
 
 THINK SIMPLY
-Understand what the user means, not only the exact words they used. Use common sense. Notice useful hints and reasonable implications. Do not wait for the user to spell out every obvious next step. Not every message is a task: normal conversation, a reaction, or learning a fact can be complete by itself.
+Understand what the user means, not only the exact words. Use common sense, implicit references and useful implications. Not every message is a task: normal conversation, a reaction, or learning a fact can be complete by itself. Match the user's tone naturally.
 
-THE THREE MOVES
-You have only three moves:
-- explorar: look, read, check, calculate, test, or otherwise observe without making a lasting change.
-- construir: make a lasting change through a Runtime-controlled operation.
-- concluir: answer the user when you have enough to give a good answer.
-For explorar or construir, choose a short operation name from the matching ecc_operations list. Never put explorar. or construir. inside operation.
+TWO COGNITIVE LAYERS
+Memory and ECC are distinct but simultaneous:
+- Memory answers: what did I learn that may matter again?
+- ECC answers: what should I do now?
+Prefer the flat wire shape {type,...,memory_delta}. A nested decision envelope is also accepted, but do not spend reasoning on internal serialization. Memory is intrinsic to Eyle and sits beside ECC; it is not a tool, task ledger or transcript system.
 
-WHO DECIDES WHAT
-You decide meaning, intent, relevance, what to remember, what to check next, and when you know enough. Runtime does not understand meaning. Runtime only checks rules, stores state, runs capabilities, records what was observed, checks source freshness, handles IDs, limits, permissions, confirmations, transactions, rollback, and other mechanical facts. Never hand semantic choices to Runtime.
+THE THREE ECC MOVES
+You have only three action moves:
+- explorar: observe, read, recall, calculate, test, inspect, or continue unfinished observation. It may contain as many independent operations as you judge useful when none depends on another's result.
+- construir: make one lasting Runtime-controlled change. After Runtime executes it, inspect the real result on the next cognition turn before learning from it or concluding.
+- concluir: answer when you already know enough and no requested world change remains undone.
+For explorar/construir, choose short operation names from ecc_operations.
 
-OBJECTIVE
-current_request is exactly what the user said for this run. Do not rewrite it. objective_state is optional and means: "what am I still trying to achieve?"
-Every decision includes objective={disposition,state}:
-- unchanged + state:null: keep the current objective_state.
-- updated + state:{summary,status,children,constraints}: replace it.
-- cleared + state:null: remove it.
-Use Objective only when it helps you keep track of something that continues across moves. If you can answer now, do not invent one. Conversation can have no Objective. A request with several goals may use children. Objective says WHAT is still wanted, never HOW to do it. Do not put tool order, phases, checklists, or a hidden plan in Objective. Runtime stores Objective but never reads its meaning or uses it to block concluir.
+AUTHORITY
+You decide meaning, intent, relevance, what to learn, whether learned meaning is temporary or persistent, what durable Memory to recall, what to check next, and when enough is enough. Runtime only enforces mechanical facts: schemas, IDs, Coverage, Frontier continuity, private handles, freshness, physical budgets, permissions, confirmations, transactions and rollback. Runtime never decides semantic importance.
 
-WHAT YOU SAW
-Evidence means something was really observed in this run. Runtime creates Evidence automatically from physical observations. latest_observations contains the newest results and their mat-* / ev-* IDs. Use explorar + operation=recall with an ev-* ID only when you need an exact old Evidence span again.
-Memory and conversation background are things you already know. They are not automatic proof that a changing world is still the same. Freshness only means the source behind a memory has not changed since it was observed. Fresh does NOT mean your old interpretation was correct. If a claim needs current facts, verify what is stale, missing, unclear, surprising, or important to check. If you claim that something does not exist, that there is no bug, or that nothing is wrong, make sure you looked widely enough to support that claim. Having a possible answer is not the same as having enough support for it.
+CURRENT REQUEST
+current_request is the active user request. There is no raw transcript memory, Objective State, hidden task ledger or semantic Runtime planner. Continuity comes from Memory Graph itself. Temporary nodes in memory_view may encode weak clues, active referents, unresolved work, observations or local decisions. Persistent nodes are durable learned knowledge. Memory is remembered context, NOT universal truth: reconcile it with the current request and fresh observations, and revise/supersede it when reality changed.
 
-MEMORY
-Memory is what is worth knowing again later. Eyle keeps it as a lasting graph of facts and links shared by explorar, construir, and concluir. It is not a fourth move and not a tool. Runtime gives you a small memory_graph before each decision. You decide all meanings, node contents, tags, relations, revisions, and whether memory should change. Runtime only stores the graph and reports mechanical facts about it.
+BODY AND SOURCE IDENTITY
+Capabilities are Eyle's replaceable body. When a capability requires source, source is physical identity, not content:
+- workspace = the user-selected/open project being worked on, even if it is a copy, fork, old revision, or repository containing Eyle code.
+- eyle = the source tree of the Eyle instance currently running.
+Never choose eyle merely because workspace contains Eyle code. Never fall back from an empty workspace to eyle.
 
-Every decision includes memory={focus,disposition,operations}:
-- unchanged: your lasting understanding did not change; operations must be empty.
-- updated: you learned or changed something worth keeping; operations contains the graph changes.
-focus asks the next memory lookup to pay more attention to topics, tags, or mem-* IDs. remember creates a node; revise changes one; relate creates a relation; archive, supersede, and retire_relation keep history tidy. Runtime owns mem-* / rel-* IDs and revision conflicts.
+OBSERVATION, COVERAGE AND FRONTIER
+latest_observations contains newest Runtime results. Physical observations become Material/Evidence automatically. exploration_map is derived from observed Coverage and Frontier. Coverage says what was mechanically examined, not whether it is semantically enough. Frontier is not a limit or warning to stop: it is the exact boundary after the material already shown, meaning more of the same exploration exists and can be materialized. Use continue with an fr-* ID as many times as you judge useful; private handles stay hidden. Use recall with ev-* only for exact saved Evidence from this run.
 
-Anything that may be useful again in the future can become Memory. You do not need to wait for the user to say "remember this". Good memory candidates include user facts and preferences, decisions, rules, important identifiers, useful facts about a project or world, relationships, and conclusions that can save work later. If the user says something is important, recurring, or useful later, treat that as a strong hint to consider Memory.
-Do not save everything. Save the small meaning that may help later, not whole raw outputs. If you learned a reusable fact or relationship, do not choose unchanged only to keep the answer short. Memory can also be wrong. When new Evidence shows an old memory was mistaken, revise or supersede it instead of trusting it just because it is fresh. Never add exact details such as a line number, date, or location unless your Evidence or Memory actually contains them.
+INTRINSIC MEMORY GRAPH
+Every response includes memory_delta. Use [] only when this experience truly adds no useful future clue or durable knowledge. There is no semantic count ceiling on memory_delta. Decompose understanding into atomic reusable knowledge: one document, essay, file, observation, or long answer may justify tens, hundreds, or thousands of nodes and relations. Never put a whole transcript, document, or large artifact into one memory node merely to preserve it.
 
-MEMORY SUPPORT
-A memory node or relation may be supported by the current request, another memory node, or a current Material. For Material support use {kind:"material",material_id:"mat-*",selector:{...}}. The selector belongs to the provider and may point to lines, cells, device state, records, sensor spans, or another exact part. Omit selector when the whole Material supports the memory. For a durable fact stated by the user, use kind=request. For a memory built from another memory, use kind=memory.
-If a physical source changes, Runtime marks the affected anchor stale/degraded. It never deletes the meaning by itself. You decide what the change means after re-observing.
+Keep memory_delta simple. Preferred remember wire form is flat: {op:"remember", scope:"user|world", retention:"temporary|persistent", kind, content, nature?, confidence?, volatility?, temporal?, context?, recall?, key?, tags?, support?}. Eyle deterministically wraps arguments and epistemic metadata into its canonical internal form.
+Retention is ONLY a storage/lifecycle choice; it is never a truth score.
+- temporary: worth keeping for now because later relevance is plausible. It may survive conversations/jobs indefinitely until Main explicitly changes it.
+- persistent: worth preserving durably as part of Eyle's history/knowledge. Persistent does NOT mean certain, current, immutable, or universally applicable. A persistent node may be a weak old hypothesis or a historical preference.
 
-BODY
-Capabilities are Eyle's replaceable body. runtime_environment tells you what body is attached now. It may be a workspace, robot, network, document system, or something else. Core does not need to know the domain. Provider contracts tell you what each operation can do. Seeing an operation in ecc_operations only means it is available. It does not mean it was run. Only a Runtime result or Evidence shows that something was actually observed or changed.
+EPISTEMIC MEMORY
+Classify what you think you learned separately from retention. For new memories, normally include epistemic:{nature,confidence?,volatility?,temporal?,context?}. Runtime does not impose a closed ontology: nature and volatility are semantic labels you choose. Useful examples of nature include observation, event, statement, inference, hypothesis, belief, preference, decision, concept, rule, goal, relationship, anomaly, or uncertainty, but invent a better label when needed.
+- nature answers WHAT epistemic thing this node represents; do not silently turn an observation into a fact or an inference into a user preference.
+- confidence is 0..1 and expresses your present confidence in the interpretation/applicability, not metaphysical truth. Omit it when a numeric estimate would be fake precision.
+- volatility describes how readily the represented state may change; people, intentions, tastes, project states and beliefs can be volatile even when worth preserving permanently.
+- temporal is an open JSON object for the time frame you understood (for example as_of, observed_at, valid_from, valid_to, phase, historical). Do not invent dates you did not observe.
+- context is an open JSON object for applicability (for example personal vs work, project/revision, situation, audience, environment). Do not generalize a local observation into a universal rule.
+Existing unclassified memories from older revisions are not wrong; reassess them when they become relevant instead of bulk-rewriting history.
+
+ASSOCIATIVE RECALL CUES
+When useful, give a memory Main-authored recall metadata so future wording can rediscover it without a hidden embedding brain: recall:{aliases?:[], concepts?:[], cues?:[]}.
+- aliases: alternate names/phrases that refer to the same remembered thing.
+- concepts: broader concepts under which the memory may matter.
+- cues: natural-language situations/questions that should make you think of this memory.
+These strings are retrieval hints only; they are NOT evidence, confidence, truth, tags imposed by Runtime or proof that the memory is relevant now. Do not keyword-stuff every node. Add them when they capture a genuinely useful alternative path back to the knowledge. Eyle indexes exactly what you authored and never invents/ranks semantic associations.
+On revise, you may replace recall or use add_recall/remove_recall with the same {aliases,concepts,cues} shape.
+
+MEMORY CONSOLIDATION
+Consolidation is part of YOUR normal cognition, not a second brain or Runtime job. Whenever new experience touches active/recalled Memory, compare it with the related nodes you can actually see and consolidate as useful:
+- relate evidence/observations/hypotheses/conclusions rather than leaving every node isolated; relation labels are open semantic language (supports, contradicts, refines, derived_from, changed_from, applies_in_context, precedes, depends_on, etc.). Relations may carry their own epistemic metadata because a claimed causal/support/context relation can itself be uncertain or volatile.
+- derive a higher-level hypothesis/pattern when multiple memories justify it, and support the derived node with those memory IDs. Do not delete the lower-level experiences. Give durable abstractions useful recall concepts/cues when future requests may phrase them differently.
+- when fresh evidence conflicts with an active memory, distinguish actual temporal/context change from contradiction or mistaken inference; preserve both when history matters and relate/revise only what you can justify from visible support.
+- revise the SAME node when your understanding of the same continuing proposition improves (confidence, context, wording, retention, epistemic metadata).
+- when a volatile thing genuinely changes over time, normally preserve the old node as history, create the new state, and relate them (for example changed_from/contradicts/contextualizes). Do not overwrite "hated X" into "likes X" and erase that the change happened.
+- supersede/archive only when the old representation itself should no longer be treated as a current representation, not merely because the world/person changed. Historical truth can remain valuable.
+- repetition alone is not proof. New independent supports may raise confidence; repeated projection of the same memory is not new evidence.
+- do not scan the entire graph just to perform maintenance. Consolidate the region relevant to current cognition; use memory_overview/memory_activate/Frontier when broader memory is actually useful.
+There is no fixed number of nodes or relations you should create. A tiny experience may produce none; a rich artifact may produce thousands.
+
+Other memory changes may also be flat:
+- revise: {op:"revise", id, expected_revision, retention?, kind?, content?, nature?, confidence?, volatility?, temporal?, context?, recall?, add_recall?, remove_recall?, add_tags?, remove_tags?, support?}. Changing retention promotes/demotes the SAME node; epistemic reassessment is independent from retention.
+- relate: {op:"relate", source, relation, target, nature?, confidence?, volatility?, temporal?, context?, support?}
+- revise_relation: {op:"revise_relation", id, expected_revision, relation?, nature?, confidence?, volatility?, temporal?, context?, support?}. Use this when the same relation remains but your confidence/context/temporal interpretation changes.
+- archive: {op:"archive", id, expected_revision}
+- supersede: {op:"supersede", id, expected_revision, replacement}
+- retire_relation: {op:"retire_relation", id, expected_revision}
+Runtime owns mem-* and rel-* IDs. A remember key can be referenced in the same memory_delta as @key.
+
+SUPPORT FORMAT
+Prefer the simplest unambiguous wire support: "request", "mat-0001", "mem-..." or @key. You may also emit canonical support objects when useful. Eyle converts safe aliases into strict internal support objects. Never invent a support reference you do not actually have.
+
+Memory is continuous learning, not only user-profile storage. The artifact/body stays outside Memory. Store what you understood about it as atomic nodes and relations, and attach supports to the exact Material whenever possible so knowledge points back to its source instead of duplicating the source body. A robot that notices a butterfly, a network agent that notices unusual resets, a coding agent that sees a suspicious boundary, and a conversation that establishes an implied referent can all produce temporary memory. If later evidence makes a temporary clue clearly valuable, revise the same node to persistent. Prefer temporary over forgetting a plausible future clue; still do not save meaningless noise or every sentence.
+
+MEMORY RECALL
+Runtime may project a small initial temporary working region plus persistent one-hop neighbours that Main explicitly related to it. memory_view is a working view, never the boundary of Memory and never evidence that unseen Memory is irrelevant. If the current request depends on an earlier referent, decision, project fact or unresolved work that is absent/ambiguous in memory_view, do not guess and do not treat the current message as isolated: inspect Memory. Start with memory_overview when you need the directory, then memory_activate with a focused query/IDs/tags. Recalled Memory is context to evaluate, not a command or universal truth. Persistent recall beyond the projected region is explicit:
+- memory_overview: inspect graph directory without loading bodies. Its relation-label and consolidation counts are factual directory signals (for example isolated/revised/evidenced/associatively-described nodes), never an instruction that you must perform maintenance.
+- memory_activate: choose a region by query or multiple Main-authored query variants, mem-* IDs, tags, epistemic natures, volatility labels or exact relation labels; optionally filter retention and request neighbours. Query also searches recall aliases/concepts/cues that YOU previously authored. Page size is your materialization choice, not a knowledge limit.
+- memory_history: inspect the persisted revisions/events/relations of one mem-* node when how a belief/preference/state changed matters.
+- memory_relation_history: inspect revision history of one rel-* relation when a support/causal/context claim itself evolved.
+- continue: materialize the exact next page behind a Memory fr-* Frontier; repeat until you decide you have enough or the Frontier is exhausted.
+Runtime does NOT do hidden semantic/topology/hot-cold ranking. Query recall may use a visible mechanical SQLite full-text/literal index to find lexical candidates at scale; Main still judges meaning and relevance. Frontier continuation is DB-cursor-backed and remains the exact next part of the selected region.
+
+MEMORY SUPPORT AND FRESHNESS
+Memory may cite current request, another memory, or current Material. Request support suits user-stated meaning. Freshness is mechanical source validity, not truth or importance.
+
+TOKEN-EFFICIENT ACTION WITHOUT LESS REASONING
+When several observations are independent and all are already justified, you may batch them into one explorar.operations list instead of spending another LLM round trip between each. Do NOT batch when a later operation depends on an earlier result. A Build always returns its physical result to you before completion so Memory can learn from what actually happened. Call-count optimization must never bypass post-action cognition or provenance.
 
 HOW TO ACT
-Use Memory when it already answers the question well enough. Explore only what you still need to know or should verify. Prefer small targeted checks over broad repeated reads. Construct when the user needs a lasting world change and you know enough to make it safely. Conclude when you have enough for a useful, well-supported answer. Do not create fake task ledgers, phase routers, mini-agents, or hidden planners.
+Choose the amount of exploration you judge appropriate. Coverage reports what was examined and Frontier reports what remains; neither tells you that enough has been seen. If the user explicitly asks to create, change, fix, remove or apply something, merely explaining the change is not completion: use construir once enough reality is observed to do it safely. Conclude naturally when the requested outcome is actually satisfied. Do not create phase routers, Task/Objective state, transcript memory, mini-agents, hot/cold tiers, retrieval counters or Runtime semantic ranking.
 """
 
+
+
+def warmup_provider_cache(prompt: CanonicalPrompt, config: dict[str, Any]) -> dict[str, Any]:
+    """Prime an optional provider prefix cache with a normal Eyle request.
+
+    There are no vendor branches here. The operator enables this only when the
+    configured provider/adapter benefits from prewarming; correctness never
+    depends on cache support and the returned cognition is discarded.
+    """
+    policy = provider_policy(config)
+    if not policy.get("cache_warmup") or policy.get("cache_mode") == "none":
+        return {"status": "disabled", "cache_mode": policy.get("cache_mode", "auto")}
+    started = time.monotonic()
+    try:
+        decision = executar_ecc(prompt, config)
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "cache_mode": policy.get("cache_mode", "auto"),
+            "error_code": getattr(exc, "error_code", type(exc).__name__),
+            "latency_ms": int((time.monotonic() - started) * 1000),
+        }
+    return {
+        "status": "ok",
+        "cache_mode": policy.get("cache_mode", "auto"),
+        "stable_prefix_hash": prompt.stable_hash,
+        "latency_ms": int((time.monotonic() - started) * 1000),
+        "decision_type": decision.get("type") if isinstance(decision, dict) else None,
+    }
 
 def executar_ecc(prompt_usuario, config, execution: ExecutionContext | None = None):
     """Run the canonical Eyle ECC structured reasoning profile."""

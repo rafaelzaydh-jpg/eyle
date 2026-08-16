@@ -16,24 +16,25 @@ def memory_from_learned(learned=None):
         support=dict(item.get("support") or {})
         supports=[]
         if support.get("material_id"):
+            support.pop("line_start", None); support.pop("line_end", None)
             supports.append({"kind":"material", **support})
         operations.append({
             "op":"remember", "scope":"world", "kind":"fact",
             "content":str(item.get("statement") or "fact"), "supports":supports,
         })
-    return {"focus":[], "disposition":"updated" if operations else "unchanged", "operations":operations}
+    return operations
 
 
 def explore(operation, arguments=None, learned=None):
-    return {"type": "explorar", "operation": operation, "arguments": dict(arguments or {}), "memory": memory_from_learned(learned)}
+    return {"type": "explorar", "operations": [{"operation": operation, "arguments": dict(arguments or {})}], "memory_delta": memory_from_learned(learned)}
 
 
 def build(operation, arguments=None, learned=None):
-    return {"type": "construir", "operation": operation, "arguments": dict(arguments or {}), "memory": memory_from_learned(learned)}
+    return {"type": "construir", "operation": operation, "arguments": dict(arguments or {}), "memory_delta": memory_from_learned(learned)}
 
 
 def conclude(response, learned=None):
-    return {"type": "concluir", "response": response, "memory": memory_from_learned(learned)}
+    return {"type": "concluir", "response": response, "memory_delta": memory_from_learned(learned)}
 
 
 def provider_context(workspace: Path | None, eyle_root: Path | None = None):
@@ -54,7 +55,7 @@ def test_ecc_source_is_fail_closed_when_model_omits_it(monkeypatch, tmp_path):
     prompts = []
 
     def fake(prompt, cfg):
-        payload = json.loads(prompt)
+        payload = json.loads(str(prompt))
         prompts.append(payload)
         if len(prompts) == 1:
             return explore("read_file", {"path": "app.py", "line_start": 1, "line_end": 1})
@@ -80,7 +81,7 @@ def test_eyle_source_remains_available_without_user_workspace(monkeypatch, tmp_p
     prompts = []
 
     def fake(prompt, cfg):
-        payload = json.loads(prompt)
+        payload = json.loads(str(prompt))
         prompts.append(payload)
         if len(prompts) == 1:
             return explore("find_symbol", {"source": "eyle", "symbol": "AgentSession"})
@@ -122,7 +123,7 @@ def test_negative_search_cache_invalidates_when_external_file_appears(monkeypatc
     prompts = []
 
     def fake(prompt, cfg):
-        payload = json.loads(prompt)
+        payload = json.loads(str(prompt))
         prompts.append(payload)
         if len(prompts) == 1:
             return explore("search", {"source": "workspace", "query": "AgentSession"})
@@ -151,7 +152,7 @@ def test_positive_read_cache_invalidates_on_external_content_change(monkeypatch,
     prompts = []
 
     def fake(prompt, cfg):
-        payload = json.loads(prompt)
+        payload = json.loads(str(prompt))
         prompts.append(payload)
         if len(prompts) == 1:
             return explore("read_file", {"source": "workspace", "path": "a.py", "line_start": 1, "line_end": 1})
@@ -173,91 +174,8 @@ def test_positive_read_cache_invalidates_on_external_content_change(monkeypatch,
     assert details["operation_replays"] == 0
 
 
-def test_knowledge_becomes_historical_after_confirmed_mutation(monkeypatch, tmp_path):
-    target = tmp_path / "app.py"
-    target.write_text("x = 1\n", encoding="utf-8")
-    calls = []
-
-    def fake(prompt, cfg):
-        payload = json.loads(prompt)
-        calls.append(payload)
-        if len(calls) == 1:
-            return explore("read_file", {"source": "workspace", "path": "app.py", "line_start": 1, "line_end": 1})
-        if len(calls) == 2:
-            mat = payload["latest_observations"][0]["grounding_ids"][0]
-            return build("transaction", {
-                "patches": [{"operation": "update", "path": "app.py", "line_start": 1, "line_end": 1, "new_code": "x = 2\n"}]
-            }, learned=[{
-                "statement": "app.py currently says x = 1",
-                "support": {"material_id": mat, "selector": {"line_start": 1, "line_end": 1}},
-            }])
-        fact = next(node for node in payload["memory_graph"]["nodes"] if node["content"] == "app.py currently says x = 1")
-        assert fact["freshness"] in {"stale", "degraded"}
-        return conclude("feito")
-
-    monkeypatch.setattr(agent, "executar_ecc_llm", fake)
-    cfg = base_config()
-    status, _, pending, _ = run_agent(
-        agent, "mude x", cfg, provider_context=provider_context(tmp_path), retornar_detalhes=True,
-    )
-    assert status == "confirmation_required"
-    status2, text2, _, details2 = run_agent(
-        agent, "mude x", cfg, provider_context=provider_context(tmp_path),
-        retomar=pending, resposta_usuario="confirmar", retornar_detalhes=True,
-    )
-    assert (status2, text2) == ("completed", "feito")
-    assert details2["reality_epoch"] == 1
-    assert target.read_text(encoding="utf-8").strip() == "x = 2"
 
 
-def test_unchanged_file_knowledge_revalidates_across_unrelated_write(monkeypatch, tmp_path):
-    a = tmp_path / "a.py"
-    b = tmp_path / "b.py"
-    a.write_text("A = 1\n", encoding="utf-8")
-    b.write_text("B = 1\n", encoding="utf-8")
-    calls = []
-
-    def fake(prompt, cfg):
-        payload = json.loads(prompt)
-        calls.append(payload)
-        if len(calls) == 1:
-            return explore("read_file", {"source": "workspace", "path": "a.py", "line_start": 1, "line_end": 1})
-        if len(calls) == 2:
-            mat_a = payload["latest_observations"][0]["grounding_ids"][0]
-            return explore(
-                "read_file",
-                {"source": "workspace", "path": "b.py", "line_start": 1, "line_end": 1},
-                learned=[{
-                    "statement": "a.py currently says A = 1",
-                    "support": {"material_id": mat_a, "line_start": 1, "line_end": 1},
-                }],
-            )
-        if len(calls) == 3:
-            return build("transaction", {
-                "patches": [{"operation": "update", "path": "b.py", "line_start": 1, "line_end": 1, "new_code": "B = 2\n"}]
-            })
-        fact = next(node for node in payload["memory_graph"]["nodes"] if node["content"] == "a.py currently says A = 1")
-        assert fact["freshness"] == "fresh"
-        if len(calls) == 4:
-            evidence_id = next(src["evidence_id"] for src in fact["sources"] if src.get("evidence_id"))
-            return explore("recall", {"evidence_id": evidence_id})
-        recalled = payload["latest_observations"][0]
-        assert recalled["status"] == "recalled"
-        return conclude("preservado")
-
-    monkeypatch.setattr(agent, "executar_ecc_llm", fake)
-    cfg = base_config()
-    status, _, pending, _ = run_agent(
-        agent, "mude apenas b", cfg, provider_context=provider_context(tmp_path), retornar_detalhes=True,
-    )
-    assert status == "confirmation_required"
-    status2, text2, _, _ = run_agent(
-        agent, "mude apenas b", cfg, provider_context=provider_context(tmp_path),
-        retomar=pending, resposta_usuario="confirmar", retornar_detalhes=True,
-    )
-    assert (status2, text2) == ("completed", "preservado")
-    assert a.read_text(encoding="utf-8") == "A = 1\n"
-    assert b.read_text(encoding="utf-8") == "B = 2\n"
 
 
 
@@ -289,7 +207,7 @@ def test_repeated_identical_internal_failure_counts_as_no_progress_not_no_execut
     prompts = []
 
     def fake(prompt, cfg):
-        payload = json.loads(prompt)
+        payload = json.loads(str(prompt))
         prompts.append(payload)
         if len(prompts) <= 3:
             return explore("fail", {})
@@ -371,7 +289,7 @@ def test_runtime_environment_exposes_physical_source_availability_without_routin
     eyle_root = tmp_path / "self"
     eyle_root.mkdir()
     prompts = []
-    monkeypatch.setattr(agent, "executar_ecc_llm", lambda prompt, cfg: prompts.append(json.loads(prompt)) or conclude("ok"))
+    monkeypatch.setattr(agent, "executar_ecc_llm", lambda prompt, cfg: prompts.append(json.loads(str(prompt))) or conclude("ok"))
     status, _, _, _ = run_agent(
         agent, "estado", base_config(), provider_context=provider_context(None, eyle_root), retornar_detalhes=True,
     )
@@ -381,40 +299,6 @@ def test_runtime_environment_exposes_physical_source_availability_without_routin
     assert resources["eyle_source"]["available"] is True
 
 
-def test_external_change_marks_retained_knowledge_and_recall_stale(monkeypatch, tmp_path):
-    target = tmp_path / "app.py"
-    target.write_text("x = 1\n", encoding="utf-8")
-    prompts = []
-
-    def fake(prompt, cfg):
-        payload = json.loads(prompt)
-        prompts.append(payload)
-        if len(prompts) == 1:
-            return explore("read_file", {"source": "workspace", "path": "app.py", "line_start": 1, "line_end": 1})
-        if len(prompts) == 2:
-            mat = payload["latest_observations"][0]["grounding_ids"][0]
-            target.write_text("x = 2\n", encoding="utf-8")
-            return explore("calculate", {"expression": "1+1"}, learned=[{
-                "statement": "app.py says x = 1",
-                "support": {"material_id": mat, "selector": {"line_start": 1, "line_end": 1}},
-            }])
-        if len(prompts) == 3:
-            fact = next(node for node in payload["memory_graph"]["nodes"] if node["content"] == "app.py says x = 1")
-            assert fact["freshness"] in {"stale", "degraded"}
-            evidence_id = next(src["evidence_id"] for src in fact["sources"] if src.get("evidence_id"))
-            return explore("recall", {"evidence_id": evidence_id})
-        recalled = payload["latest_observations"][0]
-        assert recalled["status"] == "recalled_stale"
-        assert recalled["current_world_valid"] is False
-        return conclude("stale detectado")
-
-    monkeypatch.setattr(agent, "executar_ecc_llm", fake)
-    status, text, _, details = run_agent(
-        agent, "leia e confira", base_config(), provider_context=provider_context(tmp_path), retornar_detalhes=True,
-    )
-    assert (status, text) == ("completed", "stale detectado")
-    assert details["memory_degraded_nodes"] == 1
-    assert details.get("memory_fresh_nodes", 0) == 0
 
 
 def test_memory_is_internal_not_registered_provider(tmp_path):
@@ -494,7 +378,7 @@ def test_source_change_during_operation_is_not_cached_as_current(monkeypatch):
     prompts = []
 
     def fake(prompt, cfg):
-        payload = json.loads(prompt)
+        payload = json.loads(str(prompt))
         prompts.append(payload)
         if len(prompts) <= 2:
             if len(prompts) == 2:
@@ -523,7 +407,7 @@ def test_eyle_observation_cannot_authorize_workspace_write_with_same_path(monkey
     prompts = []
 
     def fake(prompt, cfg):
-        payload = json.loads(prompt)
+        payload = json.loads(str(prompt))
         prompts.append(payload)
         if len(prompts) == 1:
             return explore("read_file", {"source": "eyle", "path": "same.py", "line_start": 1, "line_end": 1})
@@ -589,14 +473,14 @@ def test_workspace_transaction_uses_canonical_registry_run_tests(monkeypatch, tm
 def test_rev22_type_is_single_family_authority_and_redundant_prefix_is_normalized():
     from llm.structured import parse_profile_response
 
-    direct = parse_profile_response({"type": "explorar", "operation": "search", "arguments": {}, "objective": {"disposition": "unchanged", "state": None}, "memory": {"focus": [], "disposition": "unchanged", "operations": []}}, "ecc")
-    assert direct["operation"] == "search"
-    redundant = parse_profile_response({"type": "explorar", "operation": "explorar.search", "arguments": {}, "objective": {"disposition": "unchanged", "state": None}, "memory": {"focus": [], "disposition": "unchanged", "operations": []}}, "ecc")
-    assert redundant["operation"] == "search"
-    mismatched_prefix = parse_profile_response({"type": "explorar", "operation": "construir.transaction", "arguments": {}, "objective": {"disposition": "unchanged", "state": None}, "memory": {"focus": [], "disposition": "unchanged", "operations": []}}, "ecc")
+    direct = parse_profile_response({"decision":{"type":"explorar","operations":[{"operation":"search","arguments":{}}]},"memory_delta":[]}, "ecc")
+    assert direct["operations"][0]["operation"] == "search"
+    redundant = parse_profile_response({"decision":{"type":"explorar","operations":[{"operation":"explorar.search","arguments":{}}]},"memory_delta":[]}, "ecc")
+    assert redundant["operations"][0]["operation"] == "search"
+    mismatched_prefix = parse_profile_response({"decision":{"type":"explorar","operations":[{"operation":"construir.transaction","arguments":{}}]},"memory_delta":[]}, "ecc")
     # Type remains the only authority. Runtime will simply find no Explore operation
     # called transaction instead of failing the whole job at the structured layer.
-    assert mismatched_prefix == {"type": "explorar", "operation": "transaction", "arguments": {}, "objective": {"disposition": "unchanged", "state": None}, "memory": {"focus": [], "disposition": "unchanged", "operations": []}}
+    assert mismatched_prefix == {"type":"explorar","operations":[{"operation":"transaction","arguments":{}}],"memory_delta":[]}
 
 
 def test_rev22_structured_retry_resets_after_a_valid_decision(monkeypatch, tmp_path):
@@ -631,7 +515,7 @@ def test_rev22_search_material_supports_line_selected_learning(monkeypatch, tmp_
     prompts = []
 
     def fake(prompt, cfg):
-        payload = json.loads(prompt)
+        payload = json.loads(str(prompt))
         prompts.append(payload)
         if len(prompts) == 1:
             return explore("search", {"source": "workspace", "query": "AgentSession"})

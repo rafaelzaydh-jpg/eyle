@@ -1,17 +1,29 @@
-# Eyle DeepSeek Adapter Rev2.5.2 — Auditoria
+# Auditoria — Eyle Adapter Universal Rev2.8.1
 
-**Destino:** Eyle 2.7.5 Rev2.5.2 ECC + DeepSeek stable Chat Completions.
+## Arquitetura confirmada
 
-## Mudanças
+```text
+Eyle -> 127.0.0.1:8080 -> Adapter -> API remota OpenAI-compatible -> modelo
+```
 
-1. **Objective grammar derivada do schema** — `objective.disposition`, `objective.state`, `children`, `constraints`, `status` e `outcome` são ensinados à DeepSeek sem hardcode de domínio.
-2. **Memory grammar preservada** — remember/revise/relate/archive/supersede/retire_relation, aliases e supports continuam completos.
-3. **JSON Object upstream** — o adapter continua usando o mecanismo oficialmente disponível no endpoint estável e valida localmente o schema canônico Draft 2020-12.
-4. **Diagnóstico discriminado de Objective** — repair recebe caminhos específicos em Objective State, evitando umbrella errors de `oneOf`.
-5. **Repair preserva semântica** — não deve apagar uma atualização genuína de Objective ou Memory apenas para tornar o JSON válido.
-6. **Schema fixture canônico** — `tests/fixtures/eyle_rev252_ecc_schema.json` vem diretamente da release Eyle usada para construir o artefato.
+- A porta 8080 pertence ao Adapter.
+- O Adapter não requer nem inicia LLM local.
+- Não existe fallback para 127.0.0.1:8000.
+- `UPSTREAM_BASE_URL` é obrigatório e representa a API remota escolhida.
+- `UPSTREAM_API_KEY` autentica o Adapter perante o provider remoto.
+- `DEFAULT_MODEL`/`MODEL_OVERRIDE` definem o modelo sem acoplar a Eyle ao provider.
+- Com modelo explícito, `/v1/models` é servido localmente e não exige que o provider implemente model discovery.
+- Com `DEFAULT_MODEL=auto`, o Adapter usa `GET <UPSTREAM_BASE_URL>/models` para descobrir um modelo.
+- Particularidades OpenAI-compatible podem ser passadas por `UPSTREAM_EXTRA_HEADERS_JSON` e `UPSTREAM_EXTRA_BODY_JSON`.
 
-## Verificação
+## Regressão corrigida
 
-- 11 testes do adapter passam na árvore de construção.
-- O schema fixture é comparado bit-a-bit com `schema_for_profile("ecc")` antes do empacotamento final.
+O pacote anterior trazia `UPSTREAM_BASE_URL=http://127.0.0.1:8000/v1` como default. Isso fazia uma instalação sem `.env` corretamente configurado tentar falar com uma LLM local inexistente e produzir `502 model_discovery_failed`.
+
+A correção remove completamente esse default. Configuração ausente agora falha cedo e de forma explícita.
+
+## Validação
+
+`python -m pytest -q`: **20 passed**.
+
+Os testes cobrem, entre outros pontos, schema Rev2.8.1, structured-output translation/fallback, model discovery, `model=auto`, autenticação loopback da Eyle, contabilização de usage, timeout e a ausência de fallback hardcoded para `127.0.0.1:8000`.

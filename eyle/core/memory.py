@@ -1,31 +1,69 @@
-"""ECC-internal persistent Memory Graph sidecar.
+"""Intrinsic epistemic Memory Graph cognition for Eyle.
 
-Memory is not a fourth cognitive action and is not a capability.  Every ECC
-move carries a small memory sidecar: Main may focus existing graph context and
-may emit semantic graph deltas.  Runtime owns persistence, identities,
-revision conflicts, source hashes/freshness and graph topology.
+Memory is a transversal cognitive layer beside ECC. Main decides learned meaning
+and retention independently from epistemic state. ``temporary``/``persistent`` answer whether a memory should be retained; epistemic metadata answers what kind of belief/observation/hypothesis it is, how confident Main is, how volatile it may be and in what temporal/contextual frame it applies. Runtime owns graph mechanics, paged materialization,
+revisions, persistence, freshness and exact Coverage/Frontier continuation.
+Temporary memory is not conversation history and is not cleared merely because a
+chat/job boundary occurs.
 """
 from __future__ import annotations
 
 import copy
 import uuid
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List
 
 from eyle.core.evidence import retain_evidence
+from eyle.contracts.observation import register_snapshot_handle, materialize_snapshot_handle, snapshot_store
 from eyle.runtime.memory_graph import (
-    apply_graph_operations,
-    edge_record,
-    graph_counts,
-    node_record,
-    world_scope,
-    retrieve_graph,
+    apply_graph_operations, create_recall_snapshot, edge_history, edge_record, graph_counts, graph_overview, graph_records,
+    memory_search_backend, node_record, node_history, recall_snapshot_page, release_recall_snapshot,
+    temporary_graph_records, world_scope,
 )
-from eyle.runtime.observation import material_items
+from eyle.runtime.observation import (
+    consume_frontier, expose_frontiers, frontier_view, material_items, resolve_frontier,
+)
 
 
-def empty_memory_focus() -> List[str]:
-    return []
 
+
+def release_memory_navigation(session: Any, provider_context: Dict[str, Any]) -> Dict[str, Any]:
+    """Release DB-backed Memory recall snapshots owned by a terminal Session.
+
+    A Memory Frontier is logical task-navigation state, not learned knowledge.  While
+    a task is pending confirmation the Session is persisted and its exact cursor must
+    survive.  Once the logical task reaches a terminal state, however, any unopened
+    recall snapshots are unreachable and may be deleted mechanically.
+
+    This performs no semantic pruning and never touches Memory nodes/relations.
+    """
+    storage, _world_scope_id = _context(provider_context)
+    if not storage or session is None:
+        return {"released": 0, "snapshot_ids": []}
+    ledger = getattr(session, "observation_ledger", None)
+    if not isinstance(ledger, dict):
+        return {"released": 0, "snapshot_ids": []}
+    db_ids: list[str] = []
+    for item in list(snapshot_store(ledger).values()):
+        if not isinstance(item, dict):
+            continue
+        payload = item.get("payload")
+        cursor = payload.get("memory_cursor") if isinstance(payload, dict) else None
+        snapshot_id = str((cursor or {}).get("snapshot_id") or "").strip() if isinstance(cursor, dict) else ""
+        if snapshot_id and snapshot_id not in db_ids:
+            db_ids.append(snapshot_id)
+    released = 0
+    for snapshot_id in db_ids:
+        try:
+            release_recall_snapshot(storage, snapshot_id)
+            released += 1
+        except (OSError, ValueError):
+            # Terminal cleanup is best-effort physical housekeeping.  A cleanup
+            # failure must never mutate or invalidate learned Memory.
+            continue
+    return {"released": released, "snapshot_ids": db_ids}
+
+def empty_memory_view() -> Dict[str, Any]:
+    return {"node_ids": [], "coverage": {}, "frontiers": [], "selector": {}, "overview": {}}
 
 def _context(provider_context: Dict[str, Any]) -> tuple[str | None, str | None]:
     raw = (provider_context or {}).get("core_memory")
@@ -42,14 +80,11 @@ def memory_available(provider_context: Dict[str, Any]) -> bool:
 
 
 def memory_environment(provider_context: Dict[str, Any]) -> Dict[str, Any]:
+    """Small capability/identity envelope; graph counts are projected only once."""
     storage, scope = _context(provider_context)
     if not storage or not scope:
         return {"available": False}
-    try:
-        counts = graph_counts(storage)
-    except (OSError, ValueError):
-        return {"available": False}
-    return {"available": True, "world_scope": world_scope(scope), **counts}
+    return {"available": True, "world_scope": world_scope(scope)}
 
 
 def _resolve_ref(value: Any, aliases: Dict[str, str]) -> str:
@@ -126,35 +161,30 @@ def _support_anchors(
 
 def apply_memory_sidecar(
     session: Any,
-    sidecar: Any,
+    operations: Any,
     *,
     registry: Any,
     provider_context: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Apply one memory sidecar atomically. No semantic choice is made here."""
-    if not isinstance(sidecar, dict):
+    """Apply Main-authored persistent learning atomically.
+
+    ``memory_delta=[]`` means this experience added no useful memory; a non-empty list is the exact graph delta Main chose.
+    """
+    if not isinstance(operations, list):
         return {"ok": False, "error_code": "MEMORY_SIDECAR_INVALID"}
-    focus = [str(v).strip() for v in sidecar.get("focus") or [] if str(v).strip()][:12]
-    session.memory_focus = focus
-    disposition = str(sidecar.get("disposition") or "").strip()
-    operations = [copy.deepcopy(v) for v in sidecar.get("operations") or [] if isinstance(v, dict)]
-    if disposition not in {"unchanged", "updated"}:
-        return {"ok": False, "error_code": "MEMORY_DISPOSITION_INVALID", "focus": focus}
-    if disposition == "unchanged" and operations:
-        return {"ok": False, "error_code": "MEMORY_DISPOSITION_CONFLICT", "focus": focus}
-    if disposition == "updated" and not operations:
-        return {"ok": False, "error_code": "MEMORY_DISPOSITION_CONFLICT", "focus": focus}
-    if not operations:
-        return {"ok": True, "changed": False, "focus": focus, "disposition": disposition, "affected": [], "evidence_ids": []}
+    ops = [copy.deepcopy(v) for v in operations if isinstance(v, dict)]
+    if len(ops) != len(operations):
+        return {"ok": False, "error_code": "MEMORY_SIDECAR_INVALID"}
+    if not ops:
+        return {"ok": True, "changed": False, "affected": [], "evidence_ids": []}
 
     storage, world_scope_id = _context(provider_context)
     if not storage or not world_scope_id:
         return {"ok": False, "error_code": "MEMORY_CONTEXT_UNAVAILABLE"}
     world_scope_value = world_scope(world_scope_id)
 
-    # Runtime owns physical IDs. Main may name new nodes only through local @keys.
     aliases: Dict[str, str] = {}
-    for raw in operations:
+    for raw in ops:
         if str(raw.get("op") or "") == "remember":
             key = str(raw.get("key") or "").strip()
             if key:
@@ -165,86 +195,67 @@ def apply_memory_sidecar(
     prepared: List[Dict[str, Any]] = []
     evidence_ids: List[str] = []
     try:
-        for raw in operations:
+        for raw in ops:
             op = str(raw.get("op") or "").strip()
             supports = raw.get("supports") or []
             anchors, retained = _support_anchors(
-                supports,
-                session=session,
-                registry=registry,
-                provider_context=provider_context,
-                storage_dir=storage,
-                aliases=aliases,
+                supports, session=session, registry=registry, provider_context=provider_context,
+                storage_dir=storage, aliases=aliases,
             )
             evidence_ids.extend(retained)
             if op == "remember":
-                scope = str(raw.get("scope") or "world")
-                mapped_scope = "user" if scope == "user" else world_scope_value
+                mapped_scope = "user" if str(raw.get("scope") or "world") == "user" else world_scope_value
                 key = str(raw.get("key") or "").strip()
                 prepared.append({
                     "op": "create_node", "id": aliases.get(key) if key else None,
                     "scope": mapped_scope, "kind": raw.get("kind"), "content": raw.get("content"),
-                    "tags": raw.get("tags") or [], "anchors": anchors,
+                    "retention": raw.get("retention") or "temporary", "epistemic": raw.get("epistemic") or {"nature": "unclassified"},
+                    "recall": raw.get("recall") or {}, "tags": raw.get("tags") or [], "anchors": anchors,
                 })
             elif op == "revise":
-                node_id = _resolve_ref(raw.get("id"), aliases)
-                node_record(storage, node_id)
+                node_id = _resolve_ref(raw.get("id"), aliases); node_record(storage, node_id)
                 prepared.append({
                     "op": "update_node", "id": node_id, "expected_revision": raw.get("expected_revision"),
-                    "content": raw.get("content"), "kind": raw.get("kind"),
+                    "content": raw.get("content"), "kind": raw.get("kind"), "retention": raw.get("retention"),
+                    "epistemic": raw.get("epistemic"), "recall": raw.get("recall"),
+                    "add_recall": raw.get("add_recall") or {}, "remove_recall": raw.get("remove_recall") or {},
                     "add_tags": raw.get("add_tags") or [], "remove_tags": raw.get("remove_tags") or [],
                     "anchors": anchors,
                 })
             elif op == "relate":
                 source = _resolve_ref(raw.get("source"), aliases); target = _resolve_ref(raw.get("target"), aliases)
-                # Existing IDs are checked; @aliases become nodes in this same atomic changeset.
-                if not str(raw.get("source") or "").startswith("@"):
-                    node_record(storage, source)
-                if not str(raw.get("target") or "").startswith("@"):
-                    node_record(storage, target)
-                prepared.append({"op": "create_edge", "source": source, "label": raw.get("relation"), "target": target, "anchors": anchors})
+                if not str(raw.get("source") or "").startswith("@"): node_record(storage, source)
+                if not str(raw.get("target") or "").startswith("@"): node_record(storage, target)
+                prepared.append({"op": "create_edge", "source": source, "label": raw.get("relation"), "target": target, "epistemic": raw.get("epistemic") or {"nature": "relation"}, "anchors": anchors})
+            elif op == "revise_relation":
+                relation_id = str(raw.get("id") or "").strip(); edge_record(storage, relation_id)
+                prepared.append({
+                    "op": "update_edge", "id": relation_id, "expected_revision": raw.get("expected_revision"),
+                    "label": raw.get("relation"), "epistemic": raw.get("epistemic"), "anchors": anchors,
+                })
             elif op == "archive":
                 node_id = _resolve_ref(raw.get("id"), aliases); node_record(storage, node_id)
                 prepared.append({"op": "archive_node", "id": node_id, "expected_revision": raw.get("expected_revision")})
             elif op == "supersede":
                 node_id = _resolve_ref(raw.get("id"), aliases); replacement = _resolve_ref(raw.get("replacement"), aliases)
                 node_record(storage, node_id)
-                if not str(raw.get("replacement") or "").startswith("@"):
-                    node_record(storage, replacement)
+                if not str(raw.get("replacement") or "").startswith("@"): node_record(storage, replacement)
                 prepared.append({"op": "supersede_node", "id": node_id, "expected_revision": raw.get("expected_revision"), "replacement": replacement})
             elif op == "retire_relation":
                 relation_id = str(raw.get("id") or "").strip(); edge_record(storage, relation_id)
                 prepared.append({"op": "retire_edge", "id": relation_id, "expected_revision": raw.get("expected_revision")})
             else:
                 raise ValueError(f"MEMORY_SIDECAR_OPERATION_INVALID:{op or '<empty>'}")
-        change = apply_graph_operations(
-            storage, prepared, execution_id=session.execution_id, turn=session.turn,
-        )
+        change = apply_graph_operations(storage, prepared, execution_id=session.execution_id, turn=session.turn)
+        # Eyle does not auto-archive temporary memory by a tiny fixed
+        # capacity. Projection remains bounded, while retention stays an
+        # explicit cognition/maintenance decision.
     except (OSError, ValueError) as exc:
-        return {"ok": False, "error_code": str(exc).split(":", 1)[0], "detail": str(exc), "focus": focus}
-    affected = change.get("affected") or []
-    # Memory is transversal to the current thought: when Main writes graph state
-    # without choosing an explicit focus, keep the nodes it just touched hot for
-    # the next ECC turn. This is a mechanical continuation aid, not a semantic
-    # choice about importance. Explicit focus always wins.
-    affected_nodes: List[str] = []
-    for item in affected:
-        if not isinstance(item, dict):
-            continue
-        for key_name in ("id", "source", "target", "replacement"):
-            value = str(item.get(key_name) or "").strip()
-            if value.startswith("mem-") and value not in affected_nodes:
-                affected_nodes.append(value)
-    if focus:
-        session.memory_focus = focus
-    elif affected_nodes:
-        session.memory_focus = affected_nodes[-8:]
+        return {"ok": False, "error_code": str(exc).split(":", 1)[0], "detail": str(exc)}
     return {
-        "ok": True, "changed": bool(change.get("count")), "focus": list(session.memory_focus), "disposition": disposition,
-        "changeset_id": change.get("changeset_id"), "affected": affected,
-        "evidence_ids": sorted(set(evidence_ids)), "aliases": aliases,
+        "ok": True, "changed": bool(change.get("count")), "changeset_id": change.get("changeset_id"),
+        "affected": change.get("affected") or [], "evidence_ids": sorted(set(evidence_ids)), "aliases": aliases,
     }
-
 
 
 def _compact_locator(locator: Dict[str, Any], *, maximum: int = 12) -> Dict[str, Any]:
@@ -342,47 +353,44 @@ def _evaluate_node(
     freshness = _combine_anchor_statuses(statuses)
     out = {
         "id": node_id, "scope": raw.get("scope"), "kind": raw.get("kind"),
-        "content": str(raw.get("content") or "")[:1400], "tags": list(raw.get("tags") or [])[:16],
-        "revision": raw.get("revision"), "freshness": freshness,
-        "sources": statuses[:8], "topology": copy.deepcopy(raw.get("topology") or {}),
-        "retrieval": copy.deepcopy(raw.get("retrieval") or {}),
+        "retention": raw.get("retention") or "persistent", "status": raw.get("status") or "current",
+        "content": str(raw.get("content") or ""),
+        "epistemic": copy.deepcopy(raw.get("epistemic") or {"nature": "unclassified", "volatility": "unknown", "temporal": {}, "context": {}}),
+        "revision": raw.get("revision"),
+        "created_at": raw.get("created_at"), "updated_at": raw.get("updated_at"),
     }
+    recall = copy.deepcopy(raw.get("recall") or {})
+    if recall:
+        out["recall"] = recall
+    tags = list(raw.get("tags") or [])
+    if tags:
+        out["tags"] = tags
+    if freshness not in {"", "unbound"}:
+        out["freshness"] = freshness
+    if statuses:
+        out["sources"] = statuses
     node_cache[node_id] = copy.deepcopy(out)
     return out
 
 
-def memory_graph_view(
-    session: Any,
-    *,
-    query: str,
-    registry: Any,
-    config: Dict[str, Any],
-    provider_context: Dict[str, Any],
-    limit: int = 14,
-) -> Dict[str, Any]:
-    storage, world_scope_id = _context(provider_context)
-    if not storage or not world_scope_id:
-        return {"available": False, "nodes": [], "edges": []}
-    try:
-        raw = retrieve_graph(
-            storage,
-            world_scope_value=world_scope(world_scope_id),
-            query=str(query or ""),
-            focus=session.memory_focus,
-            limit=limit,
-            execution_id=session.execution_id,
-        )
-    except (OSError, ValueError) as exc:
-        return {"available": False, "nodes": [], "edges": [], "error": str(exc).split(":", 1)[0]}
-    runtime_ctx = {
+def _runtime_context(session: Any, config: Dict[str, Any], provider_context: Dict[str, Any]) -> Dict[str, Any]:
+    return {
         "config": config or {}, "provider_context": provider_context or {}, "session": session,
         "grounding": material_items(session.observation_ledger), "observation_ledger": session.observation_ledger,
         "reality_epoch": int(session.reality_epoch),
     }
+
+
+def _project_records(
+    raw: Dict[str, Any], *, session: Any, registry: Any, config: Dict[str, Any],
+    provider_context: Dict[str, Any], storage: str,
+) -> Dict[str, Any]:
+    runtime_ctx = _runtime_context(session, config, provider_context)
     node_cache: Dict[str, Dict[str, Any]] = {}
     nodes = [
-        _evaluate_node(raw_node, registry=registry, runtime_ctx=runtime_ctx, storage_dir=storage, node_cache=node_cache, stack={str(raw_node.get('id') or '')})
-        for raw_node in raw.get("nodes") or [] if isinstance(raw_node, dict)
+        _evaluate_node(item, registry=registry, runtime_ctx=runtime_ctx, storage_dir=storage,
+                       node_cache=node_cache, stack={str(item.get("id") or "")})
+        for item in raw.get("nodes") or [] if isinstance(item, dict)
     ]
     by_id = {str(item.get("id")): item for item in nodes}
     edges = []
@@ -390,7 +398,8 @@ def memory_graph_view(
         if not isinstance(raw_edge, dict):
             continue
         statuses = [
-            _anchor_status(anchor, registry=registry, runtime_ctx=runtime_ctx, storage_dir=storage, node_cache=node_cache, stack=set())
+            _anchor_status(anchor, registry=registry, runtime_ctx=runtime_ctx, storage_dir=storage,
+                           node_cache=node_cache, stack=set())
             for anchor in raw_edge.get("anchors") or [] if isinstance(anchor, dict)
         ]
         if statuses:
@@ -400,13 +409,352 @@ def memory_graph_view(
             freshness = "stale" if endpoint and all(v == "stale" for v in endpoint) else ("degraded" if any(v in {"stale", "degraded"} for v in endpoint) else "fresh")
         edges.append({
             "id": raw_edge.get("id"), "source": raw_edge.get("source"), "relation": raw_edge.get("label"),
-            "target": raw_edge.get("target"), "revision": raw_edge.get("revision"), "freshness": freshness,
-            **({"sources": statuses[:4]} if statuses else {}),
+            "target": raw_edge.get("target"), "epistemic": copy.deepcopy(raw_edge.get("epistemic") or {"nature": "relation", "volatility": "unknown", "temporal": {}, "context": {}}),
+            "revision": raw_edge.get("revision"), "freshness": freshness,
+            **({"sources": statuses} if statuses else {}),
         })
-    counts = graph_counts(storage)
-    return {
-        "available": True, "nodes": nodes, "edges": edges,
-        "retrieval": copy.deepcopy(raw.get("retrieval") or {}),
-        "graph": counts,
-        "trust_note": "freshness is mechanically derived from source anchors/hashes; semantic/unbound memory is not file-invalidated",
+    return {"nodes": nodes, "edges": edges}
+
+
+def sync_memory_lifecycle(provider_context: Dict[str, Any], conversation_context: Any, *, execution_id: str | None = None) -> Dict[str, Any]:
+    """Conversation boundaries do not erase Memory.
+
+    Temporary retention means weak/possibly-useful memory, not chat-local state.
+    Initial projection is mechanically paged; storage retention is not silently trimmed when deltas are
+    applied. The hook remains explicit so hosts can report the boundary without
+    turning it into a second memory system.
+    """
+    return {"changed": False, "reason": "memory_survives_conversation_boundary"}
+
+def project_memory_view(
+    session: Any, *, registry: Any, config: Dict[str, Any], provider_context: Dict[str, Any], limit: int = 30,
+) -> Dict[str, Any]:
+    """Project the current working page of the unified Memory Graph.
+
+    Temporary continuity is a first page plus an optional DB-backed Frontier.
+    Page size is materialization size, never a semantic read ceiling. Persistent
+    recall remains explicit; Runtime never substitutes hidden semantic ranking.
+    """
+    storage, world_scope_id = _context(provider_context)
+    if not storage or not world_scope_id:
+        return {"available": False, "nodes": [], "edges": []}
+    state = session.memory_view if isinstance(getattr(session, "memory_view", None), dict) else empty_memory_view()
+    explicit_ids = [str(v) for v in state.get("node_ids") or [] if str(v).strip()]
+    frontier_ids = [str(v) for v in state.get("frontiers") or [] if str(v).strip()]
+    selector_state = state.get("selector") if isinstance(state.get("selector"), dict) else {}
+    auto_chain_active = selector_state.get("mode") == "automatic_temporary" and bool(frontier_ids)
+    auto_exhausted = selector_state.get("mode") == "automatic_temporary_exhausted"
+    try:
+        temporary_raw = temporary_graph_records(
+            storage, world_scope_value=world_scope(world_scope_id), limit=max(1, int(limit or 30)),
+            include_persistent_neighbors=True, create_cursor=not auto_chain_active and not auto_exhausted,
+        )
+        temporary_ids = [str(v) for v in temporary_raw.get("temporary_node_ids") or []]
+        linked_ids = [str(v) for v in temporary_raw.get("linked_persistent_node_ids") or []]
+        total_temporary = int(temporary_raw.get("total_temporary_nodes") or 0)
+        remaining_temporary = int(temporary_raw.get("remaining_temporary_nodes") or 0)
+        merged_ids: list[str] = []
+        for node_id in [*temporary_ids, *linked_ids, *explicit_ids]:
+            if node_id and node_id not in merged_ids:
+                merged_ids.append(node_id)
+        projected = _project_records(
+            graph_records(storage, merged_ids, include_inactive=True), session=session, registry=registry,
+            config=config, provider_context=provider_context, storage=storage,
+        )
+        counts = graph_counts(storage)
+    except (OSError, ValueError) as exc:
+        return {"available": False, "nodes": [], "edges": [], "error": str(exc).split(":", 1)[0]}
+
+    view = {"available": True, **projected, "graph": counts, "search_backend": memory_search_backend(storage)}
+    if temporary_ids or linked_ids or total_temporary:
+        view["temporary"] = {
+            "node_ids": temporary_ids,
+            "linked_persistent_node_ids": linked_ids,
+            "materialized_temporary_nodes": len(temporary_ids),
+            "total_temporary_nodes": total_temporary,
+            "remaining_temporary_nodes": remaining_temporary,
+        }
+    coverage = copy.deepcopy(state.get("coverage") or {})
+    if coverage:
+        view["coverage"] = coverage
+
+    # Allocate the automatic continuation only once. Its payload is a DB cursor,
+    # not the complete remaining ID list.
+    snapshot_id = str(temporary_raw.get("recall_snapshot_id") or "")
+    if snapshot_id and remaining_temporary > 0 and not auto_chain_active and not auto_exhausted:
+        auto_selector = {
+            "mode": "automatic_temporary", "query": "", "queries": [], "ids": [], "tags": [],
+            "scope": "all", "retention": "temporary", "natures": [], "volatilities": [], "relation_labels": [],
+            "include_neighbors": False,
+        }
+        selection = {
+            "scope": "all", "retention": "temporary", "scoped_nodes": total_temporary,
+            "matched_nodes": total_temporary, "selected_nodes": total_temporary,
+            "backend": str(temporary_raw.get("search_backend") or "unknown"), "db_cursor": True,
+        }
+        auto_ids = _memory_frontier(
+            session, snapshot_id=snapshot_id,
+            after_ordinal=int(temporary_raw.get("recall_after_ordinal") or len(temporary_ids)),
+            page_size=max(1, int(limit or 30)), selector=auto_selector, selection=selection,
+            remaining=remaining_temporary,
+        )
+        frontier_ids.extend(auto_ids)
+        # Persist the chain identity so a later projection does not recreate it.
+        session.memory_view.update({"frontiers": list(frontier_ids), "selector": auto_selector})
+        selector_state = auto_selector
+
+    frontiers = frontier_view(session.observation_ledger, frontier_ids)
+    if frontiers:
+        view["frontiers"] = frontiers
+    selector = copy.deepcopy(session.memory_view.get("selector") or state.get("selector") or {})
+    if selector:
+        view["selector"] = selector
+    overview = copy.deepcopy(state.get("overview") or {})
+    if overview:
+        view["overview"] = overview
+    return view
+
+
+def memory_overview_result(session: Any, *, arguments: Dict[str, Any], provider_context: Dict[str, Any]) -> Dict[str, Any]:
+    storage, world_scope_id = _context(provider_context)
+    if not storage or not world_scope_id:
+        return {"operation": "memory_overview", "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": "MEMORY_CONTEXT_UNAVAILABLE"}
+    scope = str(arguments.get("scope") or "all")
+    try:
+        overview = graph_overview(storage, world_scope_value=world_scope(world_scope_id), scope=scope)
+    except (OSError, ValueError) as exc:
+        return {"operation": "memory_overview", "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": str(exc).split(":", 1)[0]}
+    session.memory_view["overview"] = copy.deepcopy(overview)
+    coverage = {
+        "scope": {"kind": "memory_graph", "scope": scope},
+        "examined": {"nodes": int(overview.get("nodes") or 0), "edges": int(overview.get("edges") or 0)},
+        "complete": True, "boundaries": [],
+        "facts": {"materialized_node_bodies": 0, "directory_only": True},
     }
+    return {"operation": "memory_overview", "status": "success", "ok": True, "executed": True, "changed": False, "detail": overview, "coverage": coverage}
+
+
+def _memory_frontier(
+    session: Any, *, snapshot_id: str, after_ordinal: int, page_size: int,
+    selector: Dict[str, Any], selection: Dict[str, Any], remaining: int,
+) -> List[str]:
+    """Expose a tiny DB cursor as an exact Memory Frontier.
+
+    Session no longer carries the full matching ID universe. The immutable
+    selection lives in SQLite; the handle stores only snapshot identity + cursor.
+    """
+    if not snapshot_id or int(remaining or 0) <= 0:
+        return []
+    handle = register_snapshot_handle(
+        session.observation_ledger,
+        kind="memory_cursor",
+        payload={
+            "memory_cursor": {
+                "snapshot_id": str(snapshot_id), "after_ordinal": max(0, int(after_ordinal or 0)),
+                "page_size": max(1, int(page_size or 30)), "selector": copy.deepcopy(selector),
+                "selection": copy.deepcopy(selection),
+            }
+        },
+        reality_epoch=int(session.reality_epoch), source_capability="core.memory",
+        description="Continue the exact DB-backed Memory selection", page_size=1, offset=0,
+    )
+    model = {"frontiers": [{
+        "kind": "memory_not_materialized", "at": "memory_graph", "count": int(remaining),
+        "reason": f"{int(remaining)} matching memory node(s) remain", "handle": handle["id"],
+    }]}
+    return expose_frontiers(session, "core.memory", model)
+
+
+def memory_history_result(session: Any, *, arguments: Dict[str, Any], provider_context: Dict[str, Any]) -> Dict[str, Any]:
+    storage, _world_scope_id = _context(provider_context)
+    if not storage:
+        return {"operation": "memory_history", "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": "MEMORY_CONTEXT_UNAVAILABLE"}
+    node_id = str(arguments.get("id") or "").strip()
+    if not node_id:
+        return {"operation": "memory_history", "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": "MEMORY_NODE_ID_REQUIRED"}
+    try:
+        history = node_history(storage, node_id)
+    except (OSError, ValueError) as exc:
+        return {"operation": "memory_history", "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": str(exc).split(":", 1)[0], "detail": str(exc)}
+    coverage = {
+        "scope": {"kind": "memory_node_history", "id": node_id},
+        "examined": {"events": len(history.get("events") or []), "relations": len(history.get("relations") or [])},
+        "complete": True, "boundaries": [],
+        "facts": {"all_persisted_node_events_materialized": True},
+    }
+    return {"operation": "memory_history", "status": "success", "ok": True, "executed": True, "changed": False, "detail": history, "coverage": coverage}
+
+
+def memory_relation_history_result(session: Any, *, arguments: Dict[str, Any], provider_context: Dict[str, Any]) -> Dict[str, Any]:
+    storage, _world_scope_id = _context(provider_context)
+    if not storage:
+        return {"operation": "memory_relation_history", "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": "MEMORY_CONTEXT_UNAVAILABLE"}
+    relation_id = str(arguments.get("id") or "").strip()
+    if not relation_id:
+        return {"operation": "memory_relation_history", "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": "MEMORY_EDGE_ID_REQUIRED"}
+    try:
+        history = edge_history(storage, relation_id)
+    except (OSError, ValueError) as exc:
+        return {"operation": "memory_relation_history", "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": str(exc).split(":", 1)[0], "detail": str(exc)}
+    coverage = {
+        "scope": {"kind": "memory_relation_history", "id": relation_id},
+        "examined": {"events": len(history.get("events") or [])},
+        "complete": True, "boundaries": [], "facts": {"all_persisted_relation_events_materialized": True},
+    }
+    return {"operation": "memory_relation_history", "status": "success", "ok": True, "executed": True, "changed": False, "detail": history, "coverage": coverage}
+
+def memory_activate_result(
+    session: Any, *, arguments: Dict[str, Any], registry: Any, config: Dict[str, Any], provider_context: Dict[str, Any],
+) -> Dict[str, Any]:
+    storage, world_scope_id = _context(provider_context)
+    if not storage or not world_scope_id:
+        return {"operation": "memory_activate", "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": "MEMORY_CONTEXT_UNAVAILABLE"}
+    selector = {
+        "query": str(arguments.get("query") or "").strip(),
+        "queries": [str(v) for v in arguments.get("queries") or [] if str(v).strip()],
+        "ids": [str(v) for v in arguments.get("ids") or [] if str(v).strip()],
+        "tags": [str(v) for v in arguments.get("tags") or [] if str(v).strip()],
+        "scope": str(arguments.get("scope") or "all"),
+        "retention": str(arguments.get("retention") or "all"),
+        "natures": [str(v) for v in arguments.get("natures") or [] if str(v).strip()],
+        "volatilities": [str(v) for v in arguments.get("volatilities") or [] if str(v).strip()],
+        "relation_labels": [str(v) for v in arguments.get("relation_labels") or [] if str(v).strip()],
+        "include_neighbors": bool(arguments.get("include_neighbors") is True),
+    }
+    if not selector["query"] and not selector["queries"] and not selector["ids"] and not selector["tags"] and not selector["natures"] and not selector["volatilities"] and not selector["relation_labels"]:
+        return {"operation": "memory_activate", "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": "MEMORY_SELECTOR_REQUIRED", "detail": "Use query/queries, ids, tags, natures, volatilities or relation_labels; use memory_overview to browse the directory."}
+    page_size = max(1, int(arguments.get("limit") or 30))
+    snapshot_id = ""
+    try:
+        created = create_recall_snapshot(storage, world_scope_value=world_scope(world_scope_id), **selector)
+        snapshot_id = str(created.get("snapshot_id") or "")
+        selection = copy.deepcopy(created.get("selection") or {})
+        page = recall_snapshot_page(storage, snapshot_id, after_ordinal=0, limit=page_size)
+        page_ids = list(page.get("node_ids") or [])
+        projected = _project_records(
+            graph_records(storage, page_ids, include_inactive=True), session=session, registry=registry, config=config,
+            provider_context=provider_context, storage=storage,
+        )
+    except (OSError, ValueError) as exc:
+        if snapshot_id:
+            try: release_recall_snapshot(storage, snapshot_id)
+            except Exception: pass
+        return {"operation": "memory_activate", "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": str(exc).split(":", 1)[0], "detail": str(exc)}
+
+    remaining = int(page.get("remaining") or 0)
+    frontier_ids: List[str] = []
+    if remaining > 0:
+        frontier_ids = _memory_frontier(
+            session, snapshot_id=snapshot_id, after_ordinal=int(page.get("last_ordinal") or 0),
+            page_size=page_size, selector=selector, selection=selection, remaining=remaining,
+        )
+    else:
+        release_recall_snapshot(storage, snapshot_id)
+    total = int(selection.get("selected_nodes") or 0)
+    coverage = {
+        "scope": {"kind": "memory_graph", "scope": selector["scope"], "retention": selector.get("retention", "all"), "query": selector["query"], "tags": selector["tags"], "ids": selector["ids"], "natures": selector.get("natures", []), "volatilities": selector.get("volatilities", [])},
+        "examined": {"nodes": int(selection.get("scoped_nodes") or 0), "matches": total},
+        "complete": not bool(frontier_ids), "boundaries": [],
+        "facts": {
+            "materialized_nodes": len(page_ids), "remaining_nodes": remaining,
+            "include_neighbors": selector["include_neighbors"], "search_backend": selection.get("backend"),
+            "db_cursor": True,
+        },
+    }
+    session.memory_view = {"node_ids": page_ids, "coverage": coverage, "frontiers": frontier_ids, "selector": selector, "overview": copy.deepcopy(session.memory_view.get("overview") or {})}
+    return {
+        "operation": "memory_activate", "status": "success", "ok": True, "executed": True, "changed": False,
+        "detail": {"memory_view": projected, "matched_nodes": int(selection.get("matched_nodes") or 0), "selected_nodes": total, "search_backend": selection.get("backend")},
+        "coverage": coverage,
+        **({"frontiers": frontier_view(session.observation_ledger, frontier_ids)} if frontier_ids else {}),
+    }
+
+
+def memory_continue_result(
+    session: Any, *, frontier_id: str, registry: Any, config: Dict[str, Any], provider_context: Dict[str, Any],
+) -> Dict[str, Any]:
+    storage, _world_scope_id = _context(provider_context)
+    if not storage:
+        return {"operation": "continue", "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": "MEMORY_CONTEXT_UNAVAILABLE"}
+    handle_id, error = resolve_frontier(session.observation_ledger, frontier_id, reality_epoch=int(session.reality_epoch))
+    if error:
+        return {"operation": "continue", "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": error}
+    materialized, error = materialize_snapshot_handle(session.observation_ledger, str(handle_id), reality_epoch=int(session.reality_epoch))
+    if error or not isinstance(materialized, dict):
+        return {"operation": "continue", "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": error or "MEMORY_CONTINUATION_INVALID"}
+    payload = materialized.get("payload") if isinstance(materialized.get("payload"), dict) else {}
+
+    cursor = payload.get("memory_cursor") if isinstance(payload.get("memory_cursor"), dict) else None
+    if cursor is not None:
+        snapshot_id = str(cursor.get("snapshot_id") or "")
+        selector = copy.deepcopy(cursor.get("selector") or session.memory_view.get("selector") or {})
+        selection = copy.deepcopy(cursor.get("selection") or {})
+        page_size = max(1, int(cursor.get("page_size") or 30))
+        try:
+            page = recall_snapshot_page(
+                storage, snapshot_id, after_ordinal=int(cursor.get("after_ordinal") or 0), limit=page_size,
+            )
+        except (OSError, ValueError) as exc:
+            consume_frontier(session.observation_ledger, frontier_id)
+            return {"operation": "continue", "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": str(exc).split(":", 1)[0], "detail": str(exc)}
+        page_ids = list(page.get("node_ids") or [])
+        consume_frontier(session.observation_ledger, frontier_id)
+        remaining = int(page.get("remaining") or 0)
+        next_ids: List[str] = []
+        if remaining > 0:
+            next_ids = _memory_frontier(
+                session, snapshot_id=snapshot_id, after_ordinal=int(page.get("last_ordinal") or 0),
+                page_size=page_size, selector=selector, selection=selection, remaining=remaining,
+            )
+        else:
+            release_recall_snapshot(storage, snapshot_id)
+        materialized_count = int(page.get("last_ordinal") or 0)
+        total = int(selection.get("selected_nodes") or materialized_count)
+    else:
+        # Persisted-session compatibility: older Frontiers retained the
+        # exact ID list in Observation snapshots. Consume them normally once.
+        page_ids = [str(v) for v in payload.get("items") or [] if str(v).strip()]
+        selector = copy.deepcopy(payload.get("selector") or session.memory_view.get("selector") or {})
+        selection = copy.deepcopy(payload.get("selection") or {})
+        raw_next = materialized.get("frontiers") or []
+        consume_frontier(session.observation_ledger, frontier_id)
+        next_ids = []
+        if raw_next:
+            next_ids = expose_frontiers(session, "core.memory", {"frontiers": copy.deepcopy(raw_next)})
+        total = int(selection.get("selected_nodes") or len(page_ids))
+        item_end = int((materialized.get("coverage") or {}).get("examined", {}).get("item_end") or len(page_ids))
+        base_materialized = int(selection.get("base_materialized") or 0)
+        materialized_count = min(total, base_materialized + item_end) if base_materialized else min(total, item_end)
+        remaining = max(0, total - materialized_count)
+
+    previous = [str(v) for v in session.memory_view.get("node_ids") or [] if str(v).strip()]
+    merged: List[str] = []
+    for node_id in [*previous, *page_ids]:
+        if node_id not in merged:
+            merged.append(node_id)
+    try:
+        projected = _project_records(
+            graph_records(storage, merged, include_inactive=True), session=session, registry=registry, config=config,
+            provider_context=provider_context, storage=storage,
+        )
+    except (OSError, ValueError) as exc:
+        return {"operation": "continue", "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": str(exc).split(":", 1)[0]}
+    if selector.get("mode") == "automatic_temporary" and not next_ids:
+        selector = {**selector, "mode": "automatic_temporary_exhausted"}
+    coverage = {
+        "scope": {"kind": "memory_graph", "scope": selector.get("scope", "all"), "retention": selector.get("retention", "all"), "query": selector.get("query", ""), "tags": selector.get("tags", []), "ids": selector.get("ids", []), "natures": selector.get("natures", []), "volatilities": selector.get("volatilities", [])},
+        "examined": {"nodes": int(selection.get("scoped_nodes") or 0), "matches": total},
+        "complete": not bool(next_ids), "boundaries": [],
+        "facts": {
+            "materialized_nodes": materialized_count, "working_set_nodes": len(merged),
+            "remaining_nodes": remaining, "search_backend": selection.get("backend"),
+            "db_cursor": bool(selection.get("db_cursor")),
+        },
+    }
+    session.memory_view.update({"node_ids": merged, "coverage": coverage, "frontiers": next_ids, "selector": selector})
+    return {
+        "operation": "continue", "status": "success", "ok": True, "executed": True, "changed": False,
+        "detail": {"memory_view": projected, "new_nodes": len(page_ids)}, "coverage": coverage,
+        **({"frontiers": frontier_view(session.observation_ledger, next_ids)} if next_ids else {}),
+    }
+

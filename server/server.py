@@ -1,15 +1,34 @@
+"""Provider-neutral OpenAI-compatible transport adapter for Eyle Rev3.
+
+The Adapter owns transport only: provider capability negotiation, JSON-object
+recovery, caching knobs, usage accounting and network errors. It intentionally
+does not know ECC, Memory, decision types, or any Eyle semantic schema.
+
+Structured requests may carry a client-provided JSON Schema. In auto mode the
+Adapter tries the strongest provider transport mechanically:
+
+    native_json_schema -> json_object -> prompt_json
+
+A mode is degraded/cached only when the provider technically rejects that
+transport. Semantic/schema mistakes never teach the Adapter to use a weaker
+mode. If assistant content is JSON-recoverable it is returned to Eyle; Eyle is
+the sole semantic canonicalizer/validator.
+"""
 from __future__ import annotations
 
+import ast
 import copy
 import hmac
 import json
 import logging
 import os
 import re
+import ipaddress
 import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -18,15 +37,14 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from jsonschema import Draft202012Validator
-from jsonschema.exceptions import SchemaError, ValidationError
+from jsonschema.exceptions import SchemaError
 from starlette.background import BackgroundTask
 
-load_dotenv()
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO").upper(),
-    format="%(asctime)s | %(levelname)s | %(message)s",
-)
-log = logging.getLogger("eyle-deepseek-adapter")
+BASE_DIR = Path(__file__).resolve().parent
+ENV_FILE = BASE_DIR / ".env"
+load_dotenv(dotenv_path=ENV_FILE, override=False)
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format="%(asctime)s | %(levelname)s | %(message)s")
+log = logging.getLogger("eyle-openai-adapter")
 
 
 def env_bool(name: str, default: bool) -> bool:
@@ -34,12 +52,16 @@ def env_bool(name: str, default: bool) -> bool:
     return default if value is None else value.strip().lower() in {"1", "true", "yes", "on", "sim"}
 
 
-def env_int(name: str, default: int, *, minimum: int | None = None, maximum: int | None = None) -> int:
-    value = int(os.getenv(name, str(default)))
-    if minimum is not None and value < minimum:
-        raise RuntimeError(f"{name} deve ser >= {minimum}.")
-    if maximum is not None and value > maximum:
-        raise RuntimeError(f"{name} deve ser <= {maximum}.")
+def env_json(name: str) -> dict[str, Any]:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{name} precisa conter JSON válido") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{name} precisa ser objeto JSON")
     return value
 
 
@@ -49,69 +71,221 @@ class Settings:
     upstream_api_key: str
     default_model: str
     model_override: str | None
-    default_thinking: bool
-    structured_thinking: bool
-    force_thinking: bool
-    structured_repair_attempts: int
+    structured_mode: str
+    cache_mode: str
+    extra_headers: dict[str, Any]
+    extra_body: dict[str, Any]
+    cache_headers: dict[str, Any]
+    cache_body: dict[str, Any]
+    model_discovery_ttl: float
+    model_discovery_negative_ttl: float
     host: str
     port: int
     timeout: float
     max_body: int
-    default_max_output: int
     proxy_key: str | None
+    proxy_allow_loopback_no_auth: bool
 
 
 S = Settings(
-    upstream_base_url=os.getenv("UPSTREAM_BASE_URL", "https://api.deepseek.com").rstrip("/"),
+    upstream_base_url=os.getenv("UPSTREAM_BASE_URL", "").strip().rstrip("/"),
     upstream_api_key=os.getenv("UPSTREAM_API_KEY", "").strip(),
-    default_model=os.getenv("DEFAULT_MODEL", "deepseek-v4-flash").strip(),
+    default_model=os.getenv("DEFAULT_MODEL", "auto").strip(),
     model_override=os.getenv("MODEL_OVERRIDE", "").strip() or None,
-    default_thinking=env_bool("DEFAULT_ENABLE_THINKING", True),
-    structured_thinking=env_bool("STRUCTURED_ENABLE_THINKING", False),
-    force_thinking=env_bool("FORCE_ENABLE_THINKING", False),
-    structured_repair_attempts=env_int("STRUCTURED_REPAIR_ATTEMPTS", 1, minimum=0, maximum=2),
+    structured_mode=os.getenv("UPSTREAM_STRUCTURED_MODE", "auto").strip().lower(),
+    cache_mode=os.getenv("UPSTREAM_CACHE_MODE", "auto").strip().lower(),
+    extra_headers=env_json("UPSTREAM_EXTRA_HEADERS_JSON"),
+    extra_body=env_json("UPSTREAM_EXTRA_BODY_JSON"),
+    cache_headers=env_json("UPSTREAM_CACHE_HEADERS_JSON"),
+    cache_body=env_json("UPSTREAM_CACHE_BODY_JSON"),
+    model_discovery_ttl=float(os.getenv("MODEL_DISCOVERY_TTL_SECONDS", "300")),
+    model_discovery_negative_ttl=float(os.getenv("MODEL_DISCOVERY_NEGATIVE_TTL_SECONDS", "30")),
     host=os.getenv("HOST", "127.0.0.1"),
     port=int(os.getenv("PORT", "8080")),
-    timeout=float(os.getenv("REQUEST_TIMEOUT_SECONDS", "600")),
+    timeout=float(os.getenv("REQUEST_TIMEOUT_SECONDS", "1800")),
     max_body=int(os.getenv("MAX_REQUEST_BYTES", str(10 * 1024 * 1024))),
-    default_max_output=int(os.getenv("DEFAULT_MAX_OUTPUT_TOKENS", "4096")),
     proxy_key=os.getenv("PROXY_API_KEY", "").strip() or None,
+    proxy_allow_loopback_no_auth=env_bool("PROXY_ALLOW_LOOPBACK_NO_AUTH", True),
 )
 
-ADAPTER_PROFILE = "deepseek-stable-json-local-schema-v2"
+ADAPTER_PROFILE = "eyle-provider-transport-v3"
+ADAPTER_TRANSPORT_PROTOCOL = "eyle-adapter-transport-v1"
+ADAPTER_HANDSHAKE_SCHEMA = "eyle-adapter-handshake-v1"
+ADAPTER_VERSION = "2.7.5-rev3"
+# Three capability probes plus one optional format-only repair after a provider
+# accepted a mode. This is a mechanical transport bound, not a cognition retry
+# policy; Eyle's task deadline/generated-token fuse own semantic recovery.
+MAX_UPSTREAM_ATTEMPTS_PER_LOGICAL_CALL = 4
+_ALLOWED_STRUCTURED = {"auto", "native_json_schema", "json_object", "prompt_json"}
+_ALLOWED_CACHE = {"none", "implicit", "explicit", "session", "auto"}
+_STRUCTURED_MODE_ORDER = ("native_json_schema", "json_object", "prompt_json")
+_TECHNICAL_MODE_REJECTION_STATUS = {400, 404, 415, 422}
+
+# Cache only proven provider transport *incompatibilities*. A malformed model
+# answer says nothing about response_format support and must never weaken future
+# requests.
+_STRUCTURED_UNSUPPORTED_CACHE: dict[tuple[str, str], set[str]] = {}
+_MODEL_DISCOVERY_CACHE: dict[str, dict[str, Any]] = {}
+
+
+def _mode_key(model: str) -> tuple[str, str]:
+    return (S.upstream_base_url, str(model or ""))
+
+
+def _structured_mode_chain(model: str) -> list[str]:
+    if S.structured_mode != "auto":
+        return [S.structured_mode]
+    unsupported = _STRUCTURED_UNSUPPORTED_CACHE.get(_mode_key(model), set())
+    chain = [mode for mode in _STRUCTURED_MODE_ORDER if mode not in unsupported]
+    return chain or ["prompt_json"]
+
+
+def _first_structured_mode(model: str) -> str:
+    return _structured_mode_chain(model)[0]
+
+
+def _record_transport_rejection(model: str, mode: str) -> None:
+    if S.structured_mode != "auto" or mode == "prompt_json":
+        return
+    _STRUCTURED_UNSUPPORTED_CACHE.setdefault(_mode_key(model), set()).add(mode)
+
+
+def _fallback_structured_mode(mode: str) -> str:
+    # Backward-compatible helper for tests/callers; never used for semantic
+    # failures. It simply returns the next physical transport in the chain.
+    try:
+        index = _STRUCTURED_MODE_ORDER.index(mode)
+    except ValueError:
+        return "prompt_json"
+    return _STRUCTURED_MODE_ORDER[min(index + 1, len(_STRUCTURED_MODE_ORDER) - 1)]
 
 
 def check_config() -> None:
     if not S.upstream_base_url:
-        raise RuntimeError("UPSTREAM_BASE_URL não configurada.")
+        raise RuntimeError("UPSTREAM_BASE_URL não configurada")
     if not (S.model_override or S.default_model):
-        raise RuntimeError("DEFAULT_MODEL/MODEL_OVERRIDE não configurado.")
-    if not S.upstream_api_key:
-        log.warning("UPSTREAM_API_KEY vazia; o upstream provavelmente recusará chamadas autenticadas.")
+        raise RuntimeError("DEFAULT_MODEL/MODEL_OVERRIDE não configurado")
+    if S.structured_mode not in _ALLOWED_STRUCTURED:
+        raise RuntimeError(f"UPSTREAM_STRUCTURED_MODE inválido: {S.structured_mode}")
+    if S.cache_mode not in _ALLOWED_CACHE:
+        raise RuntimeError(f"UPSTREAM_CACHE_MODE inválido: {S.cache_mode}")
+    if S.cache_mode in {"explicit", "session"} and not (S.cache_headers or S.cache_body):
+        raise RuntimeError("UPSTREAM_CACHE_MODE explicit/session exige UPSTREAM_CACHE_HEADERS_JSON e/ou UPSTREAM_CACHE_BODY_JSON")
+
+
+def _request_is_loopback(request: Request) -> bool:
+    client = getattr(request, "client", None)
+    host = str(getattr(client, "host", "") or "").strip()
+    if not host:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def client_auth(request: Request) -> None:
     if not S.proxy_key:
         return
+    # Eyle Core does not send an Authorization header to its configured
+    # OpenAI-compatible endpoint. Keep direct localhost integration working
+    # while still requiring PROXY_API_KEY for non-loopback clients.
+    if S.proxy_allow_loopback_no_auth and _request_is_loopback(request):
+        return
     auth = request.headers.get("authorization", "")
     bearer = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
     supplied = bearer or request.headers.get("x-api-key", "").strip()
     if not supplied or not hmac.compare_digest(supplied, S.proxy_key):
-        raise HTTPException(401, "Chave do proxy inválida.")
+        raise HTTPException(401, "Chave do proxy inválida")
 
 
 def model_for(payload: dict[str, Any]) -> str:
-    return S.model_override or str(payload.get("model") or "").strip() or S.default_model
+    """Return an explicit configured/requested model, or ``auto`` as a sentinel.
+
+    ``auto`` is never sent upstream; ``resolve_model`` must replace it
+    with a real ID discovered from the upstream /models endpoint.
+    """
+    if S.model_override:
+        return str(S.model_override).strip()
+    requested = str(payload.get("model") or "").strip()
+    default = str(S.default_model or "auto").strip() or "auto"
+    if requested and requested.lower() != "auto":
+        return requested
+    if default.lower() != "auto":
+        return default
+    return "auto"
+
+
+def _model_ids_from_payload(payload: Any) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+    items = payload.get("data")
+    if not isinstance(items, list):
+        return []
+    out: list[str] = []
+    for item in items:
+        if isinstance(item, dict):
+            value = str(item.get("id") or "").strip()
+            if value and value not in out:
+                out.append(value)
+    return out
+
+
+async def discover_models(client: httpx.AsyncClient, *, force: bool = False) -> list[str]:
+    """Discover real upstream model IDs with bounded positive/negative caching."""
+    key = S.upstream_base_url
+    now = time.monotonic()
+    cached = _MODEL_DISCOVERY_CACHE.get(key)
+    if not force and isinstance(cached, dict) and float(cached.get("expires_at") or 0) > now:
+        if cached.get("error"):
+            raise RuntimeError(str(cached.get("error")))
+        return list(cached.get("models") or [])
+
+    headers = {"Accept": "application/json"}
+    if S.upstream_api_key:
+        headers["Authorization"] = f"Bearer {S.upstream_api_key}"
+    for name, value in S.extra_headers.items():
+        headers[str(name)] = str(value)
+    url = f"{S.upstream_base_url}/models"
+    try:
+        response = await client.get(url, headers=headers)
+        response.raise_for_status()
+        models = _model_ids_from_payload(response.json())
+        if not models:
+            raise RuntimeError("UPSTREAM_MODELS_EMPTY")
+    except Exception as exc:
+        detail = f"{type(exc).__name__}: {str(exc)[:300]}"
+        _MODEL_DISCOVERY_CACHE[key] = {
+            "models": [], "error": detail,
+            "expires_at": now + max(1.0, S.model_discovery_negative_ttl),
+        }
+        raise RuntimeError(detail) from exc
+    _MODEL_DISCOVERY_CACHE[key] = {
+        "models": models, "error": None,
+        "expires_at": now + max(1.0, S.model_discovery_ttl),
+    }
+    return models
+
+
+async def resolve_model(client: httpx.AsyncClient, payload: dict[str, Any]) -> str:
+    candidate = model_for(payload)
+    if candidate.lower() != "auto":
+        return candidate
+    models = await discover_models(client)
+    if not models:
+        raise RuntimeError("MODEL_DISCOVERY_REQUIRED")
+    return models[0]
 
 
 def schema_for(payload: dict[str, Any]) -> dict[str, Any] | None:
     fmt = payload.get("response_format")
     if not isinstance(fmt, dict):
         return None
-    kind = fmt.get("type")
-    if kind == "json_object":
+    if fmt.get("type") == "json_object":
         return {"type": "object"}
-    if kind != "json_schema":
+    if fmt.get("type") != "json_schema":
         return None
     block = fmt.get("json_schema")
     return block.get("schema") if isinstance(block, dict) and isinstance(block.get("schema"), dict) else None
@@ -122,10 +296,10 @@ def structured(payload: dict[str, Any]) -> bool:
     if fmt is None:
         return False
     if not isinstance(fmt, dict) or fmt.get("type") not in {"json_object", "json_schema"}:
-        raise HTTPException(400, "response_format inválido para o adaptador DeepSeek.")
+        raise HTTPException(400, "response_format inválido")
     schema = schema_for(payload)
     if schema is None:
-        raise HTTPException(400, "response_format estruturado sem schema/formato válido.")
+        raise HTTPException(400, "response_format estruturado sem schema/formato válido")
     if fmt.get("type") == "json_schema":
         try:
             Draft202012Validator.check_schema(schema)
@@ -134,301 +308,58 @@ def structured(payload: dict[str, Any]) -> bool:
     return True
 
 
-def max_output(payload: dict[str, Any]) -> int:
-    for key in ("max_completion_tokens", "max_tokens"):
-        if isinstance(payload.get(key), int) and payload[key] > 0:
-            return payload[key]
-    return S.default_max_output
-
-
-def thinking_enabled(payload: dict[str, Any]) -> bool:
-    if S.force_thinking:
-        return True
-    if isinstance(payload.get("enable_thinking"), bool):
-        return payload["enable_thinking"]
-    thinking = payload.get("thinking")
-    if isinstance(thinking, dict):
-        kind = str(thinking.get("type") or "").strip().lower()
-        if kind == "enabled":
-            return True
-        if kind == "disabled":
-            return False
-    reasoning = payload.get("reasoning")
-    if isinstance(reasoning, dict) and isinstance(reasoning.get("enabled"), bool):
-        return reasoning["enabled"]
-    return S.structured_thinking if structured(payload) else S.default_thinking
-
-
-def text_of(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        out: list[str] = []
-        for item in content:
-            if isinstance(item, dict) and item.get("type") in {"text", "input_text", "output_text"}:
-                if isinstance(item.get("text"), str):
-                    out.append(item["text"])
-        return "\n".join(out)
-    return ""
-
-
-def _is_ecc_schema(schema: dict[str, Any]) -> bool:
-    variants = schema.get("oneOf")
-    if not isinstance(variants, list) or len(variants) != 3:
-        return False
-    seen: list[str] = []
-    for variant in variants:
-        if not isinstance(variant, dict):
-            return False
-        prop = ((variant.get("properties") or {}).get("type") or {})
-        enum = prop.get("enum")
-        if not isinstance(enum, list) or len(enum) != 1 or not isinstance(enum[0], str):
-            return False
-        seen.append(enum[0])
-    return seen == ["explorar", "construir", "concluir"]
-
-
-def _example_from_schema(node: Any, depth: int = 0) -> Any:
-    if depth > 5 or not isinstance(node, dict):
-        return None
-    if "const" in node:
-        return node["const"]
-    enum = node.get("enum")
-    if isinstance(enum, list) and enum:
-        return enum[0]
-    variants = node.get("oneOf") or node.get("anyOf")
-    if isinstance(variants, list) and variants:
-        return _example_from_schema(variants[0], depth + 1)
-    typ = node.get("type")
-    if typ == "object" or isinstance(node.get("properties"), dict):
-        props = node.get("properties") if isinstance(node.get("properties"), dict) else {}
-        required = set(node.get("required") or [])
-        out: dict[str, Any] = {}
-        for name, child in props.items():
-            if name in required:
-                out[name] = _example_from_schema(child, depth + 1)
-        return out
-    if typ == "array":
-        return []
-    if typ == "integer" or typ == "number":
-        return node.get("minimum", 1)
-    if typ == "boolean":
-        return False
-    return "value"
-
-
-def _singleton_enum(node: Any) -> str | None:
-    if not isinstance(node, dict):
-        return None
-    if "const" in node and isinstance(node.get("const"), str):
-        return str(node["const"])
-    enum = node.get("enum")
-    if isinstance(enum, list) and len(enum) == 1 and isinstance(enum[0], str):
-        return enum[0]
-    return None
-
-
-def _variant_for(schema: dict[str, Any], discriminator: str, value: str) -> dict[str, Any] | None:
-    variants = schema.get("oneOf")
-    if not isinstance(variants, list):
-        return None
-    for variant in variants:
-        if not isinstance(variant, dict):
-            continue
-        prop = ((variant.get("properties") or {}).get(discriminator) or {})
-        if _singleton_enum(prop) == value:
-            return variant
-    return None
-
-
-def _ecc_memory_schema(schema: dict[str, Any]) -> dict[str, Any] | None:
-    branch = _variant_for(schema, "type", "explorar")
-    memory = ((branch or {}).get("properties") or {}).get("memory")
-    return memory if isinstance(memory, dict) else None
-
-
-def _ecc_objective_schema(schema: dict[str, Any]) -> dict[str, Any] | None:
-    branch = _variant_for(schema, "type", "explorar")
-    objective = ((branch or {}).get("properties") or {}).get("objective")
-    return objective if isinstance(objective, dict) else None
-
-
-def _objective_state_schema(objective_schema: dict[str, Any]) -> dict[str, Any] | None:
-    state = ((objective_schema.get("properties") or {}).get("state") or {})
-    variants = state.get("oneOf") if isinstance(state, dict) else None
-    if not isinstance(variants, list):
-        return None
-    for variant in variants:
-        if isinstance(variant, dict) and (variant.get("type") == "object" or isinstance(variant.get("properties"), dict)):
-            return variant
-    return None
-
-
-def _field_hint(name: str, node: dict[str, Any], required: bool) -> str:
-    enum = node.get("enum") if isinstance(node, dict) else None
-    typ = str(node.get("type") or "value") if isinstance(node, dict) else "value"
-    if isinstance(enum, list) and enum:
-        shape = "|".join(str(v) for v in enum)
-    elif typ == "array":
-        shape = "array"
-    elif typ == "object":
-        shape = "object"
-    elif typ == "integer":
-        shape = "int"
-    else:
-        shape = typ
-    return f"{name}:{shape}{'' if required else '?'}"
-
-
-def _operation_grammar(memory_schema: dict[str, Any]) -> tuple[list[str], list[str]]:
-    operations = ((memory_schema.get("properties") or {}).get("operations") or {})
-    item_schema = operations.get("items") if isinstance(operations, dict) else None
-    variants = item_schema.get("oneOf") if isinstance(item_schema, dict) else None
-    lines: list[str] = []
-    examples: list[str] = []
-    if not isinstance(variants, list):
-        return lines, examples
-    for variant in variants:
-        if not isinstance(variant, dict):
-            continue
-        props = variant.get("properties") if isinstance(variant.get("properties"), dict) else {}
-        op = _singleton_enum(props.get("op"))
-        if not op:
-            continue
-        required = set(variant.get("required") or [])
-        fields = [_field_hint(name, child, name in required) for name, child in props.items()]
-        lines.append(f"{op}={{" + ",".join(fields) + "}")
-        sample: dict[str, Any] = {"op": op}
-        if op == "remember":
-            if "key" in props: sample["key"] = "session"
-            sample.update({"scope": "world", "kind": "architecture_component", "content": "AgentSession stores active task state."})
-            if "tags" in props: sample["tags"] = ["ecc", "session"]
-            if "supports" in props: sample["supports"] = [{"kind": "material", "material_id": "mat-1"}]
-        elif op == "revise":
-            sample.update({"id": "mem-abc", "expected_revision": 1, "content": "Updated understanding."})
-        elif op == "relate":
-            sample.update({"source": "@session", "relation": "part_of", "target": "mem-ecc"})
-        elif op == "archive":
-            sample.update({"id": "mem-abc", "expected_revision": 1})
-        elif op == "supersede":
-            sample.update({"id": "mem-old", "expected_revision": 1, "replacement": "@new"})
-        elif op == "retire_relation":
-            sample.update({"id": "rel-abc", "expected_revision": 1})
-        examples.append(json.dumps(sample, ensure_ascii=False, separators=(",", ":")))
-    return lines, examples
-
-
-def _support_grammar(memory_schema: dict[str, Any]) -> list[str]:
-    operations = ((memory_schema.get("properties") or {}).get("operations") or {})
-    item_schema = operations.get("items") if isinstance(operations, dict) else None
-    variants = item_schema.get("oneOf") if isinstance(item_schema, dict) else None
-    support_schema = None
-    if isinstance(variants, list):
-        for variant in variants:
-            props = variant.get("properties") if isinstance(variant, dict) and isinstance(variant.get("properties"), dict) else {}
-            supports = props.get("supports")
-            if isinstance(supports, dict) and isinstance(supports.get("items"), dict):
-                support_schema = supports["items"]
-                break
-    out: list[str] = []
-    for variant in (support_schema or {}).get("oneOf") or []:
-        props = variant.get("properties") if isinstance(variant, dict) and isinstance(variant.get("properties"), dict) else {}
-        kind = _singleton_enum(props.get("kind"))
-        if not kind:
-            continue
-        required = set(variant.get("required") or [])
-        fields = [_field_hint(name, child, name in required) for name, child in props.items()]
-        out.append(f"support.{kind}={{" + ",".join(fields) + "}")
-    return out
-
-
-def _objective_grammar(objective_schema: dict[str, Any]) -> str:
-    state_schema = _objective_state_schema(objective_schema) or {}
-    props = state_schema.get("properties") if isinstance(state_schema.get("properties"), dict) else {}
-    required = set(state_schema.get("required") or [])
-    fields = [_field_hint(name, child, name in required) for name, child in props.items()]
-    child_schema = ((props.get("children") or {}).get("items") or {}) if isinstance(props.get("children"), dict) else {}
-    cprops = child_schema.get("properties") if isinstance(child_schema.get("properties"), dict) else {}
-    crequired = set(child_schema.get("required") or [])
-    child_fields = [_field_hint(name, child, name in crequired) for name, child in cprops.items()]
-    return "objective.state={" + ",".join(fields) + "}; objective.child={" + ",".join(child_fields) + "}"
-
-
-def _compact_schema_rules(schema: dict[str, Any]) -> str:
-    if _is_ecc_schema(schema):
-        memory_schema = _ecc_memory_schema(schema) or {}
-        objective_schema = _ecc_objective_schema(schema) or {}
-        op_lines, op_examples = _operation_grammar(memory_schema)
-        support_lines = _support_grammar(memory_schema)
-        grammar = "; ".join([*op_lines, *support_lines])
-        objective_grammar = _objective_grammar(objective_schema)
-        examples = " | ".join(op_examples)
-        return (
-            "Return exactly one JSON object for the Eyle ECC decision. 'type' is the only family authority. "
-            "For explorar/construir use a SHORT operation name without family prefix. "
-            "Every ECC object MUST include objective={disposition,state}; Objective is transient semantic state, NOT a fourth action or plan. "
-            "Use objective.disposition=unchanged or cleared only with state=null; updated requires the full objective.state object. "
-            "Objective state describes what is being pursued, not execution steps. Status strings are semantic labels, not Runtime control codes. "
-            + objective_grammar + ". "
-            "Every ECC object MUST include memory={focus,disposition,operations}; Memory is internal cognition, NOT a fourth action. "
-            "Use disposition=unchanged only with operations=[]; use disposition=updated only with 1+ valid graph operations. "
-            "Memory refs are mem-* or @alias. A remember key creates @key for later operations in the SAME memory transaction. "
-            "Do not invent memory merely to satisfy the field. Supports ground semantic memory: material points to observed mat-N and may include opaque selector; request grounds in the current request; memory points to an existing mem-* or @alias. "
-            "ECC examples: "
-            "{\"type\":\"explorar\",\"operation\":\"search\",\"arguments\":{\"source\":\"eyle\",\"query\":\"AgentSession\"},\"objective\":{\"disposition\":\"unchanged\",\"state\":null},\"memory\":{\"focus\":[],\"disposition\":\"unchanged\",\"operations\":[]}} | "
-            "{\"type\":\"concluir\",\"response\":\"...\",\"objective\":{\"disposition\":\"updated\",\"state\":{\"summary\":\"Answer the compound request\",\"status\":\"active\",\"children\":[{\"key\":\"part1\",\"description\":\"First subobjective\",\"status\":\"resolved\",\"outcome\":\"done\"}],\"constraints\":[]}},\"memory\":{\"focus\":[\"mem-ecc\"],\"disposition\":\"updated\",\"operations\":[{\"op\":\"remember\",\"key\":\"session\",\"scope\":\"world\",\"kind\":\"architecture_component\",\"content\":\"AgentSession stores active task state.\",\"supports\":[{\"kind\":\"material\",\"material_id\":\"mat-1\"}]}]}}. "
-            "Memory operation grammar: " + grammar + ". Examples: " + examples + ". "
-            "Return JSON only; no markdown or commentary."
-        )
-    schema_text = json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
-    example = json.dumps(_example_from_schema(schema), ensure_ascii=False, separators=(",", ":"))
+def _json_only_instruction() -> str:
     return (
-        "Return only valid JSON satisfying this JSON Schema. No markdown or commentary. "
-        f"Example JSON shape: {example}. Canonical JSON Schema: {schema_text}"
+        "Return exactly one JSON object and no markdown/prose outside it. "
+        "Preserve the response shape and semantics requested by the caller."
     )
 
-def _inject_deepseek_json_instruction(body: dict[str, Any], schema: dict[str, Any]) -> None:
-    messages = body.get("messages")
-    if not isinstance(messages, list):
-        raise HTTPException(400, "messages inválido.")
-    instruction = _compact_schema_rules(schema)
-    body["messages"] = [{"role": "system", "content": instruction}, *messages]
 
-
-def prepare_upstream(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str], dict[str, Any] | None]:
+def _prepare_upstream(payload: dict[str, Any], *, repair: str | None = None, structured_mode: str | None = None, resolved_model: str | None = None) -> tuple[dict[str, Any], dict[str, str], dict[str, Any] | None]:
     if not isinstance(payload.get("messages"), list):
-        raise HTTPException(400, "messages inválido.")
-    is_structured = structured(payload)
+        raise HTTPException(400, "messages inválido")
     body = copy.deepcopy(payload)
-    body["model"] = model_for(payload)
-    schema = schema_for(payload) if is_structured else None
+    body["model"] = str(resolved_model or model_for(payload))
+    if body["model"].strip().lower() == "auto":
+        raise HTTPException(503, "MODEL_DISCOVERY_REQUIRED")
+    schema = schema_for(payload) if structured(payload) else None
+    messages = list(body.get("messages") or [])
 
-    # DeepSeek stable supports JSON Output via json_object. OpenAI json_schema is never forwarded.
+    mode = structured_mode or _first_structured_mode(str(body.get("model") or ""))
     if schema is not None:
-        _inject_deepseek_json_instruction(body, schema)
-        body["response_format"] = {"type": "json_object"}
+        if mode == "native_json_schema":
+            pass
+        elif mode == "json_object":
+            body["response_format"] = {"type": "json_object"}
+            # Insert before the first dynamic user message, preserving a stable prefix.
+            insert_at = 1 if messages and messages[0].get("role") == "system" else 0
+            messages.insert(insert_at, {"role": "system", "content": _json_only_instruction()})
+        elif mode == "prompt_json":
+            body.pop("response_format", None)
+            insert_at = 1 if messages and messages[0].get("role") == "system" else 0
+            messages.insert(insert_at, {"role": "system", "content": _json_only_instruction()})
 
-    enabled = thinking_enabled(payload)
-    for key in ("enable_thinking", "reasoning"):
-        body.pop(key, None)
-    body["thinking"] = {"type": "enabled" if enabled else "disabled"}
-    if enabled:
-        effort = str(payload.get("reasoning_effort") or "high").strip().lower()
-        body["reasoning_effort"] = effort if effort in {"low", "high", "max"} else "high"
-        for key in ("temperature", "top_p", "presence_penalty", "frequency_penalty"):
-            body.pop(key, None)
-    else:
-        body.pop("reasoning_effort", None)
+    # Format repair is a suffix. Everything before it stays byte-identical, which
+    # is cache-friendly for providers with prefix caching and harmless elsewhere.
+    if repair:
+        messages.append({"role": "user", "content": repair})
+        body["temperature"] = 0
+    body["messages"] = messages
 
-    # OpenAI aliases that DeepSeek stable does not need.
-    if "max_completion_tokens" in body:
-        if "max_tokens" not in body:
-            body["max_tokens"] = body["max_completion_tokens"]
-        body.pop("max_completion_tokens", None)
-
+    # Provider-specific transport knobs live only in configuration, not Core.
+    for key, value in S.extra_body.items():
+        body[key] = copy.deepcopy(value)
+    if S.cache_mode in {"explicit", "session"}:
+        for key, value in S.cache_body.items():
+            body[key] = copy.deepcopy(value)
     headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
     if S.upstream_api_key:
         headers["Authorization"] = f"Bearer {S.upstream_api_key}"
+    for key, value in S.extra_headers.items():
+        headers[str(key)] = str(value)
+    if S.cache_mode in {"explicit", "session"}:
+        for key, value in S.cache_headers.items():
+            headers[str(key)] = str(value)
     return body, headers, schema
 
 
@@ -437,7 +368,6 @@ class UsageAccumulator:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cached_prompt_tokens: int = 0
-    cache_miss_tokens: int = 0
     reasoning_tokens: int = 0
 
     def add(self, data: dict[str, Any]) -> None:
@@ -446,269 +376,166 @@ class UsageAccumulator:
             return
         prompt = max(0, int(usage.get("prompt_tokens") or 0))
         completion = max(0, int(usage.get("completion_tokens") or 0))
-        hit = usage.get("prompt_cache_hit_tokens")
-        miss = usage.get("prompt_cache_miss_tokens")
-        details = usage.get("prompt_tokens_details")
-        detail_hit = details.get("cached_tokens") if isinstance(details, dict) else None
-        hit_values = [int(x) for x in (hit, detail_hit) if isinstance(x, (int, float)) and int(x) >= 0]
-        if hit_values:
-            cached = min(prompt, max(hit_values))
-            cache_miss = max(0, prompt - cached)
-        elif isinstance(miss, (int, float)) and int(miss) >= 0:
-            cache_miss = min(prompt, int(miss))
-            cached = max(0, prompt - cache_miss)
-        else:
-            cached = 0
-            cache_miss = prompt
-        cdetails = usage.get("completion_tokens_details")
-        reasoning = int(cdetails.get("reasoning_tokens") or 0) if isinstance(cdetails, dict) else 0
-
+        details = usage.get("prompt_tokens_details") if isinstance(usage.get("prompt_tokens_details"), dict) else {}
+        candidates = [
+            details.get("cached_tokens"), usage.get("prompt_cache_hit_tokens"),
+            usage.get("cached_prompt_tokens"), usage.get("cached_tokens"),
+        ]
+        cached_values = [int(v) for v in candidates if isinstance(v, (int, float)) and int(v) >= 0]
+        cached = min(prompt, max(cached_values)) if cached_values else 0
+        cdetails = usage.get("completion_tokens_details") if isinstance(usage.get("completion_tokens_details"), dict) else {}
         self.prompt_tokens += prompt
         self.completion_tokens += completion
         self.cached_prompt_tokens += cached
-        self.cache_miss_tokens += cache_miss
-        self.reasoning_tokens += max(0, reasoning)
+        self.reasoning_tokens += max(0, int(cdetails.get("reasoning_tokens") or 0))
 
     def apply(self, data: dict[str, Any]) -> dict[str, Any]:
         result = copy.deepcopy(data)
         usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
-        usage["prompt_tokens"] = self.prompt_tokens
-        usage["completion_tokens"] = self.completion_tokens
-        usage["total_tokens"] = self.prompt_tokens + self.completion_tokens
-        usage["prompt_cache_hit_tokens"] = min(self.prompt_tokens, self.cached_prompt_tokens)
-        usage["prompt_cache_miss_tokens"] = min(self.prompt_tokens, self.cache_miss_tokens)
-        if self.reasoning_tokens:
-            cdetails = usage.get("completion_tokens_details") if isinstance(usage.get("completion_tokens_details"), dict) else {}
-            cdetails["reasoning_tokens"] = self.reasoning_tokens
-            usage["completion_tokens_details"] = cdetails
-        result["usage"] = usage
-        return result
-
-    def as_dict(self) -> dict[str, int]:
-        out = {
+        usage.update({
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "total_tokens": self.prompt_tokens + self.completion_tokens,
             "prompt_cache_hit_tokens": min(self.prompt_tokens, self.cached_prompt_tokens),
-            "prompt_cache_miss_tokens": min(self.prompt_tokens, self.cache_miss_tokens),
-        }
+            "prompt_cache_miss_tokens": max(0, self.prompt_tokens - min(self.prompt_tokens, self.cached_prompt_tokens)),
+        })
         if self.reasoning_tokens:
-            out["reasoning_tokens"] = self.reasoning_tokens
-        return out
+            details = usage.get("completion_tokens_details") if isinstance(usage.get("completion_tokens_details"), dict) else {}
+            details["reasoning_tokens"] = self.reasoning_tokens
+            usage["completion_tokens_details"] = details
+        result["usage"] = usage
+        return result
+
+    def as_dict(self) -> dict[str, int]:
+        cached = min(self.prompt_tokens, self.cached_prompt_tokens)
+        return {
+            "prompt_tokens": self.prompt_tokens, "completion_tokens": self.completion_tokens,
+            "total_tokens": self.prompt_tokens + self.completion_tokens,
+            "prompt_cache_hit_tokens": cached, "prompt_cache_miss_tokens": max(0, self.prompt_tokens - cached),
+        }
 
 
-def _assistant_content(data: dict[str, Any]) -> str:
-    choices = data.get("choices")
-    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+def text_of(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        out=[]
+        for item in content:
+            if isinstance(item, dict) and item.get("type") in {"text","input_text","output_text"} and isinstance(item.get("text"), str):
+                out.append(item["text"])
+        return "\n".join(out)
+    return ""
+
+
+def assistant_content(data: dict[str, Any]) -> str:
+    choices=data.get("choices")
+    if not isinstance(choices,list) or not choices or not isinstance(choices[0],dict):
         return ""
-    message = choices[0].get("message")
-    return text_of(message.get("content")) if isinstance(message, dict) else ""
+    message=choices[0].get("message")
+    return text_of(message.get("content")) if isinstance(message,dict) else ""
 
 
-_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.IGNORECASE | re.DOTALL)
+_FENCE_RE = re.compile(r"^\s*```(?:json|javascript|python)?\s*(.*?)\s*```\s*$", re.I | re.S)
 
 
-def parse_json_representation(text: str) -> Any:
-    candidate = text.strip()
+def _balanced_json_fragment(text: str) -> str | None:
+    start = None
+    opener = ""
+    for index, char in enumerate(text):
+        if char in "{[":
+            start = index
+            opener = char
+            break
+    if start is None:
+        return None
+    stack = [opener]
+    quote = None
+    escaped = False
+    pairs = {"}": "{", "]": "["}
+    for index in range(start + 1, len(text)):
+        char = text[index]
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in {'"', "'"}:
+            quote = char
+            continue
+        if char in "{[":
+            stack.append(char)
+            continue
+        if char in "}]":
+            if not stack or stack[-1] != pairs[char]:
+                continue
+            stack.pop()
+            if not stack:
+                return text[start:index + 1]
+    return None
+
+
+def _decode_jsonish(candidate: str) -> Any:
+    last: Exception | None = None
+    for decoder in (json.loads, ast.literal_eval):
+        try:
+            value = decoder(candidate)
+            if isinstance(value, str):
+                nested = value.strip()
+                if nested.startswith(("{", "[")):
+                    try:
+                        return json.loads(nested)
+                    except Exception:
+                        try:
+                            return ast.literal_eval(nested)
+                        except Exception:
+                            pass
+            return value
+        except Exception as exc:
+            last = exc
+    if last is not None:
+        raise last
+    raise ValueError("no decoder")
+
+
+def parse_json_value(text: str) -> tuple[Any, list[str]]:
+    """Purely syntactic recovery; never normalizes client semantics."""
+    candidate = str(text or "").strip()
+    if not candidate:
+        raise ValueError("empty assistant content")
+    candidates: list[tuple[str, str]] = []
     match = _FENCE_RE.match(candidate)
     if match:
-        candidate = match.group(1).strip()
-    value = json.loads(candidate)
-    if isinstance(value, str):
-        nested = value.strip()
-        if nested.startswith(("{", "[")):
-            value = json.loads(nested)
-    return value
+        candidates.append((match.group(1).strip(), "strip_markdown_fence"))
+    candidates.append((candidate, "direct_json"))
+    fragment = _balanced_json_fragment(candidate)
+    if fragment and fragment != candidate:
+        candidates.append((fragment, "extract_balanced_json"))
+    last: Exception | None = None
+    for item, step in candidates:
+        try:
+            value = _decode_jsonish(item)
+            return value, ([] if step == "direct_json" else [step])
+        except Exception as exc:
+            last = exc
+    raise last or ValueError("JSON recovery failed")
 
 
-def _json_path(error: ValidationError, prefix: str = "$") -> str:
-    path = prefix
-    for part in error.absolute_path:
-        path += f"[{part}]" if isinstance(part, int) else f".{part}"
-    if error.validator == "required":
-        match = re.search(r"'([^']+)' is a required property", error.message)
-        if match:
-            path += f".{match.group(1)}"
-    return path
-
-
-def _concise_errors(instance: Any, schema: dict[str, Any], *, prefix: str, limit: int = 8) -> list[str]:
-    errors = sorted(Draft202012Validator(schema).iter_errors(instance), key=lambda e: (list(e.absolute_path), e.message))
-    out: list[str] = []
-    for error in errors:
-        if error.validator in {"oneOf", "anyOf"} and error.context:
-            continue
-        msg = error.message.replace("\n", " ")
-        item = f"{_json_path(error, prefix)}: {msg[:260]}"
-        if item not in out:
-            out.append(item)
-        if len(out) >= limit:
-            break
-    return out
-
-
-def _diagnose_support(value: Any, schema: dict[str, Any], *, prefix: str) -> list[str]:
-    if not isinstance(value, dict):
-        return [f"{prefix}: support must be an object"]
-    kind = str(value.get("kind") or "")
-    branch = _variant_for(schema, "kind", kind)
-    if branch is None:
-        allowed = []
-        for candidate in schema.get("oneOf") or []:
-            prop = ((candidate.get("properties") or {}).get("kind") or {}) if isinstance(candidate, dict) else {}
-            found = _singleton_enum(prop)
-            if found: allowed.append(found)
-        return [f"{prefix}.kind: expected one of {allowed}, got {kind!r}"]
-    return _concise_errors(value, branch, prefix=prefix)
-
-
-def _diagnose_ecc_contract(value: Any, schema: dict[str, Any]) -> list[str]:
-    if not isinstance(value, dict):
-        return ["$: top-level ECC value must be an object"]
-    kind = str(value.get("type") or "")
-    branch = _variant_for(schema, "type", kind)
-    if branch is None:
-        return [f"$.type: expected explorar, construir or concluir; got {kind!r}"]
-
-    errors: list[str] = []
-    props = branch.get("properties") if isinstance(branch.get("properties"), dict) else {}
-    required = set(branch.get("required") or [])
-    for name in sorted(required - set(value)):
-        errors.append(f"$.{name}: required property missing")
-    if branch.get("additionalProperties") is False:
-        for name in sorted(set(value) - set(props)):
-            errors.append(f"$.{name}: additional property is not allowed")
-    for name, child in props.items():
-        if name in {"memory", "objective"} or name not in value:
-            continue
-        errors.extend(_concise_errors(value[name], child, prefix=f"$.{name}", limit=4))
-
-    objective_schema = props.get("objective") if isinstance(props.get("objective"), dict) else None
-    objective = value.get("objective")
-    if objective_schema is not None:
-        if not isinstance(objective, dict):
-            errors.append("$.objective: required object missing or invalid")
-        else:
-            oprops = objective_schema.get("properties") if isinstance(objective_schema.get("properties"), dict) else {}
-            orequired = set(objective_schema.get("required") or [])
-            for name in sorted(orequired - set(objective)):
-                errors.append(f"$.objective.{name}: required property missing")
-            if objective_schema.get("additionalProperties") is False:
-                for name in sorted(set(objective) - set(oprops)):
-                    errors.append(f"$.objective.{name}: additional property is not allowed")
-            disposition = objective.get("disposition")
-            if "disposition" in objective:
-                errors.extend(_concise_errors(disposition, oprops.get("disposition") or {}, prefix="$.objective.disposition", limit=2))
-            state_value = objective.get("state")
-            if disposition in {"unchanged", "cleared"} and state_value is not None:
-                errors.append(f"$.objective.state: disposition={disposition} requires null state")
-            elif disposition == "updated":
-                state_schema = _objective_state_schema(objective_schema)
-                if not isinstance(state_value, dict):
-                    errors.append("$.objective.state: disposition=updated requires an objective state object")
-                elif state_schema is not None:
-                    errors.extend(_concise_errors(state_value, state_schema, prefix="$.objective.state", limit=5))
-
-    memory_schema = props.get("memory") if isinstance(props.get("memory"), dict) else None
-    memory = value.get("memory")
-    if memory_schema is None:
-        return errors[:8]
-    if not isinstance(memory, dict):
-        return (errors + ["$.memory: required object missing or invalid"])[:8]
-    mprops = memory_schema.get("properties") if isinstance(memory_schema.get("properties"), dict) else {}
-    mrequired = set(memory_schema.get("required") or [])
-    for name in sorted(mrequired - set(memory)):
-        errors.append(f"$.memory.{name}: required property missing")
-    if memory_schema.get("additionalProperties") is False:
-        for name in sorted(set(memory) - set(mprops)):
-            errors.append(f"$.memory.{name}: additional property is not allowed")
-    if "focus" in memory:
-        errors.extend(_concise_errors(memory.get("focus"), mprops.get("focus") or {}, prefix="$.memory.focus", limit=3))
-    disposition = memory.get("disposition")
-    if "disposition" in memory:
-        errors.extend(_concise_errors(disposition, mprops.get("disposition") or {}, prefix="$.memory.disposition", limit=3))
-    operations = memory.get("operations")
-    if not isinstance(operations, list):
-        errors.append("$.memory.operations: must be an array")
-        return errors[:8]
-    if disposition == "updated" and not operations:
-        errors.append("$.memory.operations: disposition=updated requires at least one operation")
-    if disposition == "unchanged" and operations:
-        errors.append("$.memory.operations: disposition=unchanged requires an empty operations array")
-    op_container = mprops.get("operations") if isinstance(mprops.get("operations"), dict) else {}
-    errors.extend(_concise_errors(operations, {k:v for k,v in op_container.items() if k != "items"}, prefix="$.memory.operations", limit=2))
-    item_schema = op_container.get("items") if isinstance(op_container.get("items"), dict) else {}
-    for index, operation in enumerate(operations):
-        prefix = f"$.memory.operations[{index}]"
-        if not isinstance(operation, dict):
-            errors.append(f"{prefix}: operation must be an object")
-            continue
-        op = str(operation.get("op") or "")
-        op_branch = _variant_for(item_schema, "op", op)
-        if op_branch is None:
-            allowed = []
-            for candidate in item_schema.get("oneOf") or []:
-                prop = ((candidate.get("properties") or {}).get("op") or {}) if isinstance(candidate, dict) else {}
-                found = _singleton_enum(prop)
-                if found: allowed.append(found)
-            errors.append(f"{prefix}.op: expected one of {allowed}, got {op!r}")
-            continue
-        # Validate the exact operation branch while treating supports separately,
-        # avoiding the unhelpful nested oneOf umbrella error.
-        branch_copy = copy.deepcopy(op_branch)
-        bprops = branch_copy.get("properties") if isinstance(branch_copy.get("properties"), dict) else {}
-        support_schema = None
-        if isinstance(bprops.get("supports"), dict):
-            support_schema = bprops["supports"].get("items") if isinstance(bprops["supports"].get("items"), dict) else None
-            bprops["supports"]["items"] = {"type": "object"}
-        errors.extend(_concise_errors(operation, branch_copy, prefix=prefix, limit=6))
-        if support_schema is not None and isinstance(operation.get("supports"), list):
-            for sidx, support in enumerate(operation["supports"]):
-                errors.extend(_diagnose_support(support, support_schema, prefix=f"{prefix}.supports[{sidx}]"))
-        if len(errors) >= 8:
-            break
-    return errors[:8]
-
-
-def _leaf_validation_errors(errors: list[ValidationError], *, limit: int = 8) -> list[str]:
-    leaves: list[ValidationError] = []
-    stack = list(errors)
-    while stack:
-        error = stack.pop(0)
-        if error.context:
-            stack[0:0] = list(error.context)
-        else:
-            leaves.append(error)
-    leaves.sort(key=lambda e: (-len(list(e.absolute_path)), list(e.absolute_path), e.message))
-    out: list[str] = []
-    for error in leaves:
-        msg = error.message.replace("\n", " ")
-        item = f"{_json_path(error)}: {msg[:260]}"
-        if item not in out:
-            out.append(item)
-        if len(out) >= limit:
-            break
-    return out
-
-
-def validate_structured_response(data: dict[str, Any], schema: dict[str, Any]) -> tuple[Any | None, list[str]]:
-    text = _assistant_content(data)
+def normalize_structured(data: dict[str, Any], schema: dict[str, Any] | None = None) -> tuple[Any | None, list[str], list[str]]:
+    """Recover JSON only. ``schema`` is intentionally ignored semantically."""
+    text = assistant_content(data)
     if not text.strip():
-        return None, ["$: resposta estruturada sem conteúdo"]
+        return None, ["$: assistant content is empty"], []
     try:
-        value = parse_json_representation(text)
+        value, steps = parse_json_value(text)
     except Exception as exc:
-        return None, [f"$: JSON inválido ({type(exc).__name__})"]
-    errors = sorted(Draft202012Validator(schema).iter_errors(value), key=lambda e: (list(e.absolute_path), e.message))
-    if not errors:
-        return value, []
-    if _is_ecc_schema(schema):
-        diagnosed = _diagnose_ecc_contract(value, schema)
-        if diagnosed:
-            return value, diagnosed
-    return value, _leaf_validation_errors(errors)
+        return None, [f"$: JSON is not recoverable ({type(exc).__name__})"], []
+    return value, [], steps
 
-def canonicalize_content(data: dict[str, Any], value: Any) -> dict[str, Any]:
+
+def canonicalize(data: dict[str, Any], value: Any) -> dict[str, Any]:
     result = copy.deepcopy(data)
     choices = result.get("choices")
     if isinstance(choices, list) and choices and isinstance(choices[0], dict):
@@ -720,261 +547,406 @@ def canonicalize_content(data: dict[str, Any], value: Any) -> dict[str, Any]:
     return result
 
 
-def build_repair_payload(original: dict[str, Any], previous_content: str, errors: list[str]) -> dict[str, Any]:
-    repaired = copy.deepcopy(original)
-    repaired["stream"] = False
-    messages = repaired.get("messages")
-    if not isinstance(messages, list):
-        return repaired
-    err = "\n".join(f"- {x}" for x in errors[:8])
-    instruction = (
-        "Repair the previous JSON object. Preserve its intended ECC decision, objective semantics and memory semantics, but satisfy the exact contract. "
-        "Use the objective and memory grammars from the system instruction; do not erase a genuine objective or memory update merely to make validation pass. "
-        "Return JSON only, with no markdown or explanation.\nValidation errors:\n" + err
-    )
-    repaired["messages"] = [
-        *messages,
-        {"role": "assistant", "content": previous_content[:12000]},
-        {"role": "user", "content": instruction},
-    ]
-    return repaired
-
-
 @dataclass(frozen=True)
 class AttemptResult:
-    data: dict[str, Any] | None
+    data: dict[str,Any]|None
     status_code: int
     media_type: str
     raw: bytes
 
 
-async def call_once(client: httpx.AsyncClient, payload: dict[str, Any], request_id: str, attempt_no: int) -> AttemptResult:
-    body, headers, _ = prepare_upstream(payload)
-    url = f"{S.upstream_base_url}/chat/completions"
-    log.info(
-        "request=%s upstream_attempt=%s start model=%s structured=%s chars=%s",
-        request_id, attempt_no, body.get("model"), bool(schema_for(payload)), len(json.dumps(body, ensure_ascii=False)),
-    )
-    response = await client.post(url, headers=headers, json=body)
-    media = response.headers.get("content-type", "application/json")
-    if response.status_code >= 400:
-        log.warning("request=%s upstream_attempt=%s http=%s", request_id, attempt_no, response.status_code)
-        return AttemptResult(None, response.status_code, media, response.content)
-    try:
-        data = response.json()
-    except Exception:
-        return AttemptResult(None, 502, media, response.content)
-    if not isinstance(data, dict):
-        return AttemptResult(None, 502, media, response.content)
-    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
-    log.info(
-        "request=%s upstream_attempt=%s ok prompt=%s completion=%s cache_hit=%s",
-        request_id, attempt_no, usage.get("prompt_tokens"), usage.get("completion_tokens"), usage.get("prompt_cache_hit_tokens"),
-    )
-    return AttemptResult(data, response.status_code, media, response.content)
+async def call_once(client:httpx.AsyncClient,payload:dict[str,Any],request_id:str,attempt_no:int,*,repair:str|None=None,structured_mode:str|None=None,resolved_model:str|None=None)->AttemptResult:
+    body,headers,_=_prepare_upstream(payload,repair=repair,structured_mode=structured_mode,resolved_model=resolved_model)
+    url=f"{S.upstream_base_url}/chat/completions"
+    effective_mode = structured_mode or _first_structured_mode(str(body.get("model") or ""))
+    log.info("request=%s upstream_attempt=%s model=%s structured_mode=%s configured_mode=%s cache_mode=%s",request_id,attempt_no,body.get("model"),effective_mode,S.structured_mode,S.cache_mode)
+    response=await client.post(url,headers=headers,json=body)
+    media=response.headers.get("content-type","application/json")
+    if response.status_code>=400:
+        return AttemptResult(None,response.status_code,media,response.content)
+    try: data=response.json()
+    except Exception: return AttemptResult(None,502,media,response.content)
+    return AttemptResult(data if isinstance(data,dict) else None,response.status_code,media,response.content)
 
 
-def _adapter_headers(*, usage: UsageAccumulator, attempts: int, repairs: int, enforcement: str, usage_unknown: bool = False) -> dict[str, str]:
+def adapter_headers(usage:UsageAccumulator,attempts:int,enforcement:str,*,repairs:int=0,normalized:bool=False,effective_mode:str|None=None)->dict[str,str]:
     return {
-        "X-Eyle-Adapter-Profile": ADAPTER_PROFILE,
-        "X-Eyle-Structured-Backend": "deepseek_json_object_local_schema",
-        "X-Eyle-Schema-Enforcement": enforcement,
-        "X-Eyle-Structured-Repairs": str(repairs),
-        "X-Eyle-Upstream-Attempts": str(attempts),
-        "X-Eyle-Usage-Prompt-Tokens": str(usage.prompt_tokens),
-        "X-Eyle-Usage-Completion-Tokens": str(usage.completion_tokens),
-        "X-Eyle-Usage-Cached-Prompt-Tokens": str(min(usage.prompt_tokens, usage.cached_prompt_tokens)),
-        "X-Eyle-Usage-Cache-Miss-Tokens": str(min(usage.prompt_tokens, usage.cache_miss_tokens)),
-        "X-Eyle-Upstream-Usage-Unknown": "1" if usage_unknown else "0",
+        "X-Eyle-Adapter-Profile":ADAPTER_PROFILE,
+        "X-Eyle-Structured-Upstream-Mode":effective_mode or S.structured_mode,
+        "X-Eyle-Structured-Configured-Mode":S.structured_mode,
+        "X-Eyle-Cache-Mode":S.cache_mode,
+        "X-Eyle-Schema-Enforcement":enforcement,
+        "X-Eyle-Structured-Repairs":str(repairs),
+        "X-Eyle-Upstream-Attempts":str(attempts),
+        "X-Eyle-Max-Upstream-Attempts":str(MAX_UPSTREAM_ATTEMPTS_PER_LOGICAL_CALL),
+        "X-Eyle-Local-Normalized":"1" if normalized else "0",
+        "X-Eyle-Usage-Prompt-Tokens":str(usage.prompt_tokens),
+        "X-Eyle-Usage-Completion-Tokens":str(usage.completion_tokens),
+        "X-Eyle-Usage-Cached-Prompt-Tokens":str(min(usage.prompt_tokens,usage.cached_prompt_tokens)),
     }
 
 
-async def execute_structured(client: httpx.AsyncClient, incoming: dict[str, Any], request_id: str) -> Response:
-    schema = schema_for(incoming)
-    if schema is None:
-        raise HTTPException(400, "Structured request sem schema.")
-    usage = UsageAccumulator()
-    attempts = 0
-    repairs = 0
-    last_errors: list[str] = []
-    payload = copy.deepcopy(incoming)
+def _safe_transport_detail(exc: BaseException) -> dict[str, Any]:
+    return {
+        "exception": type(exc).__name__,
+        "detail": str(exc)[:300],
+        "target": S.upstream_base_url,
+    }
 
-    for repair_index in range(S.structured_repair_attempts + 1):
-        attempts += 1
-        try:
-            result = await call_once(client, payload, request_id, attempts)
-        except httpx.TimeoutException:
-            headers = _adapter_headers(
-                usage=usage, attempts=attempts, repairs=repairs, enforcement="adapter_timeout", usage_unknown=True
-            )
-            log.warning("request=%s upstream_timeout attempt=%s billing_may_have_occurred=true", request_id, attempts)
-            return JSONResponse(
-                status_code=504,
-                headers=headers,
-                content={
-                    "error": {
-                        "type": "upstream_timeout",
-                        "message": "Timeout no upstream DeepSeek; a tentativa pode ter sido processada/cobrada sem usage retornado.",
-                        "billing_may_have_occurred": True,
-                        "provider_usage_unknown": True,
-                        "upstream_attempts": attempts,
-                    },
-                    "usage": usage.as_dict(),
-                },
-            )
-        except httpx.HTTPError as exc:
-            headers = _adapter_headers(usage=usage, attempts=attempts, repairs=repairs, enforcement="adapter_transport")
-            log.exception("request=%s upstream_transport_error attempt=%s error=%s", request_id, attempts, exc)
-            return JSONResponse(
-                status_code=502,
-                headers=headers,
-                content={"error": {"type": "upstream_connection_error", "message": "Falha ao conectar ao DeepSeek."}, "usage": usage.as_dict()},
-            )
 
-        if result.data is None:
-            headers = _adapter_headers(usage=usage, attempts=attempts, repairs=repairs, enforcement="provider_http")
-            return Response(content=result.raw, status_code=result.status_code, media_type=result.media_type, headers=headers)
+def _transport_failure(usage: UsageAccumulator, attempts: int, enforcement: str, exc: BaseException, *, repairs: int = 0, effective_mode: str | None = None, timeout: bool = False) -> JSONResponse:
+    billed = usage.prompt_tokens > 0 or usage.completion_tokens > 0
+    error = {
+        "type": "upstream_timeout" if timeout else "upstream_connection_error",
+        **_safe_transport_detail(exc),
+        "upstream_attempts": attempts,
+        "repairs": repairs,
+        "billing_may_have_occurred": bool(billed or timeout),
+        "retry_cost_risk": bool(billed or timeout),
+    }
+    headers = adapter_headers(usage, attempts, enforcement, repairs=repairs, effective_mode=effective_mode)
+    headers["X-Eyle-Billing-May-Have-Occurred"] = "1" if error["billing_may_have_occurred"] else "0"
+    headers["X-Eyle-Retry-Cost-Risk"] = "1" if error["retry_cost_risk"] else "0"
+    log.warning("adapter transport failure: %s", json.dumps(error, ensure_ascii=False))
+    return JSONResponse(status_code=504 if timeout else 502, headers=headers, content={"error": error, "usage": usage.as_dict()})
 
-        usage.add(result.data)
-        value, errors = validate_structured_response(result.data, schema)
-        if not errors:
-            canonical = canonicalize_content(result.data, value)
-            aggregated = usage.apply(canonical)
-            headers = _adapter_headers(usage=usage, attempts=attempts, repairs=repairs, enforcement="adapter")
-            return JSONResponse(aggregated, headers=headers)
 
-        last_errors = errors
-        if repair_index >= S.structured_repair_attempts:
-            break
-        repairs += 1
-        payload = build_repair_payload(incoming, _assistant_content(result.data), errors)
-
-    headers = _adapter_headers(usage=usage, attempts=attempts, repairs=repairs, enforcement="adapter_failed")
-    log.warning("request=%s structured_contract_unsatisfied attempts=%s repairs=%s errors=%s", request_id, attempts, repairs, last_errors)
-    return JSONResponse(
-        status_code=502,
-        headers=headers,
-        content={
-            "error": {
-                "type": "structured_contract_unsatisfied",
-                "message": "A DeepSeek não satisfez o contrato estruturado após o repair permitido.",
-                "validation_errors": last_errors[:8],
-                "repairs": repairs,
-                "upstream_attempts": attempts,
-            },
-            "usage": usage.as_dict(),
-        },
+def repair_instruction(previous: str) -> str:
+    previous = str(previous or "")[-12000:]
+    return (
+        "FORMAT RECOVERY ONLY. Re-express the previous assistant output as exactly one JSON object. "
+        "Preserve the same semantic fields, values and intended action; do not add new meaning, remove meaning, "
+        "or explain anything. Follow the caller's requested response shape. No markdown. "
+        f"Previous assistant output:\n{previous}"
     )
 
 
-async def read_body(request: Request) -> dict[str, Any]:
-    raw = await request.body()
-    if len(raw) > S.max_body:
-        raise HTTPException(413, "Requisição grande demais.")
+def _candidate_response(data: dict[str, Any], usage: UsageAccumulator) -> dict[str, Any]:
+    # Return the original candidate content while applying all billed usage from
+    # transport probes/format repair. Eyle will canonicalize or ask Main again.
+    return usage.apply(copy.deepcopy(data))
+
+
+async def execute_structured(client: httpx.AsyncClient, incoming: dict[str, Any], request_id: str) -> Response:
+    # The client schema is transport guidance only. Adapter validates its syntax
+    # in structured()/schema_for(), but never validates assistant semantics.
+    if schema_for(incoming) is None:
+        raise HTTPException(400, "Structured request sem schema/formato")
+    usage = UsageAccumulator()
+    attempts = 0
+    repairs = 0
     try:
-        data = json.loads(raw)
+        model = await resolve_model(client, incoming)
     except Exception as exc:
-        raise HTTPException(400, "JSON inválido.") from exc
-    if not isinstance(data, dict):
-        raise HTTPException(400, "O corpo precisa ser um objeto JSON.")
+        return _transport_failure(usage, 0, "model_discovery", exc, effective_mode=S.structured_mode)
+
+    selected_data: dict[str, Any] | None = None
+    selected_mode: str | None = None
+    selected_steps: list[str] = []
+    selected_errors: list[str] = []
+
+    for mode in _structured_mode_chain(model):
+        attempts += 1
+        try:
+            result = await call_once(client, incoming, request_id, attempts, structured_mode=mode, resolved_model=model)
+        except httpx.TimeoutException as exc:
+            return _transport_failure(usage, attempts, "adapter_timeout", exc, effective_mode=mode, timeout=True)
+        except httpx.HTTPError as exc:
+            return _transport_failure(usage, attempts, "adapter_transport", exc, effective_mode=mode)
+
+        if result.data is None:
+            if S.structured_mode == "auto" and mode != "prompt_json" and result.status_code in _TECHNICAL_MODE_REJECTION_STATUS:
+                _record_transport_rejection(model, mode)
+                log.info("request=%s provider_rejected_structured_transport mode=%s status=%s; trying weaker transport", request_id, mode, result.status_code)
+                continue
+            return Response(
+                content=result.raw, status_code=result.status_code, media_type=result.media_type,
+                headers=adapter_headers(usage, attempts, "provider_http", effective_mode=mode),
+            )
+
+        usage.add(result.data)
+        selected_data = result.data
+        selected_mode = mode
+        value, errors, steps = normalize_structured(result.data, schema_for(incoming))
+        selected_steps = steps
+        selected_errors = errors
+        if not errors:
+            enforcement = "adapter_json_recovered" if steps else "adapter_json_valid"
+            return JSONResponse(
+                usage.apply(canonicalize(result.data, value)),
+                headers=adapter_headers(usage, attempts, enforcement, repairs=0, normalized=bool(steps), effective_mode=mode),
+            )
+
+        # The provider accepted this transport; a malformed answer is not a
+        # capability rejection. Never degrade/cache another mode for this.
+        break
+
+    if selected_data is None:
+        # Auto chain exhausted only through technical rejections. Return the last
+        # physical provider error is impossible here because each rejection was
+        # consumed above; expose a transport-level diagnostic rather than an ECC error.
+        return JSONResponse(
+            status_code=502,
+            headers=adapter_headers(usage, attempts, "structured_transport_unavailable", effective_mode=selected_mode or S.structured_mode),
+            content={"error": {"type": "structured_transport_unavailable", "upstream_attempts": attempts}, "usage": usage.as_dict()},
+        )
+
+    # Optional cheap repair exists only for syntactically unrecoverable content.
+    # It stays on the same already-accepted transport and never sees/interprets
+    # ECC validation errors.
+    repairs = 1
+    repair = repair_instruction(assistant_content(selected_data))
+    attempts += 1
+    try:
+        repaired = await call_once(
+            client, incoming, request_id, attempts, repair=repair,
+            structured_mode=selected_mode, resolved_model=model,
+        )
+    except (httpx.TimeoutException, httpx.HTTPError) as exc:
+        headers = adapter_headers(
+            usage, attempts, "adapter_repair_failed_candidate_returned", repairs=repairs,
+            normalized=False, effective_mode=selected_mode,
+        )
+        headers["X-Eyle-Billing-May-Have-Occurred"] = "1"
+        headers["X-Eyle-Retry-Cost-Risk"] = "1"
+        return JSONResponse(_candidate_response(selected_data, usage), headers=headers)
+
+    if repaired.data is not None:
+        usage.add(repaired.data)
+        value2, errors2, steps2 = normalize_structured(repaired.data, schema_for(incoming))
+        if not errors2:
+            return JSONResponse(
+                usage.apply(canonicalize(repaired.data, value2)),
+                headers=adapter_headers(
+                    usage, attempts, "adapter_format_repaired", repairs=repairs,
+                    normalized=True, effective_mode=selected_mode,
+                ),
+            )
+        selected_errors = errors2
+
+    # Never turn a format failure into a fatal 502 after a model generation.
+    # Return the original semantic candidate and let Eyle's wire parser provide
+    # precise cognitive feedback to the same Main.
+    headers = adapter_headers(
+        usage, attempts, "adapter_candidate_unparsed", repairs=repairs,
+        normalized=bool(selected_steps), effective_mode=selected_mode,
+    )
+    headers["X-Eyle-Structured-Recovery-Error"] = (selected_errors[0] if selected_errors else "JSON recovery failed")[:240]
+    return JSONResponse(_candidate_response(selected_data, usage), headers=headers)
+
+
+async def read_body(request:Request)->dict[str,Any]:
+    raw=await request.body()
+    if len(raw)>S.max_body: raise HTTPException(413,"Requisição grande demais")
+    try: data=json.loads(raw)
+    except Exception as exc: raise HTTPException(400,"JSON inválido") from exc
+    if not isinstance(data,dict): raise HTTPException(400,"Corpo precisa ser objeto JSON")
     return data
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app:FastAPI):
     check_config()
-    timeout = httpx.Timeout(connect=20, read=S.timeout, write=60, pool=20)
-    app.state.http = httpx.AsyncClient(timeout=timeout, follow_redirects=False)
+    app.state.http=httpx.AsyncClient(timeout=httpx.Timeout(connect=20,read=S.timeout,write=60,pool=20),follow_redirects=False)
     log.info(
-        "Eyle DeepSeek Adapter -> %s | model=%s | profile=%s | repairs=%s",
-        S.upstream_base_url, S.model_override or S.default_model, ADAPTER_PROFILE, S.structured_repair_attempts,
+        "Eyle provider-neutral adapter -> %s | structured=%s | cache=%s | env=%s",
+        S.upstream_base_url, S.structured_mode, S.cache_mode, ENV_FILE,
     )
-    try:
-        yield
-    finally:
-        await app.state.http.aclose()
+    if S.proxy_key and S.proxy_allow_loopback_no_auth:
+        log.info("PROXY_API_KEY ativo para clientes remotos; localhost permanece liberado para a Eyle Core")
+    try: yield
+    finally: await app.state.http.aclose()
 
 
-app = FastAPI(title="Eyle DeepSeek Adapter", version="2.5.2", lifespan=lifespan)
+app=FastAPI(title="Eyle Provider-Neutral OpenAI Adapter",version=ADAPTER_VERSION,lifespan=lifespan)
+
+
+@app.middleware("http")
+async def advertise_transport_protocol(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Eyle-Adapter-Protocol"] = ADAPTER_TRANSPORT_PROTOCOL
+    response.headers["X-Eyle-Adapter-Profile"] = ADAPTER_PROFILE
+    return response
+
+
+@app.get("/v1/eyle/handshake")
+async def handshake(request: Request)->Response:
+    """Formal Eyle<->Adapter transport negotiation with no paid generation.
+
+    The handshake advertises only mechanical transport capabilities. It does
+    not expose or validate any ECC/Memory semantics. A caller that declares an
+    incompatible transport protocol receives HTTP 426 rather than discovering
+    the mismatch during a paid generation.
+    """
+    client_auth(request)
+    requested = str(request.headers.get("x-eyle-transport-protocol") or "").strip()
+    if requested and requested != ADAPTER_TRANSPORT_PROTOCOL:
+        return JSONResponse(status_code=426, content={
+            "status": "incompatible",
+            "handshake_schema": ADAPTER_HANDSHAKE_SCHEMA,
+            "adapter_protocol": ADAPTER_TRANSPORT_PROTOCOL,
+            "requested_protocol": requested,
+            "error_code": "ADAPTER_PROTOCOL_INCOMPATIBLE",
+        })
+    explicit = S.model_override or (S.default_model if S.default_model.lower() != "auto" else "")
+    return JSONResponse({
+        "status": "ok",
+        "handshake_schema": ADAPTER_HANDSHAKE_SCHEMA,
+        "adapter_protocol": ADAPTER_TRANSPORT_PROTOCOL,
+        "adapter_profile": ADAPTER_PROFILE,
+        "adapter_version": ADAPTER_VERSION,
+        "authority": "transport-only",
+        "semantic_protocol": "client-owned",
+        "endpoints": {
+            "chat_completions": "/v1/chat/completions",
+            "readiness": "/ready",
+            "models": "/v1/models",
+        },
+        "capabilities": {
+            "chat_completions": True,
+            "client_json_schema_hint": True,
+            "json_candidate_passthrough": True,
+            "syntactic_json_recovery": True,
+            "structured_modes": sorted(_ALLOWED_STRUCTURED),
+            "structured_auto_policy": "degrade only on technical provider rejection",
+            "usage_accounting": "best-effort-openai-usage",
+            "cache_modes": sorted(_ALLOWED_CACHE),
+        },
+        "limits": {
+            "max_request_bytes": int(S.max_body),
+            "adapter_request_timeout_seconds": float(S.timeout),
+            "max_upstream_attempts_per_logical_call": int(MAX_UPSTREAM_ATTEMPTS_PER_LOGICAL_CALL),
+        },
+        "provider": {
+            "model_policy": "configured" if explicit else "discover",
+            **({"configured_model": explicit} if explicit else {}),
+            "structured_mode": S.structured_mode,
+            "cache_mode": S.cache_mode,
+        },
+    })
 
 
 @app.get("/")
 @app.get("/health")
-async def health() -> dict[str, Any]:
+async def health()->dict[str,Any]:
     return {
-        "status": "ok",
-        "provider": "deepseek",
-        "upstream": S.upstream_base_url,
-        "model": S.model_override or S.default_model,
-        "structured_backend": "json_object + local Draft 2020-12 validation",
-        "structured_repair_attempts": S.structured_repair_attempts,
-        "adapter_profile": ADAPTER_PROFILE,
-        "openai_base_url": f"http://{S.host}:{S.port}/v1",
+        "status":"ok","upstream":S.upstream_base_url,"model":S.model_override or S.default_model,
+        "adapter_profile":ADAPTER_PROFILE,"adapter_protocol":ADAPTER_TRANSPORT_PROTOCOL,"handshake_schema":ADAPTER_HANDSHAKE_SCHEMA,"semantic_protocol":"client-owned",
+        "structured_upstream_mode":S.structured_mode,"structured_auto_policy":"native_json_schema -> json_object -> prompt_json; degrade/cache only on technical provider rejection","cache_mode":S.cache_mode,
+        "supported_structured_modes":sorted(_ALLOWED_STRUCTURED),
+        "cache_warmup":"POST /v1/eyle/cache/warmup; explicit/session require configured provider-specific cache knobs",
+        "openai_base_url":f"http://{S.host}:{S.port}/v1",
+        "env_file":str(ENV_FILE),
+        "env_file_exists":ENV_FILE.exists(),
+        "proxy_auth":("remote_only" if S.proxy_key and S.proxy_allow_loopback_no_auth else "required" if S.proxy_key else "disabled"),
     }
 
 
-@app.get("/v1/models")
-async def models(request: Request) -> dict[str, Any]:
+@app.get("/ready")
+async def ready(request:Request)->Response:
+    """Verify configuration without forcing providers to implement GET /models."""
     client_auth(request)
-    return {"object": "list", "data": [{"id": S.model_override or S.default_model, "object": "model", "created": 0, "owned_by": "deepseek"}]}
+    explicit=S.model_override or (S.default_model if S.default_model.lower()!="auto" else "")
+    if explicit:
+        return JSONResponse({
+            "status":"ready_configured",
+            "upstream":S.upstream_base_url,
+            "model":explicit,
+            "note":"Modelo configurado explicitamente; nenhuma chamada paga foi feita ao provider.",
+        })
+
+    client: httpx.AsyncClient=request.app.state.http
+    try:
+        ids=await discover_models(client,force=True)
+        return JSONResponse({"status":"ready","upstream":S.upstream_base_url,"models":ids})
+    except Exception as exc:
+        return JSONResponse(status_code=503,content={
+            "status":"not_ready",
+            "upstream":S.upstream_base_url,
+            "error":_safe_transport_detail(exc),
+            "hint":"Verifique UPSTREAM_BASE_URL/API key. Se o provider não expõe /models, configure DEFAULT_MODEL com o ID real.",
+        })
+
+
+@app.get("/v1/models")
+async def models(request:Request)->Response:
+    client_auth(request)
+    # Se um modelo foi configurado explicitamente, a Eyle não precisa que o
+    # provider exponha GET /models. Isso mantém o Adapter realmente agnóstico:
+    # ele anuncia localmente o modelo configurado e usa a API remota somente
+    # quando houver uma geração real.
+    explicit = S.model_override or (S.default_model if S.default_model.lower() != "auto" else "")
+    if explicit:
+        return JSONResponse(
+            {"object":"list","data":[{"id":explicit,"object":"model","created":0,"owned_by":"configured"}]},
+            headers={"X-Eyle-Model-Discovery":"configured"},
+        )
+
+    client: httpx.AsyncClient=request.app.state.http
+    try:
+        ids = await discover_models(client)
+    except Exception as exc:
+        detail = _safe_transport_detail(exc)
+        return JSONResponse(status_code=502, content={"error":{
+            "type":"model_discovery_failed",**detail,
+            "hint":"Configure UPSTREAM_BASE_URL/API key. Se o provider não expõe /models, defina DEFAULT_MODEL com o ID real do modelo.",
+        }})
+    return JSONResponse({"object":"list","data":[{"id":item,"object":"model","created":0,"owned_by":"upstream"} for item in ids]}, headers={"X-Eyle-Model-Discovery":"upstream"})
+
+
+@app.post("/v1/eyle/cache/warmup")
+async def cache_warmup(request:Request)->Response:
+    """Optional provider-level prefix priming. Never called by Core automatically."""
+    client_auth(request)
+    incoming=await read_body(request)
+    client: httpx.AsyncClient=request.app.state.http
+    if S.cache_mode == "none":
+        raise HTTPException(409,"Cache warmup desativado por UPSTREAM_CACHE_MODE=none")
+    try:
+        model = await resolve_model(client, incoming)
+        result=await call_once(client,incoming,str(uuid.uuid4()),1,resolved_model=model)
+    except httpx.HTTPError as exc:
+        raise HTTPException(502,f"Falha no warmup: {type(exc).__name__}: {str(exc)[:200]}") from exc
+    except Exception as exc:
+        raise HTTPException(502,f"Falha no warmup/model discovery: {type(exc).__name__}: {str(exc)[:200]}") from exc
+    if result.data is None: return Response(content=result.raw,status_code=result.status_code,media_type=result.media_type)
+    usage=UsageAccumulator(); usage.add(result.data)
+    return JSONResponse({"status":"ok","cache_mode":S.cache_mode,"usage":usage.as_dict()})
 
 
 @app.post("/v1/chat/completions")
-@app.post("/chat/completions", include_in_schema=False)
-async def chat(request: Request) -> Response:
+@app.post("/chat/completions",include_in_schema=False)
+async def chat(request:Request)->Response:
     client_auth(request)
-    incoming = await read_body(request)
-    request_id = str(uuid.uuid4())
-    is_structured = structured(incoming)
-    stream = bool(incoming.get("stream"))
-    client: httpx.AsyncClient = request.app.state.http
-
-    if is_structured and stream:
-        raise HTTPException(400, "Validação estruturada requer stream=false.")
-
-    if is_structured:
-        return await execute_structured(client, incoming, request_id)
-
-    body, headers, _ = prepare_upstream(incoming)
-    url = f"{S.upstream_base_url}/chat/completions"
+    incoming=await read_body(request)
+    request_id=str(uuid.uuid4())
+    is_structured=structured(incoming)
+    stream=bool(incoming.get("stream"))
+    client: httpx.AsyncClient=request.app.state.http
+    if is_structured and stream: raise HTTPException(400,"Validação estruturada requer stream=false")
+    if is_structured: return await execute_structured(client,incoming,request_id)
+    try:
+        resolved_model = await resolve_model(client, incoming)
+    except Exception as exc:
+        return _transport_failure(UsageAccumulator(),0,"model_discovery",exc)
+    body,headers,_=_prepare_upstream(incoming,resolved_model=resolved_model)
+    url=f"{S.upstream_base_url}/chat/completions"
     try:
         if stream:
-            req = client.build_request("POST", url, headers=headers, json=body)
-            upstream = await client.send(req, stream=True)
-            if upstream.status_code >= 400:
-                content = await upstream.aread()
-                status = upstream.status_code
-                media = upstream.headers.get("content-type", "application/json")
-                await upstream.aclose()
-                return Response(content=content, status_code=status, media_type=media)
-            return StreamingResponse(
-                upstream.aiter_raw(),
-                status_code=upstream.status_code,
-                media_type=upstream.headers.get("content-type", "text/event-stream"),
-                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-                background=BackgroundTask(upstream.aclose),
-            )
-        result = await call_once(client, incoming, request_id, 1)
-        if result.data is None:
-            return Response(content=result.raw, status_code=result.status_code, media_type=result.media_type)
+            req=client.build_request("POST",url,headers=headers,json=body)
+            upstream=await client.send(req,stream=True)
+            if upstream.status_code>=400:
+                content=await upstream.aread(); status=upstream.status_code; media=upstream.headers.get("content-type","application/json"); await upstream.aclose()
+                return Response(content=content,status_code=status,media_type=media)
+            return StreamingResponse(upstream.aiter_raw(),status_code=upstream.status_code,media_type=upstream.headers.get("content-type","text/event-stream"),headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"},background=BackgroundTask(upstream.aclose))
+        result=await call_once(client,incoming,request_id,1,resolved_model=resolved_model)
+        if result.data is None: return Response(content=result.raw,status_code=result.status_code,media_type=result.media_type)
         return JSONResponse(result.data)
-    except httpx.TimeoutException:
-        return JSONResponse(
-            status_code=504,
-            headers={"X-Eyle-Upstream-Usage-Unknown": "1"},
-            content={
-                "error": {
-                    "type": "upstream_timeout",
-                    "message": "Timeout no upstream DeepSeek.",
-                    "billing_may_have_occurred": True,
-                    "provider_usage_unknown": True,
-                }
-            },
-        )
+    except httpx.TimeoutException as exc:
+        return _transport_failure(UsageAccumulator(),1,"adapter_timeout",exc,timeout=True)
     except httpx.HTTPError as exc:
-        log.exception("request=%s erro HTTP: %s", request_id, exc)
-        return JSONResponse(status_code=502, content={"error": {"type": "upstream_connection_error", "message": "Falha ao conectar ao DeepSeek."}})
+        return _transport_failure(UsageAccumulator(),1,"adapter_transport",exc)
 
 
-if __name__ == "__main__":
-    uvicorn.run("server:app", host=S.host, port=S.port, reload=False, log_level=os.getenv("LOG_LEVEL", "info").lower())
+if __name__=="__main__":
+    uvicorn.run(app,host=S.host,port=S.port,reload=False,log_level=os.getenv("LOG_LEVEL","info").lower())

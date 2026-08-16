@@ -10,13 +10,16 @@ from __future__ import annotations
 from typing import Any, Dict
 import re
 
-PENDING_SCHEMA_VERSION = "9-ecc"
+from eyle.runtime.execution_context import validate_execution_continuity_state
+
+PENDING_SCHEMA_VERSION = "11-ecc"
 
 _BASE_FIELDS = {
     "pending_schema_version",
     "continuation_kind",
     "question",
     "session",
+    "execution_state",
 }
 _PERSISTED_FIELDS = {"id", "created_at", "expires_at", "provider_context_hash"}
 _KIND_FIELDS = {
@@ -80,6 +83,10 @@ def validate_pending_continuation(value: Any, *, persisted: bool = False) -> Dic
         raise ValueError("PENDING_SCHEMA_INVALID")
     if not isinstance(value.get("session"), dict):
         raise ValueError("PENDING_SCHEMA_INVALID")
+    try:
+        validate_execution_continuity_state(value.get("execution_state"))
+    except ValueError as exc:
+        raise ValueError("PENDING_EXECUTION_STATE_INVALID") from exc
 
     if kind == "capability_confirmation":
         if not _non_empty_text(value.get("capability")) or not _non_empty_text(value.get("provider")) or not _non_empty_text(value.get("confirmation_id")):

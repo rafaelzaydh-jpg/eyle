@@ -26,7 +26,7 @@ def _has_meaningful_content(path: str, scan_limit: int = 200) -> bool:
 def discover_project(base_dir: str):
     """Return the dedicated user workspace and a private Eyle self-source root.
 
-    Rev1.3.1 closes the old fallback where an empty ``workspace/`` caused the
+    The workspace boundary closes the old fallback where an empty ``workspace/`` caused the
     installation directory itself to become the writable project root.  Empty is
     a valid workspace state.  Eyle's installation remains available separately
     as a read-only/self-sandbox source, never as the real write target.

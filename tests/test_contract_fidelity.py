@@ -54,7 +54,7 @@ def test_capability_index_exposes_small_enums_without_full_catalog():
 
 
 
-def test_symbol_relations_model_view_is_bounded_but_preserves_full_counts():
+def test_symbol_relations_model_view_exposes_entire_materialized_page():
     import eyle.core.agent as core_agent
     from eyle.runtime.ecc_runtime import project_result
     from eyle.core.session import AgentSession
@@ -71,8 +71,9 @@ def test_symbol_relations_model_view_is_bounded_but_preserves_full_counts():
     raw = {"status": "success", "ok": True, "executed": True, "changed": False, "detail": detail}
     model = project_result(AgentSession("inspect"), "standard.symbol_relations", raw, standard_registry(), base_config())
     view = model["detail"]
-    assert view["counts"] == {"definitions": 20, "incoming": 30, "outgoing": 30, "structural_references": 20, "imports": 20, "text_references": 0, "unresolved_dynamic": 20}
-    assert len(view["definitions"]) == 8
-    assert len(view["incoming"]) == 12
-    assert len(view["outgoing"]) == 12
+    assert view["counts"] == {"definitions": 20, "incoming": 30, "outgoing": 30, "structural_references": 20, "imports": 20, "text_references": 0, "root_reachability": 20, "unresolved_dynamic": 20}
+    assert len(view["definitions"]) == 20
+    assert len(view["incoming"]) == 30
+    assert len(view["outgoing"]) == 30
+    assert len(view["root_reachability"]) == 20
     assert view["semantics"] == "structural_facts_only"

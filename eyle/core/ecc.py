@@ -91,7 +91,7 @@ def resolve(operation: str, action_kind: str, registry: Any, available: Iterable
     return operation_map(registry, available, action_kind).get(str(operation or "").strip())
 
 
-def catalog(registry: Any, config: Dict[str, Any], available: Iterable[str]) -> Dict[str, List[Dict[str, Any]]]:
+def catalog(registry: Any, config: Dict[str, Any], available: Iterable[str], *, memory_enabled: bool = False) -> Dict[str, List[Dict[str, Any]]]:
     allowed = {str(v) for v in available}
     contracts = {str(item.get("name")): item for item in registry.catalog(config=config, allowed_names=allowed)}
     out: Dict[str, Any] = {"guidance": list(registry.ecc_guidance(allowed)), "explorar": [], "construir": []}
@@ -133,4 +133,39 @@ def catalog(registry: Any, config: Dict[str, Any], available: Iterable[str]) -> 
         "returns": "The saved Evidence and where it came from.",
         "caveats": ["Only Evidence from this run can be recalled."],
     })
+    if memory_enabled:
+        out["explorar"].extend([
+            {
+                "operation": "memory_overview",
+                "purpose": "See the compact directory of the unified Memory Graph without loading node bodies.",
+                "inputs": {"scope": "all|user|world?"},
+                "returns": "Memory counts plus compact retention/epistemic/kind/tag directory and Coverage.",
+            },
+            {
+                "operation": "memory_history",
+                "purpose": "Inspect the complete persisted revision/event history and relations of one mem-* node so temporal change is not erased by the current projection.",
+                "inputs": {"id": "mem-*"},
+                "returns": "Current node, all persisted node events, relations and Coverage.",
+            },
+            {
+                "operation": "memory_relation_history",
+                "purpose": "Inspect the persisted revision/event history of one rel-* relation so relation confidence/context can evolve without losing history.",
+                "inputs": {"id": "rel-*"},
+                "returns": "Current relation, all persisted relation events and Coverage.",
+            },
+            {
+                "operation": "memory_activate",
+                "purpose": "Explicitly activate a Memory Graph region by query, exact mem-* IDs or tags. The requested page is materialized now; any remainder is exposed as Frontier and may be continued as many times as Main chooses.",
+                "inputs": {"query": "string?", "ids": "mem-*[]?", "tags": "string[]?", "natures": "epistemic nature[]?", "volatilities": "epistemic volatility[]?", "scope": "all|user|world?", "retention": "all|temporary|persistent?", "include_neighbors": "bool?", "limit": "positive page size?"},
+                "returns": "Memory View, Coverage and optional fr-* Frontier. Frontier is continuation, never a stop signal.",
+                "caveats": ["At least one of query, ids, tags, natures or volatilities is required. Runtime never adds topology/importance fallback."],
+            },
+        ])
+        if not any(str(item.get("operation")) == "continue" for item in out["explorar"]):
+            out["explorar"].append({
+                "operation": "continue",
+                "purpose": "Continue any open fr-* Frontier, including Memory or provider observation pages.",
+                "inputs": {"frontier": "fr-*"},
+                "returns": "The exact next page behind that Frontier plus Coverage and another Frontier if more remains.",
+            })
     return out

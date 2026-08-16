@@ -22,7 +22,7 @@ python -m pytest -q
 5. Run the full test suite before opening the pull request.
 6. Before reintroducing a removed architecture or compatibility path, document the concrete current failure and add a regression test or metric that justifies the change; consult Git history for prior removals.
 7. Keep Core abstractions domain-neutral. Coding-language, repository, framework, document, network, or device semantics belong in capabilities/toolpacks unless the state is demonstrably universal to the agent protocol.
-8. Keep shipped behavior and future direction distinct in documentation. `docs/architecture.md` describes the current runtime; `docs/architectural-direction.md` records non-shipped design goals.
+8. Keep shipped behavior and future direction distinct. `docs/architecture.md` documents the current runtime; proposed semantic changes should be justified in the pull request rather than presented as shipped behavior.
 9. Do not submit code, assets, documentation, or other material that you do not have the right to contribute under these terms.
 
 ## Contribution terms
@@ -42,7 +42,7 @@ Use short imperative messages, for example:
 ```text
 Fix stale patch hash validation
 Add grounded symbol-not-found result
-Document llama.cpp setup
+Document Adapter handshake behavior
 ```
 
 ## Language

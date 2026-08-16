@@ -24,7 +24,8 @@ def test_escrita_atomica_usa_replace_e_preserva_permissoes(monkeypatch, tmp_path
     codar_mod._escrever_arquivo_atomico(str(arquivo), "depois")
 
     assert arquivo.read_text(encoding="utf-8") == "depois"
-    assert stat.S_IMODE(arquivo.stat().st_mode) == 0o640
+    if os.name == "posix":
+        assert stat.S_IMODE(arquivo.stat().st_mode) == 0o640
     assert len(chamadas) == 1
     assert os.path.dirname(chamadas[0][0]) == str(tmp_path)
     assert chamadas[0][1] == str(arquivo)
