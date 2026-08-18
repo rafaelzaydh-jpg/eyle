@@ -12,8 +12,7 @@ from pathlib import Path
 
 import eyle.core.agent as core_agent
 from eyle.runtime.ecc_runtime import project_result
-import eyle.providers.standard_impl.sandbox as sandbox_mod
-import eyle.providers.standard as tools
+import eyle.providers.standard.sandbox as sandbox_mod
 from eyle.runtime.execution_context import ExecutionContext, bind_execution, reset_execution
 from eyle.core.session import AgentSession
 from tests.canonical import base_config

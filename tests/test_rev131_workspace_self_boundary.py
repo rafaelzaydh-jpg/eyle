@@ -5,10 +5,11 @@ from pathlib import Path
 import pytest
 
 from eyle.runtime.execution_context import ExecutionContext, bind_execution, reset_execution
-from eyle.providers.standard_impl.sandbox import _copiar_projeto, export_active_sandbox_zip, ErroSandbox
-from eyle.providers.standard import CAPABILITIES, _material_source_root
+from eyle.providers.standard.sandbox import _copiar_projeto, export_active_sandbox_zip, ErroSandbox
+from eyle.providers.standard.registry import CAPABILITIES
+from eyle.providers.standard.contracts import _material_source_root
 from tests.canonical import standard_registry
-from eyle.providers.standard_impl.workspace import discover_project
+from eyle.providers.standard.workspace import discover_project
 from llm.executar import PROMPT_ECC
 from tests.canonical import base_config
 
@@ -192,7 +193,7 @@ def test_run_command_source_conflict_is_request_scoped_not_terminal(monkeypatch,
     ctx = _ctx(workspace, tmp_path)
 
     monkeypatch.setattr(
-        "eyle.providers.standard.executar_comando_livre_no_sandbox",
+        "eyle.providers.standard.sandbox.executar_comando_livre_no_sandbox",
         lambda *args, **kwargs: {
             "executado": False,
             "ok": False,

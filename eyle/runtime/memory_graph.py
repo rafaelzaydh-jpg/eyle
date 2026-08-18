@@ -15,20 +15,17 @@ import os
 import re
 import sqlite3
 import uuid
+import warnings
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Tuple
+from eyle.contracts.memory import normalize_domain, normalize_context_key, normalize_epistemic
 
-MEMORY_GRAPH_SCHEMA_VERSION = "2.7.5-r2.9-memory-graph-v8"
-_PRE_ASSOCIATIVE_MEMORY_GRAPH_SCHEMA_VERSION = "2.7.5-r2.8.7-memory-graph-v7"
-_PRE_SCALABLE_MEMORY_GRAPH_SCHEMA_VERSION = "2.7.5-r2.8.5-memory-graph-v6"
-_PRE_EPISTEMIC_MEMORY_GRAPH_SCHEMA_VERSION = "2.7.5-r2.8-memory-graph-v5"
-_LEGACY_MEMORY_GRAPH_SCHEMA_VERSIONS = {
-    "2.7.5-r2.7.1-memory-graph-v4", "2.7.5-r2.7-memory-graph-v3", "2.7.5-r2.5-memory-graph-v2"
-}
+MEMORY_GRAPH_SCHEMA_VERSION = "2.7.5-r3.7.1-memory-graph-v12"
 _RETENTIONS = {"temporary", "persistent"}
 _NODE_STATUSES = {"current", "archived", "superseded"}
 _EDGE_STATUSES = {"current", "retired"}
+_TASK_STATES = {"active", "blocked", "resolved", "cancelled"}
 _MEM_ID_RE = re.compile(r"^mem-[A-Za-z0-9._-]+$")
 _REL_ID_RE = re.compile(r"^rel-[A-Za-z0-9._-]+$")
 
@@ -79,17 +76,14 @@ def _clean_json_object(value: Any, *, code: str) -> dict[str, Any]:
 
 
 def _clean_epistemic(value: Any) -> dict[str, Any]:
-    raw = value if isinstance(value, dict) else {}
-    nature = _clean_text(raw.get("nature") or "unclassified", code="EPISTEMIC_NATURE", maximum=96)
-    confidence = raw.get("confidence")
-    if confidence is not None:
-        if not isinstance(confidence, (int, float)) or isinstance(confidence, bool) or not 0.0 <= float(confidence) <= 1.0:
-            raise ValueError("MEMORY_EPISTEMIC_CONFIDENCE_INVALID")
-        confidence = float(confidence)
-    volatility = _clean_text(raw.get("volatility") or "unknown", code="EPISTEMIC_VOLATILITY", maximum=96)
-    temporal = _clean_json_object(raw.get("temporal"), code="EPISTEMIC_TEMPORAL")
-    context = _clean_json_object(raw.get("context"), code="EPISTEMIC_CONTEXT")
-    return {"nature": nature, "confidence": confidence, "volatility": volatility, "temporal": temporal, "context": context}
+    normalized = normalize_epistemic(value, default_unclassified=True, error_factory=ValueError) or {}
+    return {
+        "nature": normalized["nature"],
+        "confidence": normalized.get("confidence"),
+        "volatility": normalized["volatility"],
+        "temporal": _clean_json_object(normalized.get("temporal"), code="EPISTEMIC_TEMPORAL"),
+        "context": _clean_json_object(normalized.get("context"), code="EPISTEMIC_CONTEXT"),
+    }
 
 
 def _clean_tags(values: Iterable[Any] | None) -> list[str]:
@@ -209,6 +203,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
                 CREATE TABLE memory_nodes (
                     id TEXT PRIMARY KEY,
                     scope TEXT NOT NULL,
+                    domain TEXT NOT NULL DEFAULT 'knowledge' CHECK(domain IN ('chat','task','eyle','knowledge')),
+                    context_key TEXT,
                     kind TEXT NOT NULL,
                     content TEXT NOT NULL,
                     retention TEXT NOT NULL DEFAULT 'persistent' CHECK(retention IN ('temporary','persistent')),
@@ -225,6 +221,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
                     updated_at TEXT NOT NULL
                 );
                 CREATE INDEX idx_memory_nodes_scope_status_updated ON memory_nodes(scope,status,updated_at DESC);
+                CREATE INDEX idx_memory_nodes_domain_context_status_updated ON memory_nodes(domain,context_key,status,updated_at DESC);
                 CREATE INDEX idx_memory_nodes_retention_status_updated ON memory_nodes(retention,status,updated_at DESC);
                 CREATE INDEX idx_memory_nodes_kind_status ON memory_nodes(kind,status);
                 CREATE INDEX idx_memory_nodes_epistemic_nature_status ON memory_nodes(epistemic_nature,status);
@@ -258,7 +255,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
                     id TEXT PRIMARY KEY,
                     entity_type TEXT NOT NULL CHECK(entity_type IN ('node','edge')),
                     entity_id TEXT NOT NULL,
-                    anchor_kind TEXT NOT NULL CHECK(anchor_kind IN ('material','request','memory')),
+                    anchor_kind TEXT NOT NULL CHECK(anchor_kind IN ('material','request','memory','relation')),
+                    source_entity_type TEXT,
+                    source_revision INTEGER,
                     source_capability TEXT,
                     locator TEXT NOT NULL,
                     source_version TEXT,
@@ -271,6 +270,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
                 );
                 CREATE INDEX idx_memory_anchors_entity ON memory_anchors(entity_type,entity_id);
                 CREATE INDEX idx_memory_anchors_ref ON memory_anchors(source_ref);
+                CREATE INDEX idx_memory_anchors_source_revision ON memory_anchors(anchor_kind,source_ref,source_revision);
                 CREATE TABLE memory_changesets (
                     id TEXT PRIMARY KEY,
                     execution_id TEXT,
@@ -298,132 +298,43 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
                     matched_nodes INTEGER NOT NULL DEFAULT 0,
                     selected_nodes INTEGER NOT NULL DEFAULT 0,
                     backend TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    owner_execution_id TEXT
                 );
+                CREATE INDEX idx_memory_recall_snapshots_owner ON memory_recall_snapshots(owner_execution_id);
                 CREATE TABLE memory_recall_items (
                     snapshot_id TEXT NOT NULL REFERENCES memory_recall_snapshots(id) ON DELETE CASCADE,
                     ordinal INTEGER NOT NULL CHECK(ordinal >= 1),
                     node_id TEXT NOT NULL,
                     source_kind TEXT NOT NULL DEFAULT 'match',
+                    source_from_node TEXT,
+                    source_via_relation TEXT,
                     PRIMARY KEY(snapshot_id,ordinal),
                     UNIQUE(snapshot_id,node_id)
                 );
                 CREATE INDEX idx_memory_recall_items_cursor ON memory_recall_items(snapshot_id,ordinal);
+                CREATE TABLE memory_tasks (
+                    task_id TEXT PRIMARY KEY REFERENCES memory_nodes(id) ON DELETE CASCADE,
+                    state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active','blocked','resolved','cancelled')),
+                    state_revision INTEGER NOT NULL DEFAULT 1 CHECK(state_revision >= 1),
+                    created_execution_id TEXT,
+                    last_execution_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    resolved_at TEXT
+                );
+                CREATE INDEX idx_memory_tasks_state_updated ON memory_tasks(state,updated_at DESC);
                 """
             )
             _ensure_fts_schema(conn, rebuild=True)
             conn.execute("INSERT INTO memory_meta(key,value) VALUES('schema_version',?)", (MEMORY_GRAPH_SCHEMA_VERSION,))
         return
     rows = dict(conn.execute("SELECT key,value FROM memory_meta").fetchall())
-    schema_version = rows.get("schema_version")
-    if schema_version in _LEGACY_MEMORY_GRAPH_SCHEMA_VERSIONS:
-        # Migration: lifecycle vocabulary changed from conversation-bound ``context``
-        # to general-purpose ``temporary`` memory. Existing temporary nodes keep
-        # their meaning and become temporary; older stores without retention stay
-        # persistent. The rebuild is mechanical and preserves IDs/relations.
-        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(memory_nodes)")}
-        if "retention" not in columns:
-            with conn:
-                conn.execute("ALTER TABLE memory_nodes ADD COLUMN retention TEXT NOT NULL DEFAULT 'persistent'")
-        conn.commit()
-        conn.execute("PRAGMA foreign_keys = OFF")
-        try:
-            with conn:
-                conn.execute("""
-                    CREATE TABLE memory_nodes_v5 (
-                        id TEXT PRIMARY KEY, scope TEXT NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL,
-                        retention TEXT NOT NULL DEFAULT 'persistent' CHECK(retention IN ('temporary','persistent')),
-                        status TEXT NOT NULL CHECK(status IN ('current','archived','superseded')),
-                        revision INTEGER NOT NULL CHECK(revision >= 1), created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-                    )
-                """)
-                conn.execute("""
-                    INSERT INTO memory_nodes_v5(id,scope,kind,content,retention,status,revision,created_at,updated_at)
-                    SELECT id,scope,kind,content,CASE WHEN retention IN ('context','temporary') THEN 'temporary' ELSE 'persistent' END,status,revision,created_at,updated_at
-                    FROM memory_nodes
-                """)
-                conn.execute("DROP TABLE memory_nodes")
-                conn.execute("ALTER TABLE memory_nodes_v5 RENAME TO memory_nodes")
-                conn.execute("CREATE INDEX idx_memory_nodes_scope_status_updated ON memory_nodes(scope,status,updated_at DESC)")
-                conn.execute("CREATE INDEX idx_memory_nodes_retention_status_updated ON memory_nodes(retention,status,updated_at DESC)")
-                conn.execute("CREATE INDEX idx_memory_nodes_kind_status ON memory_nodes(kind,status)")
-                conn.execute("UPDATE memory_meta SET value=? WHERE key='schema_version'", (_PRE_EPISTEMIC_MEMORY_GRAPH_SCHEMA_VERSION,))
-        finally:
-            conn.execute("PRAGMA foreign_keys = ON")
-        schema_version = _PRE_EPISTEMIC_MEMORY_GRAPH_SCHEMA_VERSION
-    if schema_version == _PRE_EPISTEMIC_MEMORY_GRAPH_SCHEMA_VERSION:
-        # Migration: add epistemic metadata without rewriting semantic history.
-        # Existing nodes become explicitly unclassified/unknown; Main may later
-        # reassess them when they are relevant instead of Runtime inventing meaning.
-        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(memory_nodes)")}
-        with conn:
-            additions = [
-                ("epistemic_nature", "TEXT NOT NULL DEFAULT 'unclassified'"),
-                ("epistemic_confidence", "REAL"),
-                ("epistemic_volatility", "TEXT NOT NULL DEFAULT 'unknown'"),
-                ("epistemic_temporal", "TEXT NOT NULL DEFAULT '{}'"),
-                ("epistemic_context", "TEXT NOT NULL DEFAULT '{}'"),
-                ("last_evidenced_at", "TEXT"),
-            ]
-            for name, ddl in additions:
-                if name not in columns:
-                    conn.execute(f"ALTER TABLE memory_nodes ADD COLUMN {name} {ddl}")
-            edge_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(memory_edges)")}
-            edge_additions = [
-                ("epistemic_nature", "TEXT NOT NULL DEFAULT 'relation'"),
-                ("epistemic_confidence", "REAL"),
-                ("epistemic_volatility", "TEXT NOT NULL DEFAULT 'unknown'"),
-                ("epistemic_temporal", "TEXT NOT NULL DEFAULT '{}'"),
-                ("epistemic_context", "TEXT NOT NULL DEFAULT '{}'"),
-            ]
-            for name, ddl in edge_additions:
-                if name not in edge_columns:
-                    conn.execute(f"ALTER TABLE memory_edges ADD COLUMN {name} {ddl}")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_nodes_epistemic_nature_status ON memory_nodes(epistemic_nature,status)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_nodes_epistemic_volatility_status ON memory_nodes(epistemic_volatility,status)")
-            conn.execute("UPDATE memory_meta SET value=? WHERE key='schema_version'", (_PRE_SCALABLE_MEMORY_GRAPH_SCHEMA_VERSION,))
-        schema_version = _PRE_SCALABLE_MEMORY_GRAPH_SCHEMA_VERSION
-    if schema_version == _PRE_SCALABLE_MEMORY_GRAPH_SCHEMA_VERSION:
-        # Migration: add scalable literal recall infrastructure. This migration
-        # adds only mechanical indexes/search/navigation state; semantic node and
-        # edge contents are unchanged.
-        with conn:
-            edge_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(memory_edges)")}
-            if "last_evidenced_at" not in edge_columns:
-                conn.execute("ALTER TABLE memory_edges ADD COLUMN last_evidenced_at TEXT")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_nodes_recall_scope ON memory_nodes(status,scope,retention,id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_nodes_recall_nature ON memory_nodes(status,scope,epistemic_nature,id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_nodes_recall_volatility ON memory_nodes(status,scope,epistemic_volatility,id)")
-            conn.execute("""CREATE TABLE IF NOT EXISTS memory_recall_snapshots (
-                id TEXT PRIMARY KEY, selector TEXT NOT NULL, scoped_nodes INTEGER NOT NULL DEFAULT 0,
-                matched_nodes INTEGER NOT NULL DEFAULT 0, selected_nodes INTEGER NOT NULL DEFAULT 0,
-                backend TEXT NOT NULL, created_at TEXT NOT NULL
-            )""")
-            conn.execute("""CREATE TABLE IF NOT EXISTS memory_recall_items (
-                snapshot_id TEXT NOT NULL REFERENCES memory_recall_snapshots(id) ON DELETE CASCADE,
-                ordinal INTEGER NOT NULL CHECK(ordinal >= 1), node_id TEXT NOT NULL,
-                source_kind TEXT NOT NULL DEFAULT 'match', PRIMARY KEY(snapshot_id,ordinal), UNIQUE(snapshot_id,node_id)
-            )""")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_recall_items_cursor ON memory_recall_items(snapshot_id,ordinal)")
-            # FTS is rebuilt after the associative-recall column exists.
-            conn.execute("UPDATE memory_meta SET value=? WHERE key='schema_version'", (_PRE_ASSOCIATIVE_MEMORY_GRAPH_SCHEMA_VERSION,))
-        schema_version = _PRE_ASSOCIATIVE_MEMORY_GRAPH_SCHEMA_VERSION
-    if schema_version == _PRE_ASSOCIATIVE_MEMORY_GRAPH_SCHEMA_VERSION:
-        # Migration: add Main-authored associative recall metadata. Existing
-        # memories remain semantically unchanged; Runtime adds only an empty
-        # retrieval-cue object and rebuilds the mechanical FTS index.
-        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(memory_nodes)")}
-        with conn:
-            if "associative_recall" not in columns:
-                conn.execute("ALTER TABLE memory_nodes ADD COLUMN associative_recall TEXT NOT NULL DEFAULT '{}'")
-            _ensure_fts_schema(conn, rebuild=True)
-            conn.execute("UPDATE memory_meta SET value=? WHERE key='schema_version'", (MEMORY_GRAPH_SCHEMA_VERSION,))
-        schema_version = MEMORY_GRAPH_SCHEMA_VERSION
-    if schema_version != MEMORY_GRAPH_SCHEMA_VERSION:
+    if rows.get("schema_version") != MEMORY_GRAPH_SCHEMA_VERSION:
         raise ValueError("MEMORY_GRAPH_SCHEMA_INCOMPATIBLE")
     required = {
         "memory_meta", "memory_nodes", "memory_tags", "memory_edges", "memory_anchors",
-        "memory_changesets", "memory_events", "memory_recall_snapshots", "memory_recall_items",
+        "memory_changesets", "memory_events", "memory_recall_snapshots", "memory_recall_items", "memory_tasks",
     }
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if not required.issubset(tables):
@@ -524,10 +435,6 @@ def _refresh_fts_nodes(conn: sqlite3.Connection, node_ids: Iterable[str], *, del
             )
 
 
-def _refresh_fts_node(conn: sqlite3.Connection, node_id: str) -> None:
-    # Compatibility helper for call sites outside changeset application.
-    _refresh_fts_nodes(conn, [node_id])
-
 def _node_row(conn: sqlite3.Connection, node_id: str) -> sqlite3.Row:
     row = conn.execute("SELECT * FROM memory_nodes WHERE id=?", (node_id,)).fetchone()
     if row is None:
@@ -540,6 +447,25 @@ def _edge_row(conn: sqlite3.Connection, edge_id: str) -> sqlite3.Row:
     if row is None:
         raise ValueError(f"MEMORY_EDGE_NOT_FOUND:{edge_id}")
     return row
+
+
+def _task_row(conn: sqlite3.Connection, task_id: str) -> sqlite3.Row:
+    row = conn.execute("SELECT * FROM memory_tasks WHERE task_id=?", (str(task_id),)).fetchone()
+    if row is None:
+        raise ValueError(f"MEMORY_TASK_NOT_FOUND:{task_id}")
+    return row
+
+
+def _task_record(conn: sqlite3.Connection, task_id: str) -> Dict[str, Any]:
+    row = _task_row(conn, task_id)
+    return {
+        "id": str(row["task_id"]), "state": str(row["state"]),
+        "state_revision": int(row["state_revision"]),
+        "created_execution_id": row["created_execution_id"],
+        "last_execution_id": row["last_execution_id"],
+        "created_at": row["created_at"], "updated_at": row["updated_at"],
+        "resolved_at": row["resolved_at"],
+    }
 
 
 def _expect_revision(row: sqlite3.Row, expected: Any) -> None:
@@ -556,23 +482,69 @@ def _event(conn: sqlite3.Connection, cid: str, entity_type: str, entity_id: str,
     )
 
 
+def _source_revision_exists(conn: sqlite3.Connection, anchor_kind: str, source_ref: str, source_revision: int) -> bool:
+    """Check an explicitly pinned semantic source revision mechanically.
+
+    Current entity tables keep only the latest body, while ``memory_events``
+    preserve revision history.  This check does not reconstruct or interpret the
+    historical body; it only proves that the referenced revision existed.
+    """
+    revision = int(source_revision)
+    if revision < 1:
+        return False
+    if anchor_kind == "memory":
+        row = conn.execute("SELECT revision FROM memory_nodes WHERE id=?", (source_ref,)).fetchone()
+        entity_type = "node"
+    elif anchor_kind == "relation":
+        row = conn.execute("SELECT revision FROM memory_edges WHERE id=?", (source_ref,)).fetchone()
+        entity_type = "edge"
+    else:
+        return False
+    if row is None:
+        return False
+    if int(row["revision"]) == revision:
+        return True
+    return conn.execute(
+        "SELECT 1 FROM memory_events WHERE entity_type=? AND entity_id=? AND revision=? LIMIT 1",
+        (entity_type, source_ref, revision),
+    ).fetchone() is not None
+
+
 def _insert_anchors(conn: sqlite3.Connection, entity_type: str, entity_id: str, anchors: Iterable[Dict[str, Any]], now: str, *, entity_revision: int) -> list[str]:
     ids: list[str] = []
     for raw in anchors or []:
         if not isinstance(raw, dict):
             continue
         kind = str(raw.get("anchor_kind") or "").strip()
-        if kind not in {"material", "request", "memory"}:
+        if kind not in {"material", "request", "memory", "relation"}:
             raise ValueError("MEMORY_ANCHOR_KIND_INVALID")
         anchor_id = _new_id("ma")
         locator = raw.get("locator") if isinstance(raw.get("locator"), dict) else {}
         source_ref = str(raw.get("source_ref") or "").strip() or None
-        if kind == "memory" and (not source_ref or _MEM_ID_RE.fullmatch(source_ref) is None):
-            raise ValueError("MEMORY_ANCHOR_MEMORY_REF_INVALID")
+        source_entity_type = str(raw.get("source_entity_type") or "").strip() or None
+        source_revision = raw.get("source_revision")
+        if source_revision is not None:
+            if not isinstance(source_revision, int) or isinstance(source_revision, bool) or source_revision < 1:
+                raise ValueError("MEMORY_ANCHOR_SOURCE_REVISION_INVALID")
+            source_revision = int(source_revision)
+        if kind == "memory":
+            if not source_ref or _MEM_ID_RE.fullmatch(source_ref) is None:
+                raise ValueError("MEMORY_ANCHOR_MEMORY_REF_INVALID")
+            source_entity_type = "node"
+            if source_revision is not None and not _source_revision_exists(conn, kind, source_ref, source_revision):
+                raise ValueError("MEMORY_ANCHOR_SOURCE_REVISION_NOT_FOUND")
+        elif kind == "relation":
+            if not source_ref or _REL_ID_RE.fullmatch(source_ref) is None:
+                raise ValueError("MEMORY_ANCHOR_RELATION_REF_INVALID")
+            source_entity_type = "edge"
+            if source_revision is not None and not _source_revision_exists(conn, kind, source_ref, source_revision):
+                raise ValueError("MEMORY_ANCHOR_SOURCE_REVISION_NOT_FOUND")
+        elif source_revision is not None:
+            raise ValueError("MEMORY_ANCHOR_SOURCE_REVISION_INVALID")
         conn.execute(
-            "INSERT INTO memory_anchors(id,entity_type,entity_id,anchor_kind,source_capability,locator,source_version,content_hash,freshness_token,freshness_arguments,source_ref,entity_revision,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO memory_anchors(id,entity_type,entity_id,anchor_kind,source_entity_type,source_revision,source_capability,locator,source_version,content_hash,freshness_token,freshness_arguments,source_ref,entity_revision,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
-                anchor_id, entity_type, entity_id, kind,
+                anchor_id, entity_type, entity_id, kind, source_entity_type, source_revision,
                 str(raw.get("source_capability") or "").strip() or None,
                 _json(locator), str(raw.get("source_version") or "").strip() or None,
                 str(raw.get("content_hash") or "").strip() or None,
@@ -616,6 +588,11 @@ def apply_graph_operations(
                         raise ValueError("MEMORY_NODE_ID_INVALID")
                     scope = _clean_text(op.get("scope"), code="SCOPE", maximum=160)
                     node_kind = _clean_text(op.get("kind"), code="KIND", maximum=96)
+                    domain = normalize_domain(op.get("domain"), default="task" if node_kind == "task" else "knowledge")
+                    context_key = normalize_context_key(op.get("context_key"))
+                    if node_kind == "task":
+                        domain = "task"
+                        context_key = context_key or node_id
                     content = _clean_text(op.get("content"), code="CONTENT")
                     epistemic = _clean_epistemic(op.get("epistemic"))
                     retention = str(op.get("retention") or "persistent").strip().lower()
@@ -624,12 +601,18 @@ def apply_graph_operations(
                     tags = _clean_tags(op.get("tags"))
                     recall = _clean_recall_metadata(op.get("recall"))
                     conn.execute(
-                        "INSERT INTO memory_nodes(id,scope,kind,content,retention,epistemic_nature,epistemic_confidence,epistemic_volatility,epistemic_temporal,epistemic_context,associative_recall,last_evidenced_at,status,revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (node_id, scope, node_kind, content, retention, epistemic["nature"], epistemic["confidence"], epistemic["volatility"], _json(epistemic["temporal"]), _json(epistemic["context"]), _json(recall), now if op.get("anchors") else None, "current", 1, now, now),
+                        "INSERT INTO memory_nodes(id,scope,domain,context_key,kind,content,retention,epistemic_nature,epistemic_confidence,epistemic_volatility,epistemic_temporal,epistemic_context,associative_recall,last_evidenced_at,status,revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (node_id, scope, domain, context_key, node_kind, content, retention, epistemic["nature"], epistemic["confidence"], epistemic["volatility"], _json(epistemic["temporal"]), _json(epistemic["context"]), _json(recall), now if op.get("anchors") else None, "current", 1, now, now),
                     )
                     conn.executemany("INSERT INTO memory_tags(node_id,tag) VALUES(?,?)", [(node_id, tag) for tag in tags])
                     anchor_ids = _insert_anchors(conn, "node", node_id, op.get("anchors") or [], now, entity_revision=1)
-                    payload = {"scope": scope, "kind": node_kind, "content": content, "retention": retention, "epistemic": epistemic, "recall": recall, "tags": tags, "anchors": anchor_ids}
+                    if node_kind == "task":
+                        conn.execute(
+                            "INSERT INTO memory_tasks(task_id,state,state_revision,created_execution_id,last_execution_id,created_at,updated_at,resolved_at) VALUES(?,?,?,?,?,?,?,NULL)",
+                            (node_id, "active", 1, str(execution_id or "") or None, str(execution_id or "") or None, now, now),
+                        )
+                        _event(conn, cid, "task", node_id, "create_task_state", 1, {"state": "active"}, now)
+                    payload = {"scope": scope, "domain": domain, "context_key": context_key, "kind": node_kind, "content": content, "retention": retention, "epistemic": epistemic, "recall": recall, "tags": tags, "anchors": anchor_ids}
                     _event(conn, cid, "node", node_id, kind, 1, payload, now)
                     fts_new.add(node_id)
                     affected.append({"type": "node", "id": node_id, "revision": 1, "action": kind})
@@ -643,6 +626,9 @@ def apply_graph_operations(
                     node_kind = str(op.get("kind") or "").strip() or str(row["kind"])
                     if len(node_kind) > 96:
                         raise ValueError("MEMORY_KIND_TOO_LARGE")
+                    existing_task = conn.execute("SELECT 1 FROM memory_tasks WHERE task_id=?", (node_id,)).fetchone() is not None
+                    if existing_task and node_kind != "task":
+                        raise ValueError("MEMORY_TASK_KIND_IMMUTABLE")
                     retention = str(op.get("retention") or row["retention"] or "persistent").strip().lower()
                     current_epistemic = {
                         "nature": row["epistemic_nature"] or "unclassified",
@@ -668,6 +654,12 @@ def apply_graph_operations(
                     conn.executemany("DELETE FROM memory_tags WHERE node_id=? AND tag=? COLLATE NOCASE", [(node_id, tag) for tag in remove_tags])
                     # New anchors supplement provenance history; current trust is evaluated from the current revision anchors.
                     anchor_ids = _insert_anchors(conn, "node", node_id, op.get("anchors") or [], now, entity_revision=revision)
+                    if node_kind == "task" and not existing_task:
+                        conn.execute(
+                            "INSERT INTO memory_tasks(task_id,state,state_revision,created_execution_id,last_execution_id,created_at,updated_at,resolved_at) VALUES(?,?,?,?,?,?,?,NULL)",
+                            (node_id, "active", 1, str(execution_id or "") or None, str(execution_id or "") or None, now, now),
+                        )
+                        _event(conn, cid, "task", node_id, "create_task_state", 1, {"state": "active"}, now)
                     payload = {"content": content, "kind": node_kind, "retention": retention, "epistemic": epistemic, "recall": recall, "add_recall": _clean_recall_metadata(op.get("add_recall")), "remove_recall": _clean_recall_metadata(op.get("remove_recall")), "add_tags": add_tags, "remove_tags": remove_tags, "anchors": anchor_ids}
                     _event(conn, cid, "node", node_id, kind, revision, payload, now)
                     fts_dirty.add(node_id)
@@ -678,6 +670,9 @@ def apply_graph_operations(
                     _expect_revision(row, op.get("expected_revision"))
                     if row["status"] != "current":
                         raise ValueError(f"MEMORY_NODE_NOT_CURRENT:{node_id}")
+                    task_state_row = conn.execute("SELECT state FROM memory_tasks WHERE task_id=?", (node_id,)).fetchone()
+                    if task_state_row is not None and str(task_state_row["state"]) not in {"resolved", "cancelled"}:
+                        raise ValueError("MEMORY_TASK_MUST_BE_TERMINAL")
                     status = "archived" if kind == "archive_node" else "superseded"
                     revision = int(row["revision"]) + 1
                     conn.execute("UPDATE memory_nodes SET status=?,revision=?,updated_at=? WHERE id=?", (status, revision, now, node_id))
@@ -695,6 +690,31 @@ def apply_graph_operations(
                     _event(conn, cid, "node", node_id, kind, revision, payload, now)
                     fts_dirty.add(node_id)
                     affected.append({"type": "node", "id": node_id, "revision": revision, "action": kind})
+                elif kind == "set_task_status":
+                    task_id = _clean_text(op.get("id"), code="TASK_ID", maximum=120)
+                    node = _node_row(conn, task_id)
+                    if str(node["status"]) != "current" or str(node["kind"]) != "task":
+                        raise ValueError("MEMORY_TASK_NODE_INVALID")
+                    task = _task_row(conn, task_id)
+                    expected = op.get("expected_state_revision")
+                    if not isinstance(expected, int) or isinstance(expected, bool) or expected < 1 or int(task["state_revision"]) != int(expected):
+                        raise ValueError("MEMORY_TASK_STATE_REVISION_CONFLICT")
+                    state = str(op.get("state") or "").strip().lower()
+                    if state not in _TASK_STATES:
+                        raise ValueError("MEMORY_TASK_STATE_INVALID")
+                    old_state = str(task["state"])
+                    if old_state == state:
+                        # Idempotent lifecycle request: no semantic or mechanical
+                        # state changed, so it must not count as task progress.
+                        continue
+                    state_revision = int(task["state_revision"]) + 1
+                    resolved_at = now if state in {"resolved", "cancelled"} else None
+                    conn.execute(
+                        "UPDATE memory_tasks SET state=?,state_revision=?,last_execution_id=?,updated_at=?,resolved_at=? WHERE task_id=?",
+                        (state, state_revision, str(execution_id or "") or None, now, resolved_at, task_id),
+                    )
+                    _event(conn, cid, "task", task_id, "set_task_status", state_revision, {"from": old_state, "to": state}, now)
+                    affected.append({"type": "task", "id": task_id, "state_revision": state_revision, "action": kind, "state": state, "previous_state": old_state})
                 elif kind == "create_edge":
                     edge_id = str(op.get("id") or _new_id("rel"))
                     if _REL_ID_RE.fullmatch(edge_id) is None:
@@ -783,68 +803,6 @@ def graph_counts(storage_dir: str) -> Dict[str, int]:
         conn.close()
 
 
-def temporary_graph_records(
-    storage_dir: str, *, world_scope_value: str, limit: int = 16,
-    include_persistent_neighbors: bool = True, create_cursor: bool = False,
-) -> Dict[str, Any]:
-    """Materialize only the first automatic temporary-memory page.
-
-    Counting and first-page selection stay inside SQLite. If ``create_cursor`` is
-    requested and more nodes exist, a DB-backed exact recall snapshot is created
-    for continuation; otherwise no navigation artifact is allocated.
-    """
-    cap = max(1, int(limit or 16))
-    conn = _connect(storage_dir)
-    try:
-        total = int(conn.execute(
-            "SELECT COUNT(*) FROM memory_nodes WHERE status='current' AND retention='temporary' AND scope IN (?,?)",
-            ("user", world_scope_value),
-        ).fetchone()[0])
-        temporary_ids = [str(row["id"]) for row in conn.execute(
-            "SELECT id FROM memory_nodes WHERE status='current' AND retention='temporary' AND scope IN (?,?) "
-            "ORDER BY updated_at DESC,id DESC LIMIT ?", ("user", world_scope_value, cap)
-        )]
-        neighbor_ids: list[str] = []
-        if include_persistent_neighbors and temporary_ids:
-            marks = ",".join("?" for _ in temporary_ids)
-            candidates: list[str] = []
-            for row in conn.execute(
-                f"SELECT e.source,e.target FROM memory_edges e JOIN memory_nodes s ON s.id=e.source JOIN memory_nodes t ON t.id=e.target "
-                f"WHERE e.status='current' AND s.status='current' AND t.status='current' AND (e.source IN ({marks}) OR e.target IN ({marks})) ORDER BY e.updated_at DESC,e.id",
-                tuple(temporary_ids + temporary_ids),
-            ):
-                for node_id in (str(row["source"]), str(row["target"])):
-                    if node_id not in temporary_ids and node_id not in candidates:
-                        candidates.append(node_id)
-            if candidates:
-                marks2 = ",".join("?" for _ in candidates)
-                durable = {str(row["id"]) for row in conn.execute(
-                    f"SELECT id FROM memory_nodes WHERE status='current' AND retention='persistent' AND id IN ({marks2})", tuple(candidates)
-                )}
-                neighbor_ids = [node_id for node_id in candidates if node_id in durable][:cap]
-    finally:
-        conn.close()
-    snapshot_id = ""
-    if create_cursor and total > len(temporary_ids):
-        created = create_recall_snapshot(
-            storage_dir, world_scope_value=world_scope_value, scope="all", retention="temporary",
-            select_all=True, include_neighbors=False, order_mode="updated",
-        )
-        snapshot_id = str(created["snapshot_id"])
-    records = graph_records(storage_dir, [*temporary_ids, *neighbor_ids])
-    return {
-        **records,
-        "temporary_node_ids": temporary_ids,
-        "linked_persistent_node_ids": neighbor_ids,
-        "recall_snapshot_id": snapshot_id or None,
-        "recall_after_ordinal": len(temporary_ids),
-        "total_temporary_nodes": total,
-        "remaining_temporary_nodes": max(0, total - len(temporary_ids)),
-        "search_backend": memory_search_backend(storage_dir),
-        "complete": len(temporary_ids) >= total,
-    }
-
-
 def _anchors_for(conn: sqlite3.Connection, entity_type: str, entity_id: str, entity_revision: int | None = None) -> List[Dict[str, Any]]:
     if entity_revision is None:
         rows = conn.execute(
@@ -866,6 +824,8 @@ def _anchors_for(conn: sqlite3.Connection, entity_type: str, entity_id: str, ent
     for row in rows:
         out.append({
             "id": row["id"], "anchor_kind": row["anchor_kind"],
+            "source_entity_type": row["source_entity_type"] if "source_entity_type" in row.keys() else None,
+            "source_revision": int(row["source_revision"]) if "source_revision" in row.keys() and row["source_revision"] is not None else None,
             "source_capability": row["source_capability"], "locator": _decode(row["locator"], {}),
             "source_version": row["source_version"], "content_hash": row["content_hash"],
             "freshness_token": row["freshness_token"], "freshness_arguments": _decode(row["freshness_arguments"], {}), "source_ref": row["source_ref"],
@@ -878,7 +838,10 @@ def _node_record(conn: sqlite3.Connection, row: sqlite3.Row, *, include_edges: b
     node_id = str(row["id"])
     tags = [item[0] for item in conn.execute("SELECT tag FROM memory_tags WHERE node_id=? ORDER BY tag COLLATE NOCASE", (node_id,))]
     out = {
-        "id": node_id, "scope": row["scope"], "kind": row["kind"], "content": row["content"],
+        "id": node_id, "scope": row["scope"],
+        "domain": row["domain"] if "domain" in row.keys() else "knowledge",
+        "context_key": row["context_key"] if "context_key" in row.keys() else None,
+        "kind": row["kind"], "content": row["content"],
         "retention": row["retention"], "status": row["status"], "revision": int(row["revision"]), "tags": tags,
         "recall": _decode(row["associative_recall"], {}) if "associative_recall" in row.keys() else {},
         "epistemic": {
@@ -892,6 +855,9 @@ def _node_record(conn: sqlite3.Connection, row: sqlite3.Row, *, include_edges: b
         "anchors": _anchors_for(conn, "node", node_id, int(row["revision"])),
         "created_at": row["created_at"], "updated_at": row["updated_at"],
     }
+    task_row = conn.execute("SELECT * FROM memory_tasks WHERE task_id=?", (node_id,)).fetchone()
+    if task_row is not None:
+        out["task"] = _task_record(conn, node_id)
     if include_edges:
         out["edges"] = [dict(item) for item in conn.execute(
             "SELECT id,source,label,target,status,revision FROM memory_edges WHERE status='current' AND (source=? OR target=?) ORDER BY id",
@@ -920,21 +886,23 @@ def node_history(storage_dir: str, node_id: str) -> Dict[str, Any]:
     try:
         current = _node_record(conn, _node_row(conn, str(node_id)))
         rows = conn.execute(
-            "SELECT seq,changeset_id,action,revision,payload,created_at FROM memory_events "
-            "WHERE entity_type='node' AND entity_id=? ORDER BY seq",
+            "SELECT e.seq,e.changeset_id,e.action,e.revision,e.payload,e.created_at,c.execution_id,c.turn "
+            "FROM memory_events e JOIN memory_changesets c ON c.id=e.changeset_id "
+            "WHERE e.entity_type='node' AND e.entity_id=? ORDER BY e.seq",
             (str(node_id),),
         ).fetchall()
-        events = [
-            {
+        events = []
+        for row in rows:
+            revision = int(row["revision"]) if row["revision"] is not None else None
+            events.append({
                 "seq": int(row["seq"]),
                 "changeset_id": row["changeset_id"],
-                "action": row["action"],
-                "revision": row["revision"],
+                "execution_id": row["execution_id"], "turn": row["turn"],
+                "action": row["action"], "revision": revision,
                 "payload": _decode(row["payload"], {}),
+                "provenance": _anchors_for(conn, "node", str(node_id), revision) if revision is not None else [],
                 "created_at": row["created_at"],
-            }
-            for row in rows
-        ]
+            })
         relations = [dict(row) for row in conn.execute(
             "SELECT * FROM memory_edges WHERE source=? OR target=? ORDER BY created_at,id", (str(node_id), str(node_id))
         )]
@@ -946,7 +914,17 @@ def node_history(storage_dir: str, node_id: str) -> Dict[str, Any]:
                 "temporal": _decode(relation.pop("epistemic_temporal", None), {}),
                 "context": _decode(relation.pop("epistemic_context", None), {}),
             }
-        return {"node": current, "events": events, "relations": relations}
+        task_events = []
+        if "task" in current:
+            task_rows = conn.execute(
+                "SELECT seq,changeset_id,action,revision,payload,created_at FROM memory_events "
+                "WHERE entity_type='task' AND entity_id=? ORDER BY seq", (str(node_id),),
+            ).fetchall()
+            task_events = [{
+                "seq": int(row["seq"]), "changeset_id": row["changeset_id"], "action": row["action"],
+                "state_revision": row["revision"], "payload": _decode(row["payload"], {}), "created_at": row["created_at"],
+            } for row in task_rows]
+        return {"node": current, "events": events, "task_events": task_events, "relations": relations}
     finally:
         conn.close()
 
@@ -972,26 +950,48 @@ def edge_history(storage_dir: str, edge_id: str) -> Dict[str, Any]:
     try:
         current = edge_record(storage_dir, edge_id)
         rows = conn.execute(
-            "SELECT seq,changeset_id,action,revision,payload,created_at FROM memory_events "
-            "WHERE entity_type='edge' AND entity_id=? ORDER BY seq", (str(edge_id),)
+            "SELECT e.seq,e.changeset_id,e.action,e.revision,e.payload,e.created_at,c.execution_id,c.turn "
+            "FROM memory_events e JOIN memory_changesets c ON c.id=e.changeset_id "
+            "WHERE e.entity_type='edge' AND e.entity_id=? ORDER BY e.seq", (str(edge_id),)
         ).fetchall()
-        events = [{
-            "seq": int(row["seq"]), "changeset_id": row["changeset_id"], "action": row["action"],
-            "revision": row["revision"], "payload": _decode(row["payload"], {}), "created_at": row["created_at"],
-        } for row in rows]
+        events = []
+        for row in rows:
+            revision = int(row["revision"]) if row["revision"] is not None else None
+            events.append({
+                "seq": int(row["seq"]), "changeset_id": row["changeset_id"],
+                "execution_id": row["execution_id"], "turn": row["turn"], "action": row["action"],
+                "revision": revision, "payload": _decode(row["payload"], {}),
+                "provenance": _anchors_for(conn, "edge", str(edge_id), revision) if revision is not None else [],
+                "created_at": row["created_at"],
+            })
         return {"relation": current, "events": events}
     finally:
         conn.close()
 
-def _scope_values(world_scope_value: str, scope: str) -> tuple[str, ...]:
+def _scope_values(world_scope_value: str, scope: str) -> tuple[str, ...] | None:
+    """Resolve physical recall scope.
+
+    ``all`` means user + current world. ``global`` is
+    the explicit escape hatch across every stored world. ``None`` is the
+    internal representation of no scope predicate; it is never a semantic rank.
+    """
     selected = str(scope or "all").strip().lower()
     if selected == "user":
         return ("user",)
     if selected == "world":
         return (world_scope_value,)
-    if selected != "all":
-        raise ValueError("MEMORY_SCOPE_INVALID")
-    return ("user", world_scope_value)
+    if selected == "all":
+        return ("user", world_scope_value)
+    if selected == "global":
+        return None
+    raise ValueError("MEMORY_SCOPE_INVALID")
+
+
+def _scope_clause(column: str, scopes: tuple[str, ...] | None) -> tuple[str, list[Any]]:
+    if scopes is None:
+        return "1=1", []
+    marks = ",".join("?" for _ in scopes)
+    return f"{column} IN ({marks})", list(scopes)
 
 
 def graph_overview(
@@ -1004,66 +1004,92 @@ def graph_overview(
 ) -> Dict[str, Any]:
     """Return a compact read-only directory of Memory without materializing bodies."""
     scopes = _scope_values(world_scope_value, scope)
-    marks = ",".join("?" for _ in scopes)
+    node_scope_sql, node_scope_params = _scope_clause("scope", scopes)
+    n_scope_sql, n_scope_params = _scope_clause("n.scope", scopes)
+    s_scope_sql, s_scope_params = _scope_clause("s.scope", scopes)
+    t_scope_sql, t_scope_params = _scope_clause("t.scope", scopes)
     conn = _connect(storage_dir)
     try:
         nodes = int(conn.execute(
-            f"SELECT COUNT(*) FROM memory_nodes WHERE status='current' AND scope IN ({marks})", scopes,
+            f"SELECT COUNT(*) FROM memory_nodes WHERE status='current' AND {node_scope_sql}", tuple(node_scope_params),
         ).fetchone()[0])
         edges = int(conn.execute(
             f"SELECT COUNT(*) FROM memory_edges e JOIN memory_nodes s ON s.id=e.source "
             f"JOIN memory_nodes t ON t.id=e.target WHERE e.status='current' AND s.status='current' "
-            f"AND t.status='current' AND s.scope IN ({marks}) AND t.scope IN ({marks})",
-            tuple(scopes + scopes),
+            f"AND t.status='current' AND {s_scope_sql} AND {t_scope_sql}",
+            tuple(s_scope_params + t_scope_params),
         ).fetchone()[0])
-        kind_sql = f"SELECT kind,COUNT(*) FROM memory_nodes WHERE status='current' AND scope IN ({marks}) GROUP BY kind ORDER BY COUNT(*) DESC,kind"
-        kind_args = tuple(scopes)
+        kind_sql = f"SELECT kind,COUNT(*) FROM memory_nodes n WHERE n.status='current' AND {n_scope_sql} GROUP BY kind ORDER BY COUNT(*) DESC,kind"
+        kind_args = tuple(n_scope_params)
         if kind_limit is not None:
             kind_sql += " LIMIT ?"; kind_args += (max(1, int(kind_limit)),)
         kinds = [{"kind": str(row[0]), "count": int(row[1])} for row in conn.execute(kind_sql, kind_args)]
-        tag_sql = f"SELECT t.tag,COUNT(*) FROM memory_tags t JOIN memory_nodes n ON n.id=t.node_id WHERE n.status='current' AND n.scope IN ({marks}) GROUP BY t.tag ORDER BY COUNT(*) DESC,t.tag COLLATE NOCASE"
-        tag_args = tuple(scopes)
+        tag_sql = f"SELECT t.tag,COUNT(*) FROM memory_tags t JOIN memory_nodes n ON n.id=t.node_id WHERE n.status='current' AND {n_scope_sql} GROUP BY t.tag ORDER BY COUNT(*) DESC,t.tag COLLATE NOCASE"
+        tag_args = tuple(n_scope_params)
         if tag_limit is not None:
             tag_sql += " LIMIT ?"; tag_args += (max(1, int(tag_limit)),)
         tags = [{"tag": str(row[0]), "count": int(row[1])} for row in conn.execute(tag_sql, tag_args)]
         retentions = {
             str(row[0]): int(row[1])
             for row in conn.execute(
-                f"SELECT retention,COUNT(*) FROM memory_nodes WHERE status='current' AND scope IN ({marks}) GROUP BY retention", scopes,
+                f"SELECT retention,COUNT(*) FROM memory_nodes n WHERE n.status='current' AND {n_scope_sql} GROUP BY retention", tuple(n_scope_params),
             )
         }
         epistemic_natures = [{"nature": str(row[0]), "count": int(row[1])} for row in conn.execute(
-            f"SELECT epistemic_nature,COUNT(*) FROM memory_nodes WHERE status='current' AND scope IN ({marks}) GROUP BY epistemic_nature ORDER BY COUNT(*) DESC,epistemic_nature", scopes,
+            f"SELECT epistemic_nature,COUNT(*) FROM memory_nodes n WHERE n.status='current' AND {n_scope_sql} GROUP BY epistemic_nature ORDER BY COUNT(*) DESC,epistemic_nature", tuple(n_scope_params),
         )]
         volatilities = [{"volatility": str(row[0]), "count": int(row[1])} for row in conn.execute(
-            f"SELECT epistemic_volatility,COUNT(*) FROM memory_nodes WHERE status='current' AND scope IN ({marks}) GROUP BY epistemic_volatility ORDER BY COUNT(*) DESC,epistemic_volatility", scopes,
+            f"SELECT epistemic_volatility,COUNT(*) FROM memory_nodes n WHERE n.status='current' AND {n_scope_sql} GROUP BY epistemic_volatility ORDER BY COUNT(*) DESC,epistemic_volatility", tuple(n_scope_params),
         )]
         confidence = {
-            "classified": int(conn.execute(f"SELECT COUNT(*) FROM memory_nodes WHERE status='current' AND scope IN ({marks}) AND epistemic_confidence IS NOT NULL", scopes).fetchone()[0]),
-            "unclassified": int(conn.execute(f"SELECT COUNT(*) FROM memory_nodes WHERE status='current' AND scope IN ({marks}) AND epistemic_confidence IS NULL", scopes).fetchone()[0]),
+            "classified": int(conn.execute(f"SELECT COUNT(*) FROM memory_nodes n WHERE n.status='current' AND {n_scope_sql} AND n.epistemic_confidence IS NOT NULL", tuple(n_scope_params)).fetchone()[0]),
+            "unclassified": int(conn.execute(f"SELECT COUNT(*) FROM memory_nodes n WHERE n.status='current' AND {n_scope_sql} AND n.epistemic_confidence IS NULL", tuple(n_scope_params)).fetchone()[0]),
         }
         relation_labels = [{"relation": str(row[0]), "count": int(row[1])} for row in conn.execute(
             f"SELECT e.label,COUNT(*) FROM memory_edges e JOIN memory_nodes s ON s.id=e.source JOIN memory_nodes t ON t.id=e.target "
-            f"WHERE e.status='current' AND s.status='current' AND t.status='current' AND s.scope IN ({marks}) AND t.scope IN ({marks}) "
-            "GROUP BY e.label ORDER BY COUNT(*) DESC,e.label COLLATE NOCASE", tuple(scopes + scopes),
+            f"WHERE e.status='current' AND s.status='current' AND t.status='current' AND {s_scope_sql} AND {t_scope_sql} "
+            "GROUP BY e.label ORDER BY COUNT(*) DESC,e.label COLLATE NOCASE", tuple(s_scope_params + t_scope_params),
+        )]
+        task_states = {str(row[0]): int(row[1]) for row in conn.execute(
+            f"SELECT mt.state,COUNT(*) FROM memory_tasks mt JOIN memory_nodes n ON n.id=mt.task_id "
+            f"WHERE n.status='current' AND {n_scope_sql} GROUP BY mt.state", tuple(n_scope_params),
+        )}
+        task_recent = [{
+            "id": str(row[0]), "state": str(row[1]), "state_revision": int(row[2]),
+            "retention": str(row[3]), "updated_at": str(row[4]),
+        } for row in conn.execute(
+            f"SELECT mt.task_id,mt.state,mt.state_revision,n.retention,mt.updated_at FROM memory_tasks mt "
+            f"JOIN memory_nodes n ON n.id=mt.task_id WHERE n.status='current' AND {n_scope_sql} "
+            "ORDER BY mt.updated_at DESC,mt.task_id DESC LIMIT 12", tuple(n_scope_params),
         )]
         consolidation = {
             "isolated_nodes": int(conn.execute(
-                f"SELECT COUNT(*) FROM memory_nodes n WHERE n.status='current' AND n.scope IN ({marks}) AND NOT EXISTS ("
+                f"SELECT COUNT(*) FROM memory_nodes n WHERE n.status='current' AND {n_scope_sql} AND NOT EXISTS ("
                 "SELECT 1 FROM memory_edges e JOIN memory_nodes s ON s.id=e.source JOIN memory_nodes t ON t.id=e.target "
-                "WHERE e.status='current' AND s.status='current' AND t.status='current' AND (e.source=n.id OR e.target=n.id))", scopes,
+                "WHERE e.status='current' AND s.status='current' AND t.status='current' AND (e.source=n.id OR e.target=n.id))", tuple(n_scope_params),
             ).fetchone()[0]),
             "revised_nodes": int(conn.execute(
-                f"SELECT COUNT(*) FROM memory_nodes WHERE status='current' AND scope IN ({marks}) AND revision>1", scopes,
+                f"SELECT COUNT(*) FROM memory_nodes n WHERE n.status='current' AND {n_scope_sql} AND n.revision>1", tuple(n_scope_params),
             ).fetchone()[0]),
             "evidenced_nodes": int(conn.execute(
-                f"SELECT COUNT(*) FROM memory_nodes WHERE status='current' AND scope IN ({marks}) AND last_evidenced_at IS NOT NULL", scopes,
+                f"SELECT COUNT(*) FROM memory_nodes n WHERE n.status='current' AND {n_scope_sql} AND n.last_evidenced_at IS NOT NULL", tuple(n_scope_params),
             ).fetchone()[0]),
             "associatively_described_nodes": int(conn.execute(
-                f"SELECT COUNT(*) FROM memory_nodes WHERE status='current' AND scope IN ({marks}) AND associative_recall<>'{{}}'", scopes,
+                f"SELECT COUNT(*) FROM memory_nodes n WHERE n.status='current' AND {n_scope_sql} AND n.associative_recall<>'{{}}'", tuple(n_scope_params),
             ).fetchone()[0]),
         }
-        return {"scope": scope, "nodes": nodes, "edges": edges, "retention": {"temporary": retentions.get("temporary", 0), "persistent": retentions.get("persistent", 0)}, "epistemic_natures": epistemic_natures, "volatility": volatilities, "confidence": confidence, "kinds": kinds, "tags": tags, "relation_labels": relation_labels, "consolidation": consolidation, "search_backend": "fts5" if _fts_available(conn) else "sql_like"}
+        return {
+            "scope": scope, "nodes": nodes, "edges": edges,
+            "retention": {"temporary": retentions.get("temporary", 0), "persistent": retentions.get("persistent", 0)},
+            "epistemic_natures": epistemic_natures, "volatility": volatilities, "confidence": confidence,
+            "kinds": kinds, "tags": tags, "relation_labels": relation_labels,
+            "tasks": {
+                "total": sum(task_states.values()), "active": task_states.get("active", 0),
+                "blocked": task_states.get("blocked", 0), "resolved": task_states.get("resolved", 0),
+                "cancelled": task_states.get("cancelled", 0), "recent": task_recent,
+            },
+            "consolidation": consolidation, "search_backend": "fts5" if _fts_available(conn) else "sql_like",
+        }
     finally:
         conn.close()
 
@@ -1099,12 +1125,12 @@ def _fts_expression(terms: Iterable[str]) -> str:
 
 
 def _base_recall_where(
-    *, scopes: tuple[str, ...], retention: str, natures: Iterable[str], volatilities: Iterable[str],
+    *, scopes: tuple[str, ...] | None, retention: str, natures: Iterable[str], volatilities: Iterable[str],
     include_epistemic: bool = True,
 ) -> tuple[str, list[Any]]:
-    marks = ",".join("?" for _ in scopes)
-    clauses = ["n.status='current'", f"n.scope IN ({marks})"]
-    params: list[Any] = list(scopes)
+    scope_sql, scope_params = _scope_clause("n.scope", scopes)
+    clauses = ["n.status='current'", scope_sql]
+    params: list[Any] = list(scope_params)
     if retention != "all":
         clauses.append("n.retention=?")
         params.append(retention)
@@ -1136,8 +1162,7 @@ def create_recall_snapshot(
     natures: Iterable[str] = (),
     volatilities: Iterable[str] = (),
     relation_labels: Iterable[str] = (),
-    select_all: bool = False,
-    order_mode: str = "relevance",
+    owner_execution_id: str | None = None,
 ) -> Dict[str, Any]:
     """Persist an exact DB-backed recall selection without loading all IDs in Python.
 
@@ -1158,7 +1183,7 @@ def create_recall_snapshot(
     query_variants = [str(v).strip() for v in queries or [] if str(v).strip()]
     terms = _terms([query, *query_variants])
     epistemic_only = bool(wanted_natures or wanted_volatilities or wanted_relation_labels) and not (terms or wanted_ids or wanted_tags)
-    if not (select_all or epistemic_only or terms or wanted_ids or wanted_tags):
+    if not (epistemic_only or terms or wanted_ids or wanted_tags):
         raise ValueError("MEMORY_SELECTOR_REQUIRED")
 
     snapshot_id = _new_id("mrs")
@@ -1166,7 +1191,7 @@ def create_recall_snapshot(
         "query": str(query or "")[:4000], "queries": query_variants, "ids": wanted_ids, "tags": wanted_tags,
         "scope": scope, "retention": retention_value, "natures": wanted_natures,
         "volatilities": wanted_volatilities, "relation_labels": wanted_relation_labels, "include_neighbors": bool(include_neighbors),
-        "terms": terms, "select_all": bool(select_all), "order_mode": str(order_mode or "relevance"),
+        "terms": terms,
     }
     conn = _connect(storage_dir)
     try:
@@ -1222,7 +1247,7 @@ def create_recall_snapshot(
             id_marks = ",".join("?" for _ in wanted_ids)
             direct_expr = f"CASE WHEN b.id IN ({id_marks}) THEN 1 ELSE 0 END"
             direct_params.extend(wanted_ids)
-        include_all_flag = 1 if (select_all or epistemic_only) else 0
+        include_all_flag = 1 if epistemic_only else 0
         raw_cte = (
             "raw AS (SELECT b.id,b.updated_at," + direct_expr + " AS direct_hit,"
             "COALESCE(th.hits,0) AS tag_hits,CASE WHEN qh.node_id IS NULL THEN 0 ELSE 1 END AS query_hit,"
@@ -1230,10 +1255,7 @@ def create_recall_snapshot(
             "LEFT JOIN query_hits qh ON qh.node_id=b.id),"
             "candidates AS (SELECT * FROM raw WHERE direct_hit=1 OR tag_hits>0 OR query_hit=1 OR ?=1)"
         )
-        if str(order_mode or "relevance") == "updated":
-            order_clause = "updated_at DESC,id DESC"
-        else:
-            order_clause = "direct_hit DESC,tag_hits DESC,query_hit DESC,query_rank ASC,updated_at DESC,id DESC"
+        order_clause = "direct_hit DESC,tag_hits DESC,query_hit DESC,query_rank ASC,updated_at DESC,id DESC"
         sql = (
             "WITH base AS (SELECT n.id,n.updated_at,n.content,n.kind,n.epistemic_nature,n.epistemic_volatility,"
             f"n.epistemic_temporal,n.epistemic_context,n.associative_recall FROM memory_nodes n WHERE {base_where}),"
@@ -1245,8 +1267,8 @@ def create_recall_snapshot(
         now = utc_now()
         with conn:
             conn.execute(
-                "INSERT INTO memory_recall_snapshots(id,selector,scoped_nodes,matched_nodes,selected_nodes,backend,created_at) VALUES(?,?,?,?,?,?,?)",
-                (snapshot_id, _json(selector), scoped_nodes, 0, 0, backend, now),
+                "INSERT INTO memory_recall_snapshots(id,selector,scoped_nodes,matched_nodes,selected_nodes,backend,created_at,owner_execution_id) VALUES(?,?,?,?,?,?,?,?)",
+                (snapshot_id, _json(selector), scoped_nodes, 0, 0, backend, now, str(owner_execution_id or "").strip() or None),
             )
             conn.execute(sql, tuple(params))
             matched = int(conn.execute("SELECT COUNT(*) FROM memory_recall_items WHERE snapshot_id=?", (snapshot_id,)).fetchone()[0])
@@ -1259,12 +1281,16 @@ def create_recall_snapshot(
                 )
                 conn.execute(
                     "WITH matched AS (SELECT node_id FROM memory_recall_items WHERE snapshot_id=? AND source_kind='match'),"
-                    "neighbors AS (SELECT DISTINCT CASE WHEN e.source=m.node_id THEN e.target ELSE e.source END AS node_id "
-                    "FROM memory_edges e JOIN matched m ON (e.source=m.node_id OR e.target=m.node_id) WHERE e.status='current'),"
-                    "allowed AS (SELECT n.id FROM memory_nodes n JOIN neighbors x ON x.node_id=n.id WHERE " + neighbor_where + "),"
-                    "new_neighbors AS (SELECT a.id FROM allowed a WHERE NOT EXISTS (SELECT 1 FROM memory_recall_items i WHERE i.snapshot_id=? AND i.node_id=a.id)) "
-                    "INSERT INTO memory_recall_items(snapshot_id,ordinal,node_id,source_kind) "
-                    "SELECT ?,? + ROW_NUMBER() OVER (ORDER BY id),id,'neighbor' FROM new_neighbors",
+                    "neighbor_paths AS (SELECT CASE WHEN e.source=m.node_id THEN e.target ELSE e.source END AS node_id,"
+                    "m.node_id AS from_node,e.id AS via_relation FROM memory_edges e JOIN matched m "
+                    "ON (e.source=m.node_id OR e.target=m.node_id) WHERE e.status='current'),"
+                    "allowed_paths AS (SELECT p.node_id,p.from_node,p.via_relation,"
+                    "ROW_NUMBER() OVER (PARTITION BY p.node_id ORDER BY p.via_relation,p.from_node) AS path_rank "
+                    "FROM neighbor_paths p JOIN memory_nodes n ON n.id=p.node_id WHERE " + neighbor_where + "),"
+                    "new_neighbors AS (SELECT a.node_id,a.from_node,a.via_relation FROM allowed_paths a WHERE a.path_rank=1 "
+                    "AND NOT EXISTS (SELECT 1 FROM memory_recall_items i WHERE i.snapshot_id=? AND i.node_id=a.node_id)) "
+                    "INSERT INTO memory_recall_items(snapshot_id,ordinal,node_id,source_kind,source_from_node,source_via_relation) "
+                    "SELECT ?,? + ROW_NUMBER() OVER (ORDER BY node_id),node_id,'neighbor',from_node,via_relation FROM new_neighbors",
                     tuple([snapshot_id, *neighbor_params, snapshot_id, snapshot_id, matched]),
                 )
             selected = int(conn.execute("SELECT COUNT(*) FROM memory_recall_items WHERE snapshot_id=?", (snapshot_id,)).fetchone()[0])
@@ -1286,8 +1312,8 @@ def create_recall_snapshot(
         try:
             with conn:
                 conn.execute("DELETE FROM memory_recall_snapshots WHERE id=?", (snapshot_id,))
-        except Exception:
-            pass
+        except sqlite3.Error as cleanup_exc:
+            warnings.warn(f"MEMORY_RECALL_ROLLBACK_FAILED:{cleanup_exc}", RuntimeWarning, stacklevel=2)
         raise
     finally:
         conn.close()
@@ -1302,15 +1328,20 @@ def recall_snapshot_page(storage_dir: str, snapshot_id: str, *, after_ordinal: i
         if meta is None:
             raise ValueError("MEMORY_RECALL_SNAPSHOT_NOT_FOUND")
         rows = conn.execute(
-            "SELECT ordinal,node_id,source_kind FROM memory_recall_items WHERE snapshot_id=? AND ordinal>? ORDER BY ordinal LIMIT ?",
+            "SELECT ordinal,node_id,source_kind,source_from_node,source_via_relation FROM memory_recall_items WHERE snapshot_id=? AND ordinal>? ORDER BY ordinal LIMIT ?",
             (str(snapshot_id), cursor, cap),
         ).fetchall()
         ids = [str(row["node_id"]) for row in rows]
+        items = [{
+            "ordinal": int(row["ordinal"]), "node_id": str(row["node_id"]), "source_kind": str(row["source_kind"]),
+            "from_node": str(row["source_from_node"]) if row["source_from_node"] is not None else None,
+            "via_relation": str(row["source_via_relation"]) if row["source_via_relation"] is not None else None,
+        } for row in rows]
         last_ordinal = int(rows[-1]["ordinal"]) if rows else cursor
         total = int(meta["selected_nodes"])
         remaining = max(0, total - last_ordinal)
         return {
-            "snapshot_id": str(snapshot_id), "node_ids": ids, "after_ordinal": cursor,
+            "snapshot_id": str(snapshot_id), "node_ids": ids, "items": items, "after_ordinal": cursor,
             "last_ordinal": last_ordinal, "remaining": remaining, "complete": remaining == 0,
             "selection": {
                 **(_decode(meta["selector"], {}) if isinstance(meta["selector"], str) else {}),
@@ -1331,43 +1362,126 @@ def release_recall_snapshot(storage_dir: str, snapshot_id: str) -> None:
         conn.close()
 
 
-def select_graph_nodes(
+def gc_orphan_recall_snapshots(
+    storage_dir: str, *, live_execution_ids: Iterable[str] = (), preserve_snapshot_ids: Iterable[str] = (),
+) -> Dict[str, Any]:
+    """Delete navigation-only snapshots that no live execution can resume.
+
+    This is ownership GC, not TTL cleanup: no learned node/relation is touched and
+    age is never used as a reason to delete anything.
+    """
+    live = {str(v).strip() for v in live_execution_ids if str(v).strip()}
+    preserve = {str(v).strip() for v in preserve_snapshot_ids if str(v).strip()}
+    conn = _connect(storage_dir)
+    try:
+        rows = conn.execute("SELECT id,owner_execution_id FROM memory_recall_snapshots").fetchall()
+        doomed = []
+        for row in rows:
+            snapshot_id = str(row["id"])
+            owner = str(row["owner_execution_id"] or "").strip()
+            if snapshot_id in preserve or (owner and owner in live):
+                continue
+            doomed.append(snapshot_id)
+        if doomed:
+            with conn:
+                conn.executemany("DELETE FROM memory_recall_snapshots WHERE id=?", [(v,) for v in doomed])
+        return {"removed": len(doomed), "snapshot_ids": doomed}
+    finally:
+        conn.close()
+
+
+def ingest_chat_message(
     storage_dir: str,
     *,
     world_scope_value: str,
-    query: str = "",
-    queries: Iterable[str] = (),
-    ids: Iterable[str] = (),
-    tags: Iterable[str] = (),
-    scope: str = "all",
-    include_neighbors: bool = False,
-    retention: str = "all",
-    natures: Iterable[str] = (),
-    volatilities: Iterable[str] = (),
-    relation_labels: Iterable[str] = (),
-) -> Dict[str, Any]:
-    """Compatibility/debug materialization of the scalable DB-backed selector.
+    conversation_id: str,
+    message_id: int,
+    role: str,
+    content: str,
+    timestamp: str | None = None,
+    reply_to_message_id: int | None = None,
+    source_job_id: int | None = None,
+) -> str:
+    """Idempotently persist one physically observed conversation message.
 
-    Core recall does not use this function for pagination anymore; it exists for
-    tests/tools that explicitly request the complete ID set.
+    This path is Runtime-authored: no semantic summary, relevance decision or
+    memory_delta is involved. The node body is the exact conversational fact.
     """
-    created = create_recall_snapshot(
-        storage_dir, world_scope_value=world_scope_value, query=query, queries=queries, ids=ids, tags=tags,
-        scope=scope, include_neighbors=include_neighbors, retention=retention,
-        natures=natures, volatilities=volatilities, relation_labels=relation_labels,
-    )
-    snapshot_id = str(created["snapshot_id"])
+    conversation_id = normalize_context_key(conversation_id)
+    if not conversation_id:
+        raise ValueError("MEMORY_CHAT_CONVERSATION_REQUIRED")
+    role = str(role or "").strip().lower()
+    if role not in {"user", "assistant", "system"}:
+        raise ValueError("MEMORY_CHAT_ROLE_INVALID")
+    text = str(content or "")
+    digest = hashlib.sha256(f"{conversation_id}:{int(message_id)}".encode("utf-8")).hexdigest()[:20]
+    node_id = f"mem-chat-{digest}"
+    conn = _connect(storage_dir)
     try:
-        conn = _connect(storage_dir)
-        try:
-            all_ids = [str(row[0]) for row in conn.execute(
-                "SELECT node_id FROM memory_recall_items WHERE snapshot_id=? ORDER BY ordinal", (snapshot_id,)
-            )]
-        finally:
-            conn.close()
-        return {"node_ids": all_ids, "reasons": {}, "selection": created["selection"]}
+        existing = conn.execute("SELECT id FROM memory_nodes WHERE id=?", (node_id,)).fetchone()
+        if existing is not None:
+            return node_id
     finally:
-        release_recall_snapshot(storage_dir, snapshot_id)
+        conn.close()
+    ep_context = {
+        "conversation_id": conversation_id,
+        "message_id": int(message_id),
+        "role": role,
+    }
+    if reply_to_message_id is not None:
+        ep_context["reply_to_message_id"] = int(reply_to_message_id)
+    if source_job_id is not None:
+        ep_context["source_job_id"] = int(source_job_id)
+    if timestamp:
+        ep_context["timestamp"] = str(timestamp)
+    apply_graph_operations(storage_dir, [{
+        "op": "create_node",
+        "id": node_id,
+        "scope": str(world_scope_value),
+        "domain": "chat",
+        "context_key": conversation_id,
+        "kind": f"chat_message:{role}",
+        "content": text,
+        "retention": "temporary",
+        "epistemic": {"nature": "conversation", "context": ep_context},
+        "recall": {},
+        "tags": [],
+        "anchors": [],
+    }])
+    return node_id
+
+
+def chat_message_records(
+    storage_dir: str,
+    *,
+    conversation_id: str,
+    before_message_id: int | None = None,
+    limit: int = 50,
+) -> list[Dict[str, Any]]:
+    """Return chat nodes by physical message order, newest page first."""
+    conversation_id = normalize_context_key(conversation_id)
+    if not conversation_id:
+        return []
+    conn = _connect(storage_dir)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM memory_nodes WHERE domain='chat' AND context_key=? AND status='current' "
+            "ORDER BY created_at DESC,id DESC",
+            (conversation_id,),
+        ).fetchall()
+        records = []
+        for row in rows:
+            record = _node_record(conn, row, include_edges=False)
+            ctx = (record.get("epistemic") or {}).get("context") or {}
+            mid = ctx.get("message_id")
+            if before_message_id is not None and isinstance(mid, int) and mid >= int(before_message_id):
+                continue
+            records.append(record)
+            if len(records) >= max(1, int(limit or 50)):
+                break
+        return records
+    finally:
+        conn.close()
 
 
 def graph_records(storage_dir: str, node_ids: Iterable[str], *, include_inactive: bool = False) -> Dict[str, Any]:

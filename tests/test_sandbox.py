@@ -5,8 +5,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import eyle.providers.standard_impl.editing as codar_mod  # noqa: E402
-import eyle.providers.standard_impl.sandbox as sandbox_mod  # noqa: E402
+import eyle.providers.standard.editing as codar_mod  # noqa: E402
+import eyle.providers.standard.sandbox as sandbox_mod  # noqa: E402
 
 
 def _cfg(**extras):
@@ -90,7 +90,7 @@ def test_recusa_do_sandbox_nao_vira_teste_pulado(monkeypatch, tmp_path):
 
     resultado = codar_mod.rodar_testes_projeto(
         str(tmp_path),
-        {"ativado": True, "comando_python": "pytest -q", "sandbox": _cfg()},
+        {"enabled": True, "command_python": "pytest -q", "sandbox": _cfg()},
     )
 
     assert resultado["executado"] is False
@@ -133,8 +133,8 @@ def test_metacaractere_de_shell_vira_argumento_literal(monkeypatch, tmp_path):
 
     monkeypatch.setattr(codar_mod, "executar_no_sandbox", fake_sandbox)
     resultado = codar_mod.rodar_testes_projeto(str(tmp_path), {
-        "ativado": True,
-        "comando_python": "pytest -q ; touch NAO_EXECUTAR",
+        "enabled": True,
+        "command_python": "pytest -q ; touch NAO_EXECUTAR",
         "sandbox": _cfg(),
     })
 
@@ -263,7 +263,7 @@ def test_execution_context_cleans_persistent_docker_and_snapshot(monkeypatch):
     temp = Temp()
     monkeypatch.setattr(sandbox_mod.subprocess, "run", lambda argv, **kwargs: calls.append(list(argv)))
     ctx = ExecutionContext(
-        started_monotonic=0.0, deadline_monotonic=10.0, execution_id="t", source_job_id=1,
+        started_monotonic=0.0, execution_id="t", source_job_id=1,
     )
     state = sandbox_mod._sandbox_state(ctx)
     state["tempdir"] = temp

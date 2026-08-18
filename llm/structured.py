@@ -8,6 +8,7 @@ never owns ECC or Memory meaning.
 """
 from __future__ import annotations
 
+from eyle.contracts.memory import EPISTEMIC_SCHEMA, normalize_epistemic
 import ast
 import json
 import re
@@ -24,6 +25,7 @@ class StructuredResponseError(ValueError):
 
 _MEMORY_REF = r"^(?:mem-[A-Za-z0-9._-]+|@[A-Za-z0-9_-]+)$"
 _MATERIAL_REF = r"^mat-[0-9]+$"
+_RELATION_REF = r"^rel-[A-Za-z0-9._-]+$"
 
 # Rev2.8.4: the schema exposed to the Adapter describes the same Memory wire
 # contract that Eyle validates locally.  Rev2.8.3 only declared
@@ -43,6 +45,7 @@ _CANONICAL_SUPPORT_SCHEMA = {
             "properties": {
                 "kind": {"type": "string", "enum": ["memory"]},
                 "memory_id": {"type": "string", "pattern": _MEMORY_REF},
+                "revision": {"type": "integer", "minimum": 1},
             },
             "required": ["kind", "memory_id"],
             "additionalProperties": False,
@@ -59,11 +62,21 @@ _CANONICAL_SUPPORT_SCHEMA = {
             "required": ["kind", "material_id"],
             "additionalProperties": False,
         },
+        {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["relation"]},
+                "relation_id": {"type": "string", "pattern": _RELATION_REF},
+                "revision": {"type": "integer", "minimum": 1},
+            },
+            "required": ["kind", "relation_id"],
+            "additionalProperties": False,
+        },
     ]
 }
 _SAFE_SUPPORT_STRING = {
     "type": "string",
-    "pattern": r"^(?:request|current_request|mat-[0-9]+|mem-[A-Za-z0-9._-]+|@[A-Za-z0-9_-]+|material:mat-[0-9]+|memory:(?:mem-[A-Za-z0-9._-]+|@[A-Za-z0-9_-]+))$",
+    "pattern": r"^(?:request|current_request|mat-[0-9]+|mem-[A-Za-z0-9._-]+|rel-[A-Za-z0-9._-]+|@[A-Za-z0-9_-]+|material:mat-[0-9]+|memory:(?:mem-[A-Za-z0-9._-]+|@[A-Za-z0-9_-]+)|relation:rel-[A-Za-z0-9._-]+)$",
 }
 # Provider-wire aliases are intentionally represented in the schema too. This
 # lets the existing generic Adapter validate exactly what Eyle can normalize
@@ -75,8 +88,18 @@ _SUPPORT_WIRE_SCHEMA = {
             "type": "object",
             "properties": {
                 "memory_id": {"type": "string", "pattern": _MEMORY_REF},
+                "revision": {"type": "integer", "minimum": 1},
             },
             "required": ["memory_id"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "relation_id": {"type": "string", "pattern": _RELATION_REF},
+                "revision": {"type": "integer", "minimum": 1},
+            },
+            "required": ["relation_id"],
             "additionalProperties": False,
         },
         {
@@ -99,21 +122,8 @@ _SUPPORTS_SCHEMA = {
 }
 _STRING_ARRAY_SCHEMA = {"type": "array", "items": {"type": "string", "minLength": 1}}
 
-_EPISTEMIC_SCHEMA = {
-    "type": "object",
-    "properties": {
-        # Main authors these semantic labels. Runtime intentionally does not
-        # freeze a closed ontology: a growing mind may need categories that
-        # this release did not anticipate.
-        "nature": {"type": "string", "minLength": 1},
-        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-        "volatility": {"type": "string", "minLength": 1},
-        "temporal": {"type": "object"},
-        "context": {"type": "object"},
-    },
-    "required": ["nature"],
-    "additionalProperties": False,
-}
+_EPISTEMIC_SCHEMA = EPISTEMIC_SCHEMA
+
 
 _ASSOCIATIVE_RECALL_SCHEMA = {
     "type": "object",
@@ -201,6 +211,15 @@ _MEMORY_ACTION_SCHEMA = {
             ["id", "expected_revision"],
         ),
         _memory_action_schema(
+            "task_status",
+            {
+                "id": {"type": "string", "pattern": _MEMORY_REF},
+                "expected_state_revision": {"type": "integer", "minimum": 1},
+                "state": {"type": "string", "enum": ["active", "blocked", "resolved", "cancelled"]},
+            },
+            ["id", "expected_state_revision", "state"],
+        ),
+        _memory_action_schema(
             "archive",
             {
                 "id": {"type": "string", "pattern": _MEMORY_REF},
@@ -263,6 +282,8 @@ _DECISION_SCHEMA = {
             "properties": {
                 "type": {"type": "string", "enum": ["concluir"]},
                 "response": {"type": "string", "minLength": 1},
+                "choices": {"type": "array", "minItems": 2, "items": {"type": "string", "minLength": 1}},
+                "allow_free_text": {"type": "boolean"},
             },
             "required": ["type", "response"],
             "additionalProperties": False,
@@ -290,6 +311,9 @@ _EYLE_WIRE_SCHEMA = {
         "type": {"type": "string"},
         "response": {},
         "answer": {},
+        "choices": {},
+        "options": {},
+        "allow_free_text": {},
         "operation": {},
         "operations": {},
         "arguments": {},
@@ -332,16 +356,10 @@ def contract_instruction(profile: str) -> str:
     return (
         'Return one JSON object only. Do the basic semantic work; Eyle will canonicalize safe wire aliases. '
         'Preferred wire form is flat: {"type":"explorar|construir|concluir",...,"memory_delta":[]}. '
-        'explorar uses operations:[{operation,arguments}]; construir uses operation+arguments; concluir uses response. '
+        'explorar uses operations:[{operation,arguments}]; construir uses operation+arguments; concluir uses response and may include semantic choices. '
         'A nested {"decision":{...},"memory_delta":[]} envelope is also accepted. '
-        'memory_delta is transversal to ECC and has no semantic item-count ceiling. Memory items may be flat '
-        '{op:"remember",scope:"user|world",retention:"temporary|persistent",kind,content,...}; Eyle wraps arguments. '
-        'Safe supports may be "request", "mat-0001", "mem-...", or their canonical objects. '
-        'Do not spend cognition trying to serialize Eyle internals perfectly; preserve meaning and emit simple JSON. '
-        'Memory may include epistemic:{nature,confidence?,volatility?,temporal?,context?}; nature and volatility are open Main-authored labels, never a closed Runtime ontology. '
-        'Keep epistemic layers distinct: an observed event, an inference about it, a preference, a hypothesis, a belief, and a decision may coexist instead of collapsing into one timeless fact. Confidence describes your current support for an interpretation/applicability, not metaphysical truth or a mandatory arithmetic score. '
-        'When related active memory exists, consolidate incrementally when useful: revise the same continuing proposition/relation when its support changes; create and relate a new temporal/contextual state when reality or a volatile person/preferences changed; derive reusable patterns/hypotheses from supporting memories; preserve prior history rather than rewriting it. '
-        'Do not treat persistence as certainty. Prefer atomic reusable knowledge over transcript/document blobs, and let contradictory/context-specific memories coexist when that better represents what was learned.'
+        'memory_delta is always an array and may use flat memory actions; safe supports include "request", "mat-0001", "mem-...", "rel-..." or canonical objects. '
+        'Preserve meaning; do not spend cognition trying to serialize Eyle internals perfectly.'
     )
 
 
@@ -399,13 +417,13 @@ def _decode_jsonish(candidate: str) -> Any:
                 if nested.startswith(("{", "[")):
                     try:
                         return json.loads(nested)
-                    except Exception:
+                    except (json.JSONDecodeError, TypeError):
                         try:
                             return ast.literal_eval(nested)
-                        except Exception:
+                        except (ValueError, SyntaxError, TypeError):
                             pass
             return value
-        except Exception as exc:  # deterministic fall-through only
+        except (json.JSONDecodeError, ValueError, SyntaxError, TypeError) as exc:  # deterministic fall-through only
             last_error = exc
     if last_error is not None:
         raise last_error
@@ -431,7 +449,7 @@ def parse_json_representation(raw: Any) -> Any:
     for candidate in candidates:
         try:
             return _decode_jsonish(candidate)
-        except Exception as exc:
+        except (json.JSONDecodeError, ValueError, SyntaxError, TypeError) as exc:
             last = exc
     detail = type(last).__name__ if last is not None else "unknown"
     raise StructuredResponseError("STRUCTURED_JSON_INVALID", f"response does not contain a recoverable JSON object: {detail}") from last
@@ -456,6 +474,7 @@ def _memory_op(value: Any) -> str:
         "archive": "archive",
         "supersede": "supersede", "replace": "supersede",
         "retire_relation": "retire_relation", "retire_edge": "retire_relation",
+        "task_status": "task_status", "set_task_status": "task_status", "task_state": "task_status",
     }.get(token, str(value or "").strip())
 
 
@@ -482,45 +501,138 @@ def _wire_operation(raw: Any) -> Any:
 
 
 def _wire_memory_item(raw: Any) -> Any:
+    """Normalize common Memory wire variants without inventing knowledge.
+
+    Main remains responsible only for the semantic payload.
+    Eyle handles harmless transport variation: wrapper placement, singular/list
+    forms, spelling aliases and the conservative omitted-retention default.
+    Unknown fields are preserved so strict validation can still reject semantic
+    ambiguity instead of silently discarding meaning.
+    """
     if not isinstance(raw, dict):
         return raw
     item = deepcopy(raw)
     op = item.get("op")
     if not isinstance(op, str) or not op.strip():
-        op = item.get("action")
+        op = item.get("action") or item.get("operation")
     op = _memory_op(op)
+
     if isinstance(item.get("arguments"), dict):
         args = deepcopy(item["arguments"])
+        # Models sometimes put part of a flat memory item beside arguments.
+        # Merge only when the nested object did not already choose the field.
+        for key, value in item.items():
+            if key not in {"op", "action", "operation", "arguments"} and key not in args:
+                args[key] = deepcopy(value)
     else:
-        args = {k: deepcopy(v) for k, v in item.items() if k not in {"op", "action", "arguments"}}
-    if "supports" not in args and "support" in args:
-        args["supports"] = args.pop("support")
+        args = {k: deepcopy(v) for k, v in item.items() if k not in {"op", "action", "operation", "arguments"}}
+
+    # Pure serialization aliases.
+    aliases = {
+        "scope": ("namespace", "memory_scope"),
+        "retention": ("lifetime", "duration", "memory_retention"),
+        "kind": ("category", "memory_kind", "memory_type"),
+        "content": ("text", "statement", "fact", "memory_content"),
+        "supports": ("support", "evidence", "sources", "provenance"),
+        "tags": ("tag",),
+    }
+    for canonical, candidates in aliases.items():
+        if canonical in args:
+            continue
+        for alias in candidates:
+            if alias in args:
+                args[canonical] = args.pop(alias)
+                break
+
+    scope_token = str(args.get("scope") or "").strip().lower().replace("-", "_")
+    if scope_token in {"personal", "person", "self", "profile", "user_memory"}:
+        args["scope"] = "user"
+    elif scope_token in {"global", "external", "environment", "world_memory", "project", "workspace"}:
+        args["scope"] = "world"
+
     retention = args.get("retention")
-    token = str(retention or "").strip().lower()
-    if token in {"temp", "temporary", "transient", "short", "short_term"}:
+    token = str(retention or "").strip().lower().replace("-", "_")
+    if token in {"temp", "temporary", "transient", "short", "short_term", "working"}:
         args["retention"] = "temporary"
     elif token in {"permanent", "durable", "persistent", "long", "long_term"}:
         args["retention"] = "persistent"
+    elif op == "remember" and retention is None:
+        # Omission is a wire-level conservative default, not a truth judgment:
+        # temporary can later be promoted by Main; silent durable storage cannot
+        # be undone epistemically.
+        args["retention"] = "temporary"
+
+    if op == "remember" and "kind" not in args:
+        # Reuse a label Main already authored instead of inventing a category.
+        epi_source = args.get("epistemic") if isinstance(args.get("epistemic"), dict) else args
+        nature = epi_source.get("nature") if isinstance(epi_source, dict) else None
+        if isinstance(nature, str) and nature.strip():
+            args["kind"] = nature.strip()
+
+    if isinstance(args.get("expected_revision"), str) and args["expected_revision"].strip().isdigit():
+        args["expected_revision"] = int(args["expected_revision"].strip())
+    if isinstance(args.get("expected_state_revision"), str) and args["expected_state_revision"].strip().isdigit():
+        args["expected_state_revision"] = int(args["expected_state_revision"].strip())
+    if op == "task_status" and "state" not in args:
+        for alias in ("status", "task_state"):
+            if alias in args:
+                args["state"] = args.pop(alias)
+                break
+    if isinstance(args.get("confidence"), str):
+        try:
+            numeric = float(args["confidence"].strip())
+        except (TypeError, ValueError):
+            pass
+        else:
+            args["confidence"] = numeric
+    if isinstance(args.get("epistemic"), dict) and isinstance(args["epistemic"].get("confidence"), str):
+        epi = deepcopy(args["epistemic"])
+        try:
+            epi["confidence"] = float(epi["confidence"].strip())
+        except (TypeError, ValueError):
+            pass
+        args["epistemic"] = epi
+
+    if "supports" not in args and "source" in args:
+        # Only promote source when it already looks like an unambiguous support.
+        source = args.get("source")
+        if isinstance(source, str) and (source in {"request", "current_request"} or re.fullmatch(_MATERIAL_REF, source) or re.fullmatch(_MEMORY_REF, source) or re.fullmatch(_RELATION_REF, source)):
+            args["supports"] = args.pop("source")
+
+    if isinstance(args.get("tags"), str) and args["tags"].strip():
+        args["tags"] = [args["tags"].strip()]
+
     # Flat epistemic fields are a serialization alias only; no value is inferred.
     if "epistemic" not in args:
         epi = {k: args.pop(k) for k in ("nature", "confidence", "volatility", "temporal", "context") if k in args}
         if epi:
             args["epistemic"] = epi
-    # Associative-recall aliases remain Main-authored semantics. Eyle
-    # merely nests the strings into the canonical recall object.
+
+    # Associative-recall aliases remain Main-authored semantics. Eyle merely
+    # nests them and accepts singular strings as one-element lists.
     if "recall" not in args:
         recall = {}
-        for canonical, aliases in {
+        for canonical, recall_aliases in {
             "aliases": ("recall_aliases", "aliases"),
             "concepts": ("recall_concepts", "concepts"),
             "cues": ("recall_cues", "cues"),
         }.items():
-            for alias in aliases:
+            for alias in recall_aliases:
                 if alias in args:
-                    recall[canonical] = args.pop(alias)
+                    value = args.pop(alias)
+                    if isinstance(value, str) and value.strip():
+                        value = [value.strip()]
+                    recall[canonical] = value
                     break
         if recall:
             args["recall"] = recall
+    elif isinstance(args.get("recall"), dict):
+        recall = deepcopy(args["recall"])
+        for key in ("aliases", "concepts", "cues"):
+            if isinstance(recall.get(key), str) and recall[key].strip():
+                recall[key] = [recall[key].strip()]
+        args["recall"] = recall
+
     return {"op": op, "arguments": args}
 
 
@@ -563,7 +675,7 @@ def _canonicalize_wire(raw: Any) -> tuple[Dict[str, Any], list[str]]:
     if not isinstance(decision, dict):
         if any(k in value for k in ("type", "operation", "operations", "response", "answer", "final", "text")):
             decision = {k: deepcopy(v) for k, v in value.items() if k in {
-                "type", "operation", "operations", "arguments", "response", "answer", "final", "text", "on_success"
+                "type", "operation", "operations", "arguments", "response", "answer", "final", "text", "choices", "options", "allow_free_text", "on_success"
             }}
             steps.append("wrap_flat_decision")
         else:
@@ -604,6 +716,27 @@ def _canonicalize_wire(raw: Any) -> tuple[Dict[str, Any], list[str]]:
                     steps.append(f"alias_{alias}_to_response")
                     break
         out_decision["response"] = response
+        raw_choices = decision.get("choices") if "choices" in decision else decision.get("options")
+        if raw_choices is not None:
+            if isinstance(raw_choices, (str, dict)):
+                raw_choices = [raw_choices]
+            if isinstance(raw_choices, list):
+                choices = []
+                for item in raw_choices:
+                    if isinstance(item, str):
+                        label = item.strip()
+                    elif isinstance(item, dict):
+                        label = str(item.get("label") or item.get("text") or item.get("title") or "").strip()
+                    else:
+                        label = ""
+                    if label and label not in choices:
+                        choices.append(label)
+                if choices:
+                    out_decision["choices"] = choices
+            if "options" in decision:
+                steps.append("alias_options_to_choices")
+        if "allow_free_text" in decision:
+            out_decision["allow_free_text"] = bool(decision.get("allow_free_text"))
     else:
         # Preserve unknown decision data so strict canonical validation can give
         # Main a precise error rather than the canonicalizer guessing semantics.
@@ -627,15 +760,6 @@ def wire_canonicalization_steps(raw: Any) -> list[str]:
     """Diagnostic-only list of deterministic boundary normalizations."""
     _, steps = _canonicalize_wire(raw)
     return steps
-
-
-def _object(raw: Any) -> Dict[str, Any]:
-    # Backward-compatible helper now means "recover a wire object", not strict
-    # canonical parsing.
-    value = parse_json_representation(raw)
-    if not isinstance(value, dict):
-        raise StructuredResponseError("STRUCTURED_OBJECT_REQUIRED", "top-level JSON must be an object")
-    return value
 
 
 def observed_top_level(raw: Any) -> Dict[str, Any] | None:
@@ -684,7 +808,8 @@ def _clean_support(raw: Any, label: str) -> Dict[str, Any]:
 
     Canonical output is always one of:
       {kind:request}
-      {kind:memory,memory_id:mem-*|@alias}
+      {kind:memory,memory_id:mem-*|@alias,revision?:N}
+      {kind:relation,relation_id:rel-*,revision?:N}
       {kind:material,material_id:mat-*,selector?:{...}}
 
     Strings/singleton objects are accepted only as unambiguous boundary aliases;
@@ -698,10 +823,14 @@ def _clean_support(raw: Any, label: str) -> Dict[str, Any]:
             return {"kind": "material", "material_id": value}
         if re.fullmatch(_MEMORY_REF, value):
             return {"kind": "memory", "memory_id": value}
+        if re.fullmatch(_RELATION_REF, value):
+            return {"kind": "relation", "relation_id": value}
         if value.startswith("material:") and re.fullmatch(_MATERIAL_REF, value.split(":", 1)[1]):
             return {"kind": "material", "material_id": value.split(":", 1)[1]}
         if value.startswith("memory:") and re.fullmatch(_MEMORY_REF, value.split(":", 1)[1]):
             return {"kind": "memory", "memory_id": value.split(":", 1)[1]}
+        if value.startswith("relation:") and re.fullmatch(_RELATION_REF, value.split(":", 1)[1]):
+            return {"kind": "relation", "relation_id": value.split(":", 1)[1]}
         raise StructuredResponseError("EYLE_MEMORY_INVALID", f"{label} support reference invalid")
     if not isinstance(raw, dict):
         raise StructuredResponseError("EYLE_MEMORY_INVALID", f"{label} support must be object or safe reference")
@@ -712,14 +841,18 @@ def _clean_support(raw: Any, label: str) -> Dict[str, Any]:
     if not kind:
         if "material_id" in data and set(data) <= {"material_id", "selector"}:
             kind = "material"
-        elif "memory_id" in data and set(data) == {"memory_id"}:
+        elif "memory_id" in data and set(data) <= {"memory_id", "revision"}:
             kind = "memory"
+        elif "relation_id" in data and set(data) <= {"relation_id", "revision"}:
+            kind = "relation"
     if kind == "current_request":
         kind = "request"
     if kind == "material" and "material_id" not in data and "id" in data:
         data["material_id"] = data.pop("id")
     if kind == "memory" and "memory_id" not in data and "id" in data:
         data["memory_id"] = data.pop("id")
+    if kind == "relation" and "relation_id" not in data and "id" in data:
+        data["relation_id"] = data.pop("id")
 
     if kind == "request":
         if set(data) - {"kind"}:
@@ -727,9 +860,26 @@ def _clean_support(raw: Any, label: str) -> Dict[str, Any]:
         return {"kind": "request"}
     if kind == "memory":
         memory_id = data.get("memory_id")
-        if set(data) - {"kind", "memory_id"} or not isinstance(memory_id, str) or re.fullmatch(_MEMORY_REF, memory_id) is None:
+        revision = data.get("revision")
+        if set(data) - {"kind", "memory_id", "revision"} or not isinstance(memory_id, str) or re.fullmatch(_MEMORY_REF, memory_id) is None:
             raise StructuredResponseError("EYLE_MEMORY_INVALID", f"{label} memory support invalid")
-        return {"kind": "memory", "memory_id": memory_id}
+        out = {"kind": "memory", "memory_id": memory_id}
+        if revision is not None:
+            if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+                raise StructuredResponseError("EYLE_MEMORY_INVALID", f"{label} memory support revision invalid")
+            out["revision"] = revision
+        return out
+    if kind == "relation":
+        relation_id = data.get("relation_id")
+        revision = data.get("revision")
+        if set(data) - {"kind", "relation_id", "revision"} or not isinstance(relation_id, str) or re.fullmatch(_RELATION_REF, relation_id) is None:
+            raise StructuredResponseError("EYLE_MEMORY_INVALID", f"{label} relation support invalid")
+        out = {"kind": "relation", "relation_id": relation_id}
+        if revision is not None:
+            if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+                raise StructuredResponseError("EYLE_MEMORY_INVALID", f"{label} relation support revision invalid")
+            out["revision"] = revision
+        return out
     if kind != "material":
         raise StructuredResponseError("EYLE_MEMORY_INVALID", f"{label} support kind invalid")
     if set(data) - {"kind", "material_id", "selector"}:
@@ -751,13 +901,11 @@ def _ref(value: Any, label: str) -> str:
     return value
 
 
-def _strings(value: Any, label: str, maximum: int | None, item_max: int | None) -> list[str]:
+def _strings(value: Any, label: str, item_max: int | None) -> list[str]:
     if value is None:
         return []
     if not isinstance(value, list):
         raise StructuredResponseError("EYLE_MEMORY_INVALID", f"{label} invalid")
-    # ``maximum`` is retained for source compatibility but intentionally not
-    # used as a semantic count ceiling in Rev2.8.4.
     out = []
     for raw in value:
         if not isinstance(raw, str) or not raw.strip() or (item_max is not None and len(raw.strip()) > item_max):
@@ -774,45 +922,21 @@ def _revision(value: Any, label: str) -> int:
 
 
 def _clean_epistemic(raw: Any, label: str, *, default_unclassified: bool = False) -> Dict[str, Any] | None:
-    if raw is None:
-        if not default_unclassified:
-            return None
-        return {"nature": "unclassified", "volatility": "unknown", "temporal": {}, "context": {}}
-    if not isinstance(raw, dict):
-        raise StructuredResponseError("EYLE_MEMORY_INVALID", f"{label}.epistemic must be object")
-    allowed = {"nature", "confidence", "volatility", "temporal", "context"}
-    if set(raw) - allowed:
-        raise StructuredResponseError("EYLE_MEMORY_INVALID", f"{label}.epistemic fields invalid")
-    nature = raw.get("nature")
-    if not isinstance(nature, str) or not nature.strip() or len(nature.strip()) > 96:
-        raise StructuredResponseError("EYLE_MEMORY_INVALID", f"{label}.epistemic.nature invalid")
-    out: Dict[str, Any] = {"nature": nature.strip()}
-    confidence = raw.get("confidence")
-    if confidence is not None:
-        if not isinstance(confidence, (int, float)) or isinstance(confidence, bool) or not 0.0 <= float(confidence) <= 1.0:
-            raise StructuredResponseError("EYLE_MEMORY_INVALID", f"{label}.epistemic.confidence invalid")
-        out["confidence"] = float(confidence)
-    volatility = raw.get("volatility")
-    if volatility is not None:
-        if not isinstance(volatility, str) or not volatility.strip() or len(volatility.strip()) > 96:
-            raise StructuredResponseError("EYLE_MEMORY_INVALID", f"{label}.epistemic.volatility invalid")
-        out["volatility"] = volatility.strip()
-    else:
-        out["volatility"] = "unknown"
-    temporal = raw.get("temporal")
-    if temporal is not None:
-        if not isinstance(temporal, dict):
-            raise StructuredResponseError("EYLE_MEMORY_INVALID", f"{label}.epistemic.temporal invalid")
-        out["temporal"] = _clean_json_value(temporal, f"{label}.epistemic.temporal")
-    else:
-        out["temporal"] = {}
-    context = raw.get("context")
-    if context is not None:
-        if not isinstance(context, dict):
-            raise StructuredResponseError("EYLE_MEMORY_INVALID", f"{label}.epistemic.context invalid")
-        out["context"] = _clean_json_value(context, f"{label}.epistemic.context")
-    else:
-        out["context"] = {}
+    def _error(message: str):
+        return StructuredResponseError("EYLE_MEMORY_INVALID", f"{label}.epistemic invalid: {message}")
+    try:
+        out = normalize_epistemic(
+            raw,
+            default_unclassified=default_unclassified,
+            error_factory=_error,
+        )
+    except StructuredResponseError:
+        raise
+    if out is None:
+        return None
+    # Wire boundary also proves the nested values are canonical JSON-safe.
+    out["temporal"] = _clean_json_value(out.get("temporal") or {}, f"{label}.epistemic.temporal")
+    out["context"] = _clean_json_value(out.get("context") or {}, f"{label}.epistemic.context")
     return out
 
 def _clean_associative_recall(raw: Any, label: str) -> Dict[str, list[str]] | None:
@@ -879,7 +1003,7 @@ def _clean_memory(raw: Any) -> list[Dict[str, Any]]:
                 if not isinstance(key, str) or re.fullmatch(r"[A-Za-z0-9_-]+", key) is None or len(key) > 64:
                     raise StructuredResponseError("EYLE_MEMORY_INVALID", f"{label}.key invalid")
                 out["key"] = key
-            tags = _strings(args.get("tags"), f"{label}.tags", None, None)
+            tags = _strings(args.get("tags"), f"{label}.tags", None)
             if tags: out["tags"] = tags
             if supports: out["supports"] = supports
             clean.append(out); continue
@@ -912,8 +1036,8 @@ def _clean_memory(raw: Any) -> list[Dict[str, Any]]:
                 out["add_recall"] = add_recall
             if remove_recall:
                 out["remove_recall"] = remove_recall
-            add_tags = _strings(args.get("add_tags"), f"{label}.add_tags", None, None)
-            remove_tags = _strings(args.get("remove_tags"), f"{label}.remove_tags", None, None)
+            add_tags = _strings(args.get("add_tags"), f"{label}.add_tags", None)
+            remove_tags = _strings(args.get("remove_tags"), f"{label}.remove_tags", None)
             if add_tags: out["add_tags"] = add_tags
             if remove_tags: out["remove_tags"] = remove_tags
             if supports: out["supports"] = supports
@@ -947,6 +1071,18 @@ def _clean_memory(raw: Any) -> list[Dict[str, Any]]:
                 out["epistemic"] = epistemic
             if supports: out["supports"] = supports
             clean.append(out); continue
+        if op == "task_status":
+            allowed = {"id", "expected_state_revision", "state"}
+            if set(args) - allowed:
+                raise StructuredResponseError("EYLE_MEMORY_INVALID", f"{label} task_status arguments invalid")
+            state = str(args.get("state") or "").strip().lower()
+            if state not in {"active", "blocked", "resolved", "cancelled"}:
+                raise StructuredResponseError("EYLE_MEMORY_INVALID", f"{label}.state invalid")
+            expected = args.get("expected_state_revision")
+            if not isinstance(expected, int) or isinstance(expected, bool) or expected < 1:
+                raise StructuredResponseError("EYLE_MEMORY_INVALID", f"{label}.expected_state_revision invalid")
+            clean.append({"op": "task_status", "id": _ref(args.get("id"), label), "expected_state_revision": expected, "state": state})
+            continue
         if op == "archive":
             if set(args) != {"id", "expected_revision"}:
                 raise StructuredResponseError("EYLE_MEMORY_INVALID", f"{label} archive arguments invalid")
@@ -982,17 +1118,16 @@ def _clean_operation(raw: Any, label: str) -> Dict[str, Any]:
     return {"operation": operation, "arguments": dict(arguments)}
 
 
-def parse_ecc_response(raw: Any) -> Dict[str, Any]:
-    # Tolerant wire -> deterministic canonical envelope -> strict
-    # semantic validator. Only the final canonical result can reach Runtime.
-    envelope = canonicalize_wire_response(raw)
-    if set(envelope) != {"decision", "memory_delta"}:
-        raise StructuredResponseError("EYLE_ENVELOPE_INVALID", "canonical top-level must contain exactly decision and memory_delta")
-    decision = envelope.get("decision")
+def _parse_ecc_decision(decision: Any) -> Dict[str, Any]:
+    """Validate only the semantic ECC decision.
+
+    Rev3.7 invariant: Memory is a sidecar. A malformed memory delta must never
+    prevent a valid ECC decision from reaching Runtime.
+    """
     if not isinstance(decision, dict):
         raise StructuredResponseError("ECC_DECISION_INVALID", "decision must be an object")
     kind = decision.get("type")
-    normalized: Dict[str, Any] = {"type": kind, "memory_delta": _clean_memory(envelope.get("memory_delta"))}
+    normalized: Dict[str, Any] = {"type": kind}
     if kind == "explorar":
         if set(decision) != {"type", "operations"}:
             raise StructuredResponseError("ECC_SHAPE_INVALID", "explorar requires exactly type and operations")
@@ -1008,14 +1143,52 @@ def parse_ecc_response(raw: Any) -> Dict[str, Any]:
         normalized.update(op)
         return normalized
     if kind == "concluir":
-        if set(decision) != {"type", "response"}:
-            raise StructuredResponseError("ECC_SHAPE_INVALID", "concluir requires exactly type and response")
+        allowed = {"type", "response", "choices", "allow_free_text"}
+        if set(decision) - allowed:
+            raise StructuredResponseError("ECC_SHAPE_INVALID", "concluir contains unsupported fields")
         response = decision.get("response")
         if not isinstance(response, str) or not response.strip():
             raise StructuredResponseError("ECC_RESPONSE_INVALID", "concluir requires a non-empty response")
         normalized["response"] = response.strip()
+        if "choices" in decision:
+            raw_choices = decision.get("choices")
+            if not isinstance(raw_choices, list):
+                raise StructuredResponseError("ECC_CHOICE_INVALID", "concluir.choices must be an array")
+            choices = []
+            seen = set()
+            for value in raw_choices:
+                if not isinstance(value, str) or not value.strip():
+                    raise StructuredResponseError("ECC_CHOICE_INVALID", "concluir.choices must contain non-empty strings")
+                label = value.strip()
+                folded = label.casefold()
+                if folded not in seen:
+                    seen.add(folded); choices.append(label)
+            if len(choices) < 2:
+                raise StructuredResponseError("ECC_CHOICE_INVALID", "concluir.choices requires at least two distinct options")
+            normalized["choices"] = choices
+            normalized["allow_free_text"] = bool(decision.get("allow_free_text", True))
+        elif "allow_free_text" in decision:
+            raise StructuredResponseError("ECC_CHOICE_INVALID", "allow_free_text requires choices")
         return normalized
     raise StructuredResponseError("ECC_TYPE_INVALID", "decision.type must be explorar, construir or concluir")
+
+
+def parse_ecc_response(raw: Any) -> Dict[str, Any]:
+    # Tolerant wire -> deterministic canonical envelope. ECC is validated first;
+    # Memory is then parsed independently as a non-vetoing sidecar.
+    envelope = canonicalize_wire_response(raw)
+    if set(envelope) != {"decision", "memory_delta"}:
+        raise StructuredResponseError("EYLE_ENVELOPE_INVALID", "canonical top-level must contain exactly decision and memory_delta")
+
+    normalized = _parse_ecc_decision(envelope.get("decision"))
+    try:
+        normalized["memory_delta"] = _clean_memory(envelope.get("memory_delta"))
+    except StructuredResponseError as error:
+        if not str(error.code).startswith("EYLE_MEMORY_"):
+            raise
+        normalized["memory_delta"] = []
+        normalized["memory_error"] = {"code": error.code, "detail": error.detail}
+    return normalized
 
 
 def parse_profile_response(raw: Any, profile: str) -> Dict[str, Any]:

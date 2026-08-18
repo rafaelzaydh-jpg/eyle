@@ -3,16 +3,14 @@ from pathlib import Path
 
 import pytest
 
-from eyle.providers.standard_impl import sandbox as sandbox_mod
-from eyle.providers import standard as tools
-from eyle.providers.standard_impl.workspace_io import ErroLeituraProjeto, ler_faixa_projeto, listar_arvore_projeto
-from eyle.providers.standard_impl.workspace_policy import _is_protected_resource_path
+from eyle.providers.standard import sandbox as sandbox_mod
+from eyle.providers.standard.workspace_io import ErroLeituraProjeto, ler_faixa_projeto, listar_arvore_projeto
+from eyle.providers.standard.workspace_policy import _is_protected_resource_path
 
 
 def _ctx(root):
     return {
         "provider_context": {"standard": {"caminho_origem": str(root)}},
-        "config": {"agent": {"max_file_read_lines": 400, "max_search_matches": 40, "max_search_ranges": 12, "max_search_range_lines": 16}},
     }
 
 
@@ -115,7 +113,7 @@ def test_symbol_relations_does_not_drop_normal_source_for_sensitive_words(tmp_pa
 
 def test_git_status_shows_protected_path_but_git_diff_omits_its_content(tmp_path):
     import subprocess
-    from eyle.providers.standard_impl.git_tools import git_diff, git_status
+    from eyle.providers.standard.git_tools import git_diff, git_status
 
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
@@ -210,7 +208,7 @@ def test_sandbox_omits_symlink_and_hardlink_aliases_of_protected_resource(tmp_pa
 
 def test_git_diff_omits_hardlink_alias_of_protected_resource(tmp_path):
     import subprocess
-    from eyle.providers.standard_impl.git_tools import git_diff
+    from eyle.providers.standard.git_tools import git_diff
 
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
@@ -230,8 +228,8 @@ def test_git_diff_omits_hardlink_alias_of_protected_resource(tmp_path):
 
 
 def test_patch_dry_run_does_not_read_protected_resource_or_alias(tmp_path):
-    from eyle.providers.standard_impl.transactions import dry_run_patch_set
-    from eyle.providers.standard_impl.text_hash import hash_texto
+    from eyle.providers.standard.transactions import dry_run_patch_set
+    from eyle.providers.standard.text_hash import hash_texto
 
     env = tmp_path / ".env"
     env.write_text("TOKEN=TOP_SECRET\n", encoding="utf-8")

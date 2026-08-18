@@ -15,7 +15,7 @@ def _ambiente_temporario(monkeypatch, tmp_path):
     memory.mkdir()
     context.mkdir()
     monkeypatch.setattr(service_mod, "MEMORY_DIR", str(memory))
-    monkeypatch.setattr(service_mod, "AGENT_PENDENTE_PATH", str(context / "agent_pendente.json"))
+    monkeypatch.setattr(service_mod, "AGENT_PENDENTE_DIR", str(context / "pending"))
     monkeypatch.setattr(queue, "DB_PATH", str(context / "fila.sqlite3"))
     queue._evento_disponivel.clear()
     return memory, context

@@ -28,11 +28,17 @@ def test_release_manifest_capabilities_match_registry():
     assert manifest["publication"]["requires_extracted_artifact_verification"] is True
 
 
-def test_release_verifier_rejects_domain_module_in_core(tmp_path):
+def test_release_verifier_core_contract_is_exact(tmp_path):
     core=tmp_path/"eyle"/"core"; core.mkdir(parents=True)
-    for name in release_identity._GENERIC_CORE_FILES:
+    for name in release_identity.CORE_FILES:
         (core/name).write_text("",encoding="utf-8")
     (core/"tools.py").write_text("# resurrected",encoding="utf-8")
     actual={p.name for p in core.glob("*.py")}
-    assert "tools.py" in (actual - release_identity._GENERIC_CORE_FILES)
-    assert "tools.py" in (release_identity._REMOVED_CORE_DOMAIN_FILES & actual)
+    assert actual != release_identity.CORE_FILES
+
+
+def test_release_verifier_rejects_legacy_provider_paths(tmp_path):
+    legacy=tmp_path/"eyle"/"providers"/"standard.py"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("# compatibility facade",encoding="utf-8")
+    assert str(legacy.relative_to(tmp_path)).replace("\\","/") in release_identity.FORBIDDEN_PATHS

@@ -6,17 +6,16 @@ from pathlib import Path
 import eyle.core.agent as core_agent
 from eyle.runtime.ecc_runtime import project_result
 from eyle.runtime import observation
-from eyle.providers import standard as tools
+from eyle.providers.standard import registry as tools
 from eyle.runtime.observation import record
 from eyle.contracts.observation import materialize_snapshot_handle, register_snapshot_handle, release_snapshot_handle
 from eyle.core.session import AgentSession
 from tests.canonical import base_config
+from eyle.providers.standard.common import _sucesso
 
 
-def _ctx(root, session=None, *, max_ranges=2, max_matches=2):
+def _ctx(root, session=None):
     cfg = base_config()
-    cfg["providers"]["standard"]["max_search_ranges"] = max_ranges
-    cfg["providers"]["standard"]["max_search_matches"] = max_matches
     value = {
         "provider_context": {"standard": {"caminho_origem": str(root)}},
         "config": cfg,
@@ -67,7 +66,7 @@ def test_snapshot_payload_is_stored_once_across_pages_and_gc_after_last_handle()
 
 
 def test_search_coverage_is_complete_while_materialization_frontier_remains(tmp_path):
-    for index in range(8):
+    for index in range(20):
         (tmp_path / f"f{index}.py").write_text("needle\n", encoding="utf-8")
     session = AgentSession("search")
     ctx = _ctx(tmp_path, session)
@@ -76,14 +75,14 @@ def test_search_coverage_is_complete_while_materialization_frontier_remains(tmp_
     coverage = result["coverage"]
     assert coverage["scope"]["kind"] == "literal_search"
     assert coverage["complete"] is True
-    assert coverage["examined"]["matches"] == 8
+    assert coverage["examined"]["matches"] == 20
     assert coverage["facts"]["materialization_complete"] is False
     assert result["frontiers"]
     assert len(session.observation_ledger["snapshots"]) == 1
 
 
-def test_search_frontier_materializes_real_file_material_and_reuses_one_snapshot(tmp_path):
-    for index in range(8):
+def test_search_frontier_materializes_real_file_material_and_releases_exhausted_snapshot(tmp_path):
+    for index in range(20):
         (tmp_path / f"f{index}.py").write_text("needle\n", encoding="utf-8")
     session = AgentSession("search")
     ctx = _ctx(tmp_path, session)
@@ -101,7 +100,7 @@ def test_search_frontier_materializes_real_file_material_and_reuses_one_snapshot
     assert first["source_capability"] == "standard.search_code"
     assert first["locator"]["kind"] == "file"
     assert "needle" in first["content"]
-    assert set(session.observation_ledger["snapshots"]) == snapshot_ids
+    assert set(session.observation_ledger["snapshots"]) == set()
     assert all("payload" not in item for item in session.observation_ledger["handles"].values())
 
 
@@ -142,7 +141,7 @@ def test_new_non_file_capability_plugs_into_physical_contract_without_core_branc
     name = "sensor_scan"
 
     def execute(arguments, ctx):
-        return tools._sucesso({"device": arguments["device"], "temperature_c": 23.5, "sample": 7})
+        return _sucesso({"device": arguments["device"], "temperature_c": 23.5, "sample": 7})
 
     def observe(arguments, result):
         detail = result["detail"]

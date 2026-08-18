@@ -1,12 +1,12 @@
 from tests.canonical import standard_registry
 import hashlib
-import eyle.providers.standard as tools
+from eyle.providers.standard import registry as tools
 
 FIELDS={"status","ok","executed","changed","error_code","detail","retryable","failure_scope","failure_resource","physical_effect","observations","coverage","frontiers"}
 HASH='a'*64
 
 def ctx(root):
-    return {'provider_context': {'standard': {'caminho_origem': str(root)}}, 'config': {'providers': {'standard': {'max_file_read_lines': 400, 'max_tree_entries': 200, 'max_tree_depth': 6, 'tests': {'enabled': False}}}}}
+    return {'provider_context': {'standard': {'caminho_origem': str(root)}}, 'config': {'providers': {'standard': {'tests': {'enabled': False}}}}}
 
 def test_live_read_tools_share_envelope(tmp_path):
     (tmp_path/'a.py').write_text('def x():\n    return 1\n')
@@ -41,8 +41,7 @@ def test_validation_rejects_unknown_and_bad_arguments(tmp_path):
     missing=standard_registry().execute('standard.read_file',{'path':'a.py','line_start':1},ctx(tmp_path))
     assert missing['error_code']=='INVALID_ARGUMENT'
 
-def test_run_tests_skipped_is_not_claimed_as_executed(tmp_path,monkeypatch):
-    monkeypatch.setattr(tools,'rodar_testes_projeto',lambda *a,**k:{'executado':False,'ok':True,'detalhe':'sem suite'})
+def test_run_tests_skipped_is_not_claimed_as_executed(tmp_path):
     result=standard_registry().execute('standard.run_tests',{},ctx(tmp_path))
     assert result=={'status':'skipped','ok':True,'executed':False,'changed':False,'error_code':'TESTS_DISABLED','detail':'Test execution is disabled by the standard provider configuration.','retryable':None,'failure_scope':None,'failure_resource':None,'physical_effect':None,'observations':[],'coverage':{},'frontiers':[]}
 

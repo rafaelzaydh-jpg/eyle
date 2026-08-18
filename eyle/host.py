@@ -11,8 +11,8 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
 from eyle.capabilities import CapabilityRegistry, build_registry
-from eyle.providers.standard import get_provider as get_standard_provider
-from eyle.providers.standard_impl.workspace import discover_project
+from eyle.providers.standard.registry import get_provider as get_standard_provider
+from eyle.providers.standard.workspace import discover_project
 
 
 @dataclass(frozen=True)

@@ -225,7 +225,7 @@ def test_repeated_identical_internal_failure_counts_as_no_progress_not_no_execut
 
 
 def test_run_tests_is_not_replay_cached_and_logs_source(monkeypatch, tmp_path):
-    import eyle.providers.standard as standard
+    from eyle.providers.standard import editing
 
     workspace = tmp_path / "workspace"
     eyle_root = tmp_path / "eyle-src"
@@ -240,7 +240,7 @@ def test_run_tests_is_not_replay_cached_and_logs_source(monkeypatch, tmp_path):
             "tests_detected": True, "saida_resumida": "1 passed",
         }
 
-    monkeypatch.setattr(standard, "rodar_testes_projeto", fake_runner)
+    monkeypatch.setattr(editing, "rodar_testes_projeto", fake_runner)
     registry = standard_registry()
     cfg = base_config(tests_enabled=True)
     ctx = {"config": cfg, "provider_context": provider_context(workspace, eyle_root)}
@@ -447,11 +447,11 @@ def test_eyle_find_symbol_excludes_live_runtime_top_level_directories(tmp_path):
 
 
 def test_workspace_transaction_uses_canonical_registry_run_tests(monkeypatch, tmp_path):
-    import eyle.providers.standard as standard
-    import eyle.providers.workspace_transaction as workspace_tx
+    from eyle.providers.standard import editing
+    from eyle.providers.standard import workspace_transaction as workspace_tx
 
     seen = []
-    monkeypatch.setattr(standard, "rodar_testes_projeto", lambda root, cfg, scope=None: (
+    monkeypatch.setattr(editing, "rodar_testes_projeto", lambda root, cfg, scope=None: (
         seen.append((Path(root), scope)) or {
             "ok": True, "executado": True, "comando": "pytest", "codigo": 0,
             "scope": scope or ".", "backend": "fake", "runner": "pytest",

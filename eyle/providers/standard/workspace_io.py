@@ -122,7 +122,7 @@ def _corresponde_filtro(caminho_relativo, filtro):
     return padrao in caminho
 
 
-def listar_arvore_projeto(caminho_projeto, limite=200, profundidade=6, filtro=None):
+def listar_arvore_projeto(caminho_projeto, limite=200, profundidade=None, filtro=None):
     """List the live workspace without reading file contents.
 
     Protected secret resources remain structurally visible in the tree and are
@@ -197,7 +197,7 @@ def listar_arvore_projeto(caminho_projeto, limite=200, profundidade=6, filtro=No
                 if _corresponde_filtro(caminho_rel, filtro):
                     if not adicionar(caminho_rel, "diretorio", nivel):
                         return
-                if nivel >= profundidade:
+                if profundidade is not None and nivel >= int(profundidade):
                     ignorados["depth"] += 1
                     continue
                 visitar(caminho_seguro, caminho_rel, regras, nivel + 1)

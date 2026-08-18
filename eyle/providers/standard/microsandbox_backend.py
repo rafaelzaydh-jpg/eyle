@@ -15,6 +15,7 @@ import math
 import os
 import threading
 import uuid
+import warnings
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -176,8 +177,8 @@ class MicrosandboxSession:
         if pending:
             try:
                 self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-            except Exception:
-                pass
+            except Exception as exc:
+                warnings.warn(f"MICROSANDBOX_LOOP_DRAIN_FAILED:{type(exc).__name__}:{exc}", RuntimeWarning, stacklevel=2)
         self._loop.close()
 
     def _submit(self, coroutine: Any, *, timeout: float) -> Any:
@@ -384,16 +385,17 @@ class MicrosandboxSession:
         try:
             await asyncio.wait_for(drain(), timeout=float(timeout) + 5.0)
         except asyncio.TimeoutError:
+            kill_error = None
             try:
                 await handle.kill()
-            except Exception:
-                pass
+            except Exception as exc:
+                kill_error = f"; kill_failed={type(exc).__name__}:{exc}"
             return MicrosandboxExecResult(
                 executed=True,
                 code=code,
                 output=tail.decode("utf-8", errors="replace"),
                 timed_out=True,
-                error=f"timeout de {timeout}s excedido",
+                error=f"timeout de {timeout}s excedido" + (kill_error or ""),
             )
         except Exception as exc:
             return MicrosandboxExecResult(
@@ -448,17 +450,21 @@ class MicrosandboxSession:
         self._sandbox = None
         if sandbox is None:
             return
+        failures = []
         try:
             await sandbox.stop(timeout=5.0)
-        except Exception:
+        except Exception as stop_exc:
+            failures.append(f"stop:{type(stop_exc).__name__}:{stop_exc}")
             try:
                 await sandbox.kill(timeout=5.0)
-            except Exception:
-                pass
+            except Exception as kill_exc:
+                failures.append(f"kill:{type(kill_exc).__name__}:{kill_exc}")
         try:
             await self._sdk.Sandbox.remove(self.name)
-        except Exception:
-            pass
+        except Exception as remove_exc:
+            failures.append(f"remove:{type(remove_exc).__name__}:{remove_exc}")
+        if failures:
+            raise MicrosandboxBackendError("MICROSANDBOX_SHUTDOWN_FAILED:" + " | ".join(failures))
 
     def _stop_loop(self) -> None:
         if self._loop.is_running():
@@ -476,6 +482,7 @@ class MicrosandboxSession:
                     future.result(timeout=15)
                 except Exception:
                     future.cancel()
+                    raise
         finally:
             self._closed = True
             self._stop_loop()

@@ -32,13 +32,13 @@ def _memory_context(tmp_path: Path) -> dict:
     }
 
 
-def test_rev282_default_has_only_execution_generated_token_fuse():
+def test_rev371_default_uses_physical_provider_and_context_budgets():
     cfg = _release_config()
     llm = cfg["llm"]
-    assert llm["generated_token_fuse"] == 120_000
-    assert llm["context_window_tokens"] is None
+    assert llm["provider_token_budget_per_message"] == 150_000
+    assert llm["context_window_tokens"] == 50_000
     assert llm["read_timeout_seconds"] is None
-    for removed in ("max_tokens", "agent_max_tokens", "openai_compatible"):
+    for removed in ("generated_token_fuse", "max_tokens", "agent_max_tokens", "openai_compatible"):
         assert removed not in llm
 
 
@@ -57,22 +57,21 @@ def test_rev282_legacy_llm_config_fields_fail_closed():
         assert "UNKNOWN_CONFIG_FIELD:llm" in str(exc.value)
 
 
-def test_rev282_no_local_context_crop_by_default_but_test_window_still_available():
+def test_rev371_context_window_exposes_a_physical_prompt_budget():
     cfg = _release_config()
-    assert available_user_prompt_tokens(cfg, "system") is None
+    budget = available_user_prompt_tokens(cfg, "system")
+    assert isinstance(budget, int)
+    assert 0 < budget < cfg["llm"]["context_window_tokens"]
     cfg["llm"]["context_window_tokens"] = 1000
     budget = available_user_prompt_tokens(cfg, "system")
     assert isinstance(budget, int)
     assert 0 <= budget < 1000
 
 
-def test_rev282_read_timeout_defaults_to_remaining_task_deadline_not_120_seconds():
+def test_rev372_read_timeout_is_transport_only_without_cognitive_deadline():
     cfg = _release_config()
-    execution = ExecutionContext.from_config(cfg)
-    _connect, read, remaining = llm_exec._timeouts_da_chamada(cfg["llm"], "ecc", cfg, execution)
-    assert remaining is not None
-    assert read > 120
-    assert read <= remaining
+    _connect, read = llm_exec._timeouts_da_chamada(cfg["llm"], "ecc")
+    assert read == 1800.0
 
 
 def test_rev282_eyle_boundary_is_adapter_openai_only():
@@ -85,7 +84,7 @@ def test_rev282_eyle_boundary_is_adapter_openai_only():
 
 def test_rev283_prompt_tells_main_to_search_memory_and_not_treat_it_as_truth():
     prompt = llm_exec.PROMPT_ECC.lower()
-    assert "memory_view is a working view" in prompt
+    assert "memory_view is a materialized view" in prompt
     assert "never the boundary of memory" in prompt
     assert "memory_overview" in prompt and "memory_activate" in prompt
     assert "not universal truth" in prompt

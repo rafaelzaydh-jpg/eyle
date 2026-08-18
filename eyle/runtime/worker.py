@@ -2,8 +2,8 @@
 """Worker persistente, concorrente e com isolamento por processo.
 
 Cada job pode rodar em um processo filho. O processo supervisor publica
-heartbeat, aplica deadline de parede e termina o filho caso uma biblioteca
-nativa ignore timeouts cooperativos.
+heartbeat e permite cancelamento físico do processo filho. O fluxo normal não
+impõe deadline cognitivo por relógio; timeouts pertencem às operações físicas.
 """
 from __future__ import annotations
 
@@ -108,13 +108,13 @@ def _child_entry(evento, connection):
                     "traceback": traceback.format_exc(limit=30),
                 },
             ))
-        except Exception:
-            pass
+        except Exception as send_exc:
+            print(f"[worker][erro] falhou ao reportar erro do filho: {type(send_exc).__name__}: {send_exc}", file=sys.stderr)
     finally:
         try:
             connection.close()
-        except Exception:
-            pass
+        except (OSError, ValueError) as close_exc:
+            print(f"[worker][erro] falhou ao fechar pipe do filho: {type(close_exc).__name__}: {close_exc}", file=sys.stderr)
 
 
 def _terminate_process(process, grace_seconds=1.0):
@@ -133,7 +133,7 @@ def executar_evento_isolado(
     mp_context="spawn", target=None, cancel_check=None,
 ):
     """Executa um evento em filho terminavel e devolve seu resultado."""
-    deadline_seconds = max(0.1, float(deadline_seconds))
+    deadline_seconds = None if deadline_seconds is None else max(0.1, float(deadline_seconds))
     context = multiprocessing.get_context(mp_context)
     parent, child = context.Pipe(duplex=False)
     process = context.Process(
@@ -156,13 +156,14 @@ def executar_evento_isolado(
             if heartbeat is not None and now >= next_heartbeat:
                 heartbeat(process.pid)
                 next_heartbeat = now + max(0.5, float(heartbeat_interval))
-            remaining = deadline_seconds - (now - started)
-            if remaining <= 0:
+            remaining = None if deadline_seconds is None else deadline_seconds - (now - started)
+            if remaining is not None and remaining <= 0:
                 _terminate_process(process)
                 raise JobDeadlineExceeded(
-                    f"job excedeu o deadline de {deadline_seconds:.3f}s e o processo filho foi encerrado"
+                    f"job excedeu o watchdog físico de {deadline_seconds:.3f}s e o processo filho foi encerrado"
                 )
-            if parent.poll(min(0.2, remaining)):
+            poll_for = 0.2 if remaining is None else min(0.2, remaining)
+            if parent.poll(poll_for):
                 status, payload = parent.recv()
                 process.join(timeout=1.0)
                 if status == "ok":
@@ -198,8 +199,8 @@ def executar_evento_isolado(
     finally:
         try:
             parent.close()
-        except Exception:
-            pass
+        except (OSError, ValueError) as close_exc:
+            print(f"[worker][erro] falhou ao fechar pipe pai: {type(close_exc).__name__}: {close_exc}", file=sys.stderr)
         if process.is_alive():
             _terminate_process(process)
 
@@ -242,7 +243,7 @@ def _finalizar_cancelamento(evento, job_id, motivo, worker_id=None, started=None
 
 def processar_proximo(
     timeout=1.0, *, worker_id=None, heartbeat_interval=5,
-    max_invalid_jobs=100, isolate_job=False, hard_kill_seconds=300,
+    max_invalid_jobs=100, isolate_job=False, hard_kill_seconds=None,
     mp_context="spawn",
 ):
     """Processa no maximo um job e persiste conclusao, falha ou timeout."""
@@ -429,8 +430,8 @@ def _consumer_loop(worker_id, cfg):
             print(f"[worker][erro] ciclo da fila falhou: {type(error).__name__}: {error}")
             try:
                 queue.registrar_heartbeat(worker_id, "error", detalhe=error)
-            except Exception:
-                pass
+            except Exception as heartbeat_exc:
+                print(f"[worker][erro] heartbeat de erro falhou: {type(heartbeat_exc).__name__}: {heartbeat_exc}", file=sys.stderr)
             time.sleep(cfg["queue_error_backoff"])
 
 
@@ -457,7 +458,7 @@ def loop():
         "heartbeat_interval": max(1, int(cfg_worker.get("heartbeat_interval_seconds", 5))),
         "queue_error_backoff": max(0.1, float(cfg_worker.get("queue_error_backoff_seconds", 1))),
         "max_invalid_jobs": max(1, int(cfg_worker.get("max_invalid_jobs_per_reservation", 100))),
-        "hard_kill_seconds": max(1, int(config.get("agent", {}).get("task_deadline_seconds", 900))) + 15,
+        "hard_kill_seconds": None,
         "isolate_jobs": bool(cfg_worker.get("isolate_jobs", True)),
         "mp_context": str(cfg_worker.get("multiprocessing_context", "spawn")),
     }
@@ -465,11 +466,13 @@ def loop():
     stale_after = max(1, int(cfg_worker.get("stale_worker_seconds", 30)))
     recovered = queue.recuperar_interrompidos(stale_after_seconds=stale_after)
     _limpar_remocoes_pendentes_seguro()
+    recall_gc = eyle_service.gc_navegacao_memoria_orfa()
     root_id = f"worker-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     print(
         f"[worker] iniciado: consumidores={parallel} "
         f"(configurados={parallel_configurado}), isolamento={cfg['isolate_jobs']}, "
-        f"deadline={cfg['hard_kill_seconds']}s, recuperados={recovered}"
+        f"watchdog=operational-timeouts-only, recuperados={recovered}, "
+        f"recall_orphans={int(recall_gc.get('removed', 0) or 0)}"
     )
     consumers = []
     for index in range(parallel):

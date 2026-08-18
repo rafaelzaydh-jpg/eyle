@@ -5,7 +5,7 @@ from pathlib import Path
 
 from eyle.core import agent
 from eyle.runtime import observation
-from eyle.providers import standard as tools
+from eyle.providers.standard import registry as tools
 
 
 def test_generic_material_accepts_non_file_locator():

@@ -58,20 +58,9 @@ JS_FRAMEWORK_PACKAGES = {
 }
 
 
-def _scan_limits(config: Dict[str, Any]) -> Tuple[int | None, int, int]:
-    agent = ((((config or {}).get("providers") or {}).get("standard") or {}))
-    raw_entries = agent.get("max_project_scan_entries")
-    max_entries = None if raw_entries is None else max(100, int(raw_entries))
-    # Depth remains a physical traversal declaration. Current defaults are high
-    # enough to behave as unbounded for normal source trees; an operator may
-    # explicitly lower it for pathological filesystems.
-    raw_depth = agent.get("max_project_scan_depth")
-    max_depth = 10000 if raw_depth is None else max(1, int(raw_depth))
-    return (
-        max_entries,
-        max_depth,
-        max(1024, int(agent.get("max_project_file_bytes", 4 * 1024 * 1024) or 4 * 1024 * 1024)),
-    )
+def _scan_limits(config: Dict[str, Any]) -> Tuple[None, None, None]:
+    """Project cognition is exhaustive; paging belongs at projection boundaries."""
+    return None, None, None
 
 
 def collect_project_inventory(root: str, config: Dict[str, Any]) -> Dict[str, Any]:
@@ -93,7 +82,7 @@ def collect_project_inventory(root: str, config: Dict[str, Any]) -> Dict[str, An
     return {"inventory": inventory, "files": files, "directories": directories}
 
 
-def _safe_read(root: str, rel: str, max_bytes: int, *, protected_index=None) -> Tuple[str | None, int, str | None]:
+def _safe_read(root: str, rel: str, max_bytes: int | None, *, protected_index=None) -> Tuple[str | None, int, str | None]:
     if is_protected_workspace_resource(root, rel, index=protected_index):
         return None, 0, "protected_resource"
     safe = _resolver_caminho_seguro(root, rel)
@@ -103,7 +92,7 @@ def _safe_read(root: str, rel: str, max_bytes: int, *, protected_index=None) -> 
         size = os.path.getsize(safe)
     except OSError:
         return None, 0, "stat_error"
-    if size > max_bytes:
+    if max_bytes is not None and size > int(max_bytes):
         return None, size, "file_too_large"
     try:
         with open(safe, "r", encoding="utf-8", errors="replace") as handle:
@@ -418,8 +407,7 @@ def inspect_project(root: str, config: Dict[str, Any]) -> Dict[str, Any]:
         for rel, sources in imported_by.items() if sources
     ]
     imported_counts.sort(key=lambda item: (-item["imported_by_count"], item["path"]))
-    raw_relation_limit = ((((config or {}).get("providers") or {}).get("standard") or {}).get("max_inspect_relation_edges"))
-    max_relations = None if raw_relation_limit is None else max(10, int(raw_relation_limit))
+    max_relations = None
     local_import_edges.sort(key=lambda item: (item["from"], item["to"]))
     structural = {
         "files": len(files), "directories": len(collected["directories"]),

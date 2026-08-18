@@ -8,7 +8,7 @@ from eyle.runtime.observation import empty_ledger as empty_observation_ledger, p
 from .evidence import empty_evidence, validate_evidence
 from .memory import empty_memory_view
 
-SESSION_SCHEMA_VERSION = "2.7.5-r2.8.3-ecc"
+SESSION_SCHEMA_VERSION = "2.7.5-r3.7.2-ecc"
 
 
 def _validated_memory_view(value: Any) -> Dict[str, Any]:
@@ -56,7 +56,7 @@ class AgentSession:
             "observation_ledger": persisted_observations(self.observation_ledger),
             "evidence": validate_evidence(self.evidence),
             "memory_view": _validated_memory_view(self.memory_view),
-            "runtime_feedback": [dict(v) for v in self.runtime_feedback[-20:] if isinstance(v, dict)],
+            "runtime_feedback": [dict(v) for v in self.runtime_feedback if isinstance(v, dict)],
             "pending_operation": dict(self.pending_operation or {}),
         }
 
@@ -96,7 +96,7 @@ class AgentSession:
         value = data.get("runtime_feedback")
         if not isinstance(value, list) or not all(isinstance(v, dict) for v in value):
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
-        session.runtime_feedback = [dict(v) for v in value][-20:]
+        session.runtime_feedback = [dict(v) for v in value]
         if not isinstance(data.get("pending_operation"), dict):
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
         session.pending_operation = dict(data.get("pending_operation") or {})

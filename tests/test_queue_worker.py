@@ -1,3 +1,6 @@
+from eyle.runtime.execution_context import ExecutionContext
+from eyle.runtime.continuation import PENDING_SCHEMA_VERSION
+from tests.canonical import base_config
 from eyle.runtime import service as service_mod
 from eyle.runtime import queue
 from eyle.runtime import worker
@@ -64,9 +67,7 @@ def test_job_usa_snapshot_e_nao_historico_futuro(monkeypatch):
     conversa_futura = snapshot_a + [{"id": 2, "role": "user", "text": "B"}]
     recebido = {}
 
-    monkeypatch.setattr(service_mod, "carregar_config", lambda: {
-        "agent": {"task_deadline_seconds": 30},
-    })
+    monkeypatch.setattr(service_mod, "carregar_config", base_config)
     monkeypatch.setattr(service_mod, "carregar_provider_context", lambda: {})
     monkeypatch.setattr(service_mod, "carregar_conversa", lambda: conversa_futura)
     monkeypatch.setattr(service_mod, "registrar_mensagem", lambda *args, **kwargs: None)
@@ -137,9 +138,7 @@ def test_queue_falhar_pode_preservar_resultado_estruturado(monkeypatch, tmp_path
 
 
 def test_service_result_has_no_router_layer(monkeypatch):
-    monkeypatch.setattr(service_mod, "carregar_config", lambda: {
-        "agent": {"task_deadline_seconds": 30},
-    })
+    monkeypatch.setattr(service_mod, "carregar_config", base_config)
     monkeypatch.setattr(service_mod, "carregar_provider_context", lambda: {})
     monkeypatch.setattr(service_mod, "carregar_conversa", lambda: [])
     monkeypatch.setattr(service_mod, "registrar_mensagem", lambda *args, **kwargs: None)
@@ -157,17 +156,15 @@ def test_service_result_has_no_router_layer(monkeypatch):
 
 
 def test_natural_request_with_nao_is_not_treated_as_cancel(monkeypatch):
-    monkeypatch.setattr(service_mod, "carregar_config", lambda: {
-        "agent": {"task_deadline_seconds": 30},
-    })
+    monkeypatch.setattr(service_mod, "carregar_config", base_config)
     monkeypatch.setattr(service_mod, "carregar_provider_context", lambda: {})
     monkeypatch.setattr(service_mod, "carregar_conversa", lambda: [])
     monkeypatch.setattr(service_mod, "registrar_mensagem", lambda *args, **kwargs: None)
-    monkeypatch.setattr(service_mod, "carregar_agent_pendente", lambda: {
+    monkeypatch.setattr(service_mod, "carregar_agent_pendente", lambda *args, **kwargs: {
         "continuation_kind": "capability_confirmation", "id": "ABCD",
     })
     cleared = []
-    monkeypatch.setattr(service_mod, "limpar_agent_pendente", lambda: cleared.append(True))
+    monkeypatch.setattr(service_mod, "limpar_agent_pendente", lambda *args, **kwargs: cleared.append(True))
     monkeypatch.setattr(
         service_mod, "executar_agente",
         lambda *args, **kwargs: ("success", "novo pedido entendido", None, {
@@ -182,39 +179,17 @@ def test_natural_request_with_nao_is_not_treated_as_cancel(monkeypatch):
 
 
 def test_runtime_assigns_confirmation_metadata_once(monkeypatch, tmp_path):
-    pending_path = tmp_path / "agent_pendente.json"
     project = tmp_path / "project"
     project.mkdir()
-    monkeypatch.setattr(service_mod, "AGENT_PENDENTE_PATH", str(pending_path))
+    monkeypatch.setattr(service_mod, "AGENT_PENDENTE_DIR", str(tmp_path / "pending"))
     monkeypatch.setattr(service_mod.secrets, "token_hex", lambda size: "a1b2")
 
     core_pending = {
-        "pending_schema_version": "11-ecc",
+        "pending_schema_version": PENDING_SCHEMA_VERSION,
         "continuation_kind": "capability_confirmation",
         "question": "Proposal ready.",
         "session": {"request": "change the file"},
-        "execution_state": {
-            "schema_version": "execution-continuity-v1",
-            "execution_id": "job-1",
-            "started_wall_time": 1000.0,
-            "deadline_wall_time": 2000.0,
-            "generated_token_limit": 120000,
-            "llm_calls": [],
-            "system_prompt_hashes": [],
-            "history_messages_omitted": 0,
-            "agent_turns": 0,
-            "canonical_request_hash": None,
-            "prompt_tokens_budgeted_physical": 0,
-            "prompt_tokens_estimated_raw": 0,
-            "prompt_tokens_actual": 0,
-            "prompt_tokens_cached": 0,
-            "prompt_tokens_uncached": 0,
-            "prompt_tokens_effective": 0,
-            "completion_tokens_actual": 0,
-            "reasoning_tokens_actual": 0,
-            "terminal_capabilities": {},
-            "resume_count": 0,
-        },
+        "execution_state": ExecutionContext.from_config(base_config(), execution_id="job-1").continuation_state(),
         "capability": "workspace_transaction",
         "provider": "standard",
         "confirmation_id": "tx-1",
@@ -226,8 +201,11 @@ def test_runtime_assigns_confirmation_metadata_once(monkeypatch, tmp_path):
     )
 
     assert saved["id"] == "A1B2"
-    assert saved["question"].count("Pending ID: A1B2") == 1
-    assert saved["question"].count("confirmar A1B2") == 1
+    assert saved["question"] == "Proposal ready."
+    public = service_mod._public_interaction(saved)
+    assert [item["label"] for item in public["options"]] == ["Aceitar", "Recusar"]
+    assert public["options"][0]["submit_text"] == "confirmar A1B2"
+    assert "A1B2" not in public["title"]
     assert saved["provider_context_hash"] == service_mod._hash_provider_context(
         {"standard": {"caminho_origem": str(project)}}
     )

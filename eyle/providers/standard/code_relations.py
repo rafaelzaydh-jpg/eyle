@@ -26,7 +26,7 @@ def _rel(root: str, path: str) -> str:
     return os.path.relpath(path, root).replace(os.sep, "/")
 
 
-def _source_files(root: str, *, max_files: int | None, max_bytes: int) -> Tuple[List[str], bool, int]:
+def _source_files(root: str, *, max_files: int | None, max_bytes: int | None) -> Tuple[List[str], bool, int]:
     files: List[str] = []
     truncated = False
     protected_skipped = 0
@@ -42,7 +42,9 @@ def _source_files(root: str, *, max_files: int | None, max_bytes: int) -> Tuple[
                 protected_skipped += 1
                 continue
             try:
-                if not os.path.isfile(path) or os.path.getsize(path) > max_bytes:
+                if not os.path.isfile(path):
+                    continue
+                if max_bytes is not None and os.path.getsize(path) > int(max_bytes):
                     continue
             except OSError:
                 continue
@@ -73,7 +75,7 @@ def _call_name(node: ast.AST) -> Optional[str]:
 def _expr_text(node: ast.AST) -> str:
     try:
         return ast.unparse(node)[:240]
-    except Exception:
+    except (TypeError, ValueError, RecursionError):
         return type(node).__name__
 
 
@@ -462,8 +464,8 @@ def _reachable_nodes(adjacency: Dict[str, List[str]], starts: List[str], max_dep
 def analyze_symbol_relations(
     root: str, symbol: str, *, path: Optional[str] = None, roots: Optional[List[str]] = None,
     direction: str = "both", include_text_references: bool = False,
-    max_depth: int = 6, max_edges: int | None = 120, max_files: int | None = 20000,
-    max_file_bytes: int = 4 * 1024 * 1024, query: str = "relations",
+    max_depth: int | None = None, max_edges: int | None = None, max_files: int | None = None,
+    max_file_bytes: int | None = None, query: str = "relations",
 ) -> Dict[str, Any]:
     """Return objective structural observations for one symbol.
 
@@ -557,7 +559,7 @@ def analyze_symbol_relations(
     # Directed reachability is mechanically exhaustive over the finite resolved
     # graph. ``max_depth`` remains a local-relations control only; the Main must
     # never tune 5 -> 12 -> 32 to discover a path that Runtime can traverse itself.
-    reachability_depth: Optional[int] = None if query == "reachability" else int(max_depth)
+    reachability_depth: Optional[int] = None if max_depth is None else int(max_depth)
     depth_boundary_nodes: List[str] = []
     for root_spec in root_specs:
         starts = [root_spec] if auto_roots and root_spec in module_nodes else _resolve_nodes(root_spec, py["definitions"], module_nodes)

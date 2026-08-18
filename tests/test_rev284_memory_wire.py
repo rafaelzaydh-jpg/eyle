@@ -19,7 +19,7 @@ def test_rev284_provider_schema_describes_every_memory_operation_and_support_sha
     item = schema["properties"]["memory_delta"]["items"]
     variants = item["oneOf"]
     assert [v["properties"]["op"]["enum"][0] for v in variants] == [
-        "remember", "revise", "relate", "revise_relation", "archive", "supersede", "retire_relation",
+        "remember", "revise", "relate", "revise_relation", "task_status", "archive", "supersede", "retire_relation",
     ]
     remember_args = variants[0]["properties"]["arguments"]
     supports = remember_args["properties"]["supports"]
@@ -113,21 +113,23 @@ def test_rev284_opaque_material_selector_and_memory_content_have_no_hidden_local
     assert parsed["memory_delta"][0]["supports"][0]["selector"] == deep
 
 
-def test_rev284_ambiguous_support_still_fails_closed():
-    with pytest.raises(StructuredResponseError) as exc:
-        parse_profile_response(
-            _conclude([
-                {
-                    "op": "remember",
-                    "arguments": {
-                        "scope": "world", "retention": "temporary", "kind": "fact", "content": "x",
-                        "supports": ["whatever-this-is"],
-                    },
-                }
-            ]),
-            "ecc",
-        )
-    assert exc.value.code == "EYLE_MEMORY_INVALID"
+def test_rev371_ambiguous_memory_support_rejects_sidecar_not_valid_ecc():
+    parsed = parse_profile_response(
+        _conclude([
+            {
+                "op": "remember",
+                "arguments": {
+                    "scope": "world", "retention": "temporary", "kind": "fact", "content": "x",
+                    "supports": ["whatever-this-is"],
+                },
+            }
+        ]),
+        "ecc",
+    )
+    assert parsed["type"] == "concluir"
+    assert parsed["response"] == "ok"
+    assert parsed["memory_delta"] == []
+    assert parsed["memory_error"]["code"] == "EYLE_MEMORY_INVALID"
 
 
 def test_rev286_prompt_teaches_simple_wire_and_delegates_canonicalization():
@@ -140,10 +142,3 @@ def test_rev286_prompt_teaches_simple_wire_and_delegates_canonicalization():
     assert 'supports is always a json array' not in lower
 
 
-def test_rev284_accepts_clean_rev283_config_during_in_place_upgrade():
-    config = base_config()
-    config["config_schema_version"] = "2.7.5-r2.8.3-ecc"
-    config["revision"] = "rev2.8.3-ecc"
-    validated = validar_config(copy.deepcopy(config), standard_registry())
-    assert validated["config_schema_version"] == "2.7.5-r3-ecc"
-    assert validated["revision"] == "rev3-ecc"

@@ -49,10 +49,7 @@ def _stable_public_names(registry: Any) -> Dict[str, str]:
     candidates: Dict[str, tuple[str, str, str]] = {}
     counts: Counter[tuple[str, str]] = Counter()
     for capability in sorted({str(v) for v in registry.names()}):
-        try:
-            short, fallback, family = _candidate_name(capability, registry)
-        except Exception:
-            continue
+        short, fallback, family = _candidate_name(capability, registry)
         candidates[capability] = (short, fallback, family)
         counts[(family, short)] += 1
     return {
@@ -91,10 +88,54 @@ def resolve(operation: str, action_kind: str, registry: Any, available: Iterable
     return operation_map(registry, available, action_kind).get(str(operation or "").strip())
 
 
+
+
+def _compact_input_hint(value: Any) -> Any:
+    """Return the minimal wire hint Main needs to author an argument.
+
+    Capability schemas remain strict and provider-owned in the Registry.  The ECC
+    catalog is a model-facing navigation surface, not a second copy of those
+    schemas.  Repeated prose (especially source identity) is already taught once
+    in the stable prompt and wastes paid context when duplicated per operation.
+    """
+    if not isinstance(value, str):
+        return copy.deepcopy(value)
+    text = value.strip()
+    return text.split(" | ", 1)[0].strip() if " | " in text else text
+
+
+def _compact_catalog_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Project a capability contract into a terse model-facing operation card.
+
+    Runtime still validates the full canonical capability schema.  This function
+    only removes descriptive duplication that does not change what Main can call.
+    """
+    out: Dict[str, Any] = {"operation": str(item.get("operation") or "")}
+    inputs = item.get("inputs") if isinstance(item.get("inputs"), dict) else {}
+    if inputs:
+        out["inputs"] = {str(k): _compact_input_hint(v) for k, v in inputs.items()}
+    # Purpose/returns prose lives in Registry/docs. Only behavior-changing
+    # caveats remain on the wire, and are bounded because Runtime enforces the
+    # full canonical contract independently.
+    caveats = [str(v).strip() for v in (item.get("caveats") or []) if str(v).strip()]
+    if caveats:
+        out["caveats"] = [v[:180] for v in caveats[:2]]
+    confirmation = str(item.get("confirmation") or "none")
+    if confirmation != "none":
+        out["confirmation"] = confirmation
+    return out
+
 def catalog(registry: Any, config: Dict[str, Any], available: Iterable[str], *, memory_enabled: bool = False) -> Dict[str, List[Dict[str, Any]]]:
     allowed = {str(v) for v in available}
     contracts = {str(item.get("name")): item for item in registry.catalog(config=config, allowed_names=allowed)}
-    out: Dict[str, Any] = {"guidance": list(registry.ecc_guidance(allowed)), "explorar": [], "construir": []}
+    out: Dict[str, Any] = {
+        "guidance": [
+            "Use source=workspace for user files; source=eyle only for the running Eyle source.",
+            "Use sandboxed execution for substantial project work; promote the tested candidate instead of reconstructing it.",
+            "Promotion merge preserves unstaged target files; mirror may delete target files absent from the staged subtree.",
+        ],
+        "explorar": [], "construir": [],
+    }
     for family in ("explorar", "construir"):
         mapping = operation_map(registry, allowed, family)
         for public, internal in mapping.items():
@@ -138,7 +179,7 @@ def catalog(registry: Any, config: Dict[str, Any], available: Iterable[str], *, 
             {
                 "operation": "memory_overview",
                 "purpose": "See the compact directory of the unified Memory Graph without loading node bodies.",
-                "inputs": {"scope": "all|user|world?"},
+                "inputs": {"scope": "all|user|world|global?"},
                 "returns": "Memory counts plus compact retention/epistemic/kind/tag directory and Coverage.",
             },
             {
@@ -156,7 +197,7 @@ def catalog(registry: Any, config: Dict[str, Any], available: Iterable[str], *, 
             {
                 "operation": "memory_activate",
                 "purpose": "Explicitly activate a Memory Graph region by query, exact mem-* IDs or tags. The requested page is materialized now; any remainder is exposed as Frontier and may be continued as many times as Main chooses.",
-                "inputs": {"query": "string?", "ids": "mem-*[]?", "tags": "string[]?", "natures": "epistemic nature[]?", "volatilities": "epistemic volatility[]?", "scope": "all|user|world?", "retention": "all|temporary|persistent?", "include_neighbors": "bool?", "limit": "positive page size?"},
+                "inputs": {"query": "string?", "queries": "string[]?", "ids": "mem-*[]?", "tags": "string[]?", "natures": "epistemic nature[]?", "volatilities": "epistemic volatility[]?", "relation_labels": "string[]?", "scope": "all|user|world|global?", "retention": "all|temporary|persistent?", "include_neighbors": "bool?", "limit": "positive page size?"},
                 "returns": "Memory View, Coverage and optional fr-* Frontier. Frontier is continuation, never a stop signal.",
                 "caveats": ["At least one of query, ids, tags, natures or volatilities is required. Runtime never adds topology/importance fallback."],
             },
@@ -168,4 +209,8 @@ def catalog(registry: Any, config: Dict[str, Any], available: Iterable[str], *, 
                 "inputs": {"frontier": "fr-*"},
                 "returns": "The exact next page behind that Frontier plus Coverage and another Frontier if more remains.",
             })
+    # The full provider schema stays in Registry; Main receives only the
+    # operation name, purpose, terse wire hints and behavior-changing caveats.
+    out["explorar"] = [_compact_catalog_item(item) for item in out["explorar"]]
+    out["construir"] = [_compact_catalog_item(item) for item in out["construir"]]
     return out

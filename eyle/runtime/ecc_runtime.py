@@ -231,7 +231,7 @@ def dispatch(
     if operation == "memory_overview":
         if action_kind != "explorar" or set(arguments) - {"scope"}:
             return DispatchOutcome({"operation": operation, "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": "ECC_OPERATION_ARGUMENTS_INVALID"})
-        if "scope" in arguments and str(arguments.get("scope")) not in {"all", "user", "world"}:
+        if "scope" in arguments and str(arguments.get("scope")) not in {"all", "user", "world", "global"}:
             return DispatchOutcome({"operation": operation, "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": "ECC_OPERATION_ARGUMENTS_INVALID"})
         result = memory_overview_result(session, arguments=arguments, provider_context=provider_context)
         return DispatchOutcome(result, physical_progress=result.get("ok") is True)
@@ -258,7 +258,7 @@ def dispatch(
         valid = valid and ("natures" not in arguments or (isinstance(arguments.get("natures"), list) and all(isinstance(v, str) for v in arguments.get("natures") or [])))
         valid = valid and ("volatilities" not in arguments or (isinstance(arguments.get("volatilities"), list) and all(isinstance(v, str) for v in arguments.get("volatilities") or [])))
         valid = valid and ("relation_labels" not in arguments or (isinstance(arguments.get("relation_labels"), list) and all(isinstance(v, str) for v in arguments.get("relation_labels") or [])))
-        valid = valid and ("scope" not in arguments or str(arguments.get("scope")) in {"all", "user", "world"})
+        valid = valid and ("scope" not in arguments or str(arguments.get("scope")) in {"all", "user", "world", "global"})
         valid = valid and ("retention" not in arguments or str(arguments.get("retention")) in {"all", "temporary", "persistent"})
         valid = valid and ("include_neighbors" not in arguments or isinstance(arguments.get("include_neighbors"), bool))
         valid = valid and ("limit" not in arguments or (isinstance(arguments.get("limit"), int) and not isinstance(arguments.get("limit"), bool) and int(arguments.get("limit")) >= 1))
@@ -404,6 +404,22 @@ def dispatch(
     new_material = len(material_items(session.observation_ledger)) > material_count_before
     physical_progress = bool(new_material or (result.get("executed") is True and not duplicate_result))
     return DispatchOutcome(model, physical_progress=physical_progress)
+
+
+def cancel_pending(session: Any, pending: Dict[str, Any], *, config: Dict[str, Any], provider_context: Dict[str, Any], registry: Any) -> Dict[str, Any]:
+    state = session.pending_operation if isinstance(session.pending_operation, dict) else {}
+    capability = str(pending.get("capability") or "")
+    if (
+        not state or capability != str(state.get("capability") or "")
+        or str(pending.get("provider") or "") != str(state.get("provider") or "")
+        or str(pending.get("confirmation_id") or "") != str(state.get("confirmation_id") or "")
+    ):
+        return {"ok": False, "error_code": "CAPABILITY_PENDING_MISMATCH"}
+    cleaned = registry.cancel_confirmation(
+        capability, state.get("state") or {}, _runtime_context(session, config, provider_context),
+    )
+    session.pending_operation = {}
+    return cleaned if isinstance(cleaned, dict) else {"ok": True}
 
 
 def confirm_pending(session: Any, pending: Dict[str, Any], *, config: Dict[str, Any], provider_context: Dict[str, Any], registry: Any) -> Dict[str, Any]:

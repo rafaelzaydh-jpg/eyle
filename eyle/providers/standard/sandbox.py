@@ -30,21 +30,24 @@ def _cleanup_sandbox_state(state):
     container = state.get("container_name")
     tempdir = state.get("tempdir")
     state.clear()
+    failures = []
     if session is not None:
         try:
             session.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            failures.append(f"microsandbox:{type(exc).__name__}:{exc}")
     if docker and container:
         try:
             subprocess.run([docker, "rm", "-f", container], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15, check=False, shell=False)
-        except Exception:
-            pass
+        except (OSError, subprocess.SubprocessError) as exc:
+            failures.append(f"docker:{type(exc).__name__}:{exc}")
     if tempdir is not None:
         try:
             tempdir.cleanup()
-        except Exception:
-            pass
+        except OSError as exc:
+            failures.append(f"tempdir:{type(exc).__name__}:{exc}")
+    if failures:
+        raise RuntimeError("SANDBOX_CLEANUP_FAILED:" + " | ".join(failures))
 
 
 def _sandbox_state(execution=None):

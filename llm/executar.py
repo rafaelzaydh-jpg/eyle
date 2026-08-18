@@ -59,11 +59,12 @@ _ADAPTER_HANDSHAKE_TTL_SECONDS = 300.0
 
 def _diagnostico(codigo, **campos):
     """Log curto e estruturado; nunca interfere no resultado da chamada."""
+    payload = {"code": codigo, **campos}
     try:
-        payload = {"code": codigo, **campos}
-        print("[llm] " + json.dumps(payload, ensure_ascii=False, default=str), file=sys.stderr)
-    except Exception:
-        pass
+        encoded = json.dumps(payload, ensure_ascii=False, default=str)
+    except (TypeError, ValueError) as exc:
+        encoded = json.dumps({"code": "DIAGNOSTIC_SERIALIZATION_FAILED", "original_code": str(codigo), "error": str(exc)}, ensure_ascii=False)
+    print("[llm] " + encoded, file=sys.stderr)
 
 
 def _adapter_root(base_url: str) -> str:
@@ -95,7 +96,10 @@ def _validate_adapter_handshake(body: Any) -> dict[str, Any]:
     capabilities = body.get("capabilities")
     if not isinstance(capabilities, dict):
         raise ValueError("ADAPTER_CAPABILITIES_INVALID")
-    required = ("chat_completions", "client_json_schema_hint", "json_candidate_passthrough", "syntactic_json_recovery")
+    required = (
+        "chat_completions", "client_json_schema_hint", "json_candidate_passthrough",
+        "syntactic_json_recovery", "client_completion_ceiling", "client_reasoning_control",
+    )
     if not all(capabilities.get(key) is True for key in required):
         raise ValueError("ADAPTER_REQUIRED_CAPABILITY_MISSING")
     endpoints = body.get("endpoints")
@@ -115,7 +119,7 @@ def diagnosticar_backend(config, timeout=None):
     base_url = str(cfg_llm.get("base_url") or "http://127.0.0.1:8080").rstrip("/")
     limite = timeout
     if limite is None:
-        limite = cfg_llm.get("model_discovery_timeout_seconds", 3)
+        limite = cfg_llm.get("adapter_handshake_timeout_seconds", 3)
     try:
         limite = max(0.1, min(float(limite), 10.0))
     except (TypeError, ValueError):
@@ -218,10 +222,8 @@ def _ensure_adapter_handshake(config) -> dict[str, Any]:
 
 
 def _retry_after_seconds(erro):
-    try:
-        valor = erro.headers.get("Retry-After")
-    except Exception:
-        valor = None
+    headers = getattr(erro, "headers", None)
+    valor = headers.get("Retry-After") if headers is not None else None
     if valor is None:
         return None
     try:
@@ -251,7 +253,7 @@ def _adapter_error_contract(erro, corpo_erro=""):
     """
     try:
         payload = json.loads(str(corpo_erro or ""))
-    except Exception:
+    except (json.JSONDecodeError, TypeError):
         payload = {}
     error = payload.get("error") if isinstance(payload, dict) else None
     error_obj = error if isinstance(error, dict) else {}
@@ -268,6 +270,7 @@ def _adapter_error_contract(erro, corpo_erro=""):
 
     prompt_tokens = header_int("X-Eyle-Usage-Prompt-Tokens")
     completion_tokens = header_int("X-Eyle-Usage-Completion-Tokens")
+    total_tokens_header = header_int("X-Eyle-Usage-Total-Tokens")
     cached_tokens = header_int("X-Eyle-Usage-Cached-Prompt-Tokens")
     upstream_attempts = header_int("X-Eyle-Upstream-Attempts")
     structured_repairs = header_int("X-Eyle-Structured-Repairs")
@@ -275,6 +278,11 @@ def _adapter_error_contract(erro, corpo_erro=""):
         prompt_tokens = max(0, int(usage.get("prompt_tokens") or 0))
     if completion_tokens is None and isinstance(usage.get("completion_tokens"), (int, float)):
         completion_tokens = max(0, int(usage.get("completion_tokens") or 0))
+    total_tokens = total_tokens_header
+    if total_tokens is None and isinstance(usage.get("total_tokens"), (int, float)):
+        total_tokens = usage.get("total_tokens")
+    if total_tokens is None and prompt_tokens is not None and completion_tokens is not None:
+        total_tokens = int(prompt_tokens) + int(completion_tokens)
     if cached_tokens is None:
         raw_cached = usage.get("cached_prompt_tokens")
         if isinstance(raw_cached, (int, float)):
@@ -286,6 +294,7 @@ def _adapter_error_contract(erro, corpo_erro=""):
             "provider_usage_from_error": True,
             "prompt_tokens": max(0, int(prompt_tokens or 0)),
             "completion_tokens": max(0, int(completion_tokens or 0)),
+            "total_tokens": max(0, int(total_tokens or 0)),
         }
         if cached_tokens is not None:
             metadata["cached_prompt_tokens"] = min(metadata["prompt_tokens"], max(0, int(cached_tokens)))
@@ -353,10 +362,7 @@ def _adapter_response_metadata(headers) -> dict[str, Any]:
     if headers is None:
         return {}
     def get(name):
-        try:
-            return headers.get(name)
-        except Exception:
-            return None
+        return headers.get(name)
     def as_int(name):
         raw = get(name)
         try:
@@ -435,8 +441,8 @@ def _abrir_url(req, connect_timeout, read_timeout=None):
     finally:
         try:
             resposta.close()
-        except Exception:
-            pass
+        except OSError as exc:
+            _diagnostico("HTTP_RESPONSE_CLOSE_FAILED", detail=str(exc))
 
 
 def _semaforo_backend(chave, limite):
@@ -448,12 +454,10 @@ def _semaforo_backend(chave, limite):
         )
 
 
-def _esperar_cooldown(chave, deadline=None):
+def _esperar_cooldown(chave):
     with _COOLDOWN_LOCK:
         ate = _COOLDOWN_ATE.get(chave, 0.0)
     espera = max(0.0, ate - time.monotonic())
-    if deadline is not None:
-        espera = min(espera, max(0.0, deadline - time.monotonic()))
     if espera > 0:
         time.sleep(espera)
 
@@ -478,7 +482,8 @@ def _endpoint_openai(base_url, recurso):
 def _ler_corpo_http_error(erro):
     try:
         return erro.read().decode("utf-8", errors="replace")[:1000]
-    except Exception:
+    except (OSError, ValueError, AttributeError) as exc:
+        _diagnostico("HTTP_ERROR_BODY_READ_FAILED", detail=str(exc))
         return ""
 
 
@@ -498,6 +503,7 @@ def _metadata_resposta_normalizada(normalizada):
         "prompt_tokens": normalizada.prompt_tokens,
         "cached_prompt_tokens": normalizada.cached_prompt_tokens,
         "completion_tokens": normalizada.completion_tokens,
+        "total_tokens": normalizada.total_tokens,
         "reasoning_tokens": normalizada.reasoning_tokens,
         "provider_model": normalizada.model,
         "response_id": normalizada.response_id,
@@ -508,7 +514,19 @@ def _metadata_resposta_normalizada(normalizada):
 def _registrar_metadata_backend(normalizada):
     if not isinstance(normalizada, NormalizedModelResponse):
         raise TypeError("normalized backend response required")
-    _LLM_RESPONSE_LOCAL.metadata = _metadata_resposta_normalizada(normalizada)
+    fresh = _metadata_resposta_normalizada(normalizada)
+    if normalized_stream := bool(normalizada.streaming):
+        # Streaming metadata arrives piecemeal. In particular DeepSeek emits a
+        # final usage-only chunk, so merge non-empty fields instead of erasing
+        # the finish_reason/model learned from earlier chunks.
+        previous = dict(getattr(_LLM_RESPONSE_LOCAL, "metadata", {}) or {})
+        for key, value in fresh.items():
+            if value is not None:
+                previous[key] = value
+        previous["streaming"] = normalized_stream
+        _LLM_RESPONSE_LOCAL.metadata = previous
+    else:
+        _LLM_RESPONSE_LOCAL.metadata = fresh
     return normalizada
 
 
@@ -601,7 +619,7 @@ def _structured_response_format(profile):
 def _chamar_openai_compatible(
     base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
     read_timeout=None, on_chunk=None,
-    perfil=None, on_request=None,
+    perfil=None, on_request=None, max_completion_tokens=None, provider_token_budget_remaining=None, reasoning_mode="off",
 ):
     """Call the local OpenAI-compatible Adapter.
 
@@ -617,7 +635,12 @@ def _chamar_openai_compatible(
         "messages": prompt_messages(prompt_sistema, prompt_usuario),
         "temperature": temperature,
         "stream": bool(on_chunk),
+        "reasoning_mode": str(reasoning_mode or "off"),
     }
+    if isinstance(max_completion_tokens, int) and max_completion_tokens > 0:
+        payload["max_completion_tokens"] = int(max_completion_tokens)
+    if isinstance(provider_token_budget_remaining, int) and provider_token_budget_remaining > 0:
+        payload["provider_token_budget_remaining"] = int(provider_token_budget_remaining)
     if perfil is not None:
         # Eyle->Adapter has one stable wire protocol. Provider-specific structured
         # transport selection belongs entirely to the Adapter.
@@ -698,6 +721,8 @@ def _chamar_openai_compatible(
             transient=False, error_code="ADAPTER_PROTOCOL_INCOMPATIBLE",
         )
     meta.update({
+        "completion_ceiling_requested": int(max_completion_tokens) if isinstance(max_completion_tokens, int) and max_completion_tokens > 0 else None,
+        "reasoning_mode_requested": str(reasoning_mode or "off"),
         "structured_profile": perfil,
         "structured_mode": ("adapter_wire_json_schema" if perfil is not None else None),
         "structured_transport": ("openai_adapter_wire_json_schema" if perfil is not None else "text"),
@@ -706,11 +731,6 @@ def _chamar_openai_compatible(
     _LLM_RESPONSE_LOCAL.metadata = meta
     return text
 
-
-def _timeout_restante(execution: ExecutionContext | None):
-    if execution is None:
-        return None
-    return max(0.0, float(execution.deadline_monotonic) - time.monotonic())
 
 
 def _reservar_requisicao_llm(
@@ -735,13 +755,13 @@ def _reservar_requisicao_llm(
     prompt_tokens = system_tokens + user_tokens
     multiplier = execution.prompt_token_calibration if execution is not None else 1.0
     calibrated_prompt_tokens = int(math.ceil(prompt_tokens * min(4.0, max(0.75, float(multiplier)))))
-    response_reserved = 0
     margin = max(0, int(cfg_context.get("safety_margin_tokens", 256) or 0))
     raw_window = cfg_llm.get("context_window_tokens")
     window = int(raw_window) if isinstance(raw_window, int) and not isinstance(raw_window, bool) and raw_window > 0 else None
-    if window is not None and calibrated_prompt_tokens + response_reserved + margin > window:
+    context_output_remaining = None if window is None else window - calibrated_prompt_tokens - margin
+    if context_output_remaining is not None and context_output_remaining <= 0:
         raise ErroLLM(
-            "O prompt excede a janela de contexto local explicitamente configurada.",
+            "O prompt não deixa espaço físico para resposta dentro da janela de contexto configurada.",
             transient=False, error_code="PROMPT_CONTEXT_BUDGET_EXCEEDED",
         )
 
@@ -767,6 +787,7 @@ def _reservar_requisicao_llm(
     return {
         "estimated_prompt_tokens": prompt_tokens,
         "budgeted_prompt_tokens": reserved_prompt_tokens,
+        "context_output_remaining": context_output_remaining,
         "prompt_token_calibration": round(float(multiplier), 4),
         "estimated_effective_tokens": effective_estimate,
         "estimated_system_tokens": system_tokens,
@@ -776,6 +797,16 @@ def _reservar_requisicao_llm(
         "repeated_system_prompt": repeated_system,
         "finalized": False,
     }
+
+
+def _release_unused_reservation(execution: ExecutionContext | None, reservation) -> None:
+    if execution is None or not isinstance(reservation, dict) or reservation.get("finalized"):
+        return
+    execution.prompt_tokens_budgeted_physical = max(0, int(execution.prompt_tokens_budgeted_physical or 0) - int(reservation.get("budgeted_prompt_tokens") or 0))
+    execution.prompt_tokens_estimated_raw = max(0, int(execution.prompt_tokens_estimated_raw or 0) - int(reservation.get("estimated_prompt_tokens") or 0))
+    execution.prompt_tokens_effective = max(0, int(execution.prompt_tokens_effective or 0) - int(reservation.get("estimated_effective_tokens") or 0))
+    reservation["finalized"] = True
+    reservation["request_sent"] = False
 
 
 def _finalizar_requisicao_llm(config, execution: ExecutionContext | None, reservation, metadata):
@@ -810,6 +841,23 @@ def _finalizar_requisicao_llm(config, execution: ExecutionContext | None, reserv
             effective_actual = actual
             execution.prompt_tokens_uncached += actual
         execution.prompt_tokens_effective = max(0, int(execution.prompt_tokens_effective or 0) + effective_actual - estimated_effective)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    total_tokens = metadata.get("total_tokens")
+    usage_source = "provider_total_tokens"
+    if not isinstance(total_tokens, (int, float)):
+        prompt = metadata.get("prompt_tokens")
+        completion = metadata.get("completion_tokens")
+        if isinstance(prompt, (int, float)) and isinstance(completion, (int, float)):
+            total_tokens = int(prompt) + int(completion)
+            usage_source = "provider_prompt_plus_completion"
+    if isinstance(total_tokens, (int, float)):
+        total_tokens = max(0, int(total_tokens))
+        execution.provider_total_tokens_actual += total_tokens
+        reservation["provider_total_tokens"] = total_tokens
+        reservation["provider_usage_source"] = usage_source
+    else:
+        execution.provider_usage_unknown = True
+        reservation["provider_usage_source"] = "unknown"
     reservation["finalized"] = True
 
 
@@ -838,63 +886,64 @@ def _registrar_tokens_gerados(config, execution: ExecutionContext | None, respos
     execution.completion_tokens_actual = total
 
 
-def _generated_token_limit(config, execution: ExecutionContext | None = None) -> int:
-    if execution is not None and int(getattr(execution, "generated_token_limit", 0) or 0) > 0:
-        return int(execution.generated_token_limit)
-    raw = ((config or {}).get("llm") or {}).get("generated_token_fuse", 120000)
+def _provider_token_limit(config, execution: ExecutionContext | None = None) -> int:
+    if execution is not None and int(getattr(execution, "provider_token_limit", 0) or 0) > 0:
+        return int(execution.provider_token_limit)
+    raw = ((config or {}).get("llm") or {}).get("provider_token_budget_per_message", 150000)
     try:
         return max(1, int(raw))
     except (TypeError, ValueError):
-        return 120000
+        return 150000
 
 
-def _ensure_generated_token_budget(config, execution: ExecutionContext | None) -> int:
-    """Stop new cognition once provider-counted completion usage reaches the fuse.
+def _ensure_provider_token_budget(config, execution: ExecutionContext | None) -> int:
+    """Guard one user-message execution using provider-reported billed usage.
 
-    Prompt/cache tokens are intentionally excluded. The fuse is execution-wide,
-    not a tiny per-call output ceiling.
+    The authoritative counter is ``usage.total_tokens`` returned by the Adapter
+    after aggregating every upstream attempt it performed. Prompt/completion
+    estimates are used only for preflight; they never replace provider billing
+    truth in the execution ledger.
     """
-    limit = _generated_token_limit(config, execution)
-    used = int(execution.completion_tokens_actual or 0) if execution is not None else 0
+    limit = _provider_token_limit(config, execution)
+    if execution is None:
+        return limit
+    if bool(execution.provider_usage_unknown):
+        raise ErroLLM(
+            "O provider pode ter contabilizado uma chamada sem devolver usage; novas chamadas foram bloqueadas para não ultrapassar o orçamento às cegas.",
+            transient=False, error_code="PROVIDER_USAGE_UNKNOWN_BUDGET_STOP",
+        )
+    used = int(execution.provider_total_tokens_actual or 0)
     remaining = max(0, limit - used)
     if remaining <= 0:
         raise ErroLLM(
-            f"O fusivel fisico de geracao atingiu {limit} tokens nesta resposta/tarefa.",
-            transient=False, error_code="GENERATED_TOKEN_FUSE_REACHED",
+            f"O orçamento de {limit} tokens reportados pelo provider para esta mensagem foi atingido.",
+            transient=False, error_code="PROVIDER_TOKEN_BUDGET_REACHED",
         )
     return remaining
 
 
-def _enforce_generated_token_fuse_after_usage(config, execution: ExecutionContext | None) -> None:
+def _enforce_provider_token_budget_after_usage(config, execution: ExecutionContext | None) -> None:
     if execution is None:
         return
-    limit = _generated_token_limit(config, execution)
-    used = int(execution.completion_tokens_actual or 0)
+    if execution.provider_usage_unknown:
+        return
+    limit = _provider_token_limit(config, execution)
+    used = int(execution.provider_total_tokens_actual or 0)
     if used > limit:
         raise ErroLLM(
-            f"O provider reportou {used} tokens gerados, acima do fusivel de {limit}. "
-            "Nenhuma nova chamada LLM sera permitida nesta execucao.",
-            transient=False, error_code="GENERATED_TOKEN_FUSE_EXCEEDED",
+            f"O provider reportou {used} tokens totais para esta mensagem, acima do orçamento de {limit}. Nenhuma nova chamada será permitida.",
+            transient=False, error_code="PROVIDER_TOKEN_BUDGET_EXCEEDED",
         )
 
 
-def _timeouts_da_chamada(cfg_llm, perfil, config, execution: ExecutionContext | None = None):
+def _timeouts_da_chamada(cfg_llm, perfil):
     connect_timeout = float(cfg_llm.get("connect_timeout_seconds", 5))
     perfil_chave = f"{perfil}_timeout_seconds" if perfil else None
     configured_read = cfg_llm.get(perfil_chave) if perfil_chave and perfil_chave in cfg_llm else cfg_llm.get("read_timeout_seconds")
-    restante = _timeout_restante(execution)
-    if restante is not None:
-        if restante <= 0:
-            raise ErroLLM(
-                "O prazo total da tarefa foi esgotado antes da chamada LLM.",
-                transient=False, error_code="TASK_DEADLINE_EXCEEDED",
-            )
-        connect_timeout = min(connect_timeout, restante)
-        read_timeout = restante if configured_read is None else min(float(configured_read), restante)
-    else:
-        # Calls outside a normal ExecutionContext are still bounded mechanically.
-        read_timeout = float(configured_read) if configured_read is not None else 1800.0
-    return max(0.1, connect_timeout), max(0.1, read_timeout), restante
+    read_timeout = float(configured_read) if configured_read is not None else 1800.0
+    return max(0.1, connect_timeout), max(0.1, read_timeout)
+
+
 
 
 def _metricas_stream(metadata, estimativa_tokens, segundos):
@@ -974,17 +1023,15 @@ def _chamar_llm_impl(
     """Chama o backend com limites, isolamento e retry transitório."""
     cfg_llm = config.get("llm", {})
     base_url = cfg_llm.get("base_url", "http://127.0.0.1:8080")
-    configured_model = cfg_llm.get("model", "auto")
+    configured_model = cfg_llm.get("model", "deepseek-v4-flash")
     model = configured_model
     temperature = cfg_llm.get("temperature", 0.2)
     transport_policy = provider_policy(config)
     # Prove the local Adapter transport contract before any paid
     # generation. Success is cached mechanically per Adapter base URL.
     _ensure_adapter_handshake(config)
-    _ensure_generated_token_budget(config, execution)
-    connect_timeout, read_timeout, deadline_restante = _timeouts_da_chamada(
-        cfg_llm, perfil, config, execution,
-    )
+    _ensure_provider_token_budget(config, execution)
+    connect_timeout, read_timeout = _timeouts_da_chamada(cfg_llm, perfil)
 
     model = str(model or "").strip()
     if not model:
@@ -992,8 +1039,8 @@ def _chamar_llm_impl(
             "Nenhum modelo foi configurado para o Adapter.",
             transient=False, error_code="MODEL_REQUIRED",
         )
-    # `auto` is an Adapter concern. Eyle forwards it verbatim instead of
-    # depending on a separate /models discovery round-trip before cognition.
+    # The bundled Adapter uses one explicitly configured DeepSeek model; Core
+    # forwards its stable model field but never performs discovery/probing.
 
     structured_mode = "json_schema" if perfil is not None else None
     if perfil is not None:
@@ -1016,9 +1063,9 @@ def _chamar_llm_impl(
     latest_call = execution.latest_call() if execution is not None else None
     if isinstance(latest_call, dict):
         prompt_meta = latest_call.setdefault("prompt", {})
-        prompt_meta["output_ceiling"] = "execution_generated_token_fuse"
-        prompt_meta["generated_token_fuse"] = _generated_token_limit(config, execution)
-        prompt_meta["generated_tokens_before_call"] = int(execution.completion_tokens_actual or 0) if execution is not None else 0
+        prompt_meta["output_ceiling"] = "execution_provider_token_budget"
+        prompt_meta["provider_token_budget_per_message"] = _provider_token_limit(config, execution)
+        prompt_meta["provider_tokens_before_call"] = int(execution.provider_total_tokens_actual or 0) if execution is not None else 0
 
     tentativas = max(1, int(cfg_llm.get("retry_max_attempts", 3)))
     base_delay = max(0.0, float(cfg_llm.get("retry_base_delay_seconds", 0.5)))
@@ -1029,9 +1076,7 @@ def _chamar_llm_impl(
     semaforo = _semaforo_backend(
         chave_backend, cfg_llm.get("max_concurrent_requests", 1),
     )
-    restante = _timeout_restante(execution)
-    espera_semaforo = read_timeout if restante is None else min(read_timeout, restante)
-    if not semaforo.acquire(timeout=max(0.1, espera_semaforo)):
+    if not semaforo.acquire(timeout=max(0.1, read_timeout)):
         raise ErroLLM(
             "A fila interna de chamadas LLM excedeu o prazo disponivel.",
             transient=True, error_code="LLM_RATE_LIMIT_WAIT_TIMEOUT",
@@ -1045,7 +1090,7 @@ def _chamar_llm_impl(
     try:
         slot_processo = limiter.acquire(
             chave_backend, limit=limite_processos,
-            timeout=max(0.1, espera_semaforo), lease_seconds=lease_seconds,
+            timeout=max(0.1, read_timeout), lease_seconds=lease_seconds,
         )
     except Exception:
         semaforo.release()
@@ -1072,11 +1117,8 @@ def _chamar_llm_impl(
     try:
         ultimo_erro = None
         for tentativa in range(1, tentativas + 1):
-            _esperar_cooldown(
-                chave_backend,
-                deadline=execution.deadline_monotonic if execution is not None else None,
-            )
-            connect_atual, read_atual, _ = _timeouts_da_chamada(cfg_llm, perfil, config, execution)
+            _esperar_cooldown(chave_backend)
+            connect_atual, read_atual = _timeouts_da_chamada(cfg_llm, perfil)
             job_progress.publicar(
                 execution, "llm_request",
                 "Solicitando geracao ao Adapter" if tentativa == 1 else "Tentando o Adapter novamente",
@@ -1094,36 +1136,44 @@ def _chamar_llm_impl(
                 def chamar_backend(callback):
                     _LLM_RESPONSE_LOCAL.metadata = {}
                     inicio_backend = time.monotonic()
-                    reservations = []
-
-                    def before_request():
-                        reservation = _reservar_requisicao_llm(
-                            config, execution, prompt_sistema, prompt_usuario,
-                            profile=perfil,
+                    reservation = _reservar_requisicao_llm(
+                        config, execution, prompt_sistema, prompt_usuario, profile=perfil,
+                    )
+                    attempt_state["reservation"] = reservation
+                    remaining_provider = _ensure_provider_token_budget(config, execution)
+                    estimated_prompt = int(reservation.get("budgeted_prompt_tokens") or 0)
+                    provider_output_remaining = remaining_provider - estimated_prompt
+                    context_output_remaining = reservation.get("context_output_remaining")
+                    caps = [provider_output_remaining]
+                    if isinstance(context_output_remaining, int):
+                        caps.append(context_output_remaining)
+                    hard_remaining = min(caps) if caps else provider_output_remaining
+                    if hard_remaining <= 0:
+                        _release_unused_reservation(execution, reservation)
+                        raise ErroLLM(
+                            "O saldo de tokens desta mensagem não comporta outra chamada completa ao provider.",
+                            transient=False, error_code="PROVIDER_TOKEN_BUDGET_REACHED",
                         )
-                        reservations.append(reservation)
-                        attempt_state["reservation"] = reservation
-                        attempt_state["started_at"] = time.monotonic()
-                        attempt_state["attempt"] = _registrar_inicio_tentativa_runtime(
-                            execution, profile=perfil or "default",
-                        )
-
+                    attempt_state["started_at"] = time.monotonic()
+                    attempt_state["attempt"] = _registrar_inicio_tentativa_runtime(
+                        execution, profile=perfil or "default",
+                    )
+                    reservation["request_sent"] = True
                     resposta_backend = _chamar_openai_compatible(
                         base_url, model, prompt_sistema, prompt_usuario, temperature,
                         connect_atual, read_timeout=read_atual, on_chunk=callback,
-                        on_request=before_request,
-                        perfil=perfil,
+                        on_request=None, perfil=perfil, max_completion_tokens=hard_remaining,
+                        provider_token_budget_remaining=remaining_provider,
+                        reasoning_mode=str(cfg_llm.get("reasoning_mode") or "off"),
                     )
                     metadata_backend = _ultima_metadata_backend()
-                    if reservations:
-                        _finalizar_requisicao_llm(config, execution, reservations[-1], metadata_backend)
-                    metadata_backend["latency_ms"] = round(
-                        (time.monotonic() - inicio_backend) * 1000, 2,
-                    )
-                    metadata_backend["prompt_tokens_estimated"] = (
-                        reservations[-1].get("estimated_prompt_tokens") if reservations else 0
-                    )
+                    _finalizar_requisicao_llm(config, execution, reservation, metadata_backend)
+                    metadata_backend["latency_ms"] = round((time.monotonic() - inicio_backend) * 1000, 2)
+                    metadata_backend["prompt_tokens_estimated"] = reservation.get("estimated_prompt_tokens", 0)
+                    metadata_backend["provider_budget_before_call"] = remaining_provider
+                    metadata_backend["client_completion_ceiling"] = hard_remaining
                     return resposta_backend, metadata_backend
+
 
                 resposta, metadata_resposta = chamar_backend(on_chunk)
                 metadata_resposta.update({
@@ -1145,7 +1195,7 @@ def _chamar_llm_impl(
                     _registrar_metadata_runtime(execution, metadata_resposta, attempt=attempt_state["attempt"])
                     metadata_chamadas.append(dict(metadata_resposta))
                     _registrar_tokens_gerados(config, execution, resposta, metadata_chamadas)
-                    _enforce_generated_token_fuse_after_usage(config, execution)
+                    _enforce_provider_token_budget_after_usage(config, execution)
                     raise ErroLLM(
                         truncation["message"], transient=False, error_code=truncation["error_code"],
                     )
@@ -1214,6 +1264,8 @@ def _chamar_llm_impl(
                 )
 
             failed_metadata = _ultima_metadata_backend()
+            if execution is not None and failed_metadata.get("billing_may_have_occurred") and not failed_metadata.get("provider_usage_from_error"):
+                execution.provider_usage_unknown = True
             if (failed_metadata.get("retry_cost_risk") or failed_metadata.get("billing_may_have_occurred")
                     or int(failed_metadata.get("prompt_tokens") or 0) > 0
                     or int(failed_metadata.get("completion_tokens") or 0) > 0):
@@ -1245,14 +1297,6 @@ def _chamar_llm_impl(
                 atraso = min(max_delay, base_delay * (2 ** (tentativa - 1)))
                 if jitter:
                     atraso += random.uniform(0, jitter)
-            restante = _timeout_restante(execution)
-            if restante is not None:
-                if restante <= 0:
-                    raise ErroLLM(
-                        "O prazo total da tarefa foi esgotado durante os retries da LLM.",
-                        transient=False, error_code="TASK_DEADLINE_EXCEEDED",
-                    )
-                atraso = min(atraso, restante)
             job_progress.publicar(
                 execution, "retry", "A LLM falhou; preparando nova tentativa",
                 profile=perfil or "default", attempt=tentativa, max_attempts=tentativas,
@@ -1272,7 +1316,7 @@ def _chamar_llm_impl(
         semaforo.release()
 
     _registrar_tokens_gerados(config, execution, resposta, metadata_chamadas)
-    _enforce_generated_token_fuse_after_usage(config, execution)
+    _enforce_provider_token_budget_after_usage(config, execution)
     parsed_response = resposta
     if perfil is not None:
         try:
@@ -1362,107 +1406,44 @@ def _chamar_llm(
 
 
 
-PROMPT_ECC = """You are Eyle. Return one simple JSON cognition object. Do the semantic thinking; Eyle handles safe serialization details.
+PROMPT_ECC = """You are Eyle. Return one simple JSON cognition object. Do the basic semantic work; Eyle canonicalizes safe wire details.
 
-THINK SIMPLY
-Understand what the user means, not only the exact words. Use common sense, implicit references and useful implications. Not every message is a task: normal conversation, a reaction, or learning a fact can be complete by itself. Match the user's tone naturally.
+MAIN AUTHORITY
+Understand intent and references naturally. Main decides meaning, relevance, what to inspect/learn and when evidence is sufficient. Runtime owns physical IDs, schemas, budgets, permissions, transactions, persistence, Coverage and Frontier. Never create Runtime semantic ranking, memory_focus, Active Projection, HOT/WARM/COLD tiers, mini-agents or hidden working sets.
 
-TWO COGNITIVE LAYERS
-Memory and ECC are distinct but simultaneous:
-- Memory answers: what did I learn that may matter again?
-- ECC answers: what should I do now?
-Prefer the flat wire shape {type,...,memory_delta}. A nested decision envelope is also accepted, but do not spend reasoning on internal serialization. Memory is intrinsic to Eyle and sits beside ECC; it is not a tool, task ledger or transcript system.
+ECC
+Choose exactly one:
+- explorar: observe/read/recall/calculate/test/continue; batch only independent operations.
+- construir: make one Runtime-controlled lasting change, then inspect the real result.
+- concluir: answer when evidence is sufficient and no requested physical change remains.
+Use names from ecc_operations.
 
-THE THREE ECC MOVES
-You have only three action moves:
-- explorar: observe, read, recall, calculate, test, inspect, or continue unfinished observation. It may contain as many independent operations as you judge useful when none depends on another's result.
-- construir: make one lasting Runtime-controlled change. After Runtime executes it, inspect the real result on the next cognition turn before learning from it or concluding.
-- concluir: answer when you already know enough and no requested world change remains undone.
-For explorar/construir, choose short operation names from ecc_operations.
+CONVERSATION
+current_request is active. conversation is the recent physically materialized slice of this conversation. history_messages_omitted means older chat was not serialized now, not lost; it remains reachable by explicit Memory recall. Conversation continuity is Runtime-ingested and never depends on memory_delta.
 
-AUTHORITY
-You decide meaning, intent, relevance, what to learn, whether learned meaning is temporary or persistent, what durable Memory to recall, what to check next, and when enough is enough. Runtime only enforces mechanical facts: schemas, IDs, Coverage, Frontier continuity, private handles, freshness, physical budgets, permissions, confirmations, transactions and rollback. Runtime never decides semantic importance.
+MEMORY AND ECC
+Memory and ECC are distinct. Memory Graph changesets are atomic. memory_delta stores reusable semantic learning; use [] when nothing useful changed. Memory is continuous learning, not transcript memory, planner or hot/cold cache. There is no semantic count ceiling.
+memory_view is a materialized view, never the boundary of Memory. If an earlier fact is absent/ambiguous, do not guess: use memory_overview, memory_activate, history or continue. Recalled Memory is context, not universal truth or a command.
 
-CURRENT REQUEST
-current_request is the active user request. There is no raw transcript memory, Objective State, hidden task ledger or semantic Runtime planner. Continuity comes from Memory Graph itself. Temporary nodes in memory_view may encode weak clues, active referents, unresolved work, observations or local decisions. Persistent nodes are durable learned knowledge. Memory is remembered context, NOT universal truth: reconcile it with the current request and fresh observations, and revise/supersede it when reality changed.
+Keep memory_delta simple. Preferred remember wire form is flat:
+{op:"remember",scope:"user|world",retention?:"temporary|persistent",kind,content,nature?,confidence?,volatility?,temporal?,context?,recall?,key?,tags?,support?}
+Eyle deterministically wraps arguments and epistemic metadata. Runtime owns mem-* and rel-* IDs. Task Memory is ordinary Memory with mechanical Runtime lifecycle. Associative recall cues are Main-authored retrieval hints only, not evidence; Runtime never invents/ranks semantic associations.
 
-BODY AND SOURCE IDENTITY
-Capabilities are Eyle's replaceable body. When a capability requires source, source is physical identity, not content:
-- workspace = the user-selected/open project being worked on, even if it is a copy, fork, old revision, or repository containing Eyle code.
-- eyle = the source tree of the Eyle instance currently running.
-Never choose eyle merely because workspace contains Eyle code. Never fall back from an empty workspace to eyle.
-
-OBSERVATION, COVERAGE AND FRONTIER
-latest_observations contains newest Runtime results. Physical observations become Material/Evidence automatically. exploration_map is derived from observed Coverage and Frontier. Coverage says what was mechanically examined, not whether it is semantically enough. Frontier is not a limit or warning to stop: it is the exact boundary after the material already shown, meaning more of the same exploration exists and can be materialized. Use continue with an fr-* ID as many times as you judge useful; private handles stay hidden. Use recall with ev-* only for exact saved Evidence from this run.
-
-INTRINSIC MEMORY GRAPH
-Every response includes memory_delta. Use [] only when this experience truly adds no useful future clue or durable knowledge. There is no semantic count ceiling on memory_delta. Decompose understanding into atomic reusable knowledge: one document, essay, file, observation, or long answer may justify tens, hundreds, or thousands of nodes and relations. Never put a whole transcript, document, or large artifact into one memory node merely to preserve it.
-
-Keep memory_delta simple. Preferred remember wire form is flat: {op:"remember", scope:"user|world", retention:"temporary|persistent", kind, content, nature?, confidence?, volatility?, temporal?, context?, recall?, key?, tags?, support?}. Eyle deterministically wraps arguments and epistemic metadata into its canonical internal form.
-Retention is ONLY a storage/lifecycle choice; it is never a truth score.
-- temporary: worth keeping for now because later relevance is plausible. It may survive conversations/jobs indefinitely until Main explicitly changes it.
-- persistent: worth preserving durably as part of Eyle's history/knowledge. Persistent does NOT mean certain, current, immutable, or universally applicable. A persistent node may be a weak old hypothesis or a historical preference.
-
-EPISTEMIC MEMORY
-Classify what you think you learned separately from retention. For new memories, normally include epistemic:{nature,confidence?,volatility?,temporal?,context?}. Runtime does not impose a closed ontology: nature and volatility are semantic labels you choose. Useful examples of nature include observation, event, statement, inference, hypothesis, belief, preference, decision, concept, rule, goal, relationship, anomaly, or uncertainty, but invent a better label when needed.
-- nature answers WHAT epistemic thing this node represents; do not silently turn an observation into a fact or an inference into a user preference.
-- confidence is 0..1 and expresses your present confidence in the interpretation/applicability, not metaphysical truth. Omit it when a numeric estimate would be fake precision.
-- volatility describes how readily the represented state may change; people, intentions, tastes, project states and beliefs can be volatile even when worth preserving permanently.
-- temporal is an open JSON object for the time frame you understood (for example as_of, observed_at, valid_from, valid_to, phase, historical). Do not invent dates you did not observe.
-- context is an open JSON object for applicability (for example personal vs work, project/revision, situation, audience, environment). Do not generalize a local observation into a universal rule.
-Existing unclassified memories from older revisions are not wrong; reassess them when they become relevant instead of bulk-rewriting history.
-
-ASSOCIATIVE RECALL CUES
-When useful, give a memory Main-authored recall metadata so future wording can rediscover it without a hidden embedding brain: recall:{aliases?:[], concepts?:[], cues?:[]}.
-- aliases: alternate names/phrases that refer to the same remembered thing.
-- concepts: broader concepts under which the memory may matter.
-- cues: natural-language situations/questions that should make you think of this memory.
-These strings are retrieval hints only; they are NOT evidence, confidence, truth, tags imposed by Runtime or proof that the memory is relevant now. Do not keyword-stuff every node. Add them when they capture a genuinely useful alternative path back to the knowledge. Eyle indexes exactly what you authored and never invents/ranks semantic associations.
-On revise, you may replace recall or use add_recall/remove_recall with the same {aliases,concepts,cues} shape.
-
-MEMORY CONSOLIDATION
-Consolidation is part of YOUR normal cognition, not a second brain or Runtime job. Whenever new experience touches active/recalled Memory, compare it with the related nodes you can actually see and consolidate as useful:
-- relate evidence/observations/hypotheses/conclusions rather than leaving every node isolated; relation labels are open semantic language (supports, contradicts, refines, derived_from, changed_from, applies_in_context, precedes, depends_on, etc.). Relations may carry their own epistemic metadata because a claimed causal/support/context relation can itself be uncertain or volatile.
-- derive a higher-level hypothesis/pattern when multiple memories justify it, and support the derived node with those memory IDs. Do not delete the lower-level experiences. Give durable abstractions useful recall concepts/cues when future requests may phrase them differently.
-- when fresh evidence conflicts with an active memory, distinguish actual temporal/context change from contradiction or mistaken inference; preserve both when history matters and relate/revise only what you can justify from visible support.
-- revise the SAME node when your understanding of the same continuing proposition improves (confidence, context, wording, retention, epistemic metadata).
-- when a volatile thing genuinely changes over time, normally preserve the old node as history, create the new state, and relate them (for example changed_from/contradicts/contextualizes). Do not overwrite "hated X" into "likes X" and erase that the change happened.
-- supersede/archive only when the old representation itself should no longer be treated as a current representation, not merely because the world/person changed. Historical truth can remain valuable.
-- repetition alone is not proof. New independent supports may raise confidence; repeated projection of the same memory is not new evidence.
-- do not scan the entire graph just to perform maintenance. Consolidate the region relevant to current cognition; use memory_overview/memory_activate/Frontier when broader memory is actually useful.
-There is no fixed number of nodes or relations you should create. A tiny experience may produce none; a rich artifact may produce thousands.
-
-Other memory changes may also be flat:
-- revise: {op:"revise", id, expected_revision, retention?, kind?, content?, nature?, confidence?, volatility?, temporal?, context?, recall?, add_recall?, remove_recall?, add_tags?, remove_tags?, support?}. Changing retention promotes/demotes the SAME node; epistemic reassessment is independent from retention.
-- relate: {op:"relate", source, relation, target, nature?, confidence?, volatility?, temporal?, context?, support?}
-- revise_relation: {op:"revise_relation", id, expected_revision, relation?, nature?, confidence?, volatility?, temporal?, context?, support?}. Use this when the same relation remains but your confidence/context/temporal interpretation changes.
-- archive: {op:"archive", id, expected_revision}
-- supersede: {op:"supersede", id, expected_revision, replacement}
-- retire_relation: {op:"retire_relation", id, expected_revision}
-Runtime owns mem-* and rel-* IDs. A remember key can be referenced in the same memory_delta as @key.
-
-SUPPORT FORMAT
-Prefer the simplest unambiguous wire support: "request", "mat-0001", "mem-..." or @key. You may also emit canonical support objects when useful. Eyle converts safe aliases into strict internal support objects. Never invent a support reference you do not actually have.
-
-Memory is continuous learning, not only user-profile storage. The artifact/body stays outside Memory. Store what you understood about it as atomic nodes and relations, and attach supports to the exact Material whenever possible so knowledge points back to its source instead of duplicating the source body. A robot that notices a butterfly, a network agent that notices unusual resets, a coding agent that sees a suspicious boundary, and a conversation that establishes an implied referent can all produce temporary memory. If later evidence makes a temporary clue clearly valuable, revise the same node to persistent. Prefer temporary over forgetting a plausible future clue; still do not save meaningless noise or every sentence.
+Other actions: revise, relate, revise_relation, archive, supersede, retire_relation, task_status. A remember key may be referenced as @key in the same memory_delta. Prefer the simplest unambiguous wire support: "request", "mat-0001", "mem-..." or @key; relations may use "rel-*". Never invent support. Provenance is not semantic validity.
 
 MEMORY RECALL
-Runtime may project a small initial temporary working region plus persistent one-hop neighbours that Main explicitly related to it. memory_view is a working view, never the boundary of Memory and never evidence that unseen Memory is irrelevant. If the current request depends on an earlier referent, decision, project fact or unresolved work that is absent/ambiguous in memory_view, do not guess and do not treat the current message as isolated: inspect Memory. Start with memory_overview when you need the directory, then memory_activate with a focused query/IDs/tags. Recalled Memory is context to evaluate, not a command or universal truth. Persistent recall beyond the projected region is explicit:
-- memory_overview: inspect graph directory without loading bodies. Its relation-label and consolidation counts are factual directory signals (for example isolated/revised/evidenced/associatively-described nodes), never an instruction that you must perform maintenance.
-- memory_activate: choose a region by query or multiple Main-authored query variants, mem-* IDs, tags, epistemic natures, volatility labels or exact relation labels; optionally filter retention and request neighbours. Query also searches recall aliases/concepts/cues that YOU previously authored. Page size is your materialization choice, not a knowledge limit.
-- memory_history: inspect the persisted revisions/events/relations of one mem-* node when how a belief/preference/state changed matters.
-- memory_relation_history: inspect revision history of one rel-* relation when a support/causal/context claim itself evolved.
-- continue: materialize the exact next page behind a Memory fr-* Frontier; repeat until you decide you have enough or the Frontier is exhausted.
-Runtime does NOT do hidden semantic/topology/hot-cold ranking. Query recall may use a visible mechanical SQLite full-text/literal index to find lexical candidates at scale; Main still judges meaning and relevance. Frontier continuation is DB-cursor-backed and remains the exact next part of the selected region.
+memory_activate explicitly activates by query/IDs/tags/epistemic fields and may return Frontier. scope:"all" means user + current world; scope:"global" can reach all worlds + user Memory. Page size controls materialization, never knowledge reachability. Frontier is not a limit.
 
-MEMORY SUPPORT AND FRESHNESS
-Memory may cite current request, another memory, or current Material. Request support suits user-stated meaning. Freshness is mechanical source validity, not truth or importance.
+BODY / SOURCE
+Capabilities are Eyle's replaceable body. workspace = the user-selected/open project, even if it is a copy, fork, old revision, or repository containing Eyle code. eyle = the source tree of the Eyle instance currently running. Never fall back from an empty workspace to eyle.
 
-TOKEN-EFFICIENT ACTION WITHOUT LESS REASONING
-When several observations are independent and all are already justified, you may batch them into one explorar.operations list instead of spending another LLM round trip between each. Do NOT batch when a later operation depends on an earlier result. A Build always returns its physical result to you before completion so Memory can learn from what actually happened. Call-count optimization must never bypass post-action cognition or provenance.
+EVIDENCE
+latest_observations contains newest Runtime results; Material/Evidence preserve observed facts. Coverage says what was mechanically examined, not whether it is semantically enough. Do not confuse an inventory with an analysis: when source evidence matters, inspect representative implementation before concluding. Prefer a few targeted reads over a huge structural dump. Large artifact/source bodies remain Material instead of being copied into Memory.
 
-HOW TO ACT
-Choose the amount of exploration you judge appropriate. Coverage reports what was examined and Frontier reports what remains; neither tells you that enough has been seen. If the user explicitly asks to create, change, fix, remove or apply something, merely explaining the change is not completion: use construir once enough reality is observed to do it safely. Conclude naturally when the requested outcome is actually satisfied. Do not create phase routers, Task/Objective state, transcript memory, mini-agents, hot/cold tiers, retrieval counters or Runtime semantic ranking.
+EFFICIENCY
+Materialize only what is needed now while preserving reachability. Avoid redundant rereads and no-progress loops. Protocol repair fixes serialization; it must not re-analyse source evidence. Token efficiency must not weaken provenance or semantic judgment.
+
+If the user asks to create/change/fix/remove/apply something, explanation alone is not completion. Semantic user choices belong to Main; physical side-effect confirmation belongs to Runtime.
 """
 
 

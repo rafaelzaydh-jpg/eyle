@@ -290,8 +290,31 @@ def expose_frontiers(session: Any, capability: str, model_result: Dict[str, Any]
     return ids
 
 
+def _canonical_frontier_id(ledger: Dict[str, Any], frontier_id: str) -> str:
+    """Resolve a human/model-friendly numeric Frontier alias to its canonical id.
+
+    Runtime publishes zero-padded ids (``fr-0001``), but models naturally emit
+    ``fr-1`` as the same coordinate.  Accept that spelling mechanically instead
+    of turning a valid continuation intent into a fake missing-Frontier failure.
+    No fuzzy/semantic matching is performed.
+    """
+    raw = str(frontier_id or "").strip()
+    store = frontier_store(ledger)
+    if raw in store:
+        return raw
+    if raw.startswith("fr-"):
+        digits = raw[3:]
+        if digits.isdigit():
+            value = int(digits)
+            canonical = f"fr-{value:04d}"
+            if canonical in store:
+                return canonical
+    return raw
+
+
 def resolve_frontier(ledger: Dict[str, Any], frontier_id: str, *, reality_epoch: int) -> Tuple[Optional[str], Optional[str]]:
-    item = frontier_store(ledger).get(str(frontier_id or ""))
+    canonical_id = _canonical_frontier_id(ledger, frontier_id)
+    item = frontier_store(ledger).get(canonical_id)
     if not isinstance(item, dict):
         return None, "FRONTIER_NOT_FOUND"
     if item.get("status") != "open":
@@ -305,7 +328,8 @@ def resolve_frontier(ledger: Dict[str, Any], frontier_id: str, *, reality_epoch:
 
 
 def consume_frontier(ledger: Dict[str, Any], frontier_id: str) -> None:
-    item = frontier_store(ledger).get(str(frontier_id or ""))
+    canonical_id = _canonical_frontier_id(ledger, frontier_id)
+    item = frontier_store(ledger).get(canonical_id)
     if isinstance(item, dict):
         item["status"] = "consumed"
         release_snapshot_handle(ledger, str(item.get("handle") or ""))

@@ -6,7 +6,7 @@ from eyle.core.memory import (
     apply_memory_sidecar,
     memory_activate_result,
     memory_continue_result,
-    project_memory_view,
+    materialize_explicit_memory_view,
 )
 from eyle.core.session import AgentSession
 from eyle.runtime.continuation import PENDING_SCHEMA_VERSION, validate_pending_continuation
@@ -103,71 +103,11 @@ def test_rev283_memory_page_size_is_not_a_reading_limit(tmp_path):
     assert second["ok"] is True
     assert len(session.memory_view["node_ids"]) == 120
     assert session.memory_view["frontiers"] == []
-    view = project_memory_view(session, registry=registry, config=base_config(), provider_context=context)
+    view = materialize_explicit_memory_view(session, registry=registry, config=base_config(), provider_context=context)
     assert len(view["nodes"]) == 120
     # Full content is preserved once the node is materialized; page ordering
     # is intentionally not a semantic ranking guarantee.
     assert any(len(item["content"]) > 1400 for item in view["nodes"])
-
-
-def test_rev283_file_page_frontier_is_exact_continuation_not_ceiling(tmp_path):
-    path = tmp_path / "long.txt"
-    path.write_text("".join(f"line-{i}\n" for i in range(1, 13)), encoding="utf-8")
-    config = base_config()
-    config["providers"]["standard"]["max_file_read_lines"] = 5
-    context = _context(tmp_path)
-    registry = standard_registry()
-    session = AgentSession("read all")
-
-    first = dispatch(
-        session,
-        action_kind="explorar",
-        operation="read_file",
-        arguments={"source": "workspace", "path": "long.txt"},
-        config=config,
-        provider_context=context,
-        registry=registry,
-        pending_schema_version=PENDING_SCHEMA_VERSION,
-        validate_pending=validate_pending_continuation,
-    ).result
-    assert first["ok"] is True
-    assert first["detail"]["line_start"] == 1 and first["detail"]["line_end"] == 5
-    assert first["frontiers"][0]["id"].startswith("fr-")
-    assert "handle" not in str(first)
-
-    frontier = first["frontiers"][0]["id"]
-    second = dispatch(
-        session,
-        action_kind="explorar",
-        operation="continue",
-        arguments={"frontier": frontier},
-        config=config,
-        provider_context=context,
-        registry=registry,
-        pending_schema_version=PENDING_SCHEMA_VERSION,
-        validate_pending=validate_pending_continuation,
-    ).result
-    assert second["ok"] is True
-    ranges = second["detail"]["materialized"]["ranges"]
-    assert ranges[0]["line_start"] == 6 and ranges[0]["line_end"] == 10
-    assert second["frontiers"][0]["id"].startswith("fr-")
-
-    # The configured 5-line value is only the default page size.  Main may ask
-    # for a wider exact range directly and receives it without a policy refusal.
-    direct = dispatch(
-        AgentSession("wide range"),
-        action_kind="explorar",
-        operation="read_file",
-        arguments={"source": "workspace", "path": "long.txt", "line_start": 1, "line_end": 12},
-        config=config,
-        provider_context=context,
-        registry=registry,
-        pending_schema_version=PENDING_SCHEMA_VERSION,
-        validate_pending=validate_pending_continuation,
-    ).result
-    assert direct["ok"] is True
-    assert direct["detail"]["line_end"] == 12
-    assert "frontiers" not in direct
 
 
 def test_rev283_tree_page_frontier_preserves_complete_universe(tmp_path):
@@ -285,7 +225,7 @@ def test_rev283_symbol_relations_page_has_no_second_hidden_projection_limit(tmp_
         session,
         action_kind="explorar",
         operation="symbol_relations",
-        arguments={"source": "workspace", "symbol": "target", "direction": "incoming", "max_edges": 2},
+        arguments={"source": "workspace", "symbol": "target", "direction": "incoming", "page_size": 2},
         config=config,
         provider_context=context,
         registry=registry,
@@ -293,7 +233,7 @@ def test_rev283_symbol_relations_page_has_no_second_hidden_projection_limit(tmp_
         validate_pending=validate_pending_continuation,
     ).result
     assert first["ok"] is True
-    # max_edges is a page size.  Every row in that page reaches Main; the rest
+    # page_size is a materialization size.  Every row in that page reaches Main; the rest
     # is represented by one or more exact Frontiers rather than silently sliced.
     assert len(first["detail"]["incoming"]) == 2
     assert len(first["frontiers"]) >= 1
@@ -314,42 +254,3 @@ def test_rev283_symbol_relations_page_has_no_second_hidden_projection_limit(tmp_
     assert len(second["detail"]["materialized"]["items"]) == 2
 
 
-def test_rev283_automatic_temporary_memory_is_first_page_plus_exact_frontier(tmp_path):
-    registry = standard_registry()
-    context = _context(tmp_path)
-    seed = AgentSession("seed temporary")
-    delta = [
-        {
-            "op": "remember",
-            "scope": "world",
-            "retention": "temporary",
-            "kind": "clue",
-            "content": f"temporary-{i:03d}",
-            "tags": ["auto-page"],
-            "supports": [{"kind": "request"}],
-        }
-        for i in range(35)
-    ]
-    assert apply_memory_sidecar(seed, delta, registry=registry, provider_context=context)["ok"] is True
-
-    session = AgentSession("continue earlier context")
-    view = project_memory_view(session, registry=registry, config=base_config(), provider_context=context, limit=10)
-    assert view["temporary"]["materialized_temporary_nodes"] == 10
-    assert view["temporary"]["total_temporary_nodes"] == 35
-    assert view["temporary"]["remaining_temporary_nodes"] == 25
-    assert len(view["nodes"]) == 10
-    assert view["frontiers"]
-
-    frontier = next(item["id"] for item in view["frontiers"] if item.get("kind") == "memory_not_materialized")
-    page2 = memory_continue_result(
-        session, frontier_id=frontier, registry=registry, config=base_config(), provider_context=context,
-    )
-    assert page2["ok"] is True
-    assert page2["detail"]["new_nodes"] == 10
-    assert page2["frontiers"]
-
-    # Re-projecting must preserve the continuation chain rather than silently
-    # recreating the already consumed second page.
-    next_view = project_memory_view(session, registry=registry, config=base_config(), provider_context=context, limit=10)
-    assert next_view["frontiers"]
-    assert next_view["frontiers"][0]["id"] == page2["frontiers"][0]["id"]

@@ -1,30 +1,24 @@
-"""Provider-neutral OpenAI-compatible transport adapter for Eyle Rev3.
+"""Deterministic DeepSeek V4 transport adapter for Eyle Rev3.7.2.
 
-The Adapter owns transport only: provider capability negotiation, JSON-object
-recovery, caching knobs, usage accounting and network errors. It intentionally
-does not know ECC, Memory, decision types, or any Eyle semantic schema.
+The Adapter is intentionally boring: Eyle sends one stable local contract and
+this process translates it mechanically to one configured DeepSeek model.
+There is no model discovery, capability probing, structured-mode negotiation,
+provider guessing, or automatic upstream retry cascade.
 
-Structured requests may carry a client-provided JSON Schema. In auto mode the
-Adapter tries the strongest provider transport mechanically:
-
-    native_json_schema -> json_object -> prompt_json
-
-A mode is degraded/cached only when the provider technically rejects that
-transport. Semantic/schema mistakes never teach the Adapter to use a weaker
-mode. If assistant content is JSON-recoverable it is returned to Eyle; Eyle is
-the sole semantic canonicalizer/validator.
+Structured requests always use DeepSeek JSON Output (``json_object``), generic
+JSON recovery, Draft 2020-12 schema validation, and at most one format-only
+repair. Eyle remains the sole authority for cognition semantics.
 """
 from __future__ import annotations
 
 import ast
 import copy
 import hmac
+import ipaddress
 import json
 import logging
 import os
 import re
-import ipaddress
-import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -41,44 +35,29 @@ from jsonschema.exceptions import SchemaError
 from starlette.background import BackgroundTask
 
 BASE_DIR = Path(__file__).resolve().parent
-ENV_FILE = BASE_DIR / ".env"
-load_dotenv(dotenv_path=ENV_FILE, override=False)
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("eyle-openai-adapter")
+# Preserve the old Adapter ergonomics: normal dotenv discovery works, while a
+# server-local .env remains supported for the bundled launcher.
+load_dotenv(override=False)
+load_dotenv(dotenv_path=BASE_DIR / ".env", override=False)
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+log = logging.getLogger("eyle-deepseek-adapter")
 
 
 def env_bool(name: str, default: bool) -> bool:
-    value = os.getenv(name)
-    return default if value is None else value.strip().lower() in {"1", "true", "yes", "on", "sim"}
-
-
-def env_json(name: str) -> dict[str, Any]:
-    raw = os.getenv(name, "").strip()
-    if not raw:
-        return {}
-    try:
-        value = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"{name} precisa conter JSON válido") from exc
-    if not isinstance(value, dict):
-        raise RuntimeError(f"{name} precisa ser objeto JSON")
-    return value
+    raw = os.getenv(name)
+    return default if raw is None else raw.strip().lower() in {"1", "true", "yes", "on", "sim"}
 
 
 @dataclass(frozen=True)
 class Settings:
+    provider_profile: str
     upstream_base_url: str
     upstream_api_key: str
-    default_model: str
-    model_override: str | None
-    structured_mode: str
-    cache_mode: str
-    extra_headers: dict[str, Any]
-    extra_body: dict[str, Any]
-    cache_headers: dict[str, Any]
-    cache_body: dict[str, Any]
-    model_discovery_ttl: float
-    model_discovery_negative_ttl: float
+    model: str
     host: str
     port: int
     timeout: float
@@ -88,19 +67,11 @@ class Settings:
 
 
 S = Settings(
-    upstream_base_url=os.getenv("UPSTREAM_BASE_URL", "").strip().rstrip("/"),
-    upstream_api_key=os.getenv("UPSTREAM_API_KEY", "").strip(),
-    default_model=os.getenv("DEFAULT_MODEL", "auto").strip(),
-    model_override=os.getenv("MODEL_OVERRIDE", "").strip() or None,
-    structured_mode=os.getenv("UPSTREAM_STRUCTURED_MODE", "auto").strip().lower(),
-    cache_mode=os.getenv("UPSTREAM_CACHE_MODE", "auto").strip().lower(),
-    extra_headers=env_json("UPSTREAM_EXTRA_HEADERS_JSON"),
-    extra_body=env_json("UPSTREAM_EXTRA_BODY_JSON"),
-    cache_headers=env_json("UPSTREAM_CACHE_HEADERS_JSON"),
-    cache_body=env_json("UPSTREAM_CACHE_BODY_JSON"),
-    model_discovery_ttl=float(os.getenv("MODEL_DISCOVERY_TTL_SECONDS", "300")),
-    model_discovery_negative_ttl=float(os.getenv("MODEL_DISCOVERY_NEGATIVE_TTL_SECONDS", "30")),
-    host=os.getenv("HOST", "127.0.0.1"),
+    provider_profile=os.getenv("PROVIDER_PROFILE", "deepseek_v4").strip().lower(),
+    upstream_base_url=os.getenv("UPSTREAM_BASE_URL", "https://api.deepseek.com").strip().rstrip("/"),
+    upstream_api_key=(os.getenv("UPSTREAM_API_KEY") or "").strip(),
+    model=(os.getenv("MODEL") or "deepseek-v4-flash").strip(),
+    host=os.getenv("HOST", "127.0.0.1").strip(),
     port=int(os.getenv("PORT", "8080")),
     timeout=float(os.getenv("REQUEST_TIMEOUT_SECONDS", "1800")),
     max_body=int(os.getenv("MAX_REQUEST_BYTES", str(10 * 1024 * 1024))),
@@ -108,69 +79,29 @@ S = Settings(
     proxy_allow_loopback_no_auth=env_bool("PROXY_ALLOW_LOOPBACK_NO_AUTH", True),
 )
 
-ADAPTER_PROFILE = "eyle-provider-transport-v3"
+ADAPTER_VERSION = "2.7.5-rev3.7.2"
+ADAPTER_PROFILE = "eyle-deepseek-v4-deterministic-v1"
 ADAPTER_TRANSPORT_PROTOCOL = "eyle-adapter-transport-v1"
 ADAPTER_HANDSHAKE_SCHEMA = "eyle-adapter-handshake-v1"
-ADAPTER_VERSION = "2.7.5-rev3"
-# Three capability probes plus one optional format-only repair after a provider
-# accepted a mode. This is a mechanical transport bound, not a cognition retry
-# policy; Eyle's task deadline/generated-token fuse own semantic recovery.
-MAX_UPSTREAM_ATTEMPTS_PER_LOGICAL_CALL = 4
-_ALLOWED_STRUCTURED = {"auto", "native_json_schema", "json_object", "prompt_json"}
-_ALLOWED_CACHE = {"none", "implicit", "explicit", "session", "auto"}
-_STRUCTURED_MODE_ORDER = ("native_json_schema", "json_object", "prompt_json")
-_TECHNICAL_MODE_REJECTION_STATUS = {400, 404, 415, 422}
-
-# Cache only proven provider transport *incompatibilities*. A malformed model
-# answer says nothing about response_format support and must never weaken future
-# requests.
-_STRUCTURED_UNSUPPORTED_CACHE: dict[tuple[str, str], set[str]] = {}
-_MODEL_DISCOVERY_CACHE: dict[str, dict[str, Any]] = {}
-
-
-def _mode_key(model: str) -> tuple[str, str]:
-    return (S.upstream_base_url, str(model or ""))
-
-
-def _structured_mode_chain(model: str) -> list[str]:
-    if S.structured_mode != "auto":
-        return [S.structured_mode]
-    unsupported = _STRUCTURED_UNSUPPORTED_CACHE.get(_mode_key(model), set())
-    chain = [mode for mode in _STRUCTURED_MODE_ORDER if mode not in unsupported]
-    return chain or ["prompt_json"]
-
-
-def _first_structured_mode(model: str) -> str:
-    return _structured_mode_chain(model)[0]
-
-
-def _record_transport_rejection(model: str, mode: str) -> None:
-    if S.structured_mode != "auto" or mode == "prompt_json":
-        return
-    _STRUCTURED_UNSUPPORTED_CACHE.setdefault(_mode_key(model), set()).add(mode)
-
-
-def _fallback_structured_mode(mode: str) -> str:
-    # Backward-compatible helper for tests/callers; never used for semantic
-    # failures. It simply returns the next physical transport in the chain.
-    try:
-        index = _STRUCTURED_MODE_ORDER.index(mode)
-    except ValueError:
-        return "prompt_json"
-    return _STRUCTURED_MODE_ORDER[min(index + 1, len(_STRUCTURED_MODE_ORDER) - 1)]
+PROVIDER_PROFILE = "deepseek_v4"
+STRUCTURED_UPSTREAM_MODE = "json_object"
+MAX_UPSTREAM_ATTEMPTS_PER_LOGICAL_CALL = 2  # one generation + at most one format repair
 
 
 def check_config() -> None:
+    if S.provider_profile != PROVIDER_PROFILE:
+        raise RuntimeError(
+            f"PROVIDER_PROFILE inválido: {S.provider_profile!r}. "
+            f"Esta revisão implementa somente {PROVIDER_PROFILE!r}."
+        )
     if not S.upstream_base_url:
         raise RuntimeError("UPSTREAM_BASE_URL não configurada")
-    if not (S.model_override or S.default_model):
-        raise RuntimeError("DEFAULT_MODEL/MODEL_OVERRIDE não configurado")
-    if S.structured_mode not in _ALLOWED_STRUCTURED:
-        raise RuntimeError(f"UPSTREAM_STRUCTURED_MODE inválido: {S.structured_mode}")
-    if S.cache_mode not in _ALLOWED_CACHE:
-        raise RuntimeError(f"UPSTREAM_CACHE_MODE inválido: {S.cache_mode}")
-    if S.cache_mode in {"explicit", "session"} and not (S.cache_headers or S.cache_body):
-        raise RuntimeError("UPSTREAM_CACHE_MODE explicit/session exige UPSTREAM_CACHE_HEADERS_JSON e/ou UPSTREAM_CACHE_BODY_JSON")
+    if not S.model:
+        raise RuntimeError("MODEL não configurado")
+    if S.timeout <= 0:
+        raise RuntimeError("REQUEST_TIMEOUT_SECONDS deve ser positivo")
+    if S.max_body <= 0:
+        raise RuntimeError("MAX_REQUEST_BYTES deve ser positivo")
 
 
 def _request_is_loopback(request: Request) -> bool:
@@ -189,9 +120,6 @@ def _request_is_loopback(request: Request) -> bool:
 def client_auth(request: Request) -> None:
     if not S.proxy_key:
         return
-    # Eyle Core does not send an Authorization header to its configured
-    # OpenAI-compatible endpoint. Keep direct localhost integration working
-    # while still requiring PROXY_API_KEY for non-loopback clients.
     if S.proxy_allow_loopback_no_auth and _request_is_loopback(request):
         return
     auth = request.headers.get("authorization", "")
@@ -201,91 +129,19 @@ def client_auth(request: Request) -> None:
         raise HTTPException(401, "Chave do proxy inválida")
 
 
-def model_for(payload: dict[str, Any]) -> str:
-    """Return an explicit configured/requested model, or ``auto`` as a sentinel.
-
-    ``auto`` is never sent upstream; ``resolve_model`` must replace it
-    with a real ID discovered from the upstream /models endpoint.
-    """
-    if S.model_override:
-        return str(S.model_override).strip()
-    requested = str(payload.get("model") or "").strip()
-    default = str(S.default_model or "auto").strip() or "auto"
-    if requested and requested.lower() != "auto":
-        return requested
-    if default.lower() != "auto":
-        return default
-    return "auto"
-
-
-def _model_ids_from_payload(payload: Any) -> list[str]:
-    if not isinstance(payload, dict):
-        return []
-    items = payload.get("data")
-    if not isinstance(items, list):
-        return []
-    out: list[str] = []
-    for item in items:
-        if isinstance(item, dict):
-            value = str(item.get("id") or "").strip()
-            if value and value not in out:
-                out.append(value)
-    return out
-
-
-async def discover_models(client: httpx.AsyncClient, *, force: bool = False) -> list[str]:
-    """Discover real upstream model IDs with bounded positive/negative caching."""
-    key = S.upstream_base_url
-    now = time.monotonic()
-    cached = _MODEL_DISCOVERY_CACHE.get(key)
-    if not force and isinstance(cached, dict) and float(cached.get("expires_at") or 0) > now:
-        if cached.get("error"):
-            raise RuntimeError(str(cached.get("error")))
-        return list(cached.get("models") or [])
-
-    headers = {"Accept": "application/json"}
-    if S.upstream_api_key:
-        headers["Authorization"] = f"Bearer {S.upstream_api_key}"
-    for name, value in S.extra_headers.items():
-        headers[str(name)] = str(value)
-    url = f"{S.upstream_base_url}/models"
-    try:
-        response = await client.get(url, headers=headers)
-        response.raise_for_status()
-        models = _model_ids_from_payload(response.json())
-        if not models:
-            raise RuntimeError("UPSTREAM_MODELS_EMPTY")
-    except Exception as exc:
-        detail = f"{type(exc).__name__}: {str(exc)[:300]}"
-        _MODEL_DISCOVERY_CACHE[key] = {
-            "models": [], "error": detail,
-            "expires_at": now + max(1.0, S.model_discovery_negative_ttl),
-        }
-        raise RuntimeError(detail) from exc
-    _MODEL_DISCOVERY_CACHE[key] = {
-        "models": models, "error": None,
-        "expires_at": now + max(1.0, S.model_discovery_ttl),
-    }
-    return models
-
-
-async def resolve_model(client: httpx.AsyncClient, payload: dict[str, Any]) -> str:
-    candidate = model_for(payload)
-    if candidate.lower() != "auto":
-        return candidate
-    models = await discover_models(client)
-    if not models:
-        raise RuntimeError("MODEL_DISCOVERY_REQUIRED")
-    return models[0]
+def model_for(_payload: dict[str, Any]) -> str:
+    """Return the configured model. Incoming model IDs never trigger discovery."""
+    return S.model
 
 
 def schema_for(payload: dict[str, Any]) -> dict[str, Any] | None:
     fmt = payload.get("response_format")
     if not isinstance(fmt, dict):
         return None
-    if fmt.get("type") == "json_object":
+    kind = str(fmt.get("type") or "").strip()
+    if kind == "json_object":
         return {"type": "object"}
-    if fmt.get("type") != "json_schema":
+    if kind != "json_schema":
         return None
     block = fmt.get("json_schema")
     return block.get("schema") if isinstance(block, dict) and isinstance(block.get("schema"), dict) else None
@@ -295,12 +151,17 @@ def structured(payload: dict[str, Any]) -> bool:
     fmt = payload.get("response_format")
     if fmt is None:
         return False
-    if not isinstance(fmt, dict) or fmt.get("type") not in {"json_object", "json_schema"}:
+    if not isinstance(fmt, dict):
         raise HTTPException(400, "response_format inválido")
+    kind = str(fmt.get("type") or "").strip()
+    if kind == "text":
+        return False
+    if kind not in {"json_object", "json_schema"}:
+        raise HTTPException(400, "response_format inválido para o Adapter DeepSeek")
     schema = schema_for(payload)
     if schema is None:
         raise HTTPException(400, "response_format estruturado sem schema/formato válido")
-    if fmt.get("type") == "json_schema":
+    if kind == "json_schema":
         try:
             Draft202012Validator.check_schema(schema)
         except SchemaError as exc:
@@ -308,58 +169,137 @@ def structured(payload: dict[str, Any]) -> bool:
     return True
 
 
-def _json_only_instruction() -> str:
+def _example_from_schema(node: Any, depth: int = 0) -> Any:
+    # This is only a compact format hint for DeepSeek JSON Output, not a semantic
+    # policy. The depth guard prevents pathological/self-referential schemas.
+    if depth > 8 or not isinstance(node, dict):
+        return None
+    if "const" in node:
+        return node["const"]
+    enum = node.get("enum")
+    if isinstance(enum, list) and enum:
+        return enum[0]
+    variants = node.get("oneOf") or node.get("anyOf")
+    if isinstance(variants, list) and variants:
+        return _example_from_schema(variants[0], depth + 1)
+    typ = node.get("type")
+    if typ == "object" or isinstance(node.get("properties"), dict):
+        props = node.get("properties") if isinstance(node.get("properties"), dict) else {}
+        required = set(node.get("required") or [])
+        return {
+            name: _example_from_schema(child, depth + 1)
+            for name, child in props.items()
+            if name in required
+        }
+    if typ == "array":
+        return []
+    if typ == "boolean":
+        return False
+    if typ in {"integer", "number"}:
+        minimum = node.get("minimum")
+        return minimum if isinstance(minimum, (int, float)) else 0
+    return "value"
+
+
+def _json_instruction(schema: dict[str, Any]) -> str:
+    example = json.dumps(_example_from_schema(schema), ensure_ascii=False, separators=(",", ":"))
     return (
-        "Return exactly one JSON object and no markdown/prose outside it. "
-        "Preserve the response shape and semantics requested by the caller."
+        "Return exactly one JSON object. No markdown, code fences, or prose outside JSON. "
+        "Follow the response contract already supplied by the caller. "
+        f"Example structural shape: {example}."
     )
 
 
-def _prepare_upstream(payload: dict[str, Any], *, repair: str | None = None, structured_mode: str | None = None, resolved_model: str | None = None) -> tuple[dict[str, Any], dict[str, str], dict[str, Any] | None]:
-    if not isinstance(payload.get("messages"), list):
-        raise HTTPException(400, "messages inválido")
-    body = copy.deepcopy(payload)
-    body["model"] = str(resolved_model or model_for(payload))
-    if body["model"].strip().lower() == "auto":
-        raise HTTPException(503, "MODEL_DISCOVERY_REQUIRED")
-    schema = schema_for(payload) if structured(payload) else None
-    messages = list(body.get("messages") or [])
+def _insert_json_instruction(messages: list[dict[str, Any]], schema: dict[str, Any]) -> list[dict[str, Any]]:
+    out = copy.deepcopy(messages)
+    insert_at = 1 if out and isinstance(out[0], dict) and out[0].get("role") == "system" else 0
+    out.insert(insert_at, {"role": "system", "content": _json_instruction(schema)})
+    return out
 
-    mode = structured_mode or _first_structured_mode(str(body.get("model") or ""))
-    if schema is not None:
-        if mode == "native_json_schema":
-            pass
-        elif mode == "json_object":
-            body["response_format"] = {"type": "json_object"}
-            # Insert before the first dynamic user message, preserving a stable prefix.
-            insert_at = 1 if messages and messages[0].get("role") == "system" else 0
-            messages.insert(insert_at, {"role": "system", "content": _json_only_instruction()})
-        elif mode == "prompt_json":
-            body.pop("response_format", None)
-            insert_at = 1 if messages and messages[0].get("role") == "system" else 0
-            messages.insert(insert_at, {"role": "system", "content": _json_only_instruction()})
 
-    # Format repair is a suffix. Everything before it stays byte-identical, which
-    # is cache-friendly for providers with prefix caching and harmless elsewhere.
+def _reasoning_override(mode: Any, *, repair: bool = False) -> dict[str, Any]:
+    """Translate Eyle's stable reasoning switch directly to DeepSeek V4."""
     if repair:
-        messages.append({"role": "user", "content": repair})
-        body["temperature"] = 0
-    body["messages"] = messages
+        return {"thinking": {"type": "disabled"}}
+    normalized = str(mode or "provider_default").strip().lower()
+    if normalized in {"", "provider_default"}:
+        return {}
+    if normalized == "off":
+        return {"thinking": {"type": "disabled"}}
+    if normalized == "on":
+        return {"thinking": {"type": "enabled"}}
+    raise HTTPException(400, "reasoning_mode inválido")
 
-    # Provider-specific transport knobs live only in configuration, not Core.
-    for key, value in S.extra_body.items():
-        body[key] = copy.deepcopy(value)
-    if S.cache_mode in {"explicit", "session"}:
-        for key, value in S.cache_body.items():
-            body[key] = copy.deepcopy(value)
+
+def _positive_int(value: Any) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return int(value)
+    return None
+
+
+def _nonnegative_int(value: Any) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return int(value)
+    return None
+
+
+def prepare_upstream(
+    payload: dict[str, Any],
+    *,
+    repair_instruction: str | None = None,
+    completion_cap: int | None = None,
+) -> tuple[dict[str, Any], dict[str, str], dict[str, Any] | None]:
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        raise HTTPException(400, "messages inválido")
+
+    is_structured = structured(payload)
+    schema = schema_for(payload) if is_structured else None
+    body = copy.deepcopy(payload)
+
+    reasoning_mode = body.pop("reasoning_mode", "provider_default")
+    provider_budget = body.pop("provider_token_budget_remaining", None)
+    requested_cap = _positive_int(body.pop("max_completion_tokens", None))
+    if "max_tokens" in body:
+        raise HTTPException(400, "max_tokens não faz parte do wire canônico; use max_completion_tokens")
+    cap = _positive_int(completion_cap) or requested_cap
+    provider_budget_int = _nonnegative_int(provider_budget)
+    if provider_budget_int == 0:
+        raise HTTPException(429, "provider_token_budget_remaining esgotado")
+    if provider_budget_int is not None:
+        cap = min(cap, provider_budget_int) if cap is not None else provider_budget_int
+
+    # MODEL is configured once in the Adapter; no request can make us discover or
+    # silently switch providers/models.
+    body["model"] = model_for(payload)
+    if cap is not None:
+        body["max_tokens"] = cap
+
+    if schema is not None:
+        body["messages"] = _insert_json_instruction(messages, schema)
+        body["response_format"] = {"type": "json_object"}
+    else:
+        body["messages"] = copy.deepcopy(messages)
+        if isinstance(body.get("response_format"), dict) and body["response_format"].get("type") == "text":
+            body.pop("response_format", None)
+
+    if repair_instruction:
+        body["messages"].append({"role": "user", "content": repair_instruction})
+        body["temperature"] = 0
+
+    # The DeepSeek V4 profile owns this translation mechanically.
+    body.pop("thinking", None)
+    body.update(_reasoning_override(reasoning_mode, repair=bool(repair_instruction)))
+
+    if bool(body.get("stream")):
+        stream_options = body.get("stream_options") if isinstance(body.get("stream_options"), dict) else {}
+        stream_options = copy.deepcopy(stream_options)
+        stream_options["include_usage"] = True
+        body["stream_options"] = stream_options
+
     headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
     if S.upstream_api_key:
         headers["Authorization"] = f"Bearer {S.upstream_api_key}"
-    for key, value in S.extra_headers.items():
-        headers[str(key)] = str(value)
-    if S.cache_mode in {"explicit", "session"}:
-        for key, value in S.cache_headers.items():
-            headers[str(key)] = str(value)
     return body, headers, schema
 
 
@@ -367,72 +307,106 @@ def _prepare_upstream(payload: dict[str, Any], *, repair: str | None = None, str
 class UsageAccumulator:
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    total_tokens: int = 0
     cached_prompt_tokens: int = 0
+    cache_miss_tokens: int = 0
     reasoning_tokens: int = 0
+    usage_calls: int = 0
+    provider_total_calls: int = 0
 
-    def add(self, data: dict[str, Any]) -> None:
+    def add(self, data: dict[str, Any]) -> bool:
         usage = data.get("usage")
         if not isinstance(usage, dict):
-            return
-        prompt = max(0, int(usage.get("prompt_tokens") or 0))
-        completion = max(0, int(usage.get("completion_tokens") or 0))
-        details = usage.get("prompt_tokens_details") if isinstance(usage.get("prompt_tokens_details"), dict) else {}
-        candidates = [
-            details.get("cached_tokens"), usage.get("prompt_cache_hit_tokens"),
-            usage.get("cached_prompt_tokens"), usage.get("cached_tokens"),
-        ]
-        cached_values = [int(v) for v in candidates if isinstance(v, (int, float)) and int(v) >= 0]
-        cached = min(prompt, max(cached_values)) if cached_values else 0
-        cdetails = usage.get("completion_tokens_details") if isinstance(usage.get("completion_tokens_details"), dict) else {}
+            return False
+        prompt_raw = usage.get("prompt_tokens")
+        completion_raw = usage.get("completion_tokens")
+        reported_total = usage.get("total_tokens")
+        total_known = isinstance(reported_total, (int, float)) and not isinstance(reported_total, bool)
+        components_known = (
+            isinstance(prompt_raw, (int, float)) and not isinstance(prompt_raw, bool)
+            and isinstance(completion_raw, (int, float)) and not isinstance(completion_raw, bool)
+        )
+        if not total_known and not components_known:
+            return False
+        prompt = max(0, int(prompt_raw or 0)) if isinstance(prompt_raw, (int, float)) and not isinstance(prompt_raw, bool) else 0
+        completion = max(0, int(completion_raw or 0)) if isinstance(completion_raw, (int, float)) and not isinstance(completion_raw, bool) else 0
+        if total_known:
+            total = max(0, int(reported_total))
+            self.provider_total_calls += 1
+        else:
+            total = prompt + completion
+
+        hit = usage.get("prompt_cache_hit_tokens")
+        miss = usage.get("prompt_cache_miss_tokens")
+        prompt_details = usage.get("prompt_tokens_details") if isinstance(usage.get("prompt_tokens_details"), dict) else {}
+        hit_candidates = [hit, prompt_details.get("cached_tokens")]
+        hit_values = [int(v) for v in hit_candidates if isinstance(v, (int, float)) and not isinstance(v, bool) and int(v) >= 0]
+        if hit_values:
+            cached = min(prompt, max(hit_values))
+            cache_miss = max(0, prompt - cached)
+        elif isinstance(miss, (int, float)) and not isinstance(miss, bool) and int(miss) >= 0:
+            cache_miss = min(prompt, int(miss))
+            cached = max(0, prompt - cache_miss)
+        else:
+            cached = 0
+            cache_miss = prompt
+
+        completion_details = usage.get("completion_tokens_details") if isinstance(usage.get("completion_tokens_details"), dict) else {}
+        reasoning = completion_details.get("reasoning_tokens")
+
         self.prompt_tokens += prompt
         self.completion_tokens += completion
+        self.total_tokens += total
         self.cached_prompt_tokens += cached
-        self.reasoning_tokens += max(0, int(cdetails.get("reasoning_tokens") or 0))
+        self.cache_miss_tokens += cache_miss
+        self.reasoning_tokens += max(0, int(reasoning or 0)) if isinstance(reasoning, (int, float)) else 0
+        self.usage_calls += 1
+        return True
+
+    @property
+    def provider_total_authoritative(self) -> bool:
+        return self.usage_calls > 0 and self.provider_total_calls == self.usage_calls
+
+    def as_dict(self) -> dict[str, Any]:
+        if self.usage_calls <= 0:
+            return {}
+        out: dict[str, Any] = {
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+            "prompt_cache_hit_tokens": min(self.prompt_tokens, self.cached_prompt_tokens),
+            "prompt_cache_miss_tokens": min(self.prompt_tokens, self.cache_miss_tokens),
+        }
+        if self.reasoning_tokens:
+            out["completion_tokens_details"] = {"reasoning_tokens": self.reasoning_tokens}
+        return out
 
     def apply(self, data: dict[str, Any]) -> dict[str, Any]:
         result = copy.deepcopy(data)
-        usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
-        usage.update({
-            "prompt_tokens": self.prompt_tokens,
-            "completion_tokens": self.completion_tokens,
-            "total_tokens": self.prompt_tokens + self.completion_tokens,
-            "prompt_cache_hit_tokens": min(self.prompt_tokens, self.cached_prompt_tokens),
-            "prompt_cache_miss_tokens": max(0, self.prompt_tokens - min(self.prompt_tokens, self.cached_prompt_tokens)),
-        })
-        if self.reasoning_tokens:
-            details = usage.get("completion_tokens_details") if isinstance(usage.get("completion_tokens_details"), dict) else {}
-            details["reasoning_tokens"] = self.reasoning_tokens
-            usage["completion_tokens_details"] = details
-        result["usage"] = usage
+        if self.usage_calls > 0:
+            result["usage"] = self.as_dict()
         return result
-
-    def as_dict(self) -> dict[str, int]:
-        cached = min(self.prompt_tokens, self.cached_prompt_tokens)
-        return {
-            "prompt_tokens": self.prompt_tokens, "completion_tokens": self.completion_tokens,
-            "total_tokens": self.prompt_tokens + self.completion_tokens,
-            "prompt_cache_hit_tokens": cached, "prompt_cache_miss_tokens": max(0, self.prompt_tokens - cached),
-        }
 
 
 def text_of(content: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        out=[]
+        out: list[str] = []
         for item in content:
-            if isinstance(item, dict) and item.get("type") in {"text","input_text","output_text"} and isinstance(item.get("text"), str):
-                out.append(item["text"])
+            if isinstance(item, dict) and item.get("type") in {"text", "input_text", "output_text"}:
+                if isinstance(item.get("text"), str):
+                    out.append(item["text"])
         return "\n".join(out)
     return ""
 
 
 def assistant_content(data: dict[str, Any]) -> str:
-    choices=data.get("choices")
-    if not isinstance(choices,list) or not choices or not isinstance(choices[0],dict):
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
         return ""
-    message=choices[0].get("message")
-    return text_of(message.get("content")) if isinstance(message,dict) else ""
+    message = choices[0].get("message")
+    return text_of(message.get("content")) if isinstance(message, dict) else ""
 
 
 _FENCE_RE = re.compile(r"^\s*```(?:json|javascript|python)?\s*(.*?)\s*```\s*$", re.I | re.S)
@@ -449,7 +423,7 @@ def _balanced_json_fragment(text: str) -> str | None:
     if start is None:
         return None
     stack = [opener]
-    quote = None
+    quote: str | None = None
     escaped = False
     pairs = {"}": "{", "]": "["}
     for index in range(start + 1, len(text)):
@@ -467,10 +441,7 @@ def _balanced_json_fragment(text: str) -> str | None:
             continue
         if char in "{[":
             stack.append(char)
-            continue
-        if char in "}]":
-            if not stack or stack[-1] != pairs[char]:
-                continue
+        elif char in "}]" and stack and stack[-1] == pairs[char]:
             stack.pop()
             if not stack:
                 return text[start:index + 1]
@@ -478,7 +449,7 @@ def _balanced_json_fragment(text: str) -> str | None:
 
 
 def _decode_jsonish(candidate: str) -> Any:
-    last: Exception | None = None
+    last_error: BaseException | None = None
     for decoder in (json.loads, ast.literal_eval):
         try:
             value = decoder(candidate)
@@ -487,52 +458,65 @@ def _decode_jsonish(candidate: str) -> Any:
                 if nested.startswith(("{", "[")):
                     try:
                         return json.loads(nested)
-                    except Exception:
+                    except (json.JSONDecodeError, TypeError):
                         try:
                             return ast.literal_eval(nested)
-                        except Exception:
+                        except (ValueError, SyntaxError, TypeError):
                             pass
             return value
-        except Exception as exc:
-            last = exc
-    if last is not None:
-        raise last
-    raise ValueError("no decoder")
+        except (json.JSONDecodeError, ValueError, SyntaxError, TypeError) as exc:
+            last_error = exc
+    if last_error is not None:
+        raise ValueError(str(last_error)) from last_error
+    raise ValueError("JSON recovery failed")
 
 
 def parse_json_value(text: str) -> tuple[Any, list[str]]:
-    """Purely syntactic recovery; never normalizes client semantics."""
-    candidate = str(text or "").strip()
-    if not candidate:
-        raise ValueError("empty assistant content")
+    raw = str(text or "").strip()
     candidates: list[tuple[str, str]] = []
-    match = _FENCE_RE.match(candidate)
-    if match:
-        candidates.append((match.group(1).strip(), "strip_markdown_fence"))
-    candidates.append((candidate, "direct_json"))
-    fragment = _balanced_json_fragment(candidate)
-    if fragment and fragment != candidate:
-        candidates.append((fragment, "extract_balanced_json"))
-    last: Exception | None = None
-    for item, step in candidates:
+    if raw:
+        candidates.append(("direct_json", raw))
+    fence = _FENCE_RE.match(raw)
+    if fence:
+        candidates.append(("fence_removed", fence.group(1).strip()))
+    fragment = _balanced_json_fragment(raw)
+    if fragment and fragment != raw:
+        candidates.append(("balanced_fragment", fragment))
+
+    seen: set[str] = set()
+    for step, candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
         try:
-            value = _decode_jsonish(item)
+            value = _decode_jsonish(candidate)
             return value, ([] if step == "direct_json" else [step])
-        except Exception as exc:
-            last = exc
-    raise last or ValueError("JSON recovery failed")
+        except ValueError:
+            continue
+    raise ValueError("assistant content does not contain recoverable JSON")
 
 
-def normalize_structured(data: dict[str, Any], schema: dict[str, Any] | None = None) -> tuple[Any | None, list[str], list[str]]:
-    """Recover JSON only. ``schema`` is intentionally ignored semantically."""
+def _schema_errors(value: Any, schema: dict[str, Any], limit: int = 8) -> list[str]:
+    validator = Draft202012Validator(schema)
+    errors = sorted(validator.iter_errors(value), key=lambda err: list(err.absolute_path))
+    out: list[str] = []
+    for error in errors[:limit]:
+        path = "$" + "".join(f"[{part}]" if isinstance(part, int) else f".{part}" for part in error.absolute_path)
+        out.append(f"{path}: {error.message}")
+    return out
+
+
+def normalize_structured(data: dict[str, Any], schema: dict[str, Any]) -> tuple[Any | None, list[str], list[str]]:
+    """Recover JSON syntax and validate the caller-supplied generic schema only."""
     text = assistant_content(data)
     if not text.strip():
         return None, ["$: assistant content is empty"], []
     try:
         value, steps = parse_json_value(text)
-    except Exception as exc:
-        return None, [f"$: JSON is not recoverable ({type(exc).__name__})"], []
-    return value, [], steps
+    except ValueError as exc:
+        return None, [f"$: JSON is not recoverable ({exc})"], []
+    errors = _schema_errors(value, schema)
+    return value, errors, steps
 
 
 def canonicalize(data: dict[str, Any], value: Any) -> dict[str, Any]:
@@ -547,218 +531,353 @@ def canonicalize(data: dict[str, Any], value: Any) -> dict[str, Any]:
     return result
 
 
+def _remaining_completion_cap(incoming: dict[str, Any], usage: UsageAccumulator) -> int | None:
+    raw = _positive_int(incoming.get("max_completion_tokens"))
+    if raw is None:
+        return None
+    return max(0, raw - usage.completion_tokens)
+
+
+def _remaining_provider_budget(incoming: dict[str, Any], usage: UsageAccumulator) -> int | None:
+    raw = _nonnegative_int(incoming.get("provider_token_budget_remaining"))
+    if raw is None:
+        return None
+    return max(0, raw - usage.total_tokens)
+
+
+def _effective_completion_cap(incoming: dict[str, Any], usage: UsageAccumulator) -> int | None:
+    caps = [cap for cap in (_remaining_completion_cap(incoming, usage), _remaining_provider_budget(incoming, usage)) if cap is not None]
+    return min(caps) if caps else None
+
+
 @dataclass(frozen=True)
 class AttemptResult:
-    data: dict[str,Any]|None
+    data: dict[str, Any] | None
     status_code: int
     media_type: str
     raw: bytes
 
 
-async def call_once(client:httpx.AsyncClient,payload:dict[str,Any],request_id:str,attempt_no:int,*,repair:str|None=None,structured_mode:str|None=None,resolved_model:str|None=None)->AttemptResult:
-    body,headers,_=_prepare_upstream(payload,repair=repair,structured_mode=structured_mode,resolved_model=resolved_model)
-    url=f"{S.upstream_base_url}/chat/completions"
-    effective_mode = structured_mode or _first_structured_mode(str(body.get("model") or ""))
-    log.info("request=%s upstream_attempt=%s model=%s structured_mode=%s configured_mode=%s cache_mode=%s",request_id,attempt_no,body.get("model"),effective_mode,S.structured_mode,S.cache_mode)
-    response=await client.post(url,headers=headers,json=body)
-    media=response.headers.get("content-type","application/json")
-    if response.status_code>=400:
-        return AttemptResult(None,response.status_code,media,response.content)
-    try: data=response.json()
-    except Exception: return AttemptResult(None,502,media,response.content)
-    return AttemptResult(data if isinstance(data,dict) else None,response.status_code,media,response.content)
+async def call_once(
+    client: httpx.AsyncClient,
+    payload: dict[str, Any],
+    request_id: str,
+    attempt_no: int,
+    *,
+    repair_instruction: str | None = None,
+    completion_cap: int | None = None,
+) -> AttemptResult:
+    body, headers, _ = prepare_upstream(
+        payload,
+        repair_instruction=repair_instruction,
+        completion_cap=completion_cap,
+    )
+    url = f"{S.upstream_base_url}/chat/completions"
+    log.info(
+        "request=%s upstream_attempt=%s model=%s structured=%s repair=%s",
+        request_id,
+        attempt_no,
+        body.get("model"),
+        bool(schema_for(payload)),
+        bool(repair_instruction),
+    )
+    response = await client.post(url, headers=headers, json=body)
+    media = response.headers.get("content-type", "application/json")
+    if response.status_code >= 400:
+        log.warning("request=%s upstream_attempt=%s http=%s", request_id, attempt_no, response.status_code)
+        return AttemptResult(None, response.status_code, media, response.content)
+    try:
+        data = response.json()
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        log.error("request=%s upstream_attempt=%s invalid_json_envelope", request_id, attempt_no)
+        return AttemptResult(None, 502, media, response.content)
+    if not isinstance(data, dict):
+        return AttemptResult(None, 502, media, response.content)
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    log.info(
+        "request=%s upstream_attempt=%s ok prompt=%s completion=%s total=%s",
+        request_id,
+        attempt_no,
+        usage.get("prompt_tokens"),
+        usage.get("completion_tokens"),
+        usage.get("total_tokens"),
+    )
+    return AttemptResult(data, response.status_code, media, response.content)
 
 
-def adapter_headers(usage:UsageAccumulator,attempts:int,enforcement:str,*,repairs:int=0,normalized:bool=False,effective_mode:str|None=None)->dict[str,str]:
-    return {
-        "X-Eyle-Adapter-Profile":ADAPTER_PROFILE,
-        "X-Eyle-Structured-Upstream-Mode":effective_mode or S.structured_mode,
-        "X-Eyle-Structured-Configured-Mode":S.structured_mode,
-        "X-Eyle-Cache-Mode":S.cache_mode,
-        "X-Eyle-Schema-Enforcement":enforcement,
-        "X-Eyle-Structured-Repairs":str(repairs),
-        "X-Eyle-Upstream-Attempts":str(attempts),
-        "X-Eyle-Max-Upstream-Attempts":str(MAX_UPSTREAM_ATTEMPTS_PER_LOGICAL_CALL),
-        "X-Eyle-Local-Normalized":"1" if normalized else "0",
-        "X-Eyle-Usage-Prompt-Tokens":str(usage.prompt_tokens),
-        "X-Eyle-Usage-Completion-Tokens":str(usage.completion_tokens),
-        "X-Eyle-Usage-Cached-Prompt-Tokens":str(min(usage.prompt_tokens,usage.cached_prompt_tokens)),
+def adapter_headers(
+    usage: UsageAccumulator,
+    attempts: int,
+    enforcement: str,
+    *,
+    repairs: int = 0,
+    normalized: bool = False,
+    usage_unknown: bool = False,
+    billing_may_have_occurred: bool = False,
+    retry_cost_risk: bool = False,
+) -> dict[str, str]:
+    headers = {
+        "X-Eyle-Adapter-Profile": ADAPTER_PROFILE,
+        "X-Eyle-Adapter-Protocol": ADAPTER_TRANSPORT_PROTOCOL,
+        "X-Eyle-Structured-Upstream-Mode": STRUCTURED_UPSTREAM_MODE,
+        "X-Eyle-Structured-Configured-Mode": STRUCTURED_UPSTREAM_MODE,
+        "X-Eyle-Schema-Enforcement": enforcement,
+        "X-Eyle-Upstream-Attempts": str(max(0, attempts)),
+        "X-Eyle-Max-Upstream-Attempts": str(MAX_UPSTREAM_ATTEMPTS_PER_LOGICAL_CALL),
+        "X-Eyle-Structured-Repairs": str(max(0, repairs)),
+        "X-Eyle-Local-Normalized": "1" if normalized else "0",
+        "X-Eyle-Upstream-Usage-Unknown": "1" if usage_unknown else "0",
+        "X-Eyle-Billing-May-Have-Occurred": "1" if billing_may_have_occurred else "0",
+        "X-Eyle-Retry-Cost-Risk": "1" if retry_cost_risk else "0",
+        "X-Eyle-Usage-Source": (
+            "provider_total_tokens" if usage.provider_total_authoritative
+            else ("provider_prompt_plus_completion_fallback" if usage.usage_calls else "unknown")
+        ),
     }
+    if usage.usage_calls:
+        headers.update({
+            "X-Eyle-Usage-Prompt-Tokens": str(usage.prompt_tokens),
+            "X-Eyle-Usage-Completion-Tokens": str(usage.completion_tokens),
+            "X-Eyle-Usage-Total-Tokens": str(usage.total_tokens),
+            "X-Eyle-Usage-Cached-Prompt-Tokens": str(min(usage.prompt_tokens, usage.cached_prompt_tokens)),
+        })
+    return headers
 
 
-def _safe_transport_detail(exc: BaseException) -> dict[str, Any]:
-    return {
-        "exception": type(exc).__name__,
-        "detail": str(exc)[:300],
-        "target": S.upstream_base_url,
-    }
+def _transport_failure(
+    usage: UsageAccumulator,
+    attempts: int,
+    exc: BaseException,
+    *,
+    timeout: bool = False,
+    repairs: int = 0,
+) -> JSONResponse:
+    if timeout:
+        error_type = "upstream_timeout"
+        status = 504
+        message = "Timeout aguardando o DeepSeek; a geração pode ter sido processada/cobrada sem usage retornado."
+        risk = True
+    else:
+        error_type = "upstream_connection_error"
+        status = 502
+        message = f"Falha de transporte ao conectar ao DeepSeek: {type(exc).__name__}: {str(exc)[:240]}"
+        # ConnectError happens before a usable upstream connection; other request
+        # failures can occur after bytes crossed the network boundary.
+        risk = not isinstance(exc, httpx.ConnectError)
+    return JSONResponse(
+        status_code=status,
+        headers=adapter_headers(
+            usage,
+            attempts,
+            "adapter_timeout" if timeout else "adapter_transport",
+            repairs=repairs,
+            usage_unknown=risk,
+            billing_may_have_occurred=risk,
+            retry_cost_risk=risk,
+        ),
+        content={
+            "error": {
+                "type": error_type,
+                "message": message,
+                "billing_may_have_occurred": risk,
+                "provider_usage_unknown": risk,
+                "upstream_attempts": attempts,
+                "repairs": repairs,
+            },
+            "usage": usage.as_dict(),
+        },
+    )
 
 
-def _transport_failure(usage: UsageAccumulator, attempts: int, enforcement: str, exc: BaseException, *, repairs: int = 0, effective_mode: str | None = None, timeout: bool = False) -> JSONResponse:
-    billed = usage.prompt_tokens > 0 or usage.completion_tokens > 0
-    error = {
-        "type": "upstream_timeout" if timeout else "upstream_connection_error",
-        **_safe_transport_detail(exc),
-        "upstream_attempts": attempts,
-        "repairs": repairs,
-        "billing_may_have_occurred": bool(billed or timeout),
-        "retry_cost_risk": bool(billed or timeout),
-    }
-    headers = adapter_headers(usage, attempts, enforcement, repairs=repairs, effective_mode=effective_mode)
-    headers["X-Eyle-Billing-May-Have-Occurred"] = "1" if error["billing_may_have_occurred"] else "0"
-    headers["X-Eyle-Retry-Cost-Risk"] = "1" if error["retry_cost_risk"] else "0"
-    log.warning("adapter transport failure: %s", json.dumps(error, ensure_ascii=False))
-    return JSONResponse(status_code=504 if timeout else 502, headers=headers, content={"error": error, "usage": usage.as_dict()})
-
-
-def repair_instruction(previous: str) -> str:
-    previous = str(previous or "")[-12000:]
+def repair_instruction(previous: str, errors: list[str]) -> str:
+    compact_errors = "; ".join(str(item)[:400] for item in errors[:8])
+    previous = str(previous or "")
     return (
-        "FORMAT RECOVERY ONLY. Re-express the previous assistant output as exactly one JSON object. "
-        "Preserve the same semantic fields, values and intended action; do not add new meaning, remove meaning, "
-        "or explain anything. Follow the caller's requested response shape. No markdown. "
+        "FORMAT REPAIR ONLY. Return exactly one JSON object matching the caller's existing response contract. "
+        "Preserve the same intended meaning and values; do not add a new decision or explain the repair. "
+        f"Validation errors: {compact_errors or 'invalid JSON shape'}. "
         f"Previous assistant output:\n{previous}"
     )
 
 
 def _candidate_response(data: dict[str, Any], usage: UsageAccumulator) -> dict[str, Any]:
-    # Return the original candidate content while applying all billed usage from
-    # transport probes/format repair. Eyle will canonicalize or ask Main again.
     return usage.apply(copy.deepcopy(data))
 
 
 async def execute_structured(client: httpx.AsyncClient, incoming: dict[str, Any], request_id: str) -> Response:
-    # The client schema is transport guidance only. Adapter validates its syntax
-    # in structured()/schema_for(), but never validates assistant semantics.
-    if schema_for(incoming) is None:
+    schema = schema_for(incoming)
+    if schema is None:
         raise HTTPException(400, "Structured request sem schema/formato")
+
     usage = UsageAccumulator()
-    attempts = 0
-    repairs = 0
-    try:
-        model = await resolve_model(client, incoming)
-    except Exception as exc:
-        return _transport_failure(usage, 0, "model_discovery", exc, effective_mode=S.structured_mode)
-
-    selected_data: dict[str, Any] | None = None
-    selected_mode: str | None = None
-    selected_steps: list[str] = []
-    selected_errors: list[str] = []
-
-    for mode in _structured_mode_chain(model):
-        attempts += 1
-        try:
-            result = await call_once(client, incoming, request_id, attempts, structured_mode=mode, resolved_model=model)
-        except httpx.TimeoutException as exc:
-            return _transport_failure(usage, attempts, "adapter_timeout", exc, effective_mode=mode, timeout=True)
-        except httpx.HTTPError as exc:
-            return _transport_failure(usage, attempts, "adapter_transport", exc, effective_mode=mode)
-
-        if result.data is None:
-            if S.structured_mode == "auto" and mode != "prompt_json" and result.status_code in _TECHNICAL_MODE_REJECTION_STATUS:
-                _record_transport_rejection(model, mode)
-                log.info("request=%s provider_rejected_structured_transport mode=%s status=%s; trying weaker transport", request_id, mode, result.status_code)
-                continue
-            return Response(
-                content=result.raw, status_code=result.status_code, media_type=result.media_type,
-                headers=adapter_headers(usage, attempts, "provider_http", effective_mode=mode),
-            )
-
-        usage.add(result.data)
-        selected_data = result.data
-        selected_mode = mode
-        value, errors, steps = normalize_structured(result.data, schema_for(incoming))
-        selected_steps = steps
-        selected_errors = errors
-        if not errors:
-            enforcement = "adapter_json_recovered" if steps else "adapter_json_valid"
-            return JSONResponse(
-                usage.apply(canonicalize(result.data, value)),
-                headers=adapter_headers(usage, attempts, enforcement, repairs=0, normalized=bool(steps), effective_mode=mode),
-            )
-
-        # The provider accepted this transport; a malformed answer is not a
-        # capability rejection. Never degrade/cache another mode for this.
-        break
-
-    if selected_data is None:
-        # Auto chain exhausted only through technical rejections. Return the last
-        # physical provider error is impossible here because each rejection was
-        # consumed above; expose a transport-level diagnostic rather than an ECC error.
+    first_cap = _effective_completion_cap(incoming, usage)
+    if first_cap == 0:
         return JSONResponse(
-            status_code=502,
-            headers=adapter_headers(usage, attempts, "structured_transport_unavailable", effective_mode=selected_mode or S.structured_mode),
-            content={"error": {"type": "structured_transport_unavailable", "upstream_attempts": attempts}, "usage": usage.as_dict()},
+            status_code=429,
+            headers=adapter_headers(usage, 0, "provider_budget_exhausted"),
+            content={"error": {"type": "provider_budget_exhausted"}},
         )
 
-    # Optional cheap repair exists only for syntactically unrecoverable content.
-    # It stays on the same already-accepted transport and never sees/interprets
-    # ECC validation errors.
-    repairs = 1
-    repair = repair_instruction(assistant_content(selected_data))
-    attempts += 1
     try:
-        repaired = await call_once(
-            client, incoming, request_id, attempts, repair=repair,
-            structured_mode=selected_mode, resolved_model=model,
+        first = await call_once(client, incoming, request_id, 1, completion_cap=first_cap)
+    except httpx.TimeoutException as exc:
+        return _transport_failure(usage, 1, exc, timeout=True)
+    except httpx.RequestError as exc:
+        return _transport_failure(usage, 1, exc)
+
+    if first.data is None:
+        return Response(
+            content=first.raw,
+            status_code=first.status_code,
+            media_type=first.media_type,
+            headers=adapter_headers(usage, 1, "provider_http"),
         )
-    except (httpx.TimeoutException, httpx.HTTPError) as exc:
+
+    first_has_usage = usage.add(first.data)
+    value, errors, steps = normalize_structured(first.data, schema)
+    if not errors:
+        return JSONResponse(
+            usage.apply(canonicalize(first.data, value)),
+            headers=adapter_headers(
+                usage,
+                1,
+                "adapter_json_recovered" if steps else "adapter_json_valid",
+                normalized=bool(steps),
+            ),
+        )
+
+    # Never start a second paid generation if provider accounting from the first
+    # one is missing; Core will mark this execution's spend as unknown/fail-closed.
+    if not first_has_usage:
         headers = adapter_headers(
-            usage, attempts, "adapter_repair_failed_candidate_returned", repairs=repairs,
-            normalized=False, effective_mode=selected_mode,
+            usage,
+            1,
+            "adapter_candidate_usage_unknown",
+            normalized=bool(steps),
+            usage_unknown=True,
+            billing_may_have_occurred=True,
+            retry_cost_risk=True,
         )
-        headers["X-Eyle-Billing-May-Have-Occurred"] = "1"
-        headers["X-Eyle-Retry-Cost-Risk"] = "1"
-        return JSONResponse(_candidate_response(selected_data, usage), headers=headers)
+        headers["X-Eyle-Structured-Recovery-Error"] = errors[0][:240]
+        return JSONResponse(_candidate_response(first.data, usage), headers=headers)
 
-    if repaired.data is not None:
-        usage.add(repaired.data)
-        value2, errors2, steps2 = normalize_structured(repaired.data, schema_for(incoming))
-        if not errors2:
-            return JSONResponse(
-                usage.apply(canonicalize(repaired.data, value2)),
-                headers=adapter_headers(
-                    usage, attempts, "adapter_format_repaired", repairs=repairs,
-                    normalized=True, effective_mode=selected_mode,
-                ),
-            )
-        selected_errors = errors2
+    repair_cap = _effective_completion_cap(incoming, usage)
+    if repair_cap == 0:
+        headers = adapter_headers(
+            usage,
+            1,
+            "adapter_candidate_provider_budget_exhausted",
+            normalized=bool(steps),
+        )
+        headers["X-Eyle-Structured-Recovery-Error"] = errors[0][:240]
+        return JSONResponse(_candidate_response(first.data, usage), headers=headers)
 
-    # Never turn a format failure into a fatal 502 after a model generation.
-    # Return the original semantic candidate and let Eyle's wire parser provide
-    # precise cognitive feedback to the same Main.
+    repair = repair_instruction(assistant_content(first.data), errors)
+    try:
+        second = await call_once(
+            client,
+            incoming,
+            request_id,
+            2,
+            repair_instruction=repair,
+            completion_cap=repair_cap,
+        )
+    except httpx.TimeoutException as exc:
+        # The first provider usage is still returned. The second call is unknown,
+        # so Core must stop further paid calls for this user-message execution.
+        return _transport_failure(usage, 2, exc, timeout=True, repairs=1)
+    except httpx.RequestError as exc:
+        return _transport_failure(usage, 2, exc, repairs=1)
+
+    if second.data is None:
+        return Response(
+            content=second.raw,
+            status_code=second.status_code,
+            media_type=second.media_type,
+            headers=adapter_headers(usage, 2, "provider_http_repair", repairs=1),
+        )
+
+    second_has_usage = usage.add(second.data)
+    value2, errors2, steps2 = normalize_structured(second.data, schema)
+    if not errors2:
+        return JSONResponse(
+            usage.apply(canonicalize(second.data, value2)),
+            headers=adapter_headers(
+                usage,
+                2,
+                "adapter_format_repaired",
+                repairs=1,
+                normalized=True,
+                usage_unknown=not second_has_usage,
+                billing_may_have_occurred=not second_has_usage,
+                retry_cost_risk=not second_has_usage,
+            ),
+        )
+
+    # A model-format failure is not converted into a fake provider/transport
+    # failure. Return the last candidate with explicit recovery telemetry; Core
+    # still owns semantic canonicalization and can decide what to do next.
     headers = adapter_headers(
-        usage, attempts, "adapter_candidate_unparsed", repairs=repairs,
-        normalized=bool(selected_steps), effective_mode=selected_mode,
+        usage,
+        2,
+        "adapter_candidate_unparsed",
+        repairs=1,
+        normalized=bool(steps or steps2),
+        usage_unknown=not second_has_usage,
+        billing_may_have_occurred=not second_has_usage,
+        retry_cost_risk=not second_has_usage,
     )
-    headers["X-Eyle-Structured-Recovery-Error"] = (selected_errors[0] if selected_errors else "JSON recovery failed")[:240]
-    return JSONResponse(_candidate_response(selected_data, usage), headers=headers)
+    headers["X-Eyle-Structured-Recovery-Error"] = errors2[0][:240]
+    return JSONResponse(_candidate_response(second.data, usage), headers=headers)
 
 
-async def read_body(request:Request)->dict[str,Any]:
-    raw=await request.body()
-    if len(raw)>S.max_body: raise HTTPException(413,"Requisição grande demais")
-    try: data=json.loads(raw)
-    except Exception as exc: raise HTTPException(400,"JSON inválido") from exc
-    if not isinstance(data,dict): raise HTTPException(400,"Corpo precisa ser objeto JSON")
+async def read_body(request: Request) -> dict[str, Any]:
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > S.max_body:
+                raise HTTPException(413, "Requisição grande demais")
+        except ValueError as exc:
+            raise HTTPException(400, "Content-Length inválido") from exc
+
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > S.max_body:
+            raise HTTPException(413, "Requisição grande demais")
+        chunks.append(chunk)
+    raw = b"".join(chunks)
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(400, "JSON inválido") from exc
+    if not isinstance(data, dict):
+        raise HTTPException(400, "Corpo precisa ser objeto JSON")
     return data
 
 
 @asynccontextmanager
-async def lifespan(app:FastAPI):
+async def lifespan(app: FastAPI):
     check_config()
-    app.state.http=httpx.AsyncClient(timeout=httpx.Timeout(connect=20,read=S.timeout,write=60,pool=20),follow_redirects=False)
+    timeout = httpx.Timeout(connect=20, read=S.timeout, write=60, pool=20)
+    app.state.http = httpx.AsyncClient(timeout=timeout, follow_redirects=False)
     log.info(
-        "Eyle provider-neutral adapter -> %s | structured=%s | cache=%s | env=%s",
-        S.upstream_base_url, S.structured_mode, S.cache_mode, ENV_FILE,
+        "Eyle deterministic DeepSeek Adapter -> %s | model=%s | profile=%s | attempts=%s",
+        S.upstream_base_url,
+        S.model,
+        S.provider_profile,
+        MAX_UPSTREAM_ATTEMPTS_PER_LOGICAL_CALL,
     )
-    if S.proxy_key and S.proxy_allow_loopback_no_auth:
-        log.info("PROXY_API_KEY ativo para clientes remotos; localhost permanece liberado para a Eyle Core")
-    try: yield
-    finally: await app.state.http.aclose()
+    if not S.upstream_api_key:
+        log.warning("UPSTREAM_API_KEY vazia; /ready ficará not_ready até a chave ser configurada")
+    try:
+        yield
+    finally:
+        await app.state.http.aclose()
 
 
-app=FastAPI(title="Eyle Provider-Neutral OpenAI Adapter",version=ADAPTER_VERSION,lifespan=lifespan)
+app = FastAPI(title="Eyle Deterministic DeepSeek Adapter", version=ADAPTER_VERSION, lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -770,25 +889,21 @@ async def advertise_transport_protocol(request: Request, call_next):
 
 
 @app.get("/v1/eyle/handshake")
-async def handshake(request: Request)->Response:
-    """Formal Eyle<->Adapter transport negotiation with no paid generation.
-
-    The handshake advertises only mechanical transport capabilities. It does
-    not expose or validate any ECC/Memory semantics. A caller that declares an
-    incompatible transport protocol receives HTTP 426 rather than discovering
-    the mismatch during a paid generation.
-    """
+async def handshake(request: Request) -> Response:
+    """Static compatibility declaration; performs no provider/network probe."""
     client_auth(request)
     requested = str(request.headers.get("x-eyle-transport-protocol") or "").strip()
     if requested and requested != ADAPTER_TRANSPORT_PROTOCOL:
-        return JSONResponse(status_code=426, content={
-            "status": "incompatible",
-            "handshake_schema": ADAPTER_HANDSHAKE_SCHEMA,
-            "adapter_protocol": ADAPTER_TRANSPORT_PROTOCOL,
-            "requested_protocol": requested,
-            "error_code": "ADAPTER_PROTOCOL_INCOMPATIBLE",
-        })
-    explicit = S.model_override or (S.default_model if S.default_model.lower() != "auto" else "")
+        return JSONResponse(
+            status_code=426,
+            content={
+                "status": "incompatible",
+                "handshake_schema": ADAPTER_HANDSHAKE_SCHEMA,
+                "adapter_protocol": ADAPTER_TRANSPORT_PROTOCOL,
+                "requested_protocol": requested,
+                "error_code": "ADAPTER_PROTOCOL_INCOMPATIBLE",
+            },
+        )
     return JSONResponse({
         "status": "ok",
         "handshake_schema": ADAPTER_HANDSHAKE_SCHEMA,
@@ -807,146 +922,118 @@ async def handshake(request: Request)->Response:
             "client_json_schema_hint": True,
             "json_candidate_passthrough": True,
             "syntactic_json_recovery": True,
-            "structured_modes": sorted(_ALLOWED_STRUCTURED),
-            "structured_auto_policy": "degrade only on technical provider rejection",
-            "usage_accounting": "best-effort-openai-usage",
-            "cache_modes": sorted(_ALLOWED_CACHE),
+            "client_completion_ceiling": True,
+            "client_provider_token_budget": True,
+            "client_reasoning_control": True,
+            "structured_mode": STRUCTURED_UPSTREAM_MODE,
+            "structured_repair_attempts": 1,
+            "usage_accounting": "provider_total_tokens_aggregated",
         },
         "limits": {
-            "max_request_bytes": int(S.max_body),
-            "adapter_request_timeout_seconds": float(S.timeout),
-            "max_upstream_attempts_per_logical_call": int(MAX_UPSTREAM_ATTEMPTS_PER_LOGICAL_CALL),
+            "max_request_bytes": S.max_body,
+            "adapter_request_timeout_seconds": S.timeout,
+            "max_upstream_attempts_per_logical_call": MAX_UPSTREAM_ATTEMPTS_PER_LOGICAL_CALL,
         },
         "provider": {
-            "model_policy": "configured" if explicit else "discover",
-            **({"configured_model": explicit} if explicit else {}),
-            "structured_mode": S.structured_mode,
-            "cache_mode": S.cache_mode,
+            "profile": S.provider_profile,
+            "model_policy": "fixed_configured",
+            "configured_model": S.model,
+            "structured_transport": STRUCTURED_UPSTREAM_MODE,
+            "discovery": False,
+            "runtime_probing": False,
         },
     })
 
 
 @app.get("/")
 @app.get("/health")
-async def health()->dict[str,Any]:
+async def health(request: Request) -> dict[str, Any]:
+    client_auth(request)
     return {
-        "status":"ok","upstream":S.upstream_base_url,"model":S.model_override or S.default_model,
-        "adapter_profile":ADAPTER_PROFILE,"adapter_protocol":ADAPTER_TRANSPORT_PROTOCOL,"handshake_schema":ADAPTER_HANDSHAKE_SCHEMA,"semantic_protocol":"client-owned",
-        "structured_upstream_mode":S.structured_mode,"structured_auto_policy":"native_json_schema -> json_object -> prompt_json; degrade/cache only on technical provider rejection","cache_mode":S.cache_mode,
-        "supported_structured_modes":sorted(_ALLOWED_STRUCTURED),
-        "cache_warmup":"POST /v1/eyle/cache/warmup; explicit/session require configured provider-specific cache knobs",
-        "openai_base_url":f"http://{S.host}:{S.port}/v1",
-        "env_file":str(ENV_FILE),
-        "env_file_exists":ENV_FILE.exists(),
-        "proxy_auth":("remote_only" if S.proxy_key and S.proxy_allow_loopback_no_auth else "required" if S.proxy_key else "disabled"),
+        "status": "ok",
+        "adapter_version": ADAPTER_VERSION,
+        "adapter_profile": ADAPTER_PROFILE,
+        "adapter_protocol": ADAPTER_TRANSPORT_PROTOCOL,
     }
 
 
 @app.get("/ready")
-async def ready(request:Request)->Response:
-    """Verify configuration without forcing providers to implement GET /models."""
+async def ready(request: Request) -> Response:
+    """Local config readiness only; never calls DeepSeek."""
     client_auth(request)
-    explicit=S.model_override or (S.default_model if S.default_model.lower()!="auto" else "")
-    if explicit:
-        return JSONResponse({
-            "status":"ready_configured",
-            "upstream":S.upstream_base_url,
-            "model":explicit,
-            "note":"Modelo configurado explicitamente; nenhuma chamada paga foi feita ao provider.",
-        })
-
-    client: httpx.AsyncClient=request.app.state.http
-    try:
-        ids=await discover_models(client,force=True)
-        return JSONResponse({"status":"ready","upstream":S.upstream_base_url,"models":ids})
-    except Exception as exc:
-        return JSONResponse(status_code=503,content={
-            "status":"not_ready",
-            "upstream":S.upstream_base_url,
-            "error":_safe_transport_detail(exc),
-            "hint":"Verifique UPSTREAM_BASE_URL/API key. Se o provider não expõe /models, configure DEFAULT_MODEL com o ID real.",
-        })
+    if not S.upstream_api_key:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "not_ready",
+                "error_code": "UPSTREAM_API_KEY_REQUIRED",
+                "hint": "Configure UPSTREAM_API_KEY.",
+            },
+        )
+    return JSONResponse({
+        "status": "ready_configured",
+        "provider_profile": S.provider_profile,
+        "model": S.model,
+        "note": "Configuração local válida; nenhuma chamada ao provider foi feita.",
+    })
 
 
 @app.get("/v1/models")
-async def models(request:Request)->Response:
+async def models(request: Request) -> dict[str, Any]:
+    """Expose the one configured model; never forwards GET /models upstream."""
     client_auth(request)
-    # Se um modelo foi configurado explicitamente, a Eyle não precisa que o
-    # provider exponha GET /models. Isso mantém o Adapter realmente agnóstico:
-    # ele anuncia localmente o modelo configurado e usa a API remota somente
-    # quando houver uma geração real.
-    explicit = S.model_override or (S.default_model if S.default_model.lower() != "auto" else "")
-    if explicit:
-        return JSONResponse(
-            {"object":"list","data":[{"id":explicit,"object":"model","created":0,"owned_by":"configured"}]},
-            headers={"X-Eyle-Model-Discovery":"configured"},
-        )
-
-    client: httpx.AsyncClient=request.app.state.http
-    try:
-        ids = await discover_models(client)
-    except Exception as exc:
-        detail = _safe_transport_detail(exc)
-        return JSONResponse(status_code=502, content={"error":{
-            "type":"model_discovery_failed",**detail,
-            "hint":"Configure UPSTREAM_BASE_URL/API key. Se o provider não expõe /models, defina DEFAULT_MODEL com o ID real do modelo.",
-        }})
-    return JSONResponse({"object":"list","data":[{"id":item,"object":"model","created":0,"owned_by":"upstream"} for item in ids]}, headers={"X-Eyle-Model-Discovery":"upstream"})
-
-
-@app.post("/v1/eyle/cache/warmup")
-async def cache_warmup(request:Request)->Response:
-    """Optional provider-level prefix priming. Never called by Core automatically."""
-    client_auth(request)
-    incoming=await read_body(request)
-    client: httpx.AsyncClient=request.app.state.http
-    if S.cache_mode == "none":
-        raise HTTPException(409,"Cache warmup desativado por UPSTREAM_CACHE_MODE=none")
-    try:
-        model = await resolve_model(client, incoming)
-        result=await call_once(client,incoming,str(uuid.uuid4()),1,resolved_model=model)
-    except httpx.HTTPError as exc:
-        raise HTTPException(502,f"Falha no warmup: {type(exc).__name__}: {str(exc)[:200]}") from exc
-    except Exception as exc:
-        raise HTTPException(502,f"Falha no warmup/model discovery: {type(exc).__name__}: {str(exc)[:200]}") from exc
-    if result.data is None: return Response(content=result.raw,status_code=result.status_code,media_type=result.media_type)
-    usage=UsageAccumulator(); usage.add(result.data)
-    return JSONResponse({"status":"ok","cache_mode":S.cache_mode,"usage":usage.as_dict()})
+    return {
+        "object": "list",
+        "data": [{"id": S.model, "object": "model", "created": 0, "owned_by": "deepseek-configured"}],
+    }
 
 
 @app.post("/v1/chat/completions")
-@app.post("/chat/completions",include_in_schema=False)
-async def chat(request:Request)->Response:
+@app.post("/chat/completions", include_in_schema=False)
+async def chat(request: Request) -> Response:
     client_auth(request)
-    incoming=await read_body(request)
-    request_id=str(uuid.uuid4())
-    is_structured=structured(incoming)
-    stream=bool(incoming.get("stream"))
-    client: httpx.AsyncClient=request.app.state.http
-    if is_structured and stream: raise HTTPException(400,"Validação estruturada requer stream=false")
-    if is_structured: return await execute_structured(client,incoming,request_id)
-    try:
-        resolved_model = await resolve_model(client, incoming)
-    except Exception as exc:
-        return _transport_failure(UsageAccumulator(),0,"model_discovery",exc)
-    body,headers,_=_prepare_upstream(incoming,resolved_model=resolved_model)
-    url=f"{S.upstream_base_url}/chat/completions"
+    incoming = await read_body(request)
+    request_id = str(uuid.uuid4())
+    is_structured = structured(incoming)
+    stream = bool(incoming.get("stream"))
+    client: httpx.AsyncClient = request.app.state.http
+
+    if is_structured and stream:
+        raise HTTPException(400, "Structured output requer stream=false")
+    if is_structured:
+        return await execute_structured(client, incoming, request_id)
+
+    body, headers, _ = prepare_upstream(incoming)
+    url = f"{S.upstream_base_url}/chat/completions"
     try:
         if stream:
-            req=client.build_request("POST",url,headers=headers,json=body)
-            upstream=await client.send(req,stream=True)
-            if upstream.status_code>=400:
-                content=await upstream.aread(); status=upstream.status_code; media=upstream.headers.get("content-type","application/json"); await upstream.aclose()
-                return Response(content=content,status_code=status,media_type=media)
-            return StreamingResponse(upstream.aiter_raw(),status_code=upstream.status_code,media_type=upstream.headers.get("content-type","text/event-stream"),headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"},background=BackgroundTask(upstream.aclose))
-        result=await call_once(client,incoming,request_id,1,resolved_model=resolved_model)
-        if result.data is None: return Response(content=result.raw,status_code=result.status_code,media_type=result.media_type)
-        return JSONResponse(result.data)
+            req = client.build_request("POST", url, headers=headers, json=body)
+            upstream = await client.send(req, stream=True)
+            if upstream.status_code >= 400:
+                content = await upstream.aread()
+                status = upstream.status_code
+                media = upstream.headers.get("content-type", "application/json")
+                await upstream.aclose()
+                return Response(content=content, status_code=status, media_type=media)
+            return StreamingResponse(
+                upstream.aiter_raw(),
+                status_code=upstream.status_code,
+                media_type=upstream.headers.get("content-type", "text/event-stream"),
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                background=BackgroundTask(upstream.aclose),
+            )
+
+        result = await call_once(client, incoming, request_id, 1, completion_cap=_positive_int(incoming.get("max_completion_tokens")))
+        if result.data is None:
+            return Response(content=result.raw, status_code=result.status_code, media_type=result.media_type)
+        usage = UsageAccumulator()
+        usage.add(result.data)
+        return JSONResponse(result.data, headers=adapter_headers(usage, 1, "provider_passthrough"))
     except httpx.TimeoutException as exc:
-        return _transport_failure(UsageAccumulator(),1,"adapter_timeout",exc,timeout=True)
-    except httpx.HTTPError as exc:
-        return _transport_failure(UsageAccumulator(),1,"adapter_transport",exc)
+        return _transport_failure(UsageAccumulator(), 1, exc, timeout=True)
+    except httpx.RequestError as exc:
+        return _transport_failure(UsageAccumulator(), 1, exc)
 
 
-if __name__=="__main__":
-    uvicorn.run(app,host=S.host,port=S.port,reload=False,log_level=os.getenv("LOG_LEVEL","info").lower())
+if __name__ == "__main__":
+    uvicorn.run(app, host=S.host, port=S.port, reload=False, log_level=os.getenv("LOG_LEVEL", "info").lower())

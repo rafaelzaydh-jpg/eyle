@@ -1,24 +1,80 @@
-# ECC Benchmarks
+# Benchmarks — Rev3.7.2
 
-ECC earns changes through measured behavior, not architectural aesthetics.
+Rev3.7.2 is a cut/canonicalization release. Its benchmark goal is to prove that removing alternate paths did not reduce reachability or reintroduce cost growth.
 
 ## Required scenarios
 
-1. **AgentSession analysis:** find its definition, usages and actual flow using bounded Explore operations and then Conclude.
-2. **Bug search:** reason over project structure/tests/source rather than merely search `BUG`/`TODO`.
-3. **Write:** inspect, request a Runtime-guarded transaction, survive confirmation, apply/test/re-observe and Conclude.
-4. **Durable learning:** ordinary stable statements such as a user preference can become graph Memory without a special user command.
-5. **No prompt contamination:** a stored unrelated preference does not appear in a fresh `Oi` prompt until Main explicitly recalls it.
-6. **Explicit recall:** a later session can activate the relevant Memory region and use it.
-7. **Memory pagination:** large graph selections are paged through Coverage + exact Frontier continuation and never expose private handles.
-8. **Coverage union:** adjacent/overlapping observed file ranges prevent redundant physical reads where the provider can prove coverage.
-9. **Source identity:** a workspace that itself contains Eyle code is still `workspace`; `eyle` remains the currently running instance source tree.
-10. **Unknown provider:** attaching a new deterministic provider must not require Core domain branches.
+1. `"oi"` — one normal cognition, compact static floor.
+2. short conversation reference — recent physical conversation resolves naturally.
+3. topic switch — unrelated Task/Memory does not enter automatically.
+4. 200+ message conversation — token-budget slice stays bounded; omitted count/frontier/reachability remain correct.
+5. Memory scaling — compare 100, 1,000 and 10,000+ nodes on the same trivial request; prompt size must not grow proportionally.
+6. explicit old Memory recall — absent from baseline prompt, found when Main asks for it.
+7. protocol repair — same fingerprint is bounded and repair does not resend large observations.
+8. invalid Memory sidecar — valid ECC executes with zero extra LLM call caused solely by Memory rejection.
+9. large observation/search/file result — page is bounded physically and exact remainder remains reachable.
+10. sandbox Build — exact confirmed mutation, post-write verification and rollback invariants remain intact.
 
 ## Metrics
 
-Track Core LOC/files, fixed prompt/schema size, LLM calls, physical operations, continuation pages, graph deltas, Evidence creation, prompt tokens, duration, no-progress signals and answer/patch correctness.
+Per provider call:
 
-## Clean transcript, same Memory Graph
+```text
+provider_prompt_tokens
+provider_completion_tokens
+provider_total_tokens
+cached_tokens
+cognition_reason
+estimated_static_tokens
+estimated_conversation_tokens
+estimated_memory_tokens
+estimated_observation_tokens
+estimated_feedback_tokens
+estimated_capability_tokens
+```
 
-The Web shell may clear the visible conversation transcript without deleting `core_memory.sqlite3`. This lets tests start a fresh dialogue while keeping durable learned Memory. Since raw conversation history is no longer projected as a cognitive memory layer, no background-ablation environment switch is required.
+Per execution:
+
+```text
+total_provider_tokens
+normal_cognition_tokens
+protocol_recovery_tokens
+number_of_llm_calls
+number_of_protocol_repairs
+memory_rejections
+conversation_messages_materialized
+conversation_messages_omitted
+```
+
+Provider-reported usage remains the ledger authority; local component estimates are diagnostic only.
+
+## Static cognitive floor
+
+Measure the composed floor, not isolated components:
+
+```text
+system/wire semantics
++ current contract
++ compact capability surface
++ minimal runtime packet
+```
+
+A larger Memory Graph must not raise this floor simply because more knowledge exists.
+
+## Cut regression criterion
+
+A Rev3.7.2 change is not an improvement if it makes an old hidden/duplicate path disappear by also making useful state unreachable. The desired transformation is:
+
+```text
+multiple competing paths
+        ↓
+one canonical path
+```
+
+not:
+
+```text
+multiple paths
+        ↓
+lost capability
+```

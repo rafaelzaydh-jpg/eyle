@@ -55,7 +55,7 @@ def _seed(session, context, count: int, *, prefix: str = "alpha"):
 def test_rev287_memory_graph_v7_adds_scalable_recall_tables_and_fts(tmp_path):
     storage = str(tmp_path / "memory")
     graph_counts(storage)
-    assert MEMORY_GRAPH_SCHEMA_VERSION == "2.7.5-r2.9-memory-graph-v8"
+    assert MEMORY_GRAPH_SCHEMA_VERSION == "2.7.5-r3.7.1-memory-graph-v12"
     conn = sqlite3.connect(memory_db_path(storage))
     try:
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -232,11 +232,3 @@ def test_rev287_sql_like_fallback_searches_tags_too(tmp_path):
     assert recalled["coverage"]["facts"]["search_backend"] == "sql_like"
 
 
-def test_rev287_accepts_clean_rev286_config_identity():
-    from eyle.runtime.config import validar_config
-    config = base_config()
-    config["config_schema_version"] = "2.7.5-r2.8.6-ecc"
-    config["revision"] = "rev2.8.6-ecc"
-    validated = validar_config(copy.deepcopy(config), standard_registry())
-    assert validated["config_schema_version"] == "2.7.5-r3-ecc"
-    assert validated["revision"] == "rev3-ecc"

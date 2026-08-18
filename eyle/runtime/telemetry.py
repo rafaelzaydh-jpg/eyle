@@ -6,6 +6,7 @@ esses dados com a memoria conversacional. Falha de telemetria nunca derruba a
 tarefa principal.
 """
 from __future__ import annotations
+import warnings
 
 import json
 import os
@@ -107,7 +108,8 @@ def record(kind, name, status, duration_ms=0.0, *, execution_id=None, job_id=Non
                 (limite,),
             )
         return True
-    except Exception:
+    except Exception as exc:
+        warnings.warn(f"TELEMETRY_WRITE_FAILED:{type(exc).__name__}:{exc}", RuntimeWarning, stacklevel=2)
         return False
 
 
@@ -137,8 +139,9 @@ def summary(window_seconds=3600, limit=5000):
                 """,
                 (since, max(1, min(int(limit), 50000))),
             ).fetchall()
-    except Exception:
-        return {"window_seconds": int(window_seconds), "total": 0, "groups": {}, "error": "telemetry_unavailable"}
+    except Exception as exc:
+        warnings.warn(f"TELEMETRY_READ_FAILED:{type(exc).__name__}:{exc}", RuntimeWarning, stacklevel=2)
+        return {"window_seconds": int(window_seconds), "total": 0, "groups": {}, "error": f"telemetry_unavailable:{type(exc).__name__}"}
 
     groups = {}
     for row in rows:

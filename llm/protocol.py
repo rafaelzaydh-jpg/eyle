@@ -65,18 +65,17 @@ def prompt_messages(system_prompt: str, prompt: Any) -> list[dict[str, str]]:
 
 
 def provider_policy(config: dict[str, Any] | None) -> dict[str, Any]:
-    """Return the fixed Eyle->Adapter wire plus opportunistic cache policy.
+    """Return Eyle's fixed local-Adapter wire policy.
 
-    Provider structured-output capability selection is deliberately absent here;
-    that belongs behind the Adapter boundary.
+    Provider discovery, cache negotiation and structured-mode selection are not
+    Eyle concerns. The bundled Adapter owns one explicitly configured provider
+    profile; this function only exposes transport/reasoning metadata.
     """
     llm = (config or {}).get("llm") or {}
-    cache = str(llm.get("cache_mode") or "auto").strip().lower()
-    if cache not in {"auto", "none", "implicit", "explicit", "session"}:
-        cache = "auto"
     return {
         "transport": "adapter_openai_chat",
         "structured_output": "adapter_wire_json_schema",
-        "cache_mode": cache,
-        "cache_warmup": bool(llm.get("cache_warmup", False)),
+        "cache_mode": "provider_implicit",
+        "cache_warmup": False,
+        "reasoning_mode": str(llm.get("reasoning_mode") or "off"),
     }

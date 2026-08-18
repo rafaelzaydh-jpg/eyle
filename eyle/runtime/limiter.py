@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Semaforo entre processos baseado em SQLite, com lease recuperavel."""
 from __future__ import annotations
+import warnings
 
 import hashlib
 import os
@@ -134,7 +135,8 @@ def release(token):
             return cursor.rowcount > 0
         finally:
             conn.close()
-    except Exception:
+    except Exception as exc:
+        warnings.warn(f"LIMITER_RELEASE_FAILED:{type(exc).__name__}:{exc}", RuntimeWarning, stacklevel=2)
         return False
 
 

@@ -9,8 +9,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-import eyle.providers.standard_impl.microsandbox_backend as msb_mod
-import eyle.providers.standard_impl.sandbox as sandbox_mod
+import eyle.providers.standard.microsandbox_backend as msb_mod
+import eyle.providers.standard.sandbox as sandbox_mod
 from eyle.runtime.execution_context import ExecutionContext, bind_execution, reset_execution
 
 

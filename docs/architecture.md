@@ -1,162 +1,150 @@
-# Architecture
+# Architecture — Rev3.7.2
 
-Eyle is organized around a strict authority boundary:
+Rev3.7.2 keeps one authority rule and one implementation rule:
 
-> **Main owns meaning. Runtime owns physical truth and enforceable limits.**
+> **Main owns meaning. Runtime owns physical truth. One responsibility has one canonical implementation path.**
 
-The goal is to keep the semantic center small while allowing the physical body to grow.
+Historical compatibility is handled, when needed, by an explicit migration tool. It is not a permanent branch in the active runtime.
 
-## Cognitive model
-
-```text
-                              MEMORY GRAPH
-                    learned/revisable knowledge
-                           ▲              │
-                      memory_delta        │ recall
-                           │              ▼
-REQUEST ────────────────► MAIN LLM ◄──────────── Observation / Material
-                           │
-                           ▼
-                          ECC
-                  ┌────────┼────────┐
-               Explore    Build   Conclude
-                  │        │        │
-                  └────────┼────────┘
-                           ▼
-                         Runtime
-                           │
-                     Capability body
-                           │
-                          World
-```
-
-Memory and ECC are simultaneous. A cognition response may choose an ECC move and also update Memory.
-
-## Authorities
-
-### Main LLM
-
-Main is the sole semantic authority. It decides:
-
-- what the user means;
-- what information may matter;
-- what to inspect next;
-- what an observation means;
-- what to remember or revise;
-- how knowledge relates;
-- whether enough is known to conclude.
-
-Runtime must not replace these decisions with semantic routers, hidden relevance scoring, graph-centrality heuristics, or a second planning LLM.
-
-### Memory Graph
-
-Memory is intrinsic learned state, not transcript history and not an ECC tool. It stores atomic learned representations and relations, while large source bodies remain external Material.
-
-### ECC Core
-
-ECC exposes only three universal movements:
-
-1. **Explore** — read/observe/test/recall without lasting world mutation;
-2. **Build** — request one lasting physical change through Runtime safeguards;
-3. **Conclude** — return the answer when Main decides the request is sufficiently resolved.
-
-### Runtime
-
-Runtime owns mechanically decidable facts and restrictions:
-
-- schemas and serialization boundaries;
-- paths and resource identity;
-- hashes/freshness;
-- permissions and protected resources;
-- Evidence/Material identities;
-- Coverage and exact Frontiers;
-- token/deadline accounting;
-- confirmations;
-- persistence;
-- transactions and rollback;
-- sandbox/process limits.
-
-### Capability providers
-
-Providers implement deterministic bodies. Core does not hardcode repository, language, robot, browser, network, or another domain-specific planner.
-
-## Request and context boundary
-
-`current_request` is the active user request. Raw historical transcript is not projected as a second memory system. Earlier information returns only when Main learned it into Memory and/or explicitly recalls it.
-
-Recalled Memory is context to evaluate, not universal truth.
-
-## Observation, Material, Coverage and Frontier
-
-Capability results are objective runtime observations.
+## Cognitive path
 
 ```text
-Observation
-├── Material   exact observed source/body
-├── Coverage   what was physically materialized
-└── Frontier   exact continuation after the current page
+request
+  │
+  ▼
+Service ── conversation facts ──► Deterministic ContextMaterializer
+                                      │
+                                      ▼
+                                     Main
+                              semantic authority
+                                      │
+                         ┌────────────┴────────────┐
+                         ▼                         ▼
+                        ECC                   memory_delta
+                 Explore/Build/Conclude            │
+                         │                          ▼
+                         ▼                    Memory Graph v12
+                      Runtime                  independent sidecar
+                         │
+                         ▼
+                  provider/world effects
 ```
 
-A page size is a transport/materialization choice, not a semantic ceiling. If more finite content exists, Runtime exposes a public `fr-*` Frontier and Main may continue repeatedly.
+Main decides meaning, relevance, investigation, learning and sufficiency. Runtime may use IDs, scope, timestamps, budgets, source identity, revisions, hashes and persisted cursors because those are mechanically decidable facts.
 
-## Build lifecycle
+The runtime must not add a semantic ranker, Active Projection, `memory_focus`, HOT/WARM/COLD tier, hidden working set, embedding-selected prompt, semantic context LLM or intermediate planner.
 
-A Build never concludes merely because a write call returned successfully.
+## Canonical component ownership
+
+### Conversation
+
+Service owns physical message recording and atomic conversation snapshots. `ContextMaterializer` decides only how much of the current conversation physically fits the configured token budget.
+
+Recent continuity is automatic because current conversation membership/order is physical. Older content is omitted from the packet without becoming unreachable.
+
+### Memory
+
+Memory Graph v12 is the only runtime graph schema. Its dimensions are separate:
+
+- `scope`: physical reachability;
+- `domain`: `chat`, `task`, `eyle`, `knowledge`;
+- `context_key`: optional physical context identity.
+
+Main authors semantic Memory. Runtime may ingest Chat-domain message facts because role/message/conversation/order are physical.
+
+Memory is an ECC sidecar: parsing or storage rejection of `memory_delta` never invalidates an already valid ECC decision.
+
+### Context
+
+`ContextMaterializer` is the only normal prompt-materialization path. It receives physical identifiers/budgets and emits a bounded packet containing the current request, recent conversation, task mechanics, incremental observations, explicit Memory activation, feedback and frontiers.
+
+It has no relevance score or semantic topic classifier.
+
+### Standard provider
+
+`eyle.providers.standard` is the single bundled provider package. Registry, tools, contracts, workspace transactions and sandbox promotion live in that package. Core/Host consumes its canonical Registry directly.
+
+There is no `eyle.providers.standard_impl` or dynamic re-export facade.
+
+### Adapter
+
+The local Adapter is transport-only. Eyle sends the canonical local request; the Adapter translates it to the configured upstream provider. Public local output-cap input is `max_completion_tokens`. Provider-specific `max_tokens` exists only in the upstream body built inside the Adapter.
+
+## ECC
+
+ECC has exactly three movements:
+
+1. Explore;
+2. Build;
+3. Conclude.
+
+Wire JSON is mechanically canonicalized before strict local validation. Representation recovery may normalize safe aliases, but it may not invent semantic meaning.
+
+Structured protocol failure is repaired within the same execution. Repetition of the same protocol fingerprint is bounded; repair packets do not need to rematerialize expensive observations merely to serialize an already-attempted decision.
+
+## Evidence, Material, Coverage and Frontier
+
+Capability results create physical observations. Large results preserve exact source bodies as Material/Evidence and expose Coverage plus an exact Frontier for omitted finite content.
+
+Paging reduces materialization, not reachability.
+
+This invariant also applies to conversation and Memory:
 
 ```text
-Main proposes Build
-      ↓
-Runtime dry-run / confirmation / transaction
-      ↓
-physical write
-      ↓
-post-write verification
-      ↓
-verified Observation + Material
-      ↓
-Main sees the real result
-      ↓
-learn / inspect / conclude
+not materialized now != inaccessible
 ```
 
-This prevents Main from learning only from intended mutations.
+## Execution accounting
 
-## Wire vs canonical cognition
+One user-message execution carries one provider-token ledger across normal cognition, continuation and protocol repair. Provider usage is the accounting authority.
 
-Main emits a tolerant, simple JSON wire shape. Eyle deterministically normalizes safe representational aliases and then validates one strict internal canonical ECC envelope.
+The current defaults are:
 
 ```text
-Main wire
-   ↓
-syntax / safe alias recovery
-   ↓
-canonicalize_wire_response()
-   ↓
-{decision, memory_delta}
-   ↓
-strict semantic validation
+50000 context tokens / physical call
+150000 provider tokens / logical execution
 ```
 
-Canonicalization may repair representation but must never invent missing meaning.
+There is no generated-token fuse or cognitive wall-clock deadline.
 
-If semantic content is still incomplete, the error becomes runtime feedback for the same Main execution rather than a fatal transport failure.
+## Persistence and migrations
 
-## Adapter boundary
+Active runtime readers are current-schema only:
 
-Eyle always talks to the local Adapter on port `8080`. The Adapter talks to the remote OpenAI-compatible provider.
+- configuration: Rev3.7.2 identity;
+- Session: Rev3.7.2 schema;
+- pending interaction: v13;
+- execution continuity: v3;
+- Memory Graph: v12.
 
-The Adapter owns provider transport only. It does not implement ECC or Memory semantics. A formal handshake establishes mechanical compatibility before paid generation.
+The only retained historical conversion needed for this release is the explicit one-shot Memory Graph v11→v12 devtool. It runs outside the normal request/runtime path.
 
-## Execution continuity
+## Build safety
 
-A confirmation pause belongs to the same logical execution. Persisted continuation state includes the logical execution ID, absolute deadline, generated-token fuse, provider usage/call ledger, request identity and terminal capability state.
+Build remains Runtime-guarded:
 
-On resume, process-local resources may be recreated, but logical budget and identity do not reset. Deadline is checked before a deferred write is applied.
+```text
+Main proposes mutation
+        ↓
+dry-run / exact proposal
+        ↓
+physical confirmation when required
+        ↓
+transaction / rollback
+        ↓
+post-write observation
+        ↓
+Main sees actual result
+```
 
-## Design rule
+Semantic choice and physical confirmation share a UI interaction shape but not authority. Only Runtime confirmation authorizes an exact physical mutation.
 
-Before adding state or logic to Core, ask:
+## Design test
 
-1. Does this require interpretation? **Main should decide it.**
-2. Is this an objective fact or mechanically enforceable constraint? **Runtime/provider should own it.**
-3. Can Main already make the decision from normal observations and Memory? **Do not add another semantic coordinator.**
+Before adding another layer:
+
+1. If it interprets meaning, it belongs to Main.
+2. If it enforces/measures physical state, it belongs to Runtime/provider.
+3. If an existing canonical component already owns the responsibility, extend that component rather than create an alternate path.
+4. If a compatibility branch is needed only to read historical state, prefer a one-shot migration.
+5. If an optimization makes reachable knowledge unreachable, reject it.

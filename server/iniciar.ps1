@@ -18,7 +18,7 @@ if (-not (Test-Path $EnvFile)) {
         throw "Nao encontrei .env.example para criar o .env."
     }
     Write-Host "Arquivo .env criado em: $EnvFile" -ForegroundColor Yellow
-    Write-Host "Configure UPSTREAM_BASE_URL, UPSTREAM_API_KEY e DEFAULT_MODEL para a API remota desejada. Depois execute iniciar.bat novamente." -ForegroundColor Yellow
+    Write-Host "Configure UPSTREAM_API_KEY. PROVIDER_PROFILE, UPSTREAM_BASE_URL e MODEL já possuem defaults DeepSeek V4. Depois execute iniciar.bat novamente." -ForegroundColor Yellow
     exit 1
 }
 

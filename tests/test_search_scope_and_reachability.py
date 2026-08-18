@@ -1,8 +1,7 @@
 from __future__ import annotations
 from tests.canonical import standard_registry
 
-import eyle.providers.standard as tools
-from eyle.providers.standard_impl.code_relations import analyze_symbol_relations
+from eyle.providers.standard.code_relations import analyze_symbol_relations
 from tests.canonical import base_config
 
 
@@ -107,7 +106,7 @@ def test_reachability_is_exhaustive_not_llm_depth_tuned(tmp_path):
         "\ndef main():\n    f0()\n\nif __name__ == '__main__':\n    main()\n", encoding="utf-8",
     )
     (tmp_path / "target.py").write_text("def target():\n    return 1\n", encoding="utf-8")
-    result = standard_registry().execute("standard.symbol_relations", {"symbol": "target", "query": "reachability", "max_depth": 3, "max_edges": 20}, _ctx(tmp_path))
+    result = standard_registry().execute("standard.symbol_relations", {"symbol": "target", "query": "reachability", "max_depth": 3, "page_size": 20}, _ctx(tmp_path))
     assert result["ok"] is True
     assert result["coverage"]["facts"]["objective_result"] == "reachable"
     assert result["coverage"]["facts"]["depth_mode"] == "auto_exhaustive"
@@ -115,9 +114,9 @@ def test_reachability_is_exhaustive_not_llm_depth_tuned(tmp_path):
 
 
 def test_reachability_identity_and_validation_drop_tuning_knobs():
-    low = observation_signature("symbol_relations", {"symbol": "target", "query": "reachability", "max_depth": 3, "max_edges": 20})
-    high = observation_signature("symbol_relations", {"symbol": "target", "query": "reachability", "max_depth": 32, "max_edges": 500})
+    low = observation_signature("symbol_relations", {"symbol": "target", "query": "reachability", "max_depth": 3, "page_size": 20})
+    high = observation_signature("symbol_relations", {"symbol": "target", "query": "reachability", "max_depth": 32, "page_size": 500})
     assert low == high
-    normalized, error = standard_registry().validate("standard.symbol_relations", {"symbol": "target", "query": "reachability", "max_depth": 5, "max_edges": 20})
+    normalized, error = standard_registry().validate("standard.symbol_relations", {"symbol": "target", "query": "reachability", "max_depth": 5, "page_size": 20})
     assert error is None
-    assert "max_depth" not in normalized and "max_edges" not in normalized
+    assert "max_depth" not in normalized and "page_size" not in normalized

@@ -17,10 +17,11 @@ from datetime import datetime, timedelta, timezone
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eyle.core.agent import executar_agente
-from eyle.runtime.continuation import validate_pending_continuation, confirmation_control, is_explicit_confirmation_control
+from eyle.runtime.continuation import validate_pending_continuation, confirmation_control, is_explicit_confirmation_control, resolve_semantic_choice
 from eyle.host import build_bundled_host
 from eyle.runtime.config import carregar_config_validada
 from eyle.runtime.storage import lock_para, salvar_json_atomico
+from eyle.runtime.memory_graph import gc_orphan_recall_snapshots, ingest_chat_message, world_scope
 from eyle.runtime import queue as fila_persistente
 from eyle.runtime import progress as job_progress
 from llm.executar import ErroLLM
@@ -28,7 +29,7 @@ from llm.executar import ErroLLM
 MEMORY_DIR = os.path.join(BASE_DIR, "memory")
 CONTEXT_DIR = os.path.join(BASE_DIR, "context")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
-AGENT_PENDENTE_PATH = os.path.join(CONTEXT_DIR, "agent_pendente.json")
+AGENT_PENDENTE_DIR = os.path.join(CONTEXT_DIR, "pending")
 HOST = build_bundled_host(BASE_DIR)
 _TTL_PENDENCIA_DEFAULT = 3600
 
@@ -70,6 +71,47 @@ def salvar_conversa(mensagens):
     _salvar_json(os.path.join(MEMORY_DIR, "conversa.json"), mensagens)
 
 
+def _conversation_id(*, rotate: bool = False) -> str:
+    """Return the physical identity of the current visible conversation."""
+    os.makedirs(MEMORY_DIR, exist_ok=True)
+    caminho = os.path.join(MEMORY_DIR, "conversation_state.json")
+    with lock_para(caminho):
+        state = _carregar_json(caminho, {})
+        cid = str(state.get("conversation_id") or "").strip() if isinstance(state, dict) else ""
+        if rotate or not cid:
+            cid = "conv-" + secrets.token_hex(12)
+            _salvar_json(caminho, {"conversation_id": cid, "created_at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+        return cid
+
+
+def _persist_chat_memory(mensagem):
+    """Persist the exact message as Runtime-authored Chat Memory.
+
+    Conversation JSON remains the UI/job snapshot authority. The Graph write is
+    idempotent and uses the same physical message identity; it never summarizes
+    or decides relevance.
+    """
+    if not isinstance(mensagem, dict):
+        return None
+    provider_context = carregar_provider_context()
+    memory_ctx = (provider_context or {}).get("core_memory") or {}
+    storage = MEMORY_DIR
+    scope_id = memory_ctx.get("world_scope_id")
+    if not scope_id:
+        return None
+    return ingest_chat_message(
+        storage,
+        world_scope_value=world_scope(str(scope_id)),
+        conversation_id=str(mensagem.get("conversation_id") or _conversation_id()),
+        message_id=int(mensagem.get("id")),
+        role=str(mensagem.get("role") or ""),
+        content=str(mensagem.get("text") or ""),
+        timestamp=str(mensagem.get("timestamp") or "") or None,
+        reply_to_message_id=mensagem.get("reply_to_message_id"),
+        source_job_id=mensagem.get("source_job_id"),
+    )
+
+
 def limpar_conversa_preservando_memoria():
     """Zera somente o transcript persistido da conversa.
 
@@ -95,17 +137,18 @@ def limpar_conversa_preservando_memoria():
         mensagens = carregar_conversa()
         removidas = len(mensagens)
         salvar_conversa([])
+        _conversation_id(rotate=True)
 
     # Uma conversa visual limpa nao deve carregar uma confirmacao pendente de
     # um transcript que acabou de ser descartado. Isto nao altera Memory Graph.
-    limpar_agent_pendente()
+    limpar_todas_pendencias()
     return {
         "status": "ok",
         "removed_messages": removidas,
         "memory_graph_preserved": True,
     }
 
-def registrar_mensagem_com_snapshot(role, texto, limite_snapshot=6, metadata=None):
+def registrar_mensagem_com_snapshot(role, texto, metadata=None):
     """Registra uma mensagem e captura, sob o mesmo lock, o historico do job.
 
     O snapshot atomico impede que outra requisicao web inclua uma mensagem
@@ -117,6 +160,7 @@ def registrar_mensagem_com_snapshot(role, texto, limite_snapshot=6, metadata=Non
         novo_id = (max((m["id"] for m in mensagens), default=0)) + 1
         mensagem = {
             "id": novo_id,
+            "conversation_id": _conversation_id(),
             "role": role,
             "text": texto,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -128,16 +172,35 @@ def registrar_mensagem_com_snapshot(role, texto, limite_snapshot=6, metadata=Non
                 mensagem["source_job_id"] = int(source_job_id)
             if source_message_id is not None:
                 mensagem["reply_to_message_id"] = int(source_message_id)
+        if role == "user":
+            # A cognitive choice is not a Runtime continuation gate. It is a
+            # structured assistant affordance; the next user message resolves
+            # or supersedes it exactly like ordinary conversation.
+            for anterior in reversed(mensagens):
+                interaction = anterior.get("interaction") if isinstance(anterior, dict) else None
+                if not isinstance(interaction, dict) or interaction.get("kind") != "choice":
+                    continue
+                if not interaction.get("resolved"):
+                    interaction = dict(interaction)
+                    interaction["resolved"] = True
+                    interaction["selected_text"] = str(texto or "")
+                    anterior["interaction"] = interaction
+                break
         if isinstance(metadata, dict):
             for chave, valor in metadata.items():
                 if chave not in {"id", "role", "text", "timestamp"}:
                     mensagem[chave] = valor
         mensagens.append(mensagem)
         salvar_conversa(mensagens)
+        try:
+            mensagem["chat_memory_id"] = _persist_chat_memory(mensagem)
+            salvar_conversa(mensagens)
+        except (OSError, ValueError):
+            # Chat continuity is still backed by the atomic conversation snapshot;
+            # Graph ingestion is idempotent and can be retried without semantic loss.
+            mensagem["chat_memory_ingest_pending"] = True
+            salvar_conversa(mensagens)
         historico = _historico_sem_erros_llm(mensagens)
-        if limite_snapshot is not None:
-            limite_snapshot = max(0, int(limite_snapshot))
-            historico = historico[-limite_snapshot:] if limite_snapshot else []
         return novo_id, [dict(mensagem) for mensagem in historico]
 
 def registrar_mensagem(role, texto, metadata=None):
@@ -304,14 +367,61 @@ def _hash_provider_context(provider_context):
     encoded = json.dumps(provider_context, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
+def _pending_files():
+    os.makedirs(AGENT_PENDENTE_DIR, exist_ok=True)
+    return [
+        os.path.join(AGENT_PENDENTE_DIR, name)
+        for name in os.listdir(AGENT_PENDENTE_DIR)
+        if name.endswith(".json")
+    ]
+
+
+def _pending_execution_id(pending):
+    pending = pending or {}
+    execution_state = pending.get("execution_state") or {}
+    value = str(execution_state.get("execution_id") or "").strip()
+    return value or None
+
+
+def _pending_storage_path(pending):
+    pending_id = str((pending or {}).get("id") or "").upper()
+    execution_id = _pending_execution_id(pending) or "interactive"
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", execution_id).strip("._-")[:48] or "execution"
+    digest = hashlib.sha256(execution_id.encode("utf-8")).hexdigest()[:12]
+    return os.path.join(AGENT_PENDENTE_DIR, f"{safe}-{digest}-{pending_id}.json")
+
+
+def _load_pending_file(path):
+    pending = _carregar_json(path, None)
+    if pending is None:
+        return None
+    try:
+        validate_pending_continuation(pending, persisted=True)
+    except ValueError:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        return None
+    return dict(pending)
+
+
+def listar_agent_pendentes():
+    out = []
+    for path in _pending_files():
+        pending = _load_pending_file(path)
+        if pending is not None:
+            out.append(pending)
+    out.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    return out
+
+
 def _novo_id_pendencia():
-    atual = _carregar_json(AGENT_PENDENTE_PATH, None)
-    existente = str((atual or {}).get("id") or "").upper()
+    existentes = {str(item.get("id") or "").upper() for item in listar_agent_pendentes()}
     while True:
         candidato = secrets.token_hex(2).upper()
-        if candidato != existente:
+        if candidato not in existentes:
             return candidato
-
 
 def _preparar_pendencia(data, provider_context, config=None):
     data = dict(data or {})
@@ -322,7 +432,7 @@ def _preparar_pendencia(data, provider_context, config=None):
     provider_context_hash = _hash_provider_context(provider_context)
     expires_at = (
         _formatar_data_utc(now + timedelta(seconds=ttl))
-        if data.get("continuation_kind") == "capability_confirmation" else None
+        if data.get("continuation_kind") in {"capability_confirmation", "semantic_choice"} else None
     )
     data.update({
         "id": _novo_id_pendencia(),
@@ -342,7 +452,7 @@ def _validar_pendencia(pending, provider_context, now=None):
     if re.fullmatch(r"[0-9A-F]{4}", str(pending.get("id") or "").upper()) is None:
         return False, "PENDING_ID_INVALID"
     expiration = _parse_data_utc(pending.get("expires_at"))
-    if pending.get("continuation_kind") == "capability_confirmation":
+    if pending.get("continuation_kind") in {"capability_confirmation", "semantic_choice"}:
         if expiration is None or (now or _agora_utc()) >= expiration:
             return False, "PENDING_EXPIRED"
     elif pending.get("expires_at") is not None:
@@ -352,39 +462,102 @@ def _validar_pendencia(pending, provider_context, now=None):
     return True, None
 
 
-def carregar_agent_pendente():
-    pending = _carregar_json(AGENT_PENDENTE_PATH, None)
-    if pending is None:
+def carregar_agent_pendente(pergunta=None, execution_id=None):
+    pendentes = listar_agent_pendentes()
+    if not pendentes:
         return None
-    try:
-        validate_pending_continuation(pending, persisted=True)
-    except ValueError:
-        try:
-            os.remove(AGENT_PENDENTE_PATH)
-        except OSError:
-            pass
+    refs = [item.upper() for item in re.findall(r"\b[0-9A-Fa-f]{4}\b", str(pergunta or ""))]
+    if refs:
+        for pending in pendentes:
+            if str(pending.get("id") or "").upper() in refs:
+                return pending
         return None
-    return pending
+    wanted_execution = str(execution_id or "").strip()
+    if wanted_execution:
+        matches = [item for item in pendentes if _pending_execution_id(item) == wanted_execution]
+        if matches:
+            return matches[0]
+    # Free-text semantic choices remain ergonomic when there is exactly one
+    # outstanding gate. With several gates Runtime refuses to guess ownership.
+    if len(pendentes) == 1:
+        return pendentes[0]
+    return None
 
 
 def salvar_agent_pendente(estado_pendente, provider_context=None, config=None):
     context = provider_context if isinstance(provider_context, dict) else carregar_provider_context()
     data = _preparar_pendencia(estado_pendente, context, config)
-    question = str(data["question"]).rstrip()
-    if data.get("continuation_kind") == "capability_confirmation":
-        instruction = f"To confirm: confirmar {data['id']}; to cancel: cancelar {data['id']}"
-        marker = f"Pending ID: {data['id']}"
-        if marker not in question:
-            question = f"{question}\n{marker}. {instruction}"
-        data["question"] = question
+    data["question"] = str(data["question"]).rstrip()
     validate_pending_continuation(data, persisted=True)
-    _salvar_json(AGENT_PENDENTE_PATH, data)
-    return data
+    path = _pending_storage_path(data)
+    with lock_para(path):
+        _salvar_json(path, data)
+    return dict(data)
 
 
-def limpar_agent_pendente():
-    if os.path.exists(AGENT_PENDENTE_PATH):
-        os.remove(AGENT_PENDENTE_PATH)
+def limpar_agent_pendente(pendente=None, *, pending_id=None, execution_id=None):
+    target_id = str(pending_id or ((pendente or {}).get("id") if isinstance(pendente, dict) else "") or "").upper()
+    target_execution = str(execution_id or (_pending_execution_id(pendente) if isinstance(pendente, dict) else "") or "").strip()
+    removed = 0
+    for item in listar_agent_pendentes():
+        if target_id and str(item.get("id") or "").upper() != target_id:
+            continue
+        if target_execution and _pending_execution_id(item) != target_execution:
+            continue
+        if not target_id and not target_execution:
+            continue
+        path = _pending_storage_path(item)
+        with lock_para(path):
+            try:
+                os.remove(path)
+                removed += 1
+            except FileNotFoundError:
+                pass
+    return removed
+
+
+def limpar_todas_pendencias():
+    removed = 0
+    for item in listar_agent_pendentes():
+        path = _pending_storage_path(item)
+        with lock_para(path):
+            try:
+                os.remove(path)
+                removed += 1
+            except FileNotFoundError:
+                pass
+    return removed
+
+
+def gc_navegacao_memoria_orfa():
+    """Collect crash-orphaned recall cursors without any age/TTL policy."""
+    provider_context = carregar_provider_context()
+    memory = provider_context.get("core_memory") if isinstance(provider_context, dict) else None
+    storage = str((memory or {}).get("storage_dir") or "").strip() if isinstance(memory, dict) else ""
+    if not storage:
+        return {"removed": 0, "snapshot_ids": []}
+    live_execution_ids = set()
+    preserve_snapshot_ids = set()
+
+    def scan(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if str(key) == "snapshot_id" and isinstance(item, str) and item.strip():
+                    preserve_snapshot_ids.add(item.strip())
+                else:
+                    scan(item)
+        elif isinstance(value, list):
+            for item in value:
+                scan(item)
+
+    for pending in listar_agent_pendentes():
+        execution_id = _pending_execution_id(pending)
+        if execution_id:
+            live_execution_ids.add(execution_id)
+        scan(pending.get("session"))
+    return gc_orphan_recall_snapshots(
+        storage, live_execution_ids=live_execution_ids, preserve_snapshot_ids=preserve_snapshot_ids,
+    )
 
 
 
@@ -458,14 +631,41 @@ def _desempacotar_resultado_agente(resultado):
 
 
 
-def _public_confirmation(pending):
-    if not isinstance(pending, dict) or pending.get("continuation_kind") != "capability_confirmation":
+def _public_interaction(pending):
+    if not isinstance(pending, dict):
         return None
-    return {
-        "id": str(pending.get("id") or ""),
-        "question": str(pending.get("question") or ""),
-        "operation": str((pending.get("session") or {}).get("pending_operation", {}).get("operation") or ""),
-    }
+    pending_id = str(pending.get("id") or "")
+    kind = pending.get("continuation_kind")
+    if kind == "capability_confirmation":
+        operation = str((pending.get("session") or {}).get("pending_operation", {}).get("operation") or "")
+        return {
+            "id": pending_id,
+            "kind": "confirmation",
+            "title": "Confirmar alteração?",
+            "description": "",
+            "operation": operation,
+            "options": [
+                {"id": "accept", "label": "Aceitar", "submit_text": f"confirmar {pending_id}"},
+                {"id": "reject", "label": "Recusar", "submit_text": f"cancelar {pending_id}"},
+            ],
+            "allow_free_text": False,
+            "resolved": False,
+        }
+    if kind == "semantic_choice":
+        return {
+            "id": pending_id,
+            "kind": "choice",
+            "title": "Escolha como continuar",
+            "description": "",
+            "options": [
+                {"id": f"choice-{index+1}", "label": str(label), "submit_text": f"{label} [{pending_id}]"}
+                for index, label in enumerate(pending.get("options") or [])
+            ],
+            "allow_free_text": bool(pending.get("allow_free_text")),
+            "resolved": False,
+        }
+    return None
+
 
 
 def _execution_failure_from_details(details):
@@ -494,22 +694,27 @@ def _metadata_resposta_agente(status, detalhes, pending=None):
     failure = _execution_failure_from_details(detalhes)
     if failure:
         metadata["execution_failure"] = failure
-    confirmation = _public_confirmation(pending)
-    if confirmation:
-        metadata["confirmation"] = confirmation
+    interaction = _public_interaction(pending)
+    if interaction:
+        metadata["interaction"] = interaction
+    elif isinstance(detalhes.get("interaction"), dict):
+        metadata["interaction"] = dict(detalhes["interaction"])
     return metadata
 
 
-def carregar_confirmacao_publica():
-    """Return safe UI metadata for the active Runtime confirmation gate."""
-    pending = carregar_agent_pendente()
-    if not pending or pending.get("continuation_kind") != "capability_confirmation":
+def carregar_interacao_publica():
+    """Return safe UI metadata for the active Runtime-owned user gate."""
+    pendings = listar_agent_pendentes()
+    # Never choose a global winner when several executions are awaiting input.
+    # Per-message metadata carries the exact pending ID to the UI.
+    if len(pendings) != 1:
         return None
+    pending = pendings[0]
     provider_context = carregar_provider_context()
     valid, _ = _validar_pendencia(pending, provider_context)
     if not valid:
         return None
-    return _public_confirmation(pending)
+    return _public_interaction(pending)
 
 def _resultado_agente(status, texto, detalhes):
     detalhes = detalhes if isinstance(detalhes, dict) else {}
@@ -538,7 +743,7 @@ def _processar_agente(pergunta, config, provider_context, execution_id=None, con
         )
     except ErroLLM as erro:
         return _resultado_falha_llm(erro)
-    if status == "confirmation_required" and estado_pendente:
+    if status in {"confirmation_required", "choice_required"} and estado_pendente:
         estado_pendente = salvar_agent_pendente(estado_pendente, provider_context=provider_context, config=config_execucao)
         texto = estado_pendente["question"]
     if source_job_id is not None:
@@ -563,17 +768,17 @@ def _retomar_agente_pendente(pendente, config, resposta_usuario=None, source_job
         )
     except ErroLLM as erro:
         return _resultado_falha_llm(erro)
-    if status == "confirmation_required" and nova_pendencia:
+    if status in {"confirmation_required", "choice_required"} and nova_pendencia:
         nova_pendencia = salvar_agent_pendente(nova_pendencia, provider_context=provider_context, config=config)
         texto = nova_pendencia["question"]
     else:
-        limpar_agent_pendente()
+        limpar_agent_pendente(pendente)
     registrar_mensagem("assistant", texto, metadata=_metadata_resposta_agente(status, detalhes, nova_pendencia))
     return _resultado_agente(status, texto, detalhes)
 
 
 def _cancelar_agente_pendente(pendente):
-    limpar_agent_pendente()
+    limpar_agent_pendente(pendente)
     resposta = "Ok, cancelado. A alteração pendente não foi aplicada."
     registrar_mensagem("assistant", resposta)
     detalhes = {"status": "cancelled", "failure_code": "CANCELLED"}
@@ -590,22 +795,42 @@ def processar(pergunta, registrar_pergunta=True, historico_snapshot=None,
     if registrar_pergunta:
         registrar_mensagem("user", pergunta)
 
-    pendente = carregar_agent_pendente()
+    pendente = carregar_agent_pendente(pergunta=pergunta)
     if pendente:
         valida, motivo = _validar_pendencia(pendente, provider_context)
         if not valida:
-            limpar_agent_pendente()
+            limpar_agent_pendente(pendente)
             pendente = None
 
-    controle = confirmation_control(pergunta) if pendente else None
+    controle = confirmation_control(pergunta) if pendente and pendente.get("continuation_kind") == "capability_confirmation" else None
     if not pendente and is_explicit_confirmation_control(pergunta):
         return _resultado_controle_pendencia("Não existe capability aguardando confirmação.")
+
+    if pendente and pendente.get("continuation_kind") == "semantic_choice":
+        if confirmation_control(pergunta) == "cancelar":
+            return _retomar_agente_pendente(
+                pendente, config, resposta_usuario="cancelar",
+                source_job_id=source_job_id, execution_id=execution_id,
+            )
+        choice_text = re.sub(r"\s*\[[0-9A-Fa-f]{4}\]\s*$", "", str(pergunta or "")).strip()
+        resolved = resolve_semantic_choice(choice_text, pendente)
+        if resolved is None:
+            public = _public_interaction(pendente) or {}
+            labels = [str(item.get("label") or "") for item in public.get("options") or []]
+            return _resultado_controle_pendencia("Escolha uma das opções disponíveis" + (" ou escreva outra opção." if pendente.get("allow_free_text") else ": " + "; ".join(labels)))
+        return _retomar_agente_pendente(
+            pendente, config, resposta_usuario=resolved,
+            source_job_id=source_job_id, execution_id=execution_id,
+        )
 
     if pendente and controle == "cancelar":
         selecionada, erro = _selecionar_pendencia(pergunta, pendente)
         if erro:
             return _resultado_controle_pendencia(erro)
-        return _cancelar_agente_pendente(selecionada)
+        return _retomar_agente_pendente(
+            selecionada, config, resposta_usuario="cancelar",
+            source_job_id=source_job_id, execution_id=execution_id,
+        )
 
     if pendente and controle == "aplicar":
         selecionada, erro = _selecionar_pendencia(pergunta, pendente)
@@ -619,13 +844,13 @@ def processar(pergunta, registrar_pergunta=True, historico_snapshot=None,
         )
 
     if pendente:
-        # A new natural-language request supersedes an unapplied write proposal.
-        limpar_agent_pendente()
+        # A new natural-language request supersedes an unapplied physical proposal.
+        limpar_agent_pendente(pendente)
 
     origem = carregar_conversa() if historico_snapshot is None else historico_snapshot
     historico = _historico_sem_mensagem_atual(_historico_sem_erros_llm(origem), pergunta)
     recent_messages = []
-    for item in historico[-12:]:
+    for item in historico:
         if not isinstance(item, dict):
             continue
         message = {
@@ -636,7 +861,11 @@ def processar(pergunta, registrar_pergunta=True, historico_snapshot=None,
         if isinstance(execution_failure, dict) and execution_failure:
             message["execution_failure"] = dict(execution_failure)
         recent_messages.append(message)
-    conversation_context = {"recent_messages": recent_messages}
+    conversation_context = {
+        "conversation_id": str((origem[-1] if origem else {}).get("conversation_id") or _conversation_id()),
+        "recent_messages": recent_messages,
+        "total_messages": len(recent_messages),
+    }
     return _processar_agente(
         pergunta, config, provider_context, execution_id=execution_id,
         conversation_context=conversation_context, source_job_id=source_job_id,

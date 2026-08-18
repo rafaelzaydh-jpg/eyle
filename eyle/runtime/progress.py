@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Safe public progress for web jobs, driven by ExecutionContext."""
 from __future__ import annotations
+import warnings
 import threading, time
 from eyle.runtime import queue
 
@@ -37,10 +38,16 @@ def publicar(execution, phase, message, *, force=True, min_interval=0.2, **campo
     if decorrido is not None: payload["elapsed_seconds"]=round(decorrido,2)
     for chave,valor in campos.items():
         if valor is not None: payload[chave]=valor
-    try: return queue.atualizar_progresso(job_id,payload)
-    except Exception: return False
+    try:
+        return queue.atualizar_progresso(job_id,payload)
+    except Exception as exc:
+        warnings.warn(f"JOB_PROGRESS_UPDATE_FAILED:{type(exc).__name__}:{exc}", RuntimeWarning, stacklevel=2)
+        return False
 
 
 def publicar_job(job_id, phase, message, **campos):
-    try: return queue.atualizar_progresso(int(job_id), {"phase":phase,"message":message,**campos})
-    except Exception: return False
+    try:
+        return queue.atualizar_progresso(int(job_id), {"phase":phase,"message":message,**campos})
+    except Exception as exc:
+        warnings.warn(f"JOB_PROGRESS_UPDATE_FAILED:{type(exc).__name__}:{exc}", RuntimeWarning, stacklevel=2)
+        return False

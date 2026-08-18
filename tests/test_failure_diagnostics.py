@@ -18,7 +18,7 @@ def test_service_carries_execution_failure_into_agent_conversation_context(monke
     captured={}
     monkeypatch.setattr(service,"carregar_config",lambda:{})
     monkeypatch.setattr(service,"carregar_provider_context",lambda:{"standard":{"caminho_origem":"/tmp/project"},"memory":{"storage_dir":"/tmp/memory","world_scope_id":"workspace:/tmp/project"}})
-    monkeypatch.setattr(service,"carregar_agent_pendente",lambda:None)
+    monkeypatch.setattr(service,"carregar_agent_pendente",lambda *args, **kwargs:None)
     def fake_process(question,config,project,**kwargs):
         captured.update(kwargs.get("conversation_context") or {})
         return {"status":"success","resposta":"ok","avisos":[],"details":{}}

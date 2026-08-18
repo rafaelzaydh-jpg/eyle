@@ -9,7 +9,7 @@ import eyle.core.agent as agent
 from eyle.core.ecc import catalog
 from eyle.core.memory import (
     apply_memory_sidecar, memory_activate_result, memory_continue_result,
-    memory_overview_result, project_memory_view, sync_memory_lifecycle, memory_environment,
+    memory_overview_result, materialize_explicit_memory_view, sync_memory_lifecycle, memory_environment,
 )
 from eyle.core.session import AgentSession, SESSION_SCHEMA_VERSION
 from eyle.runtime.continuation import PENDING_SCHEMA_VERSION
@@ -78,18 +78,18 @@ def test_rev283_build_must_return_to_main_after_real_observation():
     assert parsed["type"]=="construir" and "on_success" not in parsed
 
 
-def test_session_and_graph_identity_are_rev28():
+def test_persisted_identity_is_current_only():
     state=AgentSession("x").to_dict()
-    assert state["session_schema_version"]==SESSION_SCHEMA_VERSION=="2.7.5-r2.8.3-ecc"
-    assert MEMORY_GRAPH_SCHEMA_VERSION=="2.7.5-r2.9-memory-graph-v8"
-    assert PENDING_SCHEMA_VERSION=="11-ecc"
+    assert state["session_schema_version"]==SESSION_SCHEMA_VERSION=="2.7.5-r3.7.2-ecc"
+    assert MEMORY_GRAPH_SCHEMA_VERSION=="2.7.5-r3.7.1-memory-graph-v12"
+    assert PENDING_SCHEMA_VERSION=="13-ecc"
     assert state["memory_view"]["node_ids"]==[]
 
 
 def test_prompt_defines_intrinsic_memory_and_provider_neutral_call_optimizations():
     low=PROMPT_ECC.lower()
     for phrase in (
-        "memory and ecc are distinct", "memory_delta", 'retention:"temporary|persistent"',
+        "memory and ecc are distinct", "memory_delta", 'retention?:"temporary|persistent"',
         "memory is continuous learning", "batch", "coverage", "frontier",
         "frontier is not a limit", "no semantic count ceiling", "atomic", "artifact", "material",
     ):
@@ -102,27 +102,6 @@ def test_catalog_memory_navigation_uses_temporary_persistent_filter():
     reg=standard_registry(); surface=catalog(reg,base_config(),reg.names(),memory_enabled=True)
     activate=next(x for x in surface["explorar"] if x["operation"]=="memory_activate")
     assert "temporary" in activate["inputs"]["retention"]
-
-
-def test_temporary_memory_auto_projects_and_persistent_does_not(tmp_path):
-    reg=standard_registry(); context=pc(tmp_path); seed=AgentSession("seed")
-    delta=[
-        {"op":"remember","scope":"world","retention":"temporary","kind":"weak_signal","content":"Port 443 showed unusual resets","supports":[{"kind":"request"}]},
-        {"op":"remember","scope":"user","retention":"persistent","kind":"preference","content":"User likes pizza DURABLESECRET","supports":[{"kind":"request"}]},
-    ]
-    assert apply_memory_sidecar(seed,delta,registry=reg,provider_context=context)["ok"]
-    view=project_memory_view(AgentSession("anything"),registry=reg,config=base_config(),provider_context=context)
-    assert any(n["retention"]=="temporary" and "443" in n["content"] for n in view["nodes"])
-    assert "DURABLESECRET" not in json.dumps(view,ensure_ascii=False)
-
-
-def test_temporary_memory_survives_fresh_conversation_boundary(tmp_path):
-    reg=standard_registry(); context=pc(tmp_path); seed=AgentSession("seed")
-    assert apply_memory_sidecar(seed,[{"op":"remember","scope":"world","retention":"temporary","kind":"clue","content":"Possible break point at parser boundary","supports":[{"kind":"request"}]}],registry=reg,provider_context=context)["ok"]
-    changed=sync_memory_lifecycle(context,{"recent_messages":[]},execution_id="new-chat")
-    assert changed["changed"] is False
-    view=project_memory_view(AgentSession("new job"),registry=reg,config=base_config(),provider_context=context)
-    assert any("parser boundary" in n["content"] for n in view["nodes"])
 
 
 def test_temporary_can_promote_same_node_to_persistent(tmp_path):
@@ -197,19 +176,24 @@ def test_rev283_successful_build_returns_real_observation_to_main_before_conclus
     assert status=="completed" and text=="Corrigido." and len(calls)==2
 
 
-def test_temporary_memory_bridges_followup_without_transcript(monkeypatch,tmp_path):
+def test_rev371_temporary_memory_is_reachable_but_not_auto_projected(monkeypatch,tmp_path):
     context=pc(tmp_path)
     monkeypatch.setattr(agent,"executar_ecc_llm",lambda prompt,cfg: conclude("Plano criado.",memory=[{
         "op":"remember","scope":"world","retention":"temporary","kind":"referent","content":"'o plano' means the current Eyle token-economy plan","supports":[{"kind":"request"}],
     }]))
     status,_,_,_=run_agent(agent,"faça um plano",base_config(),provider_context=context,retornar_detalhes=True,conversation_context={"recent_messages":[]})
     assert status=="completed"
+
+    # Rev3.7.1 deliberately removed universal Temporary Memory projection.
+    # The graph remains reachable; only explicit activation may materialize it.
+    captured = {}
     def follow(prompt,cfg):
-        assert any("token-economy plan" in n["content"] for n in prompt.dynamic["memory_view"]["nodes"])
+        captured["nodes"] = list(prompt.dynamic["memory_view"]["nodes"])
         return conclude("Vou detalhar o plano.")
     monkeypatch.setattr(agent,"executar_ecc_llm",follow)
     status,text,_,_=run_agent(agent,"Detalhe o plano",base_config(),provider_context=context,retornar_detalhes=True,conversation_context={"recent_messages":[]})
     assert (status,text)==("completed","Vou detalhar o plano.")
+    assert captured["nodes"] == []
 
 
 def test_rev28_cache_warmup_prompt_uses_same_stable_prefix(tmp_path):
@@ -220,21 +204,23 @@ def test_rev28_cache_warmup_prompt_uses_same_stable_prefix(tmp_path):
     assert warm.dynamic["current_request"].startswith("Provider cache warmup")
 
 
-def test_rev28_cache_warmup_is_opt_in_and_provider_neutral(monkeypatch,tmp_path):
+def test_rev371_cache_warmup_remains_adapter_owned_and_disabled_locally(monkeypatch,tmp_path):
     import llm.executar as llm_exec
     reg=standard_registry(); context=pc(tmp_path); cfg=base_config()
     prompt=agent.compile_cache_warmup_prompt(cfg,context,reg)
     assert llm_exec.warmup_provider_cache(prompt,cfg)["status"]=="disabled"
+    # Rev3.6.1+ fixed the bundled Adapter policy: local flags cannot negotiate
+    # provider cache semantics or secretly enable a second transport behavior.
     cfg["llm"]["cache_warmup"]=True
     monkeypatch.setattr(llm_exec,"executar_ecc",lambda prompt,cfg:{"type":"concluir","response":"ok","memory_delta":[]})
     result=llm_exec.warmup_provider_cache(prompt,cfg)
-    assert result["status"]=="ok" and result["stable_prefix_hash"]==prompt.stable_hash
+    assert result["status"]=="disabled"
 
 
 def test_rev281_memory_view_omits_repeated_explanatory_envelope(tmp_path):
     reg=standard_registry()
     context=pc(tmp_path)
-    view=project_memory_view(AgentSession("hello"),registry=reg,config=base_config(),provider_context=context)
+    view=materialize_explicit_memory_view(AgentSession("hello"),registry=reg,config=base_config(),provider_context=context)
     assert view["available"] is True
     assert "trust_note" not in view
     assert "temporary" not in view  # empty optional region is omitted

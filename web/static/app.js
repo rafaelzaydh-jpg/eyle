@@ -33,7 +33,7 @@
   let tokenPromptCancelado = false;
   let queueInstanceId = sessionStorage.getItem(INSTANCE_STORAGE_KEY) || "";
   let trackedJobs = carregarJobsAcompanhados();
-  let activeConfirmation = null;
+  let activeInteraction = null;
 
   function carregarJobsAcompanhados() {
     try {
@@ -443,6 +443,36 @@
     meta.appendChild(button);
   }
 
+  async function deleteMessage(messageId) {
+    const id = Number(messageId);
+    if (!Number.isInteger(id)) return;
+    const wrap = logEl.querySelector(`.msg[data-id="${id}"]`);
+    const button = wrap ? wrap.querySelector(".msg-del") : null;
+    if (button) {
+      button.disabled = true;
+      button.textContent = "removendo…";
+    }
+    try {
+      const res = await apiFetch(`/mensagem/${id}`, { method: "DELETE" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok && res.status !== 404) throw new Error(data.motivo || data.error_code || `status ${res.status}`);
+      if (data.removed || res.status === 404) {
+        if (wrap) wrap.remove();
+        renderedIds.delete(id);
+      } else if (wrap) {
+        wrap.classList.add("pending-delete");
+        if (button) { button.disabled = true; button.textContent = "removendo após resposta"; }
+      }
+      // Deleting a message can cancel the job or remove an interaction that was
+      // using it. Refresh canonical server state instead of guessing locally.
+      activeInteraction = null;
+      await Promise.allSettled([fetchConversa(), fetchStatus()]);
+    } catch (err) {
+      if (button) { button.disabled = false; button.textContent = "remover"; }
+      console.error("Falha ao remover mensagem", err);
+    }
+  }
+
   function syncDeleteState(wrap, msg) {
     const del = wrap.querySelector(".msg-del");
     if (!del) return;
@@ -453,8 +483,8 @@
   }
 
   function syncAwaitUserPanels() {
-    Array.from(logEl.querySelectorAll(".await-user-panel[data-pending-id]")).forEach((panel) => {
-      const active = Boolean(activeConfirmation && String(activeConfirmation.id) === panel.dataset.pendingId);
+    Array.from(logEl.querySelectorAll('.await-user-panel[data-pending-id]')).forEach((panel) => {
+      const active = Boolean(activeInteraction && String(activeInteraction.id) === String(panel.dataset.pendingId || panel.dataset.choiceMessageId));
       panel.classList.toggle("inactive", !active);
       panel.querySelectorAll("button, input").forEach((control) => {
         control.disabled = !active;
@@ -478,7 +508,7 @@
         mensagem_id: data.mensagem_id,
         texto_resumo: value,
       });
-      activeConfirmation = null;
+      activeInteraction = null;
       syncAwaitUserPanels();
       return true;
     } finally {
@@ -488,61 +518,78 @@
     }
   }
 
-  function buildConfirmationPanel(confirmation) {
-    if (!confirmation || !confirmation.id) return null;
+  function buildAwaitUserPanel(interaction, messageId) {
+    if (!interaction || interaction.resolved) return null;
+    const kind = String(interaction.kind || "choice");
+    if (kind === "confirmation" && !interaction.id) return null;
     const panel = document.createElement("div");
     panel.className = "await-user-panel";
-    panel.dataset.pendingId = String(confirmation.id);
+    panel.dataset.interactionKind = kind;
+    if (interaction.id) panel.dataset.pendingId = String(interaction.id);
+    else panel.dataset.choiceMessageId = String(messageId || "");
+
+    const title = String(interaction.title || "").trim();
+    if (title) {
+      const heading = document.createElement("div");
+      heading.className = "await-user-title";
+      heading.textContent = title;
+      panel.appendChild(heading);
+    }
+
+    const description = String(interaction.description || "").trim();
+    if (description) {
+      const detail = document.createElement("div");
+      detail.className = "await-user-description";
+      detail.textContent = description;
+      panel.appendChild(detail);
+    }
 
     const choices = document.createElement("div");
     choices.className = "await-user-choices";
-    (Array.isArray(confirmation.options) ? confirmation.options : []).forEach((option, index) => {
+    (Array.isArray(interaction.options) ? interaction.options : []).forEach((option) => {
       const label = String(option && option.label || "").trim();
-      if (!label) return;
+      const submitValue = String(option && option.submit_text || label).trim();
+      if (!label || !submitValue) return;
       const button = document.createElement("button");
       button.type = "button";
       button.className = "await-user-option";
-      button.textContent = `${index + 1}. ${label}`;
+      button.textContent = label;
       button.addEventListener("click", async () => {
-        try { await submitText(label); } catch (err) { /* permanece disponível */ }
+        try {
+          if (await submitText(submitValue)) panel.remove();
+        } catch (err) { /* permanece disponível */ }
       });
       choices.appendChild(button);
     });
-    panel.appendChild(choices);
+    if (choices.childElementCount) panel.appendChild(choices);
 
-    const custom = document.createElement("div");
-    custom.className = "await-user-custom";
-    const input = document.createElement("input");
-    input.type = "text";
-    input.placeholder = "Outra instrução…";
-    const send = document.createElement("button");
-    send.type = "button";
-    send.textContent = "Enviar";
-    const submitCustom = async () => {
-      const value = input.value.trim();
-      if (!value) return;
-      try {
-        if (await submitText(value)) input.value = "";
-      } catch (err) { /* mantém o texto */ }
-    };
-    send.addEventListener("click", submitCustom);
-    input.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") { event.preventDefault(); submitCustom(); }
-    });
-    custom.appendChild(input);
-    custom.appendChild(send);
-    panel.appendChild(custom);
-
-    const cancel = document.createElement("button");
-    cancel.type = "button";
-    cancel.className = "await-user-cancel";
-    cancel.textContent = "Cancelar tarefa";
-    cancel.addEventListener("click", async () => {
-      try { await submitText(`cancelar ${confirmation.id}`); } catch (err) { /* permanece disponível */ }
-    });
-    panel.appendChild(cancel);
+    if (interaction.allow_free_text) {
+      const custom = document.createElement("div");
+      custom.className = "await-user-custom";
+      const input = document.createElement("input");
+      input.type = "text";
+      input.placeholder = "Outra opção…";
+      const send = document.createElement("button");
+      send.type = "button";
+      send.textContent = "Enviar";
+      const submitCustom = async () => {
+        const value = input.value.trim();
+        if (!value) return;
+        try {
+          if (await submitText(value)) panel.remove();
+        } catch (err) { /* mantém o texto */ }
+      };
+      send.addEventListener("click", submitCustom);
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") { event.preventDefault(); submitCustom(); }
+      });
+      custom.appendChild(input);
+      custom.appendChild(send);
+      panel.appendChild(custom);
+    }
     return panel;
   }
+
 
   function buildMessageEl(msg) {
     const wrap = document.createElement("div");
@@ -554,8 +601,9 @@
     renderMarkdownSafe(bubble, msg.text);
     wrap.appendChild(bubble);
 
-    if (msg.role === "assistant" && msg.confirmation) {
-      const panel = buildConfirmationPanel(msg.confirmation);
+    if (msg.role === "assistant") {
+      const interaction = msg.interaction;
+      const panel = buildAwaitUserPanel(interaction, msg.id);
       if (panel) wrap.appendChild(panel);
     }
 
@@ -618,7 +666,11 @@
     mensagens.forEach((msg) => {
       const existente = logEl.querySelector(`.msg[data-id="${msg.id}"]`);
       if (existente) {
-        syncDeleteState(existente, msg);
+        if (msg.interaction || existente.querySelector(".await-user-panel")) {
+          existente.replaceWith(buildMessageEl(msg));
+        } else {
+          syncDeleteState(existente, msg);
+        }
         return;
       }
       logEl.appendChild(buildMessageEl(msg));
@@ -812,7 +864,7 @@
       trackedJobs = [];
       sessionStorage.removeItem(JOBS_STORAGE_KEY);
       renderedIds = new Set();
-      activeConfirmation = null;
+      activeInteraction = null;
       Array.from(logEl.querySelectorAll(".msg, .job-notice, .live-response, .execution-history")).forEach((el) => el.remove());
       await fetchConversa();
       updatePendingState();
@@ -959,7 +1011,7 @@
   }
 
   function renderProjectInfo(data) {
-    activeConfirmation = data && data.confirmation ? data.confirmation : null;
+    activeInteraction = data && data.interaction ? data.interaction : null;
     syncAwaitUserPanels();
     const p = data.projeto;
     if (!p || !p.disponivel) {

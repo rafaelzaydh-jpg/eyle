@@ -3,7 +3,6 @@ from tests.canonical import standard_registry
 
 import json
 
-import eyle.providers.standard as tools
 from tests.canonical import base_config
 
 
@@ -20,10 +19,10 @@ def test_symbol_relations_observation_identity_covers_result_shaping_arguments()
     incoming = observation_signature("symbol_relations", {**base, "direction": "incoming"})
     outgoing = observation_signature("symbol_relations", {**base, "direction": "outgoing"})
     text_refs = observation_signature("symbol_relations", {**base, "direction": "incoming", "include_text_references": True})
-    wider = observation_signature("symbol_relations", {**base, "direction": "incoming", "max_edges": 100})
+    wider = observation_signature("symbol_relations", {**base, "direction": "incoming", "page_size": 100})
     assert len({incoming, outgoing, text_refs, wider}) == 4
     assert observation_signature("symbol_relations", base) == observation_signature(
-        "symbol_relations", {**base, "direction": "both", "include_text_references": False, "max_depth": 6, "max_edges": 60, "roots": []}
+        "symbol_relations", {**base, "direction": "both", "include_text_references": False, "page_size": 60, "roots": []}
     )
 
 

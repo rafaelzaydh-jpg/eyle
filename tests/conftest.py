@@ -17,7 +17,7 @@ def _isolate_runtime_state(monkeypatch, tmp_path):
 
     monkeypatch.setattr(service, "MEMORY_DIR", str(memory_dir))
     monkeypatch.setattr(service, "CONTEXT_DIR", str(context_dir))
-    monkeypatch.setattr(service, "AGENT_PENDENTE_PATH", str(context_dir / "agent_pendente.json"))
+    monkeypatch.setattr(service, "AGENT_PENDENTE_DIR", str(context_dir / "pending"))
     monkeypatch.setattr(queue, "DB_PATH", str(context_dir / "fila.sqlite3"))
     monkeypatch.setattr(limiter, "DB_PATH", str(context_dir / "llm_limiter.sqlite3"))
     monkeypatch.setattr(telemetry, "DB_PATH", str(context_dir / "telemetry.sqlite3"))

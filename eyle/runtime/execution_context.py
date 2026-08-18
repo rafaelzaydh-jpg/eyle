@@ -1,8 +1,8 @@
 """Run-scoped physical execution state with durable logical continuity.
 
-Configuration is immutable input. This context owns the physical deadline and
-canonical LLM accounting for one *logical* ECC execution, even when Runtime
-pauses for human confirmation and later resumes in another process/job.
+Configuration is immutable input. This context owns canonical LLM accounting
+and physical timing for one *logical* ECC execution, even when Runtime pauses
+for human confirmation and later resumes in another process/job.
 
 Execution continuity persists only serializable mechanical state. Provider sockets,
 semaphores/callbacks and other process-local resources are intentionally rebuilt
@@ -10,12 +10,12 @@ on resume.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-import copy, hashlib, time
+import copy, hashlib, time, warnings
 from contextvars import ContextVar
 from typing import Any, Dict, List, Optional
 
 
-EXECUTION_CONTINUITY_SCHEMA_VERSION = "execution-continuity-v1"
+EXECUTION_CONTINUITY_SCHEMA_VERSION = "execution-continuity-v3"
 
 
 def _finite_number(value: Any, default: float) -> float:
@@ -29,17 +29,18 @@ def _finite_number(value: Any, default: float) -> float:
 
 
 def validate_execution_continuity_state(value: Any) -> Dict[str, Any]:
-    """Strictly validate the persisted mechanical execution snapshot.
+    """Validate the durable *active execution* snapshot.
 
-    This contract deliberately contains no provider/ECC semantics. It only
-    carries identity, wall-clock deadline and accounting needed to reconstruct
-    the same logical execution after a confirmation boundary.
+    Human wait time is deliberately excluded from active execution telemetry.
+    Confirmation lifetime is a separate Runtime TTL; there is no cognitive task
+    deadline in the execution contract.
     """
     if not isinstance(value, dict):
         raise ValueError("EXECUTION_CONTINUITY_INVALID")
     required = {
-        "schema_version", "execution_id", "started_wall_time", "deadline_wall_time",
-        "generated_token_limit", "llm_calls", "system_prompt_hashes",
+        "schema_version", "execution_id", "started_wall_time",
+        "active_elapsed_seconds",
+        "provider_token_limit", "provider_total_tokens_actual", "provider_usage_unknown", "llm_calls", "system_prompt_hashes",
         "history_messages_omitted", "agent_turns", "canonical_request_hash",
         "prompt_tokens_budgeted_physical", "prompt_tokens_estimated_raw",
         "prompt_tokens_actual", "prompt_tokens_cached", "prompt_tokens_uncached",
@@ -52,11 +53,11 @@ def validate_execution_continuity_state(value: Any) -> Dict[str, Any]:
     if execution_id is not None and (not isinstance(execution_id, str) or not execution_id.strip()):
         raise ValueError("EXECUTION_CONTINUITY_INVALID")
     started = _finite_number(value.get("started_wall_time"), -1)
-    deadline = _finite_number(value.get("deadline_wall_time"), -1)
-    if started <= 0 or deadline <= started:
+    elapsed = _finite_number(value.get("active_elapsed_seconds"), -1)
+    if started <= 0 or elapsed < 0:
         raise ValueError("EXECUTION_CONTINUITY_INVALID")
     ints = (
-        "generated_token_limit", "history_messages_omitted", "agent_turns",
+        "provider_token_limit", "provider_total_tokens_actual", "history_messages_omitted", "agent_turns",
         "prompt_tokens_budgeted_physical", "prompt_tokens_estimated_raw",
         "prompt_tokens_actual", "prompt_tokens_cached", "prompt_tokens_uncached",
         "prompt_tokens_effective", "completion_tokens_actual", "reasoning_tokens_actual",
@@ -64,9 +65,11 @@ def validate_execution_continuity_state(value: Any) -> Dict[str, Any]:
     )
     for key in ints:
         item = value.get(key)
-        minimum = 1 if key == "generated_token_limit" else 0
+        minimum = 1 if key == "provider_token_limit" else 0
         if not isinstance(item, int) or isinstance(item, bool) or item < minimum:
             raise ValueError("EXECUTION_CONTINUITY_INVALID")
+    if not isinstance(value.get("provider_usage_unknown"), bool):
+        raise ValueError("EXECUTION_CONTINUITY_INVALID")
     request_hash = value.get("canonical_request_hash")
     if request_hash is not None and (not isinstance(request_hash, str) or len(request_hash) != 64):
         raise ValueError("EXECUTION_CONTINUITY_INVALID")
@@ -77,7 +80,6 @@ def validate_execution_continuity_state(value: Any) -> Dict[str, Any]:
         raise ValueError("EXECUTION_CONTINUITY_INVALID")
     if not isinstance(terminal, dict):
         raise ValueError("EXECUTION_CONTINUITY_INVALID")
-    # Cached cannot exceed provider-reported prompt accounting.
     if int(value.get("prompt_tokens_cached") or 0) > int(value.get("prompt_tokens_actual") or 0):
         raise ValueError("EXECUTION_CONTINUITY_INVALID")
     return value
@@ -86,11 +88,10 @@ def validate_execution_continuity_state(value: Any) -> Dict[str, Any]:
 @dataclass
 class ExecutionContext:
     started_monotonic: float
-    deadline_monotonic: float
     execution_id: Optional[str]
     source_job_id: Optional[int]
     started_wall_time: float = 0.0
-    deadline_wall_time: float = 0.0
+    active_elapsed_before_segment: float = 0.0
     llm_calls: List[Dict[str, Any]] = field(default_factory=list)
     system_prompt_hashes: List[str] = field(default_factory=list)
     history_messages_omitted: int = 0
@@ -108,61 +109,49 @@ class ExecutionContext:
     prompt_tokens_effective: int = 0
     completion_tokens_actual: int = 0
     reasoning_tokens_actual: int = 0
-    generated_token_limit: int = 120000
+    provider_token_limit: int = 150000
+    provider_total_tokens_actual: int = 0
+    provider_usage_unknown: bool = False
     resume_count: int = 0
     provider_state: Dict[str, Dict[str, Any]] = field(default_factory=dict, repr=False, compare=False)
     provider_cleanup_callbacks: List[Any] = field(default_factory=list, repr=False, compare=False)
     terminal_capabilities: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        # Keep direct/test construction compatible with earlier revisions while
-        # giving every context a durable wall-clock coordinate.
-        now_wall = time.time()
-        now_mono = time.monotonic()
-        if float(self.started_wall_time or 0) <= 0 or float(self.deadline_wall_time or 0) <= float(self.started_wall_time or 0):
-            remaining = max(0.0, float(self.deadline_monotonic) - now_mono)
-            elapsed = max(0.0, now_mono - float(self.started_monotonic)) if float(self.started_monotonic) > 0 else 0.0
-            self.started_wall_time = now_wall - elapsed
-            self.deadline_wall_time = now_wall + remaining
+        if float(self.started_wall_time or 0) <= 0:
+            self.started_wall_time = time.time()
+
 
     @classmethod
     def from_config(cls, config: Dict[str, Any], *, execution_id: Optional[str] = None,
                     source_job_id: Optional[int] = None) -> "ExecutionContext":
-        agent = (config or {}).get("agent") or {}
-        deadline = max(1, int(agent.get("task_deadline_seconds", 900) or 900))
         now_mono = time.monotonic()
-        now_wall = time.time()
         llm = (config or {}).get("llm") or {}
         try:
-            generated_limit = max(1, int(llm.get("generated_token_fuse", 120000) or 120000))
+            provider_limit = max(1, int(llm.get("provider_token_budget_per_message", 150000) or 150000))
         except (TypeError, ValueError):
-            generated_limit = 120000
+            provider_limit = 150000
         return cls(
             started_monotonic=now_mono,
-            deadline_monotonic=now_mono + deadline,
             execution_id=execution_id,
             source_job_id=source_job_id,
-            started_wall_time=now_wall,
-            deadline_wall_time=now_wall + deadline,
-            generated_token_limit=generated_limit,
+            started_wall_time=time.time(),
+            active_elapsed_before_segment=0.0,
+            provider_token_limit=provider_limit,
         )
 
     @classmethod
     def from_continuation_state(
         cls, config: Dict[str, Any], state: Dict[str, Any], *, source_job_id: Optional[int] = None,
     ) -> "ExecutionContext":
-        """Rehydrate the same logical execution in a new physical process/job."""
+        """Resume the same logical execution; human wait carries no task deadline."""
         validate_execution_continuity_state(state)
-        now_mono = time.monotonic()
-        now_wall = time.time()
-        remaining = max(0.0, float(state["deadline_wall_time"]) - now_wall)
         execution = cls(
-            started_monotonic=now_mono - max(0.0, now_wall - float(state["started_wall_time"])),
-            deadline_monotonic=now_mono + remaining,
+            started_monotonic=time.monotonic(),
             execution_id=state.get("execution_id"),
             source_job_id=source_job_id,
             started_wall_time=float(state["started_wall_time"]),
-            deadline_wall_time=float(state["deadline_wall_time"]),
+            active_elapsed_before_segment=float(state.get("active_elapsed_seconds") or 0.0),
             llm_calls=copy.deepcopy(state.get("llm_calls") or []),
             system_prompt_hashes=list(state.get("system_prompt_hashes") or []),
             history_messages_omitted=int(state.get("history_messages_omitted") or 0),
@@ -176,21 +165,27 @@ class ExecutionContext:
             prompt_tokens_effective=int(state.get("prompt_tokens_effective") or 0),
             completion_tokens_actual=int(state.get("completion_tokens_actual") or 0),
             reasoning_tokens_actual=int(state.get("reasoning_tokens_actual") or 0),
-            generated_token_limit=int(state.get("generated_token_limit") or 120000),
+            provider_token_limit=int(state.get("provider_token_limit") or 150000),
+            provider_total_tokens_actual=int(state.get("provider_total_tokens_actual") or 0),
+            provider_usage_unknown=bool(state.get("provider_usage_unknown", False)),
             resume_count=int(state.get("resume_count") or 0) + 1,
             terminal_capabilities=copy.deepcopy(state.get("terminal_capabilities") or {}),
         )
-        # Configuration changes while awaiting confirmation must not silently
-        # reset/expand the already-created logical deadline or token fuse.
         return execution
+
+    @property
+    def active_consumed_seconds(self) -> float:
+        return max(0.0, float(self.active_elapsed_before_segment)) + max(0.0, time.monotonic() - float(self.started_monotonic))
 
     def continuation_state(self) -> Dict[str, Any]:
         state = {
             "schema_version": EXECUTION_CONTINUITY_SCHEMA_VERSION,
             "execution_id": self.execution_id,
             "started_wall_time": float(self.started_wall_time),
-            "deadline_wall_time": float(self.deadline_wall_time),
-            "generated_token_limit": int(self.generated_token_limit or 0),
+            "active_elapsed_seconds": float(self.active_consumed_seconds),
+            "provider_token_limit": int(self.provider_token_limit or 0),
+            "provider_total_tokens_actual": int(self.provider_total_tokens_actual or 0),
+            "provider_usage_unknown": bool(self.provider_usage_unknown),
             "llm_calls": copy.deepcopy(self.llm_calls),
             "system_prompt_hashes": list(self.system_prompt_hashes),
             "history_messages_omitted": int(self.history_messages_omitted or 0),
@@ -209,10 +204,6 @@ class ExecutionContext:
         }
         validate_execution_continuity_state(state)
         return state
-
-    @property
-    def deadline_remaining_seconds(self) -> float:
-        return max(0.0, float(self.deadline_wall_time) - time.time())
 
     def bind_session_baseline(self, session: Any, *, reset_agent_turns: bool = True) -> None:
         """Capture physical-job baselines without resetting logical accounting."""
@@ -277,12 +268,8 @@ class ExecutionContext:
         return item
 
     @property
-    def generated_tokens(self) -> int:
-        return int(self.completion_tokens_actual or 0)
-
-    @property
-    def generated_tokens_remaining(self) -> int:
-        return max(0, int(self.generated_token_limit or 0) - int(self.completion_tokens_actual or 0))
+    def provider_tokens_remaining(self) -> int:
+        return max(0, int(self.provider_token_limit or 0) - int(self.provider_total_tokens_actual or 0))
 
     @property
     def llm_request_count(self) -> int:
@@ -304,26 +291,64 @@ class ExecutionContext:
 
     def usage_view(self) -> Dict[str, Any]:
         effective_total = int(self.prompt_tokens_effective or 0) + int(self.completion_tokens_actual or 0)
+        reason_tokens = {"normal": 0, "protocol_repair": 0, "continuation": 0}
+        reason_calls = {"normal": 0, "protocol_repair": 0, "continuation": 0}
+        conversation_materialized = 0
+        conversation_omitted = 0
+        for call in self.llm_calls:
+            if not isinstance(call, dict):
+                continue
+            prompt = call.get("prompt") if isinstance(call.get("prompt"), dict) else {}
+            reason = str(prompt.get("cognition_reason") or "normal")
+            if reason not in reason_tokens:
+                reason = "normal"
+            reason_calls[reason] += 1
+            conversation_materialized = max(conversation_materialized, int(prompt.get("conversation_messages_materialized") or 0))
+            conversation_omitted = max(conversation_omitted, int(prompt.get("conversation_messages_omitted") or 0))
+            attempts = call.get("attempts") if isinstance(call.get("attempts"), list) else []
+            for attempt in attempts:
+                if not isinstance(attempt, dict):
+                    continue
+                total = attempt.get("total_tokens")
+                if not isinstance(total, (int, float)):
+                    pp = attempt.get("prompt_tokens")
+                    cc = attempt.get("completion_tokens")
+                    if isinstance(pp, (int, float)) and isinstance(cc, (int, float)):
+                        total = int(pp) + int(cc)
+                if isinstance(total, (int, float)):
+                    reason_tokens[reason] += max(0, int(total))
         return {
             "llm_calls": len(self.llm_calls),
             "llm_requests": self.llm_request_count,
             "prompt_tokens_budgeted_physical": int(self.prompt_tokens_budgeted_physical or 0),
             "prompt_tokens_estimated_raw": int(self.prompt_tokens_estimated_raw or 0),
             "prompt_tokens_actual": int(self.prompt_tokens_actual or 0),
+            "provider_prompt_tokens": int(self.prompt_tokens_actual or 0),
             "prompt_tokens_cached": int(self.prompt_tokens_cached or 0),
+            "cached_tokens": int(self.prompt_tokens_cached or 0),
             "prompt_tokens_uncached": int(self.prompt_tokens_uncached or 0),
             "prompt_tokens_effective": int(self.prompt_tokens_effective or 0),
             "completion_tokens_actual": int(self.completion_tokens_actual or 0),
-            "generated_tokens": int(self.completion_tokens_actual or 0),
-            "generated_token_limit": int(self.generated_token_limit or 0),
-            "generated_tokens_remaining": self.generated_tokens_remaining,
+            "provider_completion_tokens": int(self.completion_tokens_actual or 0),
+            "provider_token_limit": int(self.provider_token_limit or 0),
+            "provider_total_tokens_actual": int(self.provider_total_tokens_actual or 0),
+            "provider_total_tokens": int(self.provider_total_tokens_actual or 0),
+            "provider_usage_unknown": bool(self.provider_usage_unknown),
+            "provider_tokens_remaining": self.provider_tokens_remaining,
             "reasoning_tokens_actual": int(self.reasoning_tokens_actual or 0),
             "total_tokens_effective": effective_total,
             "total_tokens_physical_estimated": self.physical_tokens_used,
             "prompt_token_calibration": round(self.prompt_token_calibration, 4),
             "history_messages_omitted": int(self.history_messages_omitted or 0),
+            "conversation_messages_materialized": conversation_materialized,
+            "conversation_messages_omitted": conversation_omitted,
+            "number_of_llm_calls": len(self.llm_calls),
+            "number_of_protocol_repairs": reason_calls["protocol_repair"],
+            "normal_cognition_tokens": reason_tokens["normal"],
+            "protocol_recovery_tokens": reason_tokens["protocol_repair"],
+            "continuation_tokens": reason_tokens["continuation"],
             "execution_resume_count": int(self.resume_count or 0),
-            "deadline_remaining_seconds": round(self.deadline_remaining_seconds, 3),
+            "active_elapsed_seconds": round(self.active_consumed_seconds, 3),
         }
 
     def ledger_view(self) -> List[Dict[str, Any]]:
@@ -348,8 +373,11 @@ class ExecutionContext:
         for callback in callbacks:
             try:
                 callback()
-            except Exception:
-                pass
+            except Exception as exc:
+                warnings.warn(
+                    f"PROVIDER_CLEANUP_FAILED:{type(exc).__name__}:{exc}",
+                    RuntimeWarning, stacklevel=2,
+                )
         self.provider_state.clear()
 
 

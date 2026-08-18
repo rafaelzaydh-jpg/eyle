@@ -214,15 +214,6 @@ def test_rev285_overview_exposes_epistemic_directory(tmp_path):
     assert overview["confidence"] == {"classified": 1, "unclassified": 1}
 
 
-def test_rev285_accepts_clean_rev284_config_during_upgrade():
-    config = base_config()
-    config["config_schema_version"] = "2.7.5-r2.8.4-ecc"
-    config["revision"] = "rev2.8.4-ecc"
-    validated = validar_config(copy.deepcopy(config), standard_registry())
-    assert validated["config_schema_version"] == "2.7.5-r3-ecc"
-    assert validated["revision"] == "rev3-ecc"
-
-
 def test_rev285_relations_can_carry_epistemic_state(tmp_path):
     registry = standard_registry()
     context = _context(tmp_path)

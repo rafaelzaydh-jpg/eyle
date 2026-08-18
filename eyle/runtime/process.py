@@ -6,6 +6,7 @@ probe seguro no Windows. Neste modulo, Windows usa apenas handles de consulta/
 espera e nunca envia sinal ao processo observado.
 """
 from __future__ import annotations
+import warnings
 
 import os
 
@@ -70,9 +71,9 @@ def _pid_ativo_windows(pid):
             return True
         finally:
             kernel32.CloseHandle(handle)
-    except Exception:
-        # Um probe inconclusivo nunca deve virar autorizacao para remover o
-        # estado de outro processo. Expiracao/heartbeat continuam como fallback.
+    except Exception as exc:
+        # Fail closed, but never hide why the probe became inconclusive.
+        warnings.warn(f"PID_PROBE_INCONCLUSIVE:{type(exc).__name__}:{exc}", RuntimeWarning, stacklevel=2)
         return True
 
 

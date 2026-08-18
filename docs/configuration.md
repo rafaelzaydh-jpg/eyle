@@ -1,83 +1,98 @@
-# Configuration
+# Configuration — Rev3.7.2
 
-`config.json` contains Eyle-side host/runtime mechanics. Provider URL, API key, model translation and provider-specific headers/bodies belong in the transport Adapter under `server/`.
+`config.json` contains only the current Eyle runtime/host contract. Rev3.7.2 performs **no in-process configuration upgrade**.
 
-## Identity
+## Exact identity
 
-Rev3 uses:
+The accepted identity is:
 
 ```text
 app_version = 2.7.5
-config_schema_version = 2.7.5-r3-ecc
-revision = rev3-ecc
+config_schema_version = 2.7.5-r3.7.2-ecc
+revision = rev3.7.2-ecc
 ```
 
-Clean late-Rev2.x configs are accepted and normalized in memory to the current identity without reinterpreting operator settings.
+A different identity or an unknown field fails closed. Removed settings are not silently ignored, promoted or translated.
 
 ## LLM boundary
 
-Eyle requires the local Adapter boundary:
+Eyle calls the local Adapter at port `8080`. Provider URL, API key and provider-specific transport live under `server/`.
 
-```text
-http://127.0.0.1:8080
-http://localhost:8080
-http://[::1]:8080
+Current `llm` mechanics include:
+
+- `provider_token_budget_per_message = 150000`: provider-reported ledger for one logical user-message execution;
+- `context_window_tokens = 50000`: physical limit for each LLM call;
+- transport timeouts/retry/cooldown/concurrency;
+- `reasoning_mode`;
+- `adapter_handshake_timeout_seconds`.
+
+Provider `usage.total_tokens` is authoritative. `prompt_tokens + completion_tokens` is used only when the provider omits the total. If potentially billable usage cannot be established safely, the execution stops fail-closed.
+
+Removed generated-token fuse/deadline settings are not part of the schema.
+
+## Context materialization
+
+`context_engine` controls physical materialization, not semantic relevance:
+
+```json
+{
+  "safety_margin_tokens": 500,
+  "chars_per_token_fallback": 3,
+  "conversation_materialization_tokens": 1200,
+  "observation_materialization_tokens": 2200
+}
 ```
 
-with optional `/v1`.
-
-Direct remote-provider URLs, legacy local-model endpoints, port `8000`, and Ollama-style port `11434` are rejected by config validation. Provider connection details belong in `server/.env`.
-
-Important `llm` settings:
-
-- `model` — normally `auto`, passed through to Adapter;
-- `temperature` — cognition temperature;
-- `generated_token_fuse` — execution-wide provider-reported completion-token fuse (default `120000`);
-- `context_window_tokens` — optional operator-declared physical context window; default `null` means Eyle does not locally crop to an arbitrary fixed window;
-- `connect_timeout_seconds` / `read_timeout_seconds` — transport mechanics;
-- retry/cooldown/cache fields — provider transport mechanics exposed to the Eyle client.
-
-The Eyle→Adapter structured wire is fixed. Upstream selection among native JSON Schema / JSON-object / prompt JSON belongs exclusively to Adapter.
-
-## Agent deadline
-
-`agent.task_deadline_seconds` is an absolute logical execution budget. A confirmation pause does not reset it. Resume reconstructs the persisted logical deadline before applying a deferred write.
+Conversation and observation bodies are selected by token budget. There is no `MAX_HISTORY_MESSAGES`, fixed snapshot count, automatic Temporary Memory projection, relevance ranker or semantic context router.
 
 ## Memory
 
-Memory is Host-owned internal state, not transcript history. The prompt receives a working page, not the entire graph and not a Runtime relevance judgment. Main explicitly uses `memory_overview`, `memory_activate`, histories, relation navigation and `continue` when more context may exist.
+Runtime opens **Memory Graph v12 only**. It does not migrate older graph schemas while serving a request.
 
-No small fixed temporary-memory capacity silently archives learned state.
+An existing v11 database may be converted explicitly with the one-shot tool:
 
-## Page-size settings
+```bash
+python -m eyle.devtools.migrate_memory_v11_to_v12 <storage-directory>
+```
 
-Settings such as:
+After migration, normal runtime code only understands v12. Historical upgrade logic is not retained as a fallback.
 
-- `max_file_read_lines`
-- `max_tree_entries`
-- `max_git_diff_chars`
-- search/range limits
+## Standard provider
 
-are default **materialization page sizes** when more finite content can be represented by Frontier. They are not semantic “Main may never read beyond this” rules.
+The bundled provider configuration is under:
 
-Physical sandbox/process/file safety bounds remain real hard limits.
+```text
+providers.standard
+```
+
+Its canonical package is:
+
+```text
+eyle.providers.standard
+```
+
+There is no `standard_impl` compatibility package or dynamic facade.
+
+The test configuration uses the current keys:
+
+```text
+enabled
+command_python
+command_node
+timeout_seconds
+sandbox
+```
+
+Public capability paging fields use their current names, such as `page_size`; removed cognitive ceiling aliases are rejected.
+
+## Interaction and continuation
+
+`confirmacoes.expiracao_segundos` controls interaction expiration. Human wait is not a cognitive task deadline and does not reset the provider-token ledger.
+
+Persisted Session and pending continuation state are current-schema only. No runtime path promotes old Session/pending shapes.
 
 ## Sandbox
 
-`providers.standard.sandbox.backend=auto` chooses the strongest available supported backend. Unrestricted `run_command` operates on a disposable copied workspace and never receives a read-write mount of the real project.
+`providers.standard.sandbox.backend=auto` selects an available supported isolation backend. Sandbox CPU/RAM/process/file/output limits are physical safety controls, not cognitive quotas.
 
-`bloquear_rede=false` protects host/workspace integrity but does not make copied source confidential from a network-enabled process. Set the policy appropriate to the workload.
-
-## Adapter environment
-
-Copy `server/.env.example` to `server/.env` and configure:
-
-```dotenv
-UPSTREAM_BASE_URL=https://provider.example/v1
-UPSTREAM_API_KEY=...
-DEFAULT_MODEL=...
-PORT=8080
-UPSTREAM_STRUCTURED_MODE=auto
-```
-
-See [../server/README.md](../server/README.md) for transport details.
+For substantial edits, `run_command` may work in the isolated job copy and `promote_sandbox` may later freeze and promote exact hash-bound bytes after one physical confirmation.

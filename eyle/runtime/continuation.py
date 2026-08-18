@@ -12,7 +12,7 @@ import re
 
 from eyle.runtime.execution_context import validate_execution_continuity_state
 
-PENDING_SCHEMA_VERSION = "11-ecc"
+PENDING_SCHEMA_VERSION = "13-ecc"
 
 _BASE_FIELDS = {
     "pending_schema_version",
@@ -24,7 +24,8 @@ _BASE_FIELDS = {
 _PERSISTED_FIELDS = {"id", "created_at", "expires_at", "provider_context_hash"}
 _KIND_FIELDS = {
     "capability_confirmation": {"capability", "provider", "confirmation_id"},
-    }
+    "semantic_choice": {"interaction_id", "options", "allow_free_text"},
+}
 
 
 def _non_empty_text(value: Any) -> bool:
@@ -32,15 +33,15 @@ def _non_empty_text(value: Any) -> bool:
 
 
 _CONFIRM_CONTROL = re.compile(
-    r"^\s*(?:sim|confirmar|confirme|confirmo|aplicar|aplique)"
+    r"^\s*(?:sim|aceitar|aceito|aprovar|aprovo|confirmar|confirme|confirmo|aplicar|aplique)"
     r"(?:\s+[0-9A-Fa-f]{4})?\s*[.!]?\s*$", re.IGNORECASE,
 )
 _CANCEL_CONTROL = re.compile(
-    r"^\s*(?:não|nao|cancelar|cancele|cancela)"
+    r"^\s*(?:não|nao|recusar|recuso|rejeitar|rejeito|cancelar|cancele|cancela)"
     r"(?:\s+[0-9A-Fa-f]{4})?\s*[.!]?\s*$", re.IGNORECASE,
 )
 _EXPLICIT_CONTROL = re.compile(
-    r"^\s*(?:(?:sim|não|nao|confirmar|confirme|confirmo|aplicar|aplique|cancelar|cancele|cancela)"
+    r"^\s*(?:(?:sim|não|nao|aceitar|aceito|aprovar|aprovo|recusar|recuso|rejeitar|rejeito|confirmar|confirme|confirmo|aplicar|aplique|cancelar|cancele|cancela)"
     r"(?:\s+[0-9A-Fa-f]{4})?)\s*[.!]?\s*$", re.IGNORECASE,
 )
 
@@ -58,6 +59,27 @@ def confirmation_control(value: Any) -> str | None:
 def is_explicit_confirmation_control(value: Any) -> bool:
     return _EXPLICIT_CONTROL.fullmatch(str(value or "")) is not None
 
+
+
+def resolve_semantic_choice(value: Any, pending: Dict[str, Any]) -> str | None:
+    """Resolve an explicit option/index, or free text when Main allowed it."""
+    if not isinstance(pending, dict) or pending.get("continuation_kind") != "semantic_choice":
+        return None
+    text = str(value or "").strip()
+    if not text:
+        return None
+    options = [str(item).strip() for item in pending.get("options") or []]
+    if text.isdigit():
+        index = int(text) - 1
+        if 0 <= index < len(options):
+            return options[index]
+    folded = text.casefold()
+    for option in options:
+        if option.casefold() == folded:
+            return option
+    if bool(pending.get("allow_free_text")):
+        return text
+    return None
 
 
 def validate_pending_continuation(value: Any, *, persisted: bool = False) -> Dict[str, Any]:
@@ -91,6 +113,14 @@ def validate_pending_continuation(value: Any, *, persisted: bool = False) -> Dic
     if kind == "capability_confirmation":
         if not _non_empty_text(value.get("capability")) or not _non_empty_text(value.get("provider")) or not _non_empty_text(value.get("confirmation_id")):
             raise ValueError("PENDING_SCHEMA_INVALID")
+    elif kind == "semantic_choice":
+        if not _non_empty_text(value.get("interaction_id")) or not isinstance(value.get("allow_free_text"), bool):
+            raise ValueError("PENDING_SCHEMA_INVALID")
+        options = value.get("options")
+        if not isinstance(options, list) or len(options) < 2 or not all(_non_empty_text(item) for item in options):
+            raise ValueError("PENDING_SCHEMA_INVALID")
+        if len({str(item).strip().casefold() for item in options}) != len(options):
+            raise ValueError("PENDING_SCHEMA_INVALID")
 
     if persisted:
         if not isinstance(value.get("id"), str) or not value["id"].strip():
@@ -98,7 +128,7 @@ def validate_pending_continuation(value: Any, *, persisted: bool = False) -> Dic
         if not _non_empty_text(value.get("created_at")):
             raise ValueError("PENDING_SCHEMA_INVALID")
         expires_at = value.get("expires_at")
-        if kind == "capability_confirmation":
+        if kind in {"capability_confirmation", "semantic_choice"}:
             if not _non_empty_text(expires_at):
                 raise ValueError("PENDING_SCHEMA_INVALID")
         context_hash = value.get("provider_context_hash")

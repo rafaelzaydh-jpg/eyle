@@ -436,7 +436,7 @@ def status():
         "eventos_na_fila": queue.tamanho(),
         "fila": fila,
         "metricas": metricas,
-        "confirmation": eyle_service.carregar_confirmacao_publica(),
+        "interaction": eyle_service.carregar_interacao_publica(),
         "avisos_config": config.get("_config_warnings", []),
     })
 

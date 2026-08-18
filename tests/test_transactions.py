@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import os
 
-import eyle.providers.standard_impl.transactions as transactions
-from eyle.providers.standard_impl.text_hash import hash_texto
+import eyle.providers.standard.transactions as transactions
+from eyle.providers.standard.text_hash import hash_texto
 
 
 def _replace(path, before, after):

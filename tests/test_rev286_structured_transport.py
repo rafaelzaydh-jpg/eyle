@@ -109,12 +109,12 @@ def test_rev286_canonicalizer_never_invents_missing_semantics():
         parse_profile_response({"type": "explorar", "operations": []}, "ecc")
 
 
-def test_rev286_three_consecutive_structured_errors_do_not_kill_job(monkeypatch, tmp_path):
+def test_rev37_same_structured_fingerprint_is_bounded_to_two_repairs(monkeypatch, tmp_path):
     sequence = iter([
         ErroLLM("bad1", transient=False, error_code="STRUCTURED_RESPONSE_INVALID:ecc:ECC_RESPONSE_INVALID"),
         ErroLLM("bad2", transient=False, error_code="STRUCTURED_RESPONSE_INVALID:ecc:ECC_RESPONSE_INVALID"),
         ErroLLM("bad3", transient=False, error_code="STRUCTURED_RESPONSE_INVALID:ecc:ECC_RESPONSE_INVALID"),
-        {"type": "concluir", "response": "recovered", "memory_delta": []},
+        {"type": "concluir", "response": "must-not-run", "memory_delta": []},
     ])
 
     calls = {"n": 0}
@@ -130,9 +130,11 @@ def test_rev286_three_consecutive_structured_errors_do_not_kill_job(monkeypatch,
     status, text, pending, details = run_agent(
         agent, "answer", base_config(), provider_context=provider_context(tmp_path), retornar_detalhes=True,
     )
-    assert (status, text, pending) == ("completed", "recovered", None)
+    assert status == "failed"
+    assert pending is None
+    assert details["failure_code"] == "ECC_PROTOCOL_UNRECOVERABLE"
     assert details["physical_capability_calls"] == 0
-    assert calls["n"] == 4
+    assert calls["n"] == 3
 
 
 def test_rev286_old_adapter_failed_closed_can_be_cognitively_recovered(monkeypatch, tmp_path):
@@ -155,20 +157,12 @@ def test_rev286_old_adapter_failed_closed_can_be_cognitively_recovered(monkeypat
     assert details["physical_capability_calls"] == 0
 
 
-def test_rev286_agent_has_no_bounded_structured_retry_counter():
+def test_rev37_protocol_bound_is_episode_specific_not_cognitive_ceiling():
     source = Path(agent.__file__).read_text(encoding="utf-8")
-    assert "protocol_retry_streak" not in source
-    assert "< 1" not in source[source.find("def _structured_error"):source.find("def _details")]
-    assert "ECC_PROTOCOL_RECOVERY" in source
-
-
-def test_rev286_accepts_clean_rev285_config_identity():
-    config = base_config()
-    config["config_schema_version"] = "2.7.5-r2.8.5-ecc"
-    config["revision"] = "rev2.8.5-ecc"
-    validated = validar_config(copy.deepcopy(config), standard_registry())
-    assert validated["config_schema_version"] == "2.7.5-r3-ecc"
-    assert validated["revision"] == "rev3-ecc"
+    assert "protocol_failures" in source
+    assert "ECC_PROTOCOL_UNRECOVERABLE" in source
+    assert "repeat_count > 2" in source
+    assert "while True" in source
 
 
 def test_rev286_structured_empty_is_protocol_error_not_generic_transport_retry(monkeypatch):
@@ -183,6 +177,7 @@ def test_rev286_structured_empty_is_protocol_error_not_generic_transport_retry(m
         headers = {}
         def __enter__(self): return self
         def __exit__(self, *args): return False
+        def close(self): pass
         def read(self):
             return json.dumps({
                 "choices": [{"message": {"content": ""}, "finish_reason": "stop"}],
@@ -203,3 +198,58 @@ def test_rev286_structured_empty_is_protocol_error_not_generic_transport_retry(m
         llm_mod._chamar_llm("s", "u", cfg, execution=execution, perfil="ecc")
     assert exc.value.error_code == "STRUCTURED_RESPONSE_INVALID:ecc:STRUCTURED_EMPTY"
     assert calls["n"] == 1
+
+
+def test_rev37_valid_ecc_survives_invalid_memory_parser_sidecar():
+    parsed = parse_profile_response({
+        "type": "concluir",
+        "response": "delivered",
+        "memory_delta": [{"op": "remember", "scope": "not-a-scope", "content": ""}],
+    }, "ecc")
+    assert parsed["type"] == "concluir"
+    assert parsed["response"] == "delivered"
+    assert parsed["memory_delta"] == []
+    assert parsed["memory_error"]["code"].startswith("EYLE_MEMORY_")
+
+
+def test_rev37_memory_parser_rejection_does_not_trigger_new_llm_call(monkeypatch, tmp_path):
+    calls = {"n": 0}
+
+    def fake(prompt, cfg):
+        calls["n"] += 1
+        return {
+            "type": "concluir",
+            "response": "delivered",
+            "memory_delta": [],
+            "memory_error": {"code": "EYLE_MEMORY_INVALID", "detail": "bad sidecar"},
+        }
+
+    monkeypatch.setattr(agent, "executar_ecc_llm", fake)
+    status, text, pending, details = run_agent(
+        agent, "answer", base_config(), provider_context=provider_context(tmp_path), retornar_detalhes=True,
+    )
+    assert (status, text, pending) == ("completed", "delivered", None)
+    assert calls["n"] == 1
+    assert details["memory_rejection_events"] == 1
+    assert "EYLE_MEMORY_INVALID" in details["memory_rejection_reasons"]
+
+
+def test_rev37_memory_graph_rejection_does_not_trigger_new_llm_call(monkeypatch, tmp_path):
+    calls = {"n": 0}
+
+    def fake_llm(prompt, cfg):
+        calls["n"] += 1
+        return {"type": "concluir", "response": "delivered", "memory_delta": [{"op": "archive", "id": "mem-missing"}]}
+
+    def reject_sidecar(*args, **kwargs):
+        return {"ok": False, "changed": False, "task_state_changed": False, "error_code": "MEMORY_NODE_NOT_FOUND", "detail": "missing"}
+
+    monkeypatch.setattr(agent, "executar_ecc_llm", fake_llm)
+    monkeypatch.setattr(agent, "apply_memory_sidecar", reject_sidecar)
+    status, text, pending, details = run_agent(
+        agent, "answer", base_config(), provider_context=provider_context(tmp_path), retornar_detalhes=True,
+    )
+    assert (status, text, pending) == ("completed", "delivered", None)
+    assert calls["n"] == 1
+    assert details["memory_rejection_events"] == 1
+    assert "MEMORY_NODE_NOT_FOUND" in details["memory_rejection_reasons"]

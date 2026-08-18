@@ -1,137 +1,73 @@
-# Intrinsic Memory Graph
+# Memory Graph v12
 
-Memory is a first-class cognitive layer of Eyle. It is not a fourth ECC move, not a raw conversation transcript, and not a separate memory agent.
+Memory is intrinsic learned state beside ECC, not a fourth cognitive move and not a hidden context router.
 
-## Continuous learning
+## Schema dimensions
 
-Every cognition turn may emit `memory_delta` beside the ECC decision. Main decides what an experience means and whether it may matter later.
-
-Memory changes are atomic graph operations:
-
-- `remember`
-- `revise`
-- `relate`
-- `revise_relation`
-- `archive`
-- `supersede`
-- `retire_relation`
-
-The Runtime validates shape/referential integrity and persists the change; it does not decide what should be learned.
-
-## Retention is not truth
-
-All learned nodes live in one graph and may use:
-
-- `retention=temporary`
-- `retention=persistent`
-
-Retention answers **how worth preserving the representation is**, not whether it is true, stable, current, or universal.
-
-A persistent memory may still be a weak/volatile hypothesis. A temporary memory may be a high-confidence observation that Main does not yet consider durably useful.
-
-Temporary memory is not conversation-local and is not silently trimmed by a small fixed-capacity policy.
-
-## Epistemic state
-
-Nodes and relations may carry open Main-authored metadata:
-
-- `nature`
-- optional `confidence`
-- `volatility`
-- `temporal`
-- `context`
-- `last_evidenced_at`
-
-The vocabulary is deliberately open. Runtime does not impose a closed ontology of “facts”, “beliefs”, or “preferences”.
-
-`confidence` describes the current strength of an interpretation/application, not a mathematically certified probability of truth.
-
-## History and changing states
-
-Human preferences, beliefs and world states can change. The preferred model is normally to preserve the old state and represent the new state/context rather than rewrite history into a single timeless value.
-
-For example:
+Each node has separate physical dimensions:
 
 ```text
-mem-old: "Beatles are a primary preference" (earlier context)
-mem-new: "Beatles are mostly nostalgic listening" (later context)
-
-mem-new --changed_from--> mem-old
+scope        reachability boundary
+domain       chat | task | eyle | knowledge
+context_key  optional physical context identity
 ```
 
-Node and relation revisions remain inspectable through Memory history operations.
+`scope` retains the current `user`, world, `all` and `global` reachability semantics. `domain` never replaces scope.
 
-## Material provenance
+## Authorship
 
-Large source bodies do not belong inside memory nodes.
+Main authors semantic knowledge through `memory_delta`: remember, revise, relate, revise relations, archive/supersede, retire relations and task lifecycle decisions.
+
+Runtime authors only mechanically knowable state. In particular, current user/assistant message identity and ordering may be persisted in the `chat` domain without asking Main to summarize what was said.
+
+## Sidecar contract
+
+Memory cannot veto an already valid ECC decision. Wire parsing first obtains/validates the decision; Memory is parsed/applied as an independent sidecar. A Memory rejection is observable telemetry/feedback and the valid ECC path continues.
+
+## Retention and epistemic state
+
+`temporary` and `persistent` are retention choices, not truth labels or automatic prompt tiers.
+
+Nodes/relations can carry the shared canonical epistemic structure, including nature, confidence, volatility, temporal/context fields and evidence timestamps. Parser and storage validate the same definition at separate boundaries.
+
+## Current state and history
+
+A node/relation exposes its current revision by default. Revision history remains persisted and inspectable. Support references are pinned to the exact referenced Memory/relation revision used when committed; later revision drift is reported mechanically rather than interpreted as semantic invalidation.
+
+## Task Memory
+
+A task is an ordinary `kind=task` graph node plus minimal mechanical lifecycle state:
 
 ```text
-Document / file / sensor body
-            ↓
-        Material mat-*
-            │
-            ├── mem-* atomic interpretation
-            ├── mem-* hypothesis
-            ├── mem-* decision
-            └── ...
+active | blocked | resolved | cancelled
 ```
 
-One artifact may support thousands of learned nodes without duplicating the artifact into Memory.
+Task meaning and relations remain Main-authored. Task state never creates an automatic prompt working set or narrows global recall.
 
-## Main-authored recall cues
+## Recall
 
-A node may include future retrieval handles:
+Recall uses literal/mechanical candidate discovery (FTS5 with SQL fallback), persists the exact selection in SQLite and materializes a page. An exact cursor Frontier exposes the remainder without storing the full match universe in Session.
 
-```json
-{
-  "recall": {
-    "aliases": ["The Beatles"],
-    "concepts": ["music preference"],
-    "cues": ["when discussing favorite artists"]
-  }
-}
+Main may supply queries, exact IDs/tags, epistemic filters, relation labels and neighbor expansion. Runtime never treats lexical rank as semantic importance.
+
+## No automatic projection
+
+Normal cognition does not call a global `project_memory_view`. Only explicit Main activation is materialized as Memory context.
+
+There is no `memory_focus`, Active Projection, HOT/WARM/COLD tier, automatic Temporary Memory working set or hidden semantic selector.
+
+## Graph size independence
+
+Growing the graph must not proportionally increase a trivial prompt. Nodes that are not materialized remain reachable through explicit recall/activation/paging.
+
+## Migration boundary
+
+Runtime opens v12 only.
+
+The sole retained historical conversion for this release is the explicit one-shot v11→v12 tool:
+
+```bash
+python -m eyle.devtools.migrate_memory_v11_to_v12 <storage-directory>
 ```
 
-These strings are authored by Main. They are **not evidence**, do not increase confidence, and are not generated by a hidden embedding/ranking subsystem.
-
-Runtime only cleans, stores, indexes, and matches the strings Main authored.
-
-## Scalable recall
-
-Recall uses SQLite FTS5 when available and a literal SQL fallback otherwise.
-
-```text
-memory_activate
-      ↓
-lexical/literal candidate selection
-      ↓
-persist exact match universe in SQLite
-      ↓
-materialize one page
-      ↓
-fr-* cursor for the exact remainder
-```
-
-The Session does not store the full matching `mem-*` list. Frontier contains only cursor/snapshot metadata, keeping navigation state independent of match count.
-
-`memory_activate` can use:
-
-- one query or several Main-authored query variants;
-- exact IDs/tags;
-- `nature` / `volatility` filters;
-- exact relation labels;
-- optional neighbor expansion.
-
-Runtime does not treat lexical rank as semantic importance.
-
-## Memory directory
-
-`memory_overview` exposes body-free descriptive counts such as node/edge totals, retention/epistemic breakdowns, isolated nodes, revised/evidenced nodes, relation labels and association coverage.
-
-These metrics help Main decide where to inspect; they are never automatic maintenance commands.
-
-## Navigation lifecycle
-
-Recall snapshots are navigation state, not learned knowledge. Exact Frontiers survive a `confirmation_required` pause because they belong to the same logical execution. Once the task reaches a terminal state, unreachable recall snapshots are released mechanically.
-
-Learned nodes, relations and histories are never deleted by navigation cleanup.
+It performs mechanical metadata conversion only. It does not ask an LLM to reinterpret historical nodes and it is not imported by the normal runtime.

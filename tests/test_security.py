@@ -4,13 +4,12 @@ import os
 import pytest
 
 from tests.canonical import standard_registry
-from eyle.providers.standard_impl.security import _resolver_caminho_seguro
+from eyle.providers.standard.security import _resolver_caminho_seguro
 
 
 def _ctx(raiz):
     return {
         "provider_context": {"standard": {"caminho_origem": str(raiz)}},
-        "config": {"agent": {"max_file_read_lines": 400}},
     }
 
 

@@ -172,11 +172,8 @@ class CapabilityRegistry:
             if canonical in blocked:
                 continue
             predicate = provider.available
-            try:
-                if predicate is None or predicate(local_name, spec, ctx or {}):
-                    names.add(canonical)
-            except Exception:
-                continue
+            if predicate is None or predicate(local_name, spec, ctx or {}):
+                names.add(canonical)
         return names
 
     def catalog(self, config: Dict[str, Any] | None = None, allowed_names: Iterable[str] | None = None) -> list[Dict[str, Any]]:
@@ -237,6 +234,29 @@ class CapabilityRegistry:
             "question": str(prepared["question"]).strip(),
             "state": copy.deepcopy(prepared["state"]),
         }
+
+    def cancel_confirmation(self, name: str, state: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
+        """Release capability-owned prepared state without authorizing mutation.
+
+        Cancellation is mechanical cleanup only. A provider may omit the hook
+        when preparation created no durable temporary resource.
+        """
+        item = self._item(name)
+        if item is None:
+            return {"ok": False, "error_code": "CAPABILITY_NOT_FOUND"}
+        _, _, spec = item
+        cancel = spec.get("cancel")
+        if not callable(cancel):
+            return {"ok": True, "cleanup": "not_required"}
+        try:
+            raw = cancel(copy.deepcopy(state or {}), {**(ctx or {}), "registry": self})
+        except Exception as exc:
+            return {"ok": False, "error_code": "CAPABILITY_CANCEL_FAILED", "detail": str(exc)[:300]}
+        if raw is None:
+            return {"ok": True, "cleanup": "completed"}
+        if isinstance(raw, dict):
+            return copy.deepcopy(raw)
+        return {"ok": False, "error_code": "CAPABILITY_CANCEL_INVALID"}
 
     def confirm(self, name: str, state: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
         item = self._item(name)
@@ -403,10 +423,7 @@ class CapabilityRegistry:
         """
         hook = self.hook(name, "freshness_arguments")
         if callable(hook):
-            try:
-                value = hook(copy.deepcopy(arguments or {}))
-            except Exception:
-                return {}
+            value = hook(copy.deepcopy(arguments or {}))
             return copy.deepcopy(value) if isinstance(value, dict) else {}
         return {}
 
@@ -419,10 +436,7 @@ class CapabilityRegistry:
         hook = self.hook(name, "freshness_token")
         if not callable(hook):
             return None
-        try:
-            value = hook(arguments or {}, ctx or {})
-        except Exception:
-            return None
+        value = hook(arguments or {}, ctx or {})
         text = str(value or "").strip()
         return text or None
 

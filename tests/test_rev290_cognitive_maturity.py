@@ -191,51 +191,12 @@ def test_rev290_overview_exposes_factual_consolidation_map_without_semantic_rank
     assert "semantic_score" not in json.dumps(detail)
 
 
-def test_rev290_v7_migration_adds_empty_associative_metadata_without_reinterpreting_memory(tmp_path):
-    storage = tmp_path / "memory"; storage.mkdir(); db = storage / "core_memory.sqlite3"
-    # Build a real v8 store first, then mechanically emulate a clean v7 file by
-    # removing the new column/index while preserving the v7 semantic tables.
-    graph_counts(str(storage))
-    conn = sqlite3.connect(db)
-    try:
-        conn.execute("DROP TABLE IF EXISTS memory_fts")
-        conn.execute("ALTER TABLE memory_nodes RENAME TO memory_nodes_v8")
-        conn.execute("""CREATE TABLE memory_nodes (
-            id TEXT PRIMARY KEY, scope TEXT NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL,
-            retention TEXT NOT NULL, epistemic_nature TEXT NOT NULL, epistemic_confidence REAL,
-            epistemic_volatility TEXT NOT NULL, epistemic_temporal TEXT NOT NULL, epistemic_context TEXT NOT NULL,
-            last_evidenced_at TEXT, status TEXT NOT NULL, revision INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-        )""")
-        conn.execute("""INSERT INTO memory_nodes(id,scope,kind,content,retention,epistemic_nature,epistemic_confidence,epistemic_volatility,epistemic_temporal,epistemic_context,last_evidenced_at,status,revision,created_at,updated_at)
-            SELECT id,scope,kind,content,retention,epistemic_nature,epistemic_confidence,epistemic_volatility,epistemic_temporal,epistemic_context,last_evidenced_at,status,revision,created_at,updated_at FROM memory_nodes_v8""")
-        conn.execute("DROP TABLE memory_nodes_v8")
-        conn.execute("INSERT INTO memory_nodes VALUES('mem-old','user','preference','User likes jazz','persistent','preference',0.6,'high','{}','{}',NULL,'current',1,'2026-01-01','2026-01-01')")
-        conn.execute("UPDATE memory_meta SET value='2.7.5-r2.8.7-memory-graph-v7' WHERE key='schema_version'")
-        conn.commit()
-    finally:
-        conn.close()
-    old = node_record(str(storage), "mem-old")
-    assert MEMORY_GRAPH_SCHEMA_VERSION == "2.7.5-r2.9-memory-graph-v8"
-    assert old["content"] == "User likes jazz"
-    assert old["epistemic"]["confidence"] == 0.6
-    assert old["recall"] == {}
-
-
 def test_rev290_prompt_makes_association_main_authored_and_not_evidence():
     lowered = PROMPT_ECC.lower()
     assert "associative recall cues" in lowered
     assert "retrieval hints only" in lowered
     assert "not evidence" in lowered
     assert "never invents/ranks semantic associations" in lowered
-
-
-def test_rev290_clean_rev288_config_upgrades_identity_only():
-    cfg = base_config()
-    cfg["config_schema_version"] = "2.7.5-r2.8.8-ecc"
-    cfg["revision"] = "rev2.8.8-ecc"
-    validated = validar_config(cfg, standard_registry())
-    assert validated["config_schema_version"] == "2.7.5-r3-ecc"
-    assert validated["revision"] == "rev3-ecc"
 
 
 def test_rev290_sql_fallback_searches_main_authored_associative_recall(tmp_path):

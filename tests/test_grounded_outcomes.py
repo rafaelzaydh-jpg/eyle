@@ -6,9 +6,8 @@ import json
 from pathlib import Path
 
 import eyle.core.agent as core_agent
-import eyle.providers.standard_impl.sandbox as sandbox_mod
-import eyle.providers.standard as tools
-from eyle.providers.standard_impl.code_relations import analyze_symbol_relations
+import eyle.providers.standard.sandbox as sandbox_mod
+from eyle.providers.standard.code_relations import analyze_symbol_relations
 from eyle.runtime.execution_context import ExecutionContext, bind_execution, reset_execution
 from tests.canonical import base_config
 

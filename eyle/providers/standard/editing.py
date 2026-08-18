@@ -213,9 +213,14 @@ def _escrever_arquivo_atomico(caminho, conteudo):
     modo_original = stat.S_IMODE(os.stat(caminho).st_mode) if os.path.exists(caminho) else None
     fd, caminho_temporario = tempfile.mkstemp(prefix=f".{nome}.eyle-", dir=diretorio)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        # Write bytes, not text mode. On Windows text mode translates ``\n``
+        # to ``\r\n``; a caller that already supplied CRLF would therefore
+        # become CRCRLF and fail exact post-write verification. The transaction
+        # contract is byte-stable UTF-8 across operating systems.
+        encoded = str(conteudo).encode("utf-8")
+        with os.fdopen(fd, "wb") as f:
             fd = None
-            f.write(conteudo)
+            f.write(encoded)
             f.flush()
             os.fsync(f.fileno())
         if modo_original is not None:
@@ -284,7 +289,7 @@ def _descricao_comando(comando):
 
 def _detectar_comando_teste(caminho_projeto, cfg_testes):
     """
-    So devolve um comando se cfg_testes.get("ativado") for True E existir
+    So devolve um comando se cfg_testes.get("enabled") for True E existir
     evidencia de uma suite. Pytest e detectado tanto por configuracao quanto
     por arquivos ``test_*.py``, ``*_test.py`` ou ``tests.py`` em qualquer
     pasta valida, inclusive quando esses testes acabaram de ser criados pela
@@ -295,11 +300,11 @@ def _detectar_comando_teste(caminho_projeto, cfg_testes):
     dois existirem, prefere pytest (mesma raiz normalmente so faz sentido
     ter um dos dois como projeto principal). Devolve None se nada aplicavel.
     """
-    if not cfg_testes or not cfg_testes.get("ativado", False):
+    if not cfg_testes or not cfg_testes.get("enabled", False):
         return None
 
     if _tem_testes_pytest(caminho_projeto):
-        return cfg_testes.get("comando_python", "python -m pytest -q")
+        return cfg_testes.get("command_python", "python -m pytest -q")
 
     package_json = os.path.join(caminho_projeto, "package.json")
     if os.path.isfile(package_json):
@@ -309,7 +314,7 @@ def _detectar_comando_teste(caminho_projeto, cfg_testes):
         except (OSError, json.JSONDecodeError):
             dados = {}
         if isinstance(dados.get("scripts"), dict) and "test" in dados["scripts"]:
-            return cfg_testes.get("comando_node", "npm test --silent")
+            return cfg_testes.get("command_node", "npm test --silent")
 
     return None
 
@@ -427,7 +432,7 @@ def rodar_testes_projeto(caminho_projeto, cfg_testes, scope=None):
 
     descricao_comando = _descricao_comando(argv)
     cfg_sandbox = dict(cfg_testes.get("sandbox") or {})
-    cfg_sandbox.setdefault("timeout_segundos", cfg_testes.get("timeout_segundos", 60))
+    cfg_sandbox.setdefault("timeout_segundos", cfg_testes.get("timeout_seconds", 60))
     resultado = executar_no_sandbox(caminho_projeto, argv, cfg_sandbox)
     saida_resumida = (resultado.get("saida") or "").strip()[-4000:]
     backend = resultado.get("backend", "sandbox")

@@ -6,7 +6,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import eyle.providers.standard_impl.editing as codar_mod  # noqa: E402
+import eyle.providers.standard.editing as codar_mod  # noqa: E402
 
 
 def test_escrita_atomica_usa_replace_e_preserva_permissoes(monkeypatch, tmp_path):

@@ -1,9 +1,9 @@
 {
   "release": "2.7.5",
   "app_version": "2.7.5",
-  "config_schema_version": "2.7.5-r3-ecc",
-  "revision": "rev3-ecc",
-  "title": "Rev3 — Consolidated ECC + Epistemic Memory",
+  "config_schema_version": "2.7.5-r3.7.2-ecc",
+  "revision": "rev3.7.2-ecc",
+  "title": "Rev3.7.2 — Canonical Cut Review",
   "python": ">=3.11",
   "architecture": {
     "semantic_authority": "Main LLM",
@@ -12,14 +12,14 @@
       "construir",
       "concluir"
     ],
-    "memory": "Intrinsic epistemic Memory Graph v8 with Main-authored consolidation and associative recall cues",
-    "runtime": "Mechanical truth, safety, persistence, Evidence/Material, Coverage/Frontier, budgets, transactions",
-    "adapter": "Transport-only local boundary on port 8080 for remote OpenAI-compatible APIs"
+    "memory": "Memory Graph v12 with explicit domain/context identity; Runtime materializes only Main-explicit Memory activation.",
+    "runtime": "Mechanical truth, safety, persistence, Evidence/Material, Coverage/Frontier, per-call context safety, provider-reported per-message token budget, transactions",
+    "adapter": "Deterministic transport-only DeepSeek V4 profile on port 8080; fixed configured model, JSON Output, direct thinking/max_tokens translation, one format-only repair, provider usage aggregation; no discovery/probing/negotiation"
   },
-  "memory_graph_schema": "2.7.5-r2.9-memory-graph-v8",
-  "session_schema": "2.7.5-r2.8.3-ecc",
+  "memory_graph_schema": "2.7.5-r3.7.1-memory-graph-v12",
+  "session_schema": "2.7.5-r3.7.2-ecc",
   "adapter_protocol": "eyle-adapter-transport-v1",
-  "execution_continuity": "execution-continuity-v1",
+  "execution_continuity": "execution-continuity-v3",
   "bundled_providers": [
     "standard"
   ],
@@ -36,6 +36,7 @@
     "standard.read_file",
     "standard.run_command",
     "standard.export_sandbox_zip",
+    "standard.promote_sandbox",
     "standard.run_tests",
     "standard.git_status",
     "standard.git_diff",
@@ -65,6 +66,7 @@
     ],
     "construir": [
       "export_sandbox_zip",
+      "promote_sandbox",
       "transaction"
     ],
     "concluir": [
@@ -73,16 +75,46 @@
   },
   "contracts": {
     "wire": "Main emits tolerant simple wire; Eyle canonicalizes and semantically validates strict ECC locally.",
-    "memory": "Retention is lifecycle, not truth. Epistemic/temporal metadata and relations are Main-authored and historically revisable.",
-    "recall": "FTS5/SQL candidate discovery is literal/mechanical; exact match sets are DB-cursor paged and Main judges relevance.",
+    "memory": "Memory remains current-by-default semantic knowledge with preserved revision history. Task Memory reuses ordinary mem-* nodes/relations. Semantic supports are revision-pinned when created; source revision drift is exposed mechanically, never interpreted as falsity.",
+    "recall": "FTS5/SQL candidate discovery is literal/mechanical. scope=all reaches user + current world; scope=global reaches all current nodes across every world. Exact selections are DB-cursor paged and Main judges relevance.",
     "frontier": "Frontier is exact continuation after the current materialized page, never a semantic reading limit.",
-    "adapter": "Adapter remains semantically blind and negotiates transport mechanics through the formal handshake.",
-    "execution": "Confirmation/resume preserves logical identity, absolute deadline, generated-token fuse, and provider usage.",
-    "source": "workspace and eyle are physical source identities, never inferred semantically."
+    "adapter": "Adapter remains semantically blind and deterministic: static handshake, fixed configured DeepSeek V4 profile/model, json_object structured transport, direct reasoning/output translation, no remote model discovery or runtime capability negotiation.",
+    "execution": "Each user-message execution owns its pending gates and provider-token ledger. Human wait is not charged as a cognitive deadline; the 50000-token context window is enforced per physical LLM call, while provider-reported usage.total_tokens is accumulated across all calls and Adapter internal attempts under the 150000-token per-message budget. If billable usage becomes unknown, further paid calls stop fail-closed.",
+    "source": "workspace and eyle are physical source identities, never inferred semantically.",
+    "interaction": "Main authors semantic choices; Runtime owns physical confirmations. Both use persisted user gates and a common UI, but only physical confirmation authorizes an exact prepared mutation.",
+    "sandbox_promotion": "A tested sandbox file/subtree can be frozen as a hash-bound durable staging artifact and promoted to the real workspace with one exact confirmation; merge does not delete unrelated target files and mirror is explicit.",
+    "context_hygiene": "Deterministic ContextMaterializer pages conversation, observations and explicit Memory activations by physical token budget. No fixed semantic item ceiling or automatic Memory projection is part of the runtime.",
+    "task_memory": "A task is an ordinary kind=task Memory node. Runtime maintains only active/blocked/resolved/cancelled lifecycle state and state revisions; task relations and semantic content remain Main-authored. Task Memory never creates a recall boundary.",
+    "provenance": "Memory/relation support freezes the exact referenced source revision. Revision history exposes changeset execution/turn and revision-specific anchors. A later source revision is reported as source_revised, not semantically invalidated.",
+    "optimization": "Optimization remains monotonic: compact presentation may reduce prompt cost, but no physical Material, Evidence, Frontier, or Memory becomes unreachable to Main.",
+    "investigation_quality": "Structural inventory is orientation, not sufficient evidence for behavioral/architectural analysis. Main is instructed to inspect representative implementation before concluding material claims."
   },
   "publication": {
     "requires_extracted_artifact_verification": true,
-    "public_docs_are_revision_neutral": true,
-    "runtime_state_committed": false
-  }
+    "public_docs_are_revision_neutral": false,
+    "runtime_state_committed": false,
+    "experimental": false,
+    "mainline_base": "Rev3.7.1",
+    "stability": "candidate"
+  },
+  "release_notes": {
+    "canonical_paths": "One responsibility has one canonical implementation path; compatibility facades and runtime promotion branches are removed.",
+    "config": "Runtime accepts only Rev3.7.2 configuration identity. Historical configuration is not promoted in-process.",
+    "memory": "Runtime accepts only Memory Graph v12. The one-shot v11→v12 migrator lives under eyle.devtools and is not on the runtime path.",
+    "standard_provider": "The bundled provider is the canonical eyle.providers.standard package; workspace transaction and sandbox promotion live inside that domain.",
+    "execution": "Dead cognitive-deadline/generated-token aliases are removed; provider usage remains the token authority.",
+    "context": "Fixed message snapshot limits and automatic temporary-memory projection paths are removed."
+  },
+  "rev372": {
+    "revision_focus": "cuts_only",
+    "runtime_backward_compatibility": false,
+    "canonical_standard_provider": "eyle.providers.standard",
+    "config_runtime_migration": false,
+    "memory_runtime_migration": false,
+    "explicit_memory_materialization_only": true,
+    "legacy_deadline_path_removed": true,
+    "fixed_history_snapshot_limit_removed": true
+  },
+  "pending_schema": "13-ecc",
+  "adapter_version": "2.7.5-rev3.7.2"
 }

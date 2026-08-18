@@ -32,13 +32,15 @@ class _FakeResponse:
     def read(self):
         return self._bytes
 
+    def close(self):
+        pass
+
 
 def _config(**overrides):
     llm = {
         "base_url": "http://localhost:8080",
         "model": "modelo-teste",
         "temperature": 0.2,
-        "generated_token_fuse": 120000,
         "connect_timeout_seconds": 5,
         "read_timeout_seconds": None,
         "retry_max_attempts": 1,
@@ -586,55 +588,6 @@ def test_rev281_zero_usage_adapter_transport_failure_keeps_bounded_outer_retry(m
     assert calls["n"] == 3
 
 
-def test_rev282_generated_token_fuse_counts_completion_not_prompt(monkeypatch):
-    from eyle.runtime.execution_context import ExecutionContext
-
-    calls = _capture(monkeypatch, {
-        "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 200000, "completion_tokens": 5},
-    })
-    cfg = _config(generated_token_fuse=10)
-    execution = ExecutionContext.from_config(cfg)
-    assert llm_mod._chamar_llm("s", "u", cfg, execution) == "ok"
-    assert len(calls) == 1
-    usage = execution.usage_view()
-    assert usage["prompt_tokens_actual"] == 200000
-    assert usage["completion_tokens_actual"] == 5
-    assert usage["generated_tokens_remaining"] == 5
-
-
-def test_rev282_generated_token_fuse_blocks_new_llm_call_once_reached(monkeypatch):
-    from eyle.runtime.execution_context import ExecutionContext
-
-    called = {"n": 0}
-    def fake_urlopen(req, timeout=None):
-        called["n"] += 1
-        return _FakeResponse({"choices": [{"message": {"content": "never"}}]})
-    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
-    cfg = _config(generated_token_fuse=10)
-    execution = ExecutionContext.from_config(cfg)
-    execution.completion_tokens_actual = 10
-    with pytest.raises(llm_mod.ErroLLM) as exc:
-        llm_mod._chamar_llm("s", "u", cfg, execution)
-    assert exc.value.error_code == "GENERATED_TOKEN_FUSE_REACHED"
-    assert called["n"] == 0
-
-
-def test_rev282_generated_token_fuse_fails_closed_if_provider_reports_overshoot(monkeypatch):
-    from eyle.runtime.execution_context import ExecutionContext
-
-    _capture(monkeypatch, {
-        "choices": [{"message": {"content": "too much"}, "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 2, "completion_tokens": 11},
-    })
-    cfg = _config(generated_token_fuse=10)
-    execution = ExecutionContext.from_config(cfg)
-    with pytest.raises(llm_mod.ErroLLM) as exc:
-        llm_mod._chamar_llm("s", "u", cfg, execution)
-    assert exc.value.error_code == "GENERATED_TOKEN_FUSE_EXCEEDED"
-    assert execution.completion_tokens_actual == 11
-
-
 def test_rev288_diagnosticar_backend_uses_formal_handshake_then_ready_not_models(monkeypatch):
     calls = []
     handshake = {
@@ -642,7 +595,7 @@ def test_rev288_diagnosticar_backend_uses_formal_handshake_then_ready_not_models
         "handshake_schema": llm_mod.ADAPTER_HANDSHAKE_SCHEMA,
         "adapter_protocol": llm_mod.ADAPTER_TRANSPORT_PROTOCOL,
         "adapter_profile": "eyle-provider-transport-v3",
-        "adapter_version": "2.7.5-rev3",
+        "adapter_version": "2.7.5-rev3.2",
         "authority": "transport-only",
         "semantic_protocol": "client-owned",
         "endpoints": {"chat_completions": "/v1/chat/completions", "readiness": "/ready", "models": "/v1/models"},
@@ -651,6 +604,8 @@ def test_rev288_diagnosticar_backend_uses_formal_handshake_then_ready_not_models
             "client_json_schema_hint": True,
             "json_candidate_passthrough": True,
             "syntactic_json_recovery": True,
+            "client_completion_ceiling": True,
+            "client_reasoning_control": True,
         },
     }
 

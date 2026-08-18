@@ -16,3 +16,5 @@ __all__ = [
     "materialize_snapshot_handle", "register_snapshot_handle", "persisted_handles",
     "persisted_snapshots", "release_snapshot_handle",
 ]
+
+from .memory import EPISTEMIC_SCHEMA, MEMORY_DOMAINS, normalize_domain, normalize_context_key, normalize_epistemic

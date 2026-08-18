@@ -15,9 +15,8 @@ from typing import Any, Dict, Iterable, List
 from eyle.core.evidence import retain_evidence
 from eyle.contracts.observation import register_snapshot_handle, materialize_snapshot_handle, snapshot_store
 from eyle.runtime.memory_graph import (
-    apply_graph_operations, create_recall_snapshot, edge_history, edge_record, graph_counts, graph_overview, graph_records,
-    memory_search_backend, node_record, node_history, recall_snapshot_page, release_recall_snapshot,
-    temporary_graph_records, world_scope,
+    apply_graph_operations, create_recall_snapshot, edge_history, edge_record, graph_overview, graph_records,
+    node_record, node_history, recall_snapshot_page, release_recall_snapshot, world_scope,
 )
 from eyle.runtime.observation import (
     consume_frontier, expose_frontiers, frontier_view, material_items, resolve_frontier,
@@ -121,9 +120,35 @@ def _support_anchors(
             })
             continue
         if kind == "memory":
-            target = _resolve_ref(support.get("memory_id"), aliases)
-            node_record(storage_dir, target)  # deterministic existence check
-            anchors.append({"anchor_kind": "memory", "locator": {"kind": "memory_node"}, "source_ref": target})
+            raw_memory_id = str(support.get("memory_id") or "").strip()
+            target = _resolve_ref(raw_memory_id, aliases)
+            requested_revision = support.get("revision")
+            try:
+                record = node_record(storage_dir, target)  # deterministic existence/current-revision check
+                source_revision = int(requested_revision) if requested_revision is not None else int(record.get("revision") or 0)
+            except (OSError, ValueError):
+                if not raw_memory_id.startswith("@"):
+                    raise
+                # A same-delta @alias denotes a node that will be atomically
+                # created earlier in this exact changeset; its first revision is
+                # mechanically 1. _insert_anchors validates existence at commit.
+                source_revision = int(requested_revision) if requested_revision is not None else 1
+            anchors.append({
+                "anchor_kind": "memory", "source_entity_type": "node",
+                "source_revision": source_revision,
+                "locator": {"kind": "memory_node", "revision": source_revision}, "source_ref": target,
+            })
+            continue
+        if kind == "relation":
+            relation_id = str(support.get("relation_id") or "").strip()
+            record = edge_record(storage_dir, relation_id)  # deterministic existence/current-revision check
+            requested_revision = support.get("revision")
+            source_revision = int(requested_revision) if requested_revision is not None else int(record.get("revision") or 0)
+            anchors.append({
+                "anchor_kind": "relation", "source_entity_type": "edge",
+                "source_revision": source_revision,
+                "locator": {"kind": "memory_relation", "revision": source_revision}, "source_ref": relation_id,
+            })
             continue
         if kind != "material":
             raise ValueError("MEMORY_SUPPORT_KIND_INVALID")
@@ -244,6 +269,17 @@ def apply_memory_sidecar(
             elif op == "retire_relation":
                 relation_id = str(raw.get("id") or "").strip(); edge_record(storage, relation_id)
                 prepared.append({"op": "retire_edge", "id": relation_id, "expected_revision": raw.get("expected_revision")})
+            elif op == "task_status":
+                task_id = _resolve_ref(raw.get("id"), aliases)
+                if not str(raw.get("id") or "").startswith("@"):
+                    task_node = node_record(storage, task_id)
+                    if str(task_node.get("kind") or "") != "task" or not isinstance(task_node.get("task"), dict):
+                        raise ValueError("MEMORY_TASK_NOT_FOUND")
+                prepared.append({
+                    "op": "set_task_status", "id": task_id,
+                    "expected_state_revision": raw.get("expected_state_revision"),
+                    "state": raw.get("state"),
+                })
             else:
                 raise ValueError(f"MEMORY_SIDECAR_OPERATION_INVALID:{op or '<empty>'}")
         change = apply_graph_operations(storage, prepared, execution_id=session.execution_id, turn=session.turn)
@@ -252,9 +288,15 @@ def apply_memory_sidecar(
         # explicit cognition/maintenance decision.
     except (OSError, ValueError) as exc:
         return {"ok": False, "error_code": str(exc).split(":", 1)[0], "detail": str(exc)}
+    affected = change.get("affected") or []
+    task_state_changed = any(
+        isinstance(item, dict) and item.get("type") == "task" and item.get("action") == "set_task_status"
+        for item in affected
+    )
     return {
-        "ok": True, "changed": bool(change.get("count")), "changeset_id": change.get("changeset_id"),
-        "affected": change.get("affected") or [], "evidence_ids": sorted(set(evidence_ids)), "aliases": aliases,
+        "ok": True, "changed": bool(change.get("count")), "task_state_changed": task_state_changed,
+        "changeset_id": change.get("changeset_id"), "affected": affected,
+        "evidence_ids": sorted(set(evidence_ids)), "aliases": aliases,
     }
 
 
@@ -284,9 +326,10 @@ def _anchor_status(
 ) -> Dict[str, Any]:
     kind = str(anchor.get("anchor_kind") or "")
     if kind == "request":
-        return {"status": "semantic", "kind": "request"}
+        return {"status": "semantic", "kind": "request", "origin_state": "pinned_request"}
     if kind == "memory":
         ref = str(anchor.get("source_ref") or "")
+        pinned_revision = anchor.get("source_revision")
         if not ref:
             return {"status": "degraded", "kind": "memory", "reason": "missing_memory_ref"}
         if ref in stack:
@@ -294,10 +337,43 @@ def _anchor_status(
         try:
             raw = node_record(storage_dir, ref)
         except (OSError, ValueError):
-            return {"status": "stale", "kind": "memory", "memory_id": ref, "reason": "dependency_missing"}
+            return {"status": "stale", "kind": "memory", "memory_id": ref, "reason": "dependency_missing", "source_revision": pinned_revision}
+        current_revision = int(raw.get("revision") or 0)
+        compact = {
+            "kind": "memory", "memory_id": ref,
+            "source_revision": int(pinned_revision) if pinned_revision is not None else None,
+            "current_revision": current_revision,
+        }
+        if pinned_revision is None:
+            compact["origin_state"] = "unpinned"
+            evaluated = _evaluate_node(raw, registry=registry, runtime_ctx=runtime_ctx, storage_dir=storage_dir, node_cache=node_cache, stack=stack | {ref})
+            compact["status"] = str(evaluated.get("freshness") or "semantic")
+            return compact
+        if current_revision != int(pinned_revision):
+            # This is a provenance fact only. Runtime does not infer that the
+            # derived memory became false/stale merely because its source was revised.
+            compact.update({"status": "semantic", "origin_state": "source_revised"})
+            return compact
+        compact["origin_state"] = "pinned_current"
         evaluated = _evaluate_node(raw, registry=registry, runtime_ctx=runtime_ctx, storage_dir=storage_dir, node_cache=node_cache, stack=stack | {ref})
-        status = str(evaluated.get("freshness") or "degraded")
-        return {"status": status, "kind": "memory", "memory_id": ref}
+        compact["status"] = str(evaluated.get("freshness") or "semantic")
+        return compact
+    if kind == "relation":
+        ref = str(anchor.get("source_ref") or "")
+        pinned_revision = anchor.get("source_revision")
+        if not ref:
+            return {"status": "degraded", "kind": "relation", "reason": "missing_relation_ref"}
+        try:
+            raw = edge_record(storage_dir, ref)
+        except (OSError, ValueError):
+            return {"status": "stale", "kind": "relation", "relation_id": ref, "reason": "dependency_missing", "source_revision": pinned_revision}
+        current_revision = int(raw.get("revision") or 0)
+        origin_state = "unpinned" if pinned_revision is None else ("pinned_current" if current_revision == int(pinned_revision) else "source_revised")
+        return {
+            "status": "semantic", "kind": "relation", "relation_id": ref,
+            "source_revision": int(pinned_revision) if pinned_revision is not None else None,
+            "current_revision": current_revision, "origin_state": origin_state,
+        }
     if kind != "material":
         return {"status": "degraded", "kind": kind or "unknown", "reason": "unknown_anchor"}
     material = {
@@ -312,6 +388,7 @@ def _anchor_status(
     locator = material.get("locator") if isinstance(material.get("locator"), dict) else {}
     compact = {
         "kind": "material", "status": "fresh" if fresh is True else "stale",
+        "origin_state": "pinned_material",
         "source_capability": material.get("source_capability"),
         "locator": _compact_locator(locator),
     }
@@ -359,6 +436,9 @@ def _evaluate_node(
         "revision": raw.get("revision"),
         "created_at": raw.get("created_at"), "updated_at": raw.get("updated_at"),
     }
+    task = raw.get("task") if isinstance(raw.get("task"), dict) else None
+    if task is not None:
+        out["task"] = copy.deepcopy(task)
     recall = copy.deepcopy(raw.get("recall") or {})
     if recall:
         out["recall"] = recall
@@ -369,6 +449,9 @@ def _evaluate_node(
         out["freshness"] = freshness
     if statuses:
         out["sources"] = statuses
+        changed_sources = [item for item in statuses if str(item.get("origin_state") or "") == "source_revised"]
+        if changed_sources:
+            out["provenance"] = {"source_revised": len(changed_sources)}
     node_cache[node_id] = copy.deepcopy(out)
     return out
 
@@ -412,8 +495,14 @@ def _project_records(
             "target": raw_edge.get("target"), "epistemic": copy.deepcopy(raw_edge.get("epistemic") or {"nature": "relation", "volatility": "unknown", "temporal": {}, "context": {}}),
             "revision": raw_edge.get("revision"), "freshness": freshness,
             **({"sources": statuses} if statuses else {}),
+            **({"provenance": {"source_revised": sum(1 for item in statuses if str(item.get("origin_state") or "") == "source_revised")}} if any(str(item.get("origin_state") or "") == "source_revised" for item in statuses) else {}),
         })
-    return {"nodes": nodes, "edges": edges}
+    tasks = [{
+        "id": item.get("id"), "state": (item.get("task") or {}).get("state"),
+        "state_revision": (item.get("task") or {}).get("state_revision"),
+        "retention": item.get("retention"), "revision": item.get("revision"),
+    } for item in nodes if isinstance(item.get("task"), dict)]
+    return {"nodes": nodes, "edges": edges, "tasks": tasks}
 
 
 def sync_memory_lifecycle(provider_context: Dict[str, Any], conversation_context: Any, *, execution_id: str | None = None) -> Dict[str, Any]:
@@ -426,14 +515,14 @@ def sync_memory_lifecycle(provider_context: Dict[str, Any], conversation_context
     """
     return {"changed": False, "reason": "memory_survives_conversation_boundary"}
 
-def project_memory_view(
-    session: Any, *, registry: Any, config: Dict[str, Any], provider_context: Dict[str, Any], limit: int = 30,
+def materialize_explicit_memory_view(
+    session: Any, *, registry: Any, config: Dict[str, Any], provider_context: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Project the current working page of the unified Memory Graph.
+    """Materialize only Memory explicitly selected by Main.
 
-    Temporary continuity is a first page plus an optional DB-backed Frontier.
-    Page size is materialization size, never a semantic read ceiling. Persistent
-    recall remains explicit; Runtime never substitutes hidden semantic ranking.
+    Runtime never injects temporary/global Memory merely because it exists.
+    Recall and activation own selection; this function only serializes the exact
+    node IDs and Frontier state already present in the Session.
     """
     storage, world_scope_id = _context(provider_context)
     if not storage or not world_scope_id:
@@ -441,77 +530,22 @@ def project_memory_view(
     state = session.memory_view if isinstance(getattr(session, "memory_view", None), dict) else empty_memory_view()
     explicit_ids = [str(v) for v in state.get("node_ids") or [] if str(v).strip()]
     frontier_ids = [str(v) for v in state.get("frontiers") or [] if str(v).strip()]
-    selector_state = state.get("selector") if isinstance(state.get("selector"), dict) else {}
-    auto_chain_active = selector_state.get("mode") == "automatic_temporary" and bool(frontier_ids)
-    auto_exhausted = selector_state.get("mode") == "automatic_temporary_exhausted"
     try:
-        temporary_raw = temporary_graph_records(
-            storage, world_scope_value=world_scope(world_scope_id), limit=max(1, int(limit or 30)),
-            include_persistent_neighbors=True, create_cursor=not auto_chain_active and not auto_exhausted,
-        )
-        temporary_ids = [str(v) for v in temporary_raw.get("temporary_node_ids") or []]
-        linked_ids = [str(v) for v in temporary_raw.get("linked_persistent_node_ids") or []]
-        total_temporary = int(temporary_raw.get("total_temporary_nodes") or 0)
-        remaining_temporary = int(temporary_raw.get("remaining_temporary_nodes") or 0)
-        merged_ids: list[str] = []
-        for node_id in [*temporary_ids, *linked_ids, *explicit_ids]:
-            if node_id and node_id not in merged_ids:
-                merged_ids.append(node_id)
         projected = _project_records(
-            graph_records(storage, merged_ids, include_inactive=True), session=session, registry=registry,
-            config=config, provider_context=provider_context, storage=storage,
+            graph_records(storage, explicit_ids, include_inactive=True),
+            session=session, registry=registry, config=config,
+            provider_context=provider_context, storage=storage,
         )
-        counts = graph_counts(storage)
     except (OSError, ValueError) as exc:
         return {"available": False, "nodes": [], "edges": [], "error": str(exc).split(":", 1)[0]}
-
-    view = {"available": True, **projected, "graph": counts, "search_backend": memory_search_backend(storage)}
-    if temporary_ids or linked_ids or total_temporary:
-        view["temporary"] = {
-            "node_ids": temporary_ids,
-            "linked_persistent_node_ids": linked_ids,
-            "materialized_temporary_nodes": len(temporary_ids),
-            "total_temporary_nodes": total_temporary,
-            "remaining_temporary_nodes": remaining_temporary,
-        }
-    coverage = copy.deepcopy(state.get("coverage") or {})
-    if coverage:
-        view["coverage"] = coverage
-
-    # Allocate the automatic continuation only once. Its payload is a DB cursor,
-    # not the complete remaining ID list.
-    snapshot_id = str(temporary_raw.get("recall_snapshot_id") or "")
-    if snapshot_id and remaining_temporary > 0 and not auto_chain_active and not auto_exhausted:
-        auto_selector = {
-            "mode": "automatic_temporary", "query": "", "queries": [], "ids": [], "tags": [],
-            "scope": "all", "retention": "temporary", "natures": [], "volatilities": [], "relation_labels": [],
-            "include_neighbors": False,
-        }
-        selection = {
-            "scope": "all", "retention": "temporary", "scoped_nodes": total_temporary,
-            "matched_nodes": total_temporary, "selected_nodes": total_temporary,
-            "backend": str(temporary_raw.get("search_backend") or "unknown"), "db_cursor": True,
-        }
-        auto_ids = _memory_frontier(
-            session, snapshot_id=snapshot_id,
-            after_ordinal=int(temporary_raw.get("recall_after_ordinal") or len(temporary_ids)),
-            page_size=max(1, int(limit or 30)), selector=auto_selector, selection=selection,
-            remaining=remaining_temporary,
-        )
-        frontier_ids.extend(auto_ids)
-        # Persist the chain identity so a later projection does not recreate it.
-        session.memory_view.update({"frontiers": list(frontier_ids), "selector": auto_selector})
-        selector_state = auto_selector
-
+    view = {"available": True, **projected}
     frontiers = frontier_view(session.observation_ledger, frontier_ids)
     if frontiers:
         view["frontiers"] = frontiers
-    selector = copy.deepcopy(session.memory_view.get("selector") or state.get("selector") or {})
-    if selector:
-        view["selector"] = selector
-    overview = copy.deepcopy(state.get("overview") or {})
-    if overview:
-        view["overview"] = overview
+    for key in ("coverage", "selector", "overview"):
+        value = copy.deepcopy(state.get(key) or {})
+        if value:
+            view[key] = value
     return view
 
 
@@ -626,19 +660,25 @@ def memory_activate_result(
     page_size = max(1, int(arguments.get("limit") or 30))
     snapshot_id = ""
     try:
-        created = create_recall_snapshot(storage, world_scope_value=world_scope(world_scope_id), **selector)
+        created = create_recall_snapshot(
+            storage, world_scope_value=world_scope(world_scope_id),
+            owner_execution_id=str(getattr(session, "execution_id", None) or "").strip() or None, **selector,
+        )
         snapshot_id = str(created.get("snapshot_id") or "")
         selection = copy.deepcopy(created.get("selection") or {})
         page = recall_snapshot_page(storage, snapshot_id, after_ordinal=0, limit=page_size)
         page_ids = list(page.get("node_ids") or [])
+        page_items = [copy.deepcopy(v) for v in page.get("items") or [] if isinstance(v, dict)]
         projected = _project_records(
             graph_records(storage, page_ids, include_inactive=True), session=session, registry=registry, config=config,
             provider_context=provider_context, storage=storage,
         )
     except (OSError, ValueError) as exc:
         if snapshot_id:
-            try: release_recall_snapshot(storage, snapshot_id)
-            except Exception: pass
+            try:
+                release_recall_snapshot(storage, snapshot_id)
+            except (OSError, ValueError):
+                pass
         return {"operation": "memory_activate", "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": str(exc).split(":", 1)[0], "detail": str(exc)}
 
     remaining = int(page.get("remaining") or 0)
@@ -658,13 +698,13 @@ def memory_activate_result(
         "facts": {
             "materialized_nodes": len(page_ids), "remaining_nodes": remaining,
             "include_neighbors": selector["include_neighbors"], "search_backend": selection.get("backend"),
-            "db_cursor": True,
+            "db_cursor": True, "navigation_provenance": True,
         },
     }
     session.memory_view = {"node_ids": page_ids, "coverage": coverage, "frontiers": frontier_ids, "selector": selector, "overview": copy.deepcopy(session.memory_view.get("overview") or {})}
     return {
         "operation": "memory_activate", "status": "success", "ok": True, "executed": True, "changed": False,
-        "detail": {"memory_view": projected, "matched_nodes": int(selection.get("matched_nodes") or 0), "selected_nodes": total, "search_backend": selection.get("backend")},
+        "detail": {"memory_view": projected, "matched_nodes": int(selection.get("matched_nodes") or 0), "selected_nodes": total, "search_backend": selection.get("backend"), "recall_provenance": page_items},
         "coverage": coverage,
         **({"frontiers": frontier_view(session.observation_ledger, frontier_ids)} if frontier_ids else {}),
     }
@@ -685,47 +725,37 @@ def memory_continue_result(
     payload = materialized.get("payload") if isinstance(materialized.get("payload"), dict) else {}
 
     cursor = payload.get("memory_cursor") if isinstance(payload.get("memory_cursor"), dict) else None
-    if cursor is not None:
-        snapshot_id = str(cursor.get("snapshot_id") or "")
-        selector = copy.deepcopy(cursor.get("selector") or session.memory_view.get("selector") or {})
-        selection = copy.deepcopy(cursor.get("selection") or {})
-        page_size = max(1, int(cursor.get("page_size") or 30))
-        try:
-            page = recall_snapshot_page(
-                storage, snapshot_id, after_ordinal=int(cursor.get("after_ordinal") or 0), limit=page_size,
-            )
-        except (OSError, ValueError) as exc:
-            consume_frontier(session.observation_ledger, frontier_id)
-            return {"operation": "continue", "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": str(exc).split(":", 1)[0], "detail": str(exc)}
-        page_ids = list(page.get("node_ids") or [])
+    if cursor is None:
         consume_frontier(session.observation_ledger, frontier_id)
-        remaining = int(page.get("remaining") or 0)
-        next_ids: List[str] = []
-        if remaining > 0:
-            next_ids = _memory_frontier(
-                session, snapshot_id=snapshot_id, after_ordinal=int(page.get("last_ordinal") or 0),
-                page_size=page_size, selector=selector, selection=selection, remaining=remaining,
-            )
-        else:
-            release_recall_snapshot(storage, snapshot_id)
-        materialized_count = int(page.get("last_ordinal") or 0)
-        total = int(selection.get("selected_nodes") or materialized_count)
+        return {
+            "operation": "continue", "status": "failed", "ok": False, "executed": False,
+            "changed": False, "error_code": "MEMORY_CONTINUATION_INVALID",
+        }
+    snapshot_id = str(cursor.get("snapshot_id") or "")
+    selector = copy.deepcopy(cursor.get("selector") or session.memory_view.get("selector") or {})
+    selection = copy.deepcopy(cursor.get("selection") or {})
+    page_size = max(1, int(cursor.get("page_size") or 30))
+    try:
+        page = recall_snapshot_page(
+            storage, snapshot_id, after_ordinal=int(cursor.get("after_ordinal") or 0), limit=page_size,
+        )
+    except (OSError, ValueError) as exc:
+        consume_frontier(session.observation_ledger, frontier_id)
+        return {"operation": "continue", "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": str(exc).split(":", 1)[0], "detail": str(exc)}
+    page_ids = list(page.get("node_ids") or [])
+    page_items = [copy.deepcopy(v) for v in page.get("items") or [] if isinstance(v, dict)]
+    consume_frontier(session.observation_ledger, frontier_id)
+    remaining = int(page.get("remaining") or 0)
+    next_ids: List[str] = []
+    if remaining > 0:
+        next_ids = _memory_frontier(
+            session, snapshot_id=snapshot_id, after_ordinal=int(page.get("last_ordinal") or 0),
+            page_size=page_size, selector=selector, selection=selection, remaining=remaining,
+        )
     else:
-        # Persisted-session compatibility: older Frontiers retained the
-        # exact ID list in Observation snapshots. Consume them normally once.
-        page_ids = [str(v) for v in payload.get("items") or [] if str(v).strip()]
-        selector = copy.deepcopy(payload.get("selector") or session.memory_view.get("selector") or {})
-        selection = copy.deepcopy(payload.get("selection") or {})
-        raw_next = materialized.get("frontiers") or []
-        consume_frontier(session.observation_ledger, frontier_id)
-        next_ids = []
-        if raw_next:
-            next_ids = expose_frontiers(session, "core.memory", {"frontiers": copy.deepcopy(raw_next)})
-        total = int(selection.get("selected_nodes") or len(page_ids))
-        item_end = int((materialized.get("coverage") or {}).get("examined", {}).get("item_end") or len(page_ids))
-        base_materialized = int(selection.get("base_materialized") or 0)
-        materialized_count = min(total, base_materialized + item_end) if base_materialized else min(total, item_end)
-        remaining = max(0, total - materialized_count)
+        release_recall_snapshot(storage, snapshot_id)
+    materialized_count = int(page.get("last_ordinal") or 0)
+    total = int(selection.get("selected_nodes") or materialized_count)
 
     previous = [str(v) for v in session.memory_view.get("node_ids") or [] if str(v).strip()]
     merged: List[str] = []
@@ -739,14 +769,12 @@ def memory_continue_result(
         )
     except (OSError, ValueError) as exc:
         return {"operation": "continue", "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": str(exc).split(":", 1)[0]}
-    if selector.get("mode") == "automatic_temporary" and not next_ids:
-        selector = {**selector, "mode": "automatic_temporary_exhausted"}
     coverage = {
         "scope": {"kind": "memory_graph", "scope": selector.get("scope", "all"), "retention": selector.get("retention", "all"), "query": selector.get("query", ""), "tags": selector.get("tags", []), "ids": selector.get("ids", []), "natures": selector.get("natures", []), "volatilities": selector.get("volatilities", [])},
         "examined": {"nodes": int(selection.get("scoped_nodes") or 0), "matches": total},
         "complete": not bool(next_ids), "boundaries": [],
         "facts": {
-            "materialized_nodes": materialized_count, "working_set_nodes": len(merged),
+            "materialized_nodes": materialized_count, "materialized_nodes_total": len(merged),
             "remaining_nodes": remaining, "search_backend": selection.get("backend"),
             "db_cursor": bool(selection.get("db_cursor")),
         },
@@ -754,7 +782,7 @@ def memory_continue_result(
     session.memory_view.update({"node_ids": merged, "coverage": coverage, "frontiers": next_ids, "selector": selector})
     return {
         "operation": "continue", "status": "success", "ok": True, "executed": True, "changed": False,
-        "detail": {"memory_view": projected, "new_nodes": len(page_ids)}, "coverage": coverage,
+        "detail": {"memory_view": projected, "new_nodes": len(page_ids), "recall_provenance": page_items}, "coverage": coverage,
         **({"frontiers": frontier_view(session.observation_ledger, next_ids)} if next_ids else {}),
     }
 

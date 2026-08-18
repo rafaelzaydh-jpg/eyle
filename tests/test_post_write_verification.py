@@ -1,9 +1,9 @@
 import hashlib
 
-import eyle.providers.standard_impl.editing as editing
-import eyle.providers.workspace_transaction as workspace_tx
+import eyle.providers.standard.editing as editing
+from eyle.providers.standard import workspace_transaction as workspace_tx
 from tests.canonical import standard_registry
-from eyle.providers.standard_impl.post_write import expected_outputs_from_patches, run_compileall_for_changes, verify_expected_outputs
+from eyle.providers.standard.post_write import expected_outputs_from_patches, run_compileall_for_changes, verify_expected_outputs
 from tests.canonical import base_config
 
 
@@ -21,7 +21,7 @@ def _ctx(root, *, tests_enabled=False):
 
 def test_new_pytest_file_is_detected_without_root_marker(tmp_path):
     tests=tmp_path/"tests"; tests.mkdir(); (tests/"test_created.py").write_text("def test_created():\n    assert True\n",encoding="utf-8")
-    assert editing._detectar_comando_teste(str(tmp_path), {"ativado":True,"comando_python":"python -m pytest -q"}) == "python -m pytest -q"
+    assert editing._detectar_comando_teste(str(tmp_path), {"enabled":True,"command_python":"python -m pytest -q"}) == "python -m pytest -q"
 
 
 def test_compileall_runs_for_changed_python_files(tmp_path):
@@ -56,7 +56,7 @@ def test_compileall_failure_rolls_back_whole_transaction(monkeypatch,tmp_path):
 
 def test_no_tests_means_partial_validation_not_verified(tmp_path):
     app=tmp_path/"app.py"; app.write_text("VALUE = 1\n",encoding="utf-8")
-    from eyle.providers.standard_impl.text_hash import hash_texto
+    from eyle.providers.standard.text_hash import hash_texto
     state={"patches":[{"operation":"replace","path":"app.py","content":"VALUE = 2\n","file_hash_expected":hash_texto(app.read_text(encoding="utf-8"))}]}
     result=workspace_tx.confirm(state,_ctx(tmp_path,tests_enabled=False))
     assert result["ok"] is True and result["detail"]["verification_state"] == "applied_partial"
@@ -73,10 +73,10 @@ def test_newly_created_pytest_suite_is_actually_invoked(monkeypatch,tmp_path):
     tests=tmp_path/"tests"; tests.mkdir(); (tests/"test_created.py").write_text("def test_created():\n    assert True\n",encoding="utf-8")
     calls=[]
     monkeypatch.setattr(editing,"executar_no_sandbox",lambda root,command,config:(calls.append((root,command,config)) or {"executado":True,"ok":True,"codigo":0,"saida":"1 passed","backend":"fake"}))
-    result=editing.rodar_testes_projeto(str(tmp_path),{"ativado":True,"comando_python":"python -m pytest -q","sandbox":{"comandos_permitidos":[["python","-m","pytest"]]}})
+    result=editing.rodar_testes_projeto(str(tmp_path),{"enabled":True,"command_python":"python -m pytest -q","sandbox":{"comandos_permitidos":[["python","-m","pytest"]]}})
     assert result["executado"] is True and result["ok"] is True and calls[0][1] == ["python","-m","pytest","-q"]
 
 
 def test_generic_pyproject_does_not_fake_a_pytest_suite(tmp_path):
     (tmp_path/"pyproject.toml").write_text("[project]\nname = 'demo'\n",encoding="utf-8")
-    assert editing._detectar_comando_teste(str(tmp_path),{"ativado":True,"comando_python":"python -m pytest -q"}) is None
+    assert editing._detectar_comando_teste(str(tmp_path),{"enabled":True,"command_python":"python -m pytest -q"}) is None

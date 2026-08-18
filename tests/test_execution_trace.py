@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 import eyle.core.agent as core_agent
-import eyle.providers.standard as tools
+from eyle.providers.standard import registry as tools
 from eyle.runtime.execution_context import ExecutionContext, bind_execution, reset_execution
 from eyle.runtime.history import build_execution_trace
 from eyle.core.session import AgentSession

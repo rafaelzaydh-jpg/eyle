@@ -1,77 +1,51 @@
-# Eyle Adapter — Transport Only
+# Eyle Adapter — Rev3.7.2
 
-The Adapter is Eyle's single provider boundary. Eyle connects locally to port `8080`; the Adapter forwards requests to a configured remote OpenAI-compatible API.
+The bundled Adapter is the single deterministic transport path between Eyle and the configured DeepSeek V4-compatible upstream.
 
 ```text
-Eyle -> http://127.0.0.1:8080 -> Adapter -> remote provider -> model
+Eyle -> localhost:8080 -> Adapter -> UPSTREAM_BASE_URL
 ```
 
-No local LLM, port `8000`, or Ollama fallback is required.
+It does not own ECC, Memory, semantic routing, planning or relevance. It does not discover remote models or guess provider capabilities.
 
-## Authority boundary
+## Environment
 
-The Adapter does **not** know Eyle semantics. It contains no grammar for ECC moves, Memory operations, epistemic metadata, consolidation, or `on_success`.
-
-Eyle owns:
-
-- tolerant wire canonicalization;
-- canonical ECC schema;
-- semantic validation;
-- Memory meaning.
-
-Adapter owns:
-
-- provider URL/key/model routing;
-- authentication/headers/body extras;
-- OpenAI-compatible transport;
-- structured transport capability selection;
-- usage/cache metadata;
-- syntactic JSON recovery;
-- readiness/handshake endpoints.
-
-## Configuration
-
-Install:
-
-```bash
-python -m pip install -r server/requirements.txt
-```
-
-Copy `server/.env.example` to `server/.env`:
+Configure `server/.env` with the current names only:
 
 ```dotenv
-UPSTREAM_BASE_URL=https://your-provider.example/v1
-UPSTREAM_API_KEY=YOUR_KEY
-DEFAULT_MODEL=YOUR_MODEL_ID
+PROVIDER_PROFILE=deepseek_v4
+UPSTREAM_BASE_URL=https://api.deepseek.com
+UPSTREAM_API_KEY=...
+MODEL=deepseek-v4-flash
 PORT=8080
-UPSTREAM_STRUCTURED_MODE=auto
 ```
 
-Start:
+`UPSTREAM_API_KEY` and `MODEL` are the canonical settings. Removed environment aliases are not read.
 
-```bash
-python server/server.py
-```
+## Local request contract
 
-Windows launch helpers are also provided in this directory.
+Eyle sends the current local transport fields. Structured cognition uses the configured JSON-object mode and the caller-supplied generic schema.
 
-## Structured transport policy
-
-`UPSTREAM_STRUCTURED_MODE=auto` prefers:
+The local output-cap field is:
 
 ```text
-native_json_schema -> json_object -> prompt_json
+max_completion_tokens
 ```
 
-A mode is downgraded only when the provider technically rejects it. Semantically wrong model content does not change the cached provider capability.
+Incoming `max_tokens` is rejected. The Adapter may emit upstream `max_tokens` internally because that is the provider transport field; it is not a second local API.
 
-The Adapter performs deterministic syntax-only JSON recovery. When necessary it may attempt one cheap format-only repair in the same accepted transport mode. If semantic content is incomplete, Eyle—not Adapter—handles recovery with the same Main execution.
+`reasoning_mode` is translated mechanically to the configured DeepSeek thinking shape.
 
-## Handshake and diagnostics
+## Handshake and readiness
 
-- `GET /v1/eyle/handshake` — formal `eyle-adapter-handshake-v1` / `eyle-adapter-transport-v1` negotiation;
-- `GET /ready` — provider/model readiness without paid generation;
-- `GET /health` — Adapter configuration/capability policy;
-- `GET /v1/models` — optional model surface, not used to infer Eyle compatibility.
+`GET /v1/eyle/handshake` declares the static local protocol/profile. `GET /ready` checks local configuration. Neither endpoint performs a paid generation or remote model discovery.
 
-Every response advertises the Adapter protocol/profile headers.
+`GET /v1/models` exposes only the configured `MODEL`.
+
+## Usage
+
+Provider usage is returned to Eyle for the execution ledger. The Adapter does not create a second cognitive budget or reinterpret usage semantically.
+
+## Running
+
+Use the bundled launcher or start the server directly after configuring `.env`. Eyle expects the Adapter on port `8080` unless its current config says otherwise.

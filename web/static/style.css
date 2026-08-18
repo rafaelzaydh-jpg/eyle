@@ -584,3 +584,5 @@ html, body {
 .await-user-custom input:focus { outline: none; border-color: var(--accent-dim); }
 .await-user-panel button:disabled,
 .await-user-panel input:disabled { cursor: default; }
+.await-user-title { font-weight: 700; font-size: 12px; }
+.await-user-description { color: var(--muted); font-size: 12px; line-height: 1.45; white-space: pre-wrap; }
