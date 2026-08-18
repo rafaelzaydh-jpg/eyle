@@ -200,6 +200,9 @@ def build_prompt_cost_accounting(details: Dict[str, Any], *, limit: int = 20) ->
     physical_calls = int(_number(details.get("physical_capability_calls")))
     operation_requests = physical_calls + replays
     diagnostics = {
+        "conversation_messages_materialized": int(_number(usage.get("conversation_messages_materialized"))),
+        "conversation_messages_omitted": int(_number(usage.get("conversation_messages_omitted"))),
+        "older_history_available": bool(int(_number(usage.get("conversation_messages_omitted")))),
         "physical_observations": observation_count,
         "grounding_count": grounding_count,
         "physical_capability_calls": physical_calls,

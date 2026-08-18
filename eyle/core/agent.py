@@ -13,7 +13,6 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from llm.executar import ErroLLM, PROMPT_ECC, executar_ecc as executar_ecc_llm
-from llm.structured import contract_instruction
 from llm.protocol import CanonicalPrompt
 from eyle.capabilities.registry import CapabilityRegistry
 from eyle.runtime.continuation import PENDING_SCHEMA_VERSION, validate_pending_continuation, confirmation_control, resolve_semantic_choice
@@ -38,7 +37,8 @@ from eyle.runtime.observation import (
 )
 from eyle.runtime.token_budget import available_user_prompt_tokens, estimate_tokens
 from eyle.runtime.memory_graph import graph_counts
-from eyle.runtime.context_materializer import materialize_conversation, materialize_latest_observations, component_metrics
+from eyle.runtime.context_materializer import materialize_conversation, materialize_latest_observations, materialize_runtime_feedback, component_metrics
+from eyle.runtime.execution_progress import ExecutionProgress
 from .ecc import catalog as ecc_catalog, public_name
 from .memory import (
     apply_memory_sidecar, materialize_explicit_memory_view, memory_available, memory_environment,
@@ -144,25 +144,14 @@ def _compile_prompt(
     active_memory = materialize_explicit_memory_view(
         session, registry=registry, config=config, provider_context=provider_context,
     )
-    repairing_protocol = any(
-        isinstance(item, dict) and item.get("code") == "ECC_PROTOCOL_RECOVERY"
+    wire_retry = any(
+        isinstance(item, dict) and item.get("code") == "ECC_WIRE_RETRY"
         for item in session.runtime_feedback
     )
     conversation = materialize_conversation(conversation_context, config)
-    if repairing_protocol:
-        conversation = {
-            "conversation_id": conversation.get("conversation_id"),
-            "messages": [],
-            "history_messages_materialized": 0,
-            "history_messages_omitted": int(
-                conversation.get("history_messages_materialized") or 0
-            ) + int(conversation.get("history_messages_omitted") or 0),
-        }
     if execution is not None:
         execution.history_messages_omitted = int(conversation.get("history_messages_omitted") or 0)
-    latest = materialize_latest_observations(
-        pending_results(session), config, repair=repairing_protocol,
-    )
+    latest = materialize_latest_observations(pending_results(session), config)
     # Stable provider/body material is physically before all per-turn state so
     # provider prefix caching can reuse it without provider-specific Core logic.
     stable_packet = {
@@ -173,19 +162,19 @@ def _compile_prompt(
         "current_request": session.request,
         "conversation": conversation,
         "memory_environment": memory_environment(provider_context),
-        "memory_view": {"available": active_memory.get("available", False), "nodes": [], "edges": []} if repairing_protocol else active_memory,
-        "exploration_map": [] if repairing_protocol else exploration_map(session, registry),
+        "memory_view": active_memory,
+        "exploration_map": exploration_map(session, registry),
         "latest_observations": latest,
-        "runtime_effects": [] if repairing_protocol else effects_view(session),
+        "runtime_effects": effects_view(session),
         "turn": session.turn,
-        "runtime_feedback": copy.deepcopy(session.runtime_feedback),
+        "runtime_feedback": materialize_runtime_feedback(session.runtime_feedback, config),
     }
     payload = {**stable_packet, **dynamic_packet}
 
     context_cfg = config.get("context_engine") or {}
     chars_per_token = max(1, int(context_cfg.get("chars_per_token_fallback", 3) or 3))
     calibration = execution.prompt_token_calibration if execution is not None else 1.0
-    full_system_prompt = PROMPT_ECC.rstrip() + "\n\n" + contract_instruction("ecc")
+    full_system_prompt = PROMPT_ECC.rstrip()
     prompt_budget = available_user_prompt_tokens(
         config, full_system_prompt, output_tokens=0, token_estimate_multiplier=calibration,
     )
@@ -214,7 +203,7 @@ def _compile_prompt(
             "crop_applied": post_tokens < pre_tokens,
             "prompt_budget_tokens": prompt_budget,
             "local_context_limit_enabled": prompt_budget is not None,
-            "cognition_reason": "protocol_repair" if repairing_protocol else ("continuation" if session.turn > 0 else "normal"),
+            "cognition_reason": "wire_retry" if wire_retry else ("continuation" if session.turn > 1 else "normal"),
             "conversation_messages_materialized": int((conversation or {}).get("history_messages_materialized") or 0),
             "conversation_messages_omitted": int((conversation or {}).get("history_messages_omitted") or 0),
             "ecc_explore_operations": len(surface.get("explorar") or []),
@@ -239,57 +228,14 @@ def _structured_error(error: Exception) -> bool:
     return code.startswith("STRUCTURED_RESPONSE_INVALID:ecc:") or code == "LLM_STRUCTURED_RESPONSE_UNSATISFIED"
 
 
-def _structured_fingerprint(error: Exception) -> str:
-    observed = getattr(error, "structured_observed", None)
-    try:
-        observed_text = json.dumps(observed, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
-    except Exception:
-        observed_text = str(observed or "")
-    return f"{getattr(error, 'error_code', '')}|{observed_text[:4000]}"
-
-
-def _structured_observed_summary(observed: Any) -> Dict[str, Any] | None:
-    """Return shape-only repair facts; never echo giant rejected payloads.
-
-    A malformed memory sidecar used to repeat source code/patch content inside
-    runtime_feedback, making the next prompt much larger than the error itself.
-    Main only needs the rejected envelope's structure to re-serialize it.
-    """
-    if not isinstance(observed, dict):
-        return None
-    out: Dict[str, Any] = {"top_level_keys": sorted(str(k) for k in observed.keys())[:24]}
-    decision = observed.get("decision") if isinstance(observed.get("decision"), dict) else observed
-    if isinstance(decision, dict):
-        if decision.get("type") is not None:
-            out["decision_type"] = str(decision.get("type"))[:80]
-        if isinstance(decision.get("operation"), str):
-            out["operation"] = decision.get("operation")[:120]
-    memory = observed.get("memory_delta")
-    if isinstance(memory, dict):
-        memory = [memory]
-    if isinstance(memory, list):
-        out["memory_delta_count"] = len(memory)
-        shapes = []
-        for item in memory[:8]:
-            if isinstance(item, dict):
-                shape = {"op": str(item.get("op") or item.get("action") or "")[:80], "keys": sorted(str(k) for k in item.keys())[:20]}
-                args = item.get("arguments")
-                if isinstance(args, dict):
-                    shape["argument_keys"] = sorted(str(k) for k in args.keys())[:30]
-                shapes.append(shape)
-        if shapes:
-            out["memory_shapes"] = shapes
-    return out
-
-
 def _feedback(session: AgentSession, code: str, **facts: Any) -> None:
-    # runtime_feedback is an *active repair surface*, not an append-only log.
-    # Repeating the same unresolved code replaces its prior payload so protocol
-    # recovery cannot snowball prompt size turn after turn. Historical telemetry
-    # remains in the execution/job history.
+    # runtime_feedback is an active execution surface, not an append-only log.
+    # Repeating the same unresolved condition replaces its prior payload so the
+    # next cognition receives bounded current facts. Historical telemetry remains
+    # in execution/job history.
     code = str(code)
     item = {"code": code, **{k: copy.deepcopy(v) for k, v in facts.items() if v is not None}}
-    replaceable = {"ECC_PROTOCOL_RECOVERY", "MEMORY_DELTA_REJECTED", "NO_PROGRESS", "CONFIRMATION_EXECUTION_FAILED", "USER_CHOICE"}
+    replaceable = {"ECC_WIRE_RETRY", "MEMORY_DELTA_REJECTED", "NO_PROGRESS", "CONFIRMATION_EXECUTION_FAILED", "USER_CHOICE"}
     if code in replaceable:
         session.runtime_feedback = [v for v in session.runtime_feedback if not (isinstance(v, dict) and v.get("code") == code)]
     session.runtime_feedback.append(item)
@@ -368,7 +314,11 @@ def _details(
         "failure_code": failure_code,
     }
     if execution is not None:
-        details["llm_usage"] = execution.usage_view()
+        usage = execution.usage_view()
+        details["llm_usage"] = usage
+        details["conversation_messages_materialized"] = int(usage.get("conversation_messages_materialized") or 0)
+        details["conversation_messages_omitted"] = int(usage.get("conversation_messages_omitted") or 0)
+        details["older_history_available"] = bool(usage.get("conversation_messages_omitted"))
         details["llm_calls"] = execution.ledger_view()
     return {k: v for k, v in details.items() if v not in (None, "", [], {})}
 
@@ -383,9 +333,8 @@ def _run(
     registry: CapabilityRegistry,
 ) -> tuple:
     execution = current_execution()
-    protocol_failures: Dict[str, int] = {}
-    last_signature: Optional[str] = None
-    stagnant = 0
+    progress_tracker = ExecutionProgress()
+    wire_retry_used = False
 
     while True:
         session.turn += 1
@@ -397,39 +346,30 @@ def _run(
             decision = executar_ecc_llm(prompt, config)
         except ErroLLM as error:
             if _structured_error(error):
-                # A malformed cognition envelope is a recoverable
-                # serialization event, not task death. The same Main receives
-                # feedback on the next turn with the same Session, ExecutionContext,
-                # provider-token ledger. Mechanical context/cost/safety limits
-                # remain the bounded stop conditions.
-                fingerprint = _structured_fingerprint(error)
-                repeat_count = protocol_failures.get(fingerprint, 0) + 1
-                protocol_failures[fingerprint] = repeat_count
-                observed = getattr(error, "structured_observed", None)
+                # Adapter already performed the single mechanical format repair.
+                # Eyle preserves its Session/observations and may ask Main for one
+                # fresh current decision. This is Eyle recovery, not provider-wire
+                # normalization. The allowance only resets after real execution
+                # progress below.
                 detail = str(getattr(getattr(error, "structured_error", None), "detail", "") or str(error))[:900]
-                guidance = (
-                    "Re-emit the same intended decision as the simplest valid wire JSON; do not repeat capabilities merely because serialization failed."
-                    if repeat_count < 3 else
-                    "The same envelope error repeated. Simplify aggressively: flat top-level type + required fields + memory_delta, preserving semantics."
-                )
-                _feedback(
-                    session, "ECC_PROTOCOL_RECOVERY", rejected_code=error.error_code,
-                    detail=detail, observed_shape=_structured_observed_summary(observed),
-                    repeat_count=repeat_count, state_unchanged=True, guidance=guidance,
-                )
-                # Rev3.7 bounds only repeated mechanical protocol repair, not
-                # legitimate cognition. The initial malformed response may be
-                # followed by at most two repairs for the same fingerprint.
-                if repeat_count > 2:
+                if wire_retry_used:
                     return _terminal_return(
-                        session, "failed", "A resposta estruturada permaneceu inválida após reparos de protocolo.",
+                        session, "failed", "A resposta permaneceu incompatível com o wire ECC atual.",
                         _details(
                             session, "failed", config, registry, provider_context,
-                            failure_code="ECC_PROTOCOL_UNRECOVERABLE",
+                            failure_code="ECC_WIRE_INVALID",
                             limitations=[detail],
                         ),
                         full, provider_context=provider_context,
                     )
+                wire_retry_used = True
+                _feedback(
+                    session, "ECC_WIRE_RETRY",
+                    rejected_code=error.error_code,
+                    detail=detail,
+                    state_unchanged=True,
+                    guidance="Emit a fresh decision using the current ECC wire. Preserve the task and existing observations.",
+                )
                 continue
             code = error.error_code or "LLM_FAILED"
             return _terminal_return(
@@ -444,10 +384,10 @@ def _run(
                 provider_context=provider_context,
             )
 
-        # A valid structured decision closes the current serialization episode
-        # and has consumed any one-turn USER_CHOICE fact.
-        protocol_failures.clear()
-        _resolve_feedback(session, "ECC_PROTOCOL_RECOVERY", "USER_CHOICE")
+        # USER_CHOICE is one-turn input. A syntactically valid ECC does not
+        # replenish the one fresh-decision allowance; only real Eyle execution
+        # progress below does that.
+        _resolve_feedback(session, "USER_CHOICE")
 
         # Persistent learning is transversal to the chosen ECC move, but it is
         # a true sidecar in Rev3.7: parser/storage failure never vetoes a valid
@@ -530,33 +470,45 @@ def _run(
         set_pending_results(session, [outcome.result for outcome in outcomes])
 
         physical_progress = any(outcome.physical_progress for outcome in outcomes)
-        if physical_progress:
-            _resolve_feedback(session, "NO_PROGRESS", "CONFIRMATION_EXECUTION_FAILED")
-        # Every successful Build observation returns to Main.
-        # This lets the same brain learn from the real post-write Material/effect,
-        # attach provenance, and only then decide whether to conclude.
-
-        # General Memory learning is valuable but cannot by itself keep a task
-        # execution alive indefinitely. Only a real physical/navigation result or
-        # an explicit Task Memory lifecycle transition resets task stagnation.
-        no_new_reality = not physical_progress and not task_state_progress
-        statuses = [str(outcome.result.get("status") or "") for outcome in outcomes]
-        if signature == last_signature and no_new_reality:
-            stagnant += 1
-        elif no_new_reality and statuses and all(status == "already_observed" for status in statuses):
-            stagnant += 1
+        progress = progress_tracker.observe(
+            action_signature=signature,
+            results=[outcome.result for outcome in outcomes],
+            physical_progress=physical_progress,
+            task_state_progress=task_state_progress,
+            reality_epoch=session.reality_epoch,
+        )
+        if progress.meaningful_progress:
+            wire_retry_used = False
+            _resolve_feedback(
+                session, "ECC_WIRE_RETRY", "NO_PROGRESS",
+                "CONFIRMATION_EXECUTION_FAILED",
+            )
         else:
-            stagnant = 0
-        last_signature = signature
-        if stagnant >= 2:
             _feedback(
                 session, "NO_PROGRESS",
                 repeated_operations=[str(item.get("operation") or "") for item in selected],
                 physical_execution=any(bool(outcome.result.get("executed") is True) for outcome in outcomes),
-                new_physical_observation=bool(physical_progress), new_memory=bool(memory_changed),
-                task_state_transition=bool(task_state_progress), reality_epoch=session.reality_epoch,
-                fact="Equivalent requests are producing no new physical/navigation result or Task Memory lifecycle transition. General Memory edits alone do not count as task progress.",
+                new_physical_observation=bool(physical_progress),
+                new_runtime_result=False,
+                new_memory=bool(memory_changed),
+                task_state_transition=bool(task_state_progress),
+                reality_epoch=session.reality_epoch,
+                repeat_count=progress.no_progress_repeat_count,
+                fact="The same deterministic action/result state produced no new observable Runtime information. General Memory edits alone do not count as task progress.",
             )
+            if progress.terminal:
+                return _terminal_return(
+                    session, "failed",
+                    "A cognição entrou em um ciclo determinístico sem novo progresso observável.",
+                    _details(
+                        session, "failed", config, registry, provider_context,
+                        failure_code="ECC_NO_PROGRESS_UNRECOVERABLE",
+                        limitations=[
+                            "Repeated deterministic action/result state without new observation, physical progress, or Task-state transition."
+                        ],
+                    ),
+                    full, provider_context=provider_context,
+                )
 
 
 def _resume_confirmation(

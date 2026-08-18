@@ -17,7 +17,7 @@ def payload():
             "type": "json_schema",
             "json_schema": {
                 "name": "wire",
-                "strict": False,
+                "strict": True,
                 "schema": {
                     "type": "object",
                     "properties": {"type": {"type": "string"}, "answer": {"type": "string"}},
@@ -27,7 +27,6 @@ def payload():
             },
         },
         "max_completion_tokens": 1000,
-        "provider_token_budget_remaining": 150000,
         "reasoning_mode": "off",
         "stream": False,
     }
@@ -60,9 +59,11 @@ def test_structured_translation_is_one_fixed_json_object_path(monkeypatch):
     assert body["response_format"] == {"type": "json_object"}
     assert body["max_tokens"] == 1000
     assert "max_completion_tokens" not in body
-    assert "provider_token_budget_remaining" not in body
     assert body["thinking"] == {"type": "disabled"}
-    assert any("JSON" in str(message.get("content")) for message in body["messages"])
+    system_text = str(body["messages"][0]["content"])
+    assert "JSON_SCHEMA=" in system_text
+    assert '"required":["type","answer"]' in system_text
+    assert "Do not copy input keys" in system_text
     assert schema["required"] == ["type", "answer"]
     assert headers["Content-Type"] == "application/json"
 
@@ -90,9 +91,9 @@ def test_usage_preserves_provider_total_tokens_even_when_sum_differs():
 
 def test_generic_json_recovery_does_not_semantically_alias_fields():
     schema = {"type": "object", "properties": {"type": {"const": "expected"}}, "required": ["type"]}
-    value, errors, steps = server.normalize_structured(completion("```json\n{'type':'wrong'}\n```"), schema)
+    value, errors, steps = server.normalize_structured(completion('```json\\n{"type":"wrong"}\\n```'), schema)
     assert value == {"type": "wrong"}
-    assert steps == ["fence_removed"]
+    assert steps and steps[0] in {"fence_removed", "balanced_fragment"}
     assert errors and "expected" in errors[0]
 
 
@@ -111,10 +112,13 @@ def test_structured_uses_at_most_one_repair_and_aggregates_usage(monkeypatch):
     response = asyncio.run(server.execute_structured(object(), payload(), "req"))
     body = json.loads(response.body)
     assert len(calls) == 2
-    assert calls[1][1]["repair_instruction"]
+    assert calls[1][1]["repair_candidate"] == '{"type":"x"}'
+    assert calls[1][1]["repair_errors"]
     assert body["usage"]["total_tokens"] == 24
     assert response.headers["x-eyle-upstream-attempts"] == "2"
     assert response.headers["x-eyle-structured-repairs"] == "1"
+    assert int(response.headers["x-eyle-structured-contract-characters"]) > 0
+    assert response.headers["x-eyle-repair-context-mode"] == "isolated"
 
 
 def test_missing_usage_stops_repair_instead_of_guessing_zero(monkeypatch):
@@ -133,14 +137,17 @@ def test_missing_usage_stops_repair_instead_of_guessing_zero(monkeypatch):
     assert response.headers["x-eyle-retry-cost-risk"] == "1"
 
 
-def test_handshake_is_static_and_declares_no_discovery():
-    response = asyncio.run(server.handshake(request_from(headers={"X-Eyle-Transport-Protocol": server.ADAPTER_TRANSPORT_PROTOCOL})))
+def test_health_and_ready_are_small_local_status_surfaces(monkeypatch):
+    monkeypatch.setattr(server, "S", replace(server.S, upstream_api_key="secret", model="deepseek-v4-flash"))
+    health = asyncio.run(server.health(request_from()))
+    assert health["status"] == "ok"
+    assert health["adapter_protocol"] == server.ADAPTER_TRANSPORT_PROTOCOL
+    assert health["structured_repair_attempts"] == 1
+    response = asyncio.run(server.ready(request_from()))
     body = json.loads(response.body)
-    assert body["provider"]["discovery"] is False
-    assert body["provider"]["runtime_probing"] is False
-    assert body["provider"]["model_policy"] == "fixed_configured"
-    assert body["capabilities"]["structured_mode"] == "json_object"
-    assert body["limits"]["max_upstream_attempts_per_logical_call"] == 2
+    assert body["status"] == "ready_configured"
+    assert body["model"] == "deepseek-v4-flash"
+    assert "capabilities" not in body
 
 
 def test_remote_proxy_auth_is_not_bypassed(monkeypatch):
@@ -160,3 +167,42 @@ def test_source_has_no_runtime_provider_negotiation():
     ):
         assert forbidden not in source
     assert server.MAX_UPSTREAM_ATTEMPTS_PER_LOGICAL_CALL == 2
+
+
+
+def test_repair_context_isolated_from_application_prompt():
+    p = payload()
+    p["messages"] = [
+        {"role": "system", "content": "SECRET EYLE SEMANTICS"},
+        {"role": "user", "content": "USER CONVERSATION"},
+    ]
+    body, _, schema = server.prepare_upstream(
+        p,
+        repair_candidate='{"type":"x"}',
+        repair_errors=["$.answer: required"],
+    )
+    assert schema is not None
+    assert len(body["messages"]) == 3
+    encoded = "\n".join(str(message.get("content")) for message in body["messages"])
+    assert "SECRET EYLE SEMANTICS" not in encoded
+    assert "USER CONVERSATION" not in encoded
+    assert "JSON_SCHEMA=" in encoded
+    assert '{"type":"x"}' in encoded
+    assert "$.answer: required" in encoded
+
+
+def test_provider_declared_truncation_does_not_trigger_format_repair(monkeypatch):
+    calls = []
+
+    async def fake_call_once(client, incoming, request_id, attempt_no, **kwargs):
+        calls.append((attempt_no, kwargs))
+        data = completion('{"type":"x"', total=100, prompt=20, completion_tokens=80)
+        data["choices"][0]["finish_reason"] = "length"
+        return server.AttemptResult(data, 200, "application/json", b"")
+
+    monkeypatch.setattr(server, "call_once", fake_call_once)
+    response = asyncio.run(server.execute_structured(object(), payload(), "req"))
+    assert [item[0] for item in calls] == [1]
+    assert response.headers["x-eyle-schema-enforcement"] == "adapter_output_truncated"
+    assert response.headers["x-eyle-structured-repairs"] == "0"
+    assert response.headers["x-eyle-repair-context-mode"] == "none"

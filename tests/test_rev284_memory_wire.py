@@ -11,7 +11,7 @@ from tests.canonical import base_config, standard_registry
 
 
 def _conclude(memory_delta):
-    return {"decision": {"type": "concluir", "response": "ok"}, "memory_delta": memory_delta}
+    return {"type": "concluir", "response": "ok", "memory_delta": memory_delta}
 
 
 def test_rev284_provider_schema_describes_every_memory_operation_and_support_shape():

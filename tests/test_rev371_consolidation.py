@@ -164,11 +164,12 @@ def test_rev371_memory_graph_size_does_not_change_trivial_prompt(tmp_path):
     assert "node 9999" not in prompt_large.wire_text
 
 
-def test_rev371_protocol_repair_does_not_rematerialize_observation_bodies():
+def test_rev375_wire_retry_preserves_current_observation_materialization():
     cfg = base_config()
     observations = [{"detail": {"content": "x" * 10000}, "status": "success"}]
-    assert materialize_latest_observations(observations, cfg, repair=True) == []
-    assert materialize_latest_observations(observations, cfg, repair=False)
+    materialized = materialize_latest_observations(observations, cfg)
+    assert materialized
+    assert materialized[0]["status"] == "success"
 
 
 def test_rev371_static_cognitive_floor_is_composed_and_bounded(tmp_path):

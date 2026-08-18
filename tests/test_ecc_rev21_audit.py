@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import pytest
 from pathlib import Path
 
 import eyle.core.agent as agent
@@ -209,19 +210,21 @@ def test_repeated_identical_internal_failure_counts_as_no_progress_not_no_execut
     def fake(prompt, cfg):
         payload = json.loads(str(prompt))
         prompts.append(payload)
-        if len(prompts) <= 3:
-            return explore("fail", {})
-        feedback = next(item for item in payload["runtime_feedback"] if item.get("code") == "NO_PROGRESS")
-        assert feedback["physical_execution"] is True
-        assert feedback["new_physical_observation"] is False
-        return conclude("parei")
+        if len(prompts) == 3:
+            feedback = next(item for item in payload["runtime_feedback"] if item.get("code") == "NO_PROGRESS")
+            assert feedback["physical_execution"] is True
+            assert feedback["new_physical_observation"] is False
+            assert feedback["repeat_count"] == 1
+        return explore("fail", {})
 
     monkeypatch.setattr(agent, "executar_ecc_llm", fake)
     status, text, _, details = agent.executar_agente(
         "falhe", base_config(), provider_context={"boom": {}}, registry=registry, retornar_detalhes=True,
     )
-    assert (status, text) == ("completed", "parei")
+    assert status == "failed"
+    assert details["failure_code"] == "ECC_NO_PROGRESS_UNRECOVERABLE"
     assert details["physical_capability_calls"] == 3
+    assert len(prompts) == 3
 
 
 def test_run_tests_is_not_replay_cached_and_logs_source(monkeypatch, tmp_path):
@@ -470,17 +473,14 @@ def test_workspace_transaction_uses_canonical_registry_run_tests(monkeypatch, tm
     assert seen == [(tmp_path, None)]
 
 
-def test_rev22_type_is_single_family_authority_and_redundant_prefix_is_normalized():
-    from llm.structured import parse_profile_response
+def test_rev375_type_is_single_family_authority_and_operation_names_are_current_only():
+    from llm.structured import parse_profile_response, StructuredResponseError
 
-    direct = parse_profile_response({"decision":{"type":"explorar","operations":[{"operation":"search","arguments":{}}]},"memory_delta":[]}, "ecc")
+    direct = parse_profile_response({"type":"explorar","operations":[{"operation":"search","arguments":{}}],"memory_delta":[]}, "ecc")
     assert direct["operations"][0]["operation"] == "search"
-    redundant = parse_profile_response({"decision":{"type":"explorar","operations":[{"operation":"explorar.search","arguments":{}}]},"memory_delta":[]}, "ecc")
-    assert redundant["operations"][0]["operation"] == "search"
-    mismatched_prefix = parse_profile_response({"decision":{"type":"explorar","operations":[{"operation":"construir.transaction","arguments":{}}]},"memory_delta":[]}, "ecc")
-    # Type remains the only authority. Runtime will simply find no Explore operation
-    # called transaction instead of failing the whole job at the structured layer.
-    assert mismatched_prefix == {"type":"explorar","operations":[{"operation":"transaction","arguments":{}}],"memory_delta":[]}
+    for retired in ("explorar.search", "construir.transaction"):
+        with pytest.raises(StructuredResponseError):
+            parse_profile_response({"type":"explorar","operations":[{"operation":retired,"arguments":{}}],"memory_delta":[]}, "ecc")
 
 
 def test_rev22_structured_retry_resets_after_a_valid_decision(monkeypatch, tmp_path):

@@ -1,98 +1,224 @@
-# Configuration — Rev3.7.2
+# Configuration — Rev3.7.5.1
 
-`config.json` contains only the current Eyle runtime/host contract. Rev3.7.2 performs **no in-process configuration upgrade**.
+Eyle uses a **current-contract** configuration policy. `config.json` is validated against the exact active schema; removed, unknown, or historical fields are not silently promoted or ignored.
 
-## Exact identity
+## Release identity
 
 The accepted identity is:
 
 ```text
 app_version = 2.7.5
-config_schema_version = 2.7.5-r3.7.2-ecc
-revision = rev3.7.2-ecc
+config_schema_version = 2.7.5-r3.7.5.1-ecc
+revision = rev3.7.5.1-ecc
 ```
 
-A different identity or an unknown field fails closed. Removed settings are not silently ignored, promoted or translated.
+A different identity fails closed.
 
-## LLM boundary
+## Configuration surfaces
 
-Eyle calls the local Adapter at port `8080`. Provider URL, API key and provider-specific transport live under `server/`.
+Eyle intentionally separates runtime configuration from provider credentials.
 
-Current `llm` mechanics include:
+| Location | Owns |
+|---|---|
+| `config.json` | Eyle Runtime, context, worker, web, sandbox, telemetry |
+| `server/.env` | DeepSeek Adapter/provider credentials and transport |
+| `workspace/` | user project content |
+| `memory/` | persisted Eyle Memory/runtime state |
+| `context/` | runtime/benchmark artifacts |
 
-- `provider_token_budget_per_message = 150000`: provider-reported ledger for one logical user-message execution;
-- `context_window_tokens = 50000`: physical limit for each LLM call;
-- transport timeouts/retry/cooldown/concurrency;
-- `reasoning_mode`;
-- `adapter_handshake_timeout_seconds`.
+Provider credentials should never be placed in `config.json` or committed to the repository.
 
-Provider `usage.total_tokens` is authoritative. `prompt_tokens + completion_tokens` is used only when the provider omits the total. If potentially billable usage cannot be established safely, the execution stops fail-closed.
+## LLM Runtime configuration
 
-Removed generated-token fuse/deadline settings are not part of the schema.
+Current `llm` fields include:
+
+| Field | Meaning |
+|---|---|
+| `base_url` | local Adapter URL; default `http://127.0.0.1:8080` |
+| `model` | model identity expected by Eyle diagnostics |
+| `temperature` | provider generation temperature requested by Eyle |
+| `provider_token_budget_per_message` | provider-accounted ledger for one logical user-message execution |
+| `context_window_tokens` | physical context budget for one LLM call |
+| `connect_timeout_seconds` | connection timeout |
+| `read_timeout_seconds` | read timeout; `null` means no Eyle-side read timeout |
+| `retry_max_attempts` | physical transport retry attempts |
+| `retry_base_delay_seconds` | initial retry backoff |
+| `retry_max_delay_seconds` | maximum retry backoff |
+| `retry_jitter_seconds` | retry jitter |
+| `max_concurrent_requests` | physical concurrent LLM requests |
+| `cooldown_seconds` | configured cooldown between provider calls |
+| `retry_read_timeouts` | whether read timeouts are retried |
+| `stream_responses` | local Eyle streaming behavior |
+| `reasoning_mode` | current provider reasoning mode |
+| `adapter_status_timeout_seconds` | local Adapter status/preflight timeout |
+
+Provider `usage.total_tokens` is authoritative. `prompt_tokens + completion_tokens` is a fallback only when the provider omits a total.
+
+If potentially billable provider usage cannot be established safely, execution fails closed rather than guessing the remaining ledger.
+
+Rev3.7.5.1 adds no additional semantic prompt-size or generated-output ceiling. Token efficiency comes from materializing only the required state and avoiding duplicate representation/context in repair paths.
 
 ## Context materialization
 
-`context_engine` controls physical materialization, not semantic relevance:
+`context_engine` controls what physically fits into a cognition packet:
 
 ```json
 {
   "safety_margin_tokens": 500,
   "chars_per_token_fallback": 3,
   "conversation_materialization_tokens": 1200,
-  "observation_materialization_tokens": 2200
+  "observation_materialization_tokens": 2200,
+  "runtime_feedback_materialization_tokens": 320
 }
 ```
 
-Conversation and observation bodies are selected by token budget. There is no `MAX_HISTORY_MESSAGES`, fixed snapshot count, automatic Temporary Memory projection, relevance ranker or semantic context router.
+These are presentation budgets, not semantic relevance rules.
 
-## Memory
+There is no:
 
-Runtime opens **Memory Graph v12 only**. It does not migrate older graph schemas while serving a request.
+- fixed `MAX_HISTORY_MESSAGES`;
+- automatic global/Temporary Memory projection;
+- semantic context ranker;
+- fixed number of observations;
+- hidden topic router.
 
-An existing v11 database may be converted explicitly with the one-shot tool:
+Omitted content remains reachable through the appropriate conversation/Memory/Material/Frontier path.
 
-```bash
-python -m eyle.devtools.migrate_memory_v11_to_v12 <storage-directory>
+## Web API
+
+The `web` section contains the user-facing API token and local rate limits.
+
+```json
+{
+  "api_token": null,
+  "rate_limit": {
+    "requests": 180,
+    "auth_failures": 10,
+    "window_seconds": 60
+  }
+}
 ```
 
-After migration, normal runtime code only understands v12. Historical upgrade logic is not retained as a fallback.
+When the server is exposed beyond loopback, use network/firewall controls and an HTTPS reverse proxy. The bundled Flask development server does not provide transport encryption.
 
 ## Standard provider
 
-The bundled provider configuration is under:
+The bundled provider configuration lives at:
 
 ```text
 providers.standard
 ```
 
-Its canonical package is:
+Its canonical implementation package is:
 
 ```text
 eyle.providers.standard
 ```
 
-There is no `standard_impl` compatibility package or dynamic facade.
+The provider owns workspace/tool mechanics, including the sandbox and test execution configuration.
 
-The test configuration uses the current keys:
+### Sandbox
 
-```text
-enabled
-command_python
-command_node
-timeout_seconds
-sandbox
+Relevant fields include:
+
+- `backend`;
+- `bloquear_rede`;
+- `timeout_segundos`;
+- `cpu_segundos`;
+- `memoria_mb`;
+- `max_processos`;
+- `max_arquivos_abertos`;
+- `max_saida_kb`;
+- `max_arquivo_mb`;
+- project-copy size/count limits;
+- CPU allocation;
+- trusted-local fallback policy;
+- OCI image.
+
+Sandbox limits are physical safety/resource controls. They are not reasoning limits.
+
+### Tests
+
+The Standard provider can expose configured test commands for Python and Node projects. These commands execute through the configured sandbox policy.
+
+## Interaction
+
+`confirmacoes.expiracao_segundos` controls how long a pending physical interaction/confirmation remains valid.
+
+Human waiting time is not a cognition deadline and does not reset the provider-token ledger.
+
+## Worker and queue
+
+The `worker` section controls job execution mechanics such as:
+
+- heartbeat interval;
+- queue-error backoff;
+- invalid-job reservation tolerance;
+- parallel job count;
+- per-job process isolation;
+- stale-worker detection;
+- head-of-line blocked detection;
+- multiprocessing context.
+
+These are Service/Runtime mechanics, not semantic planning settings.
+
+## Telemetry
+
+```json
+{
+  "enabled": true,
+  "window_seconds": 3600
+}
 ```
 
-Public capability paging fields use their current names, such as `page_size`; removed cognitive ceiling aliases are rejected.
+Telemetry aggregates execution facts such as job duration, provider usage, failure classes, and runtime behavior. User-facing diagnostics intentionally omit hidden chain-of-thought, raw prompts, raw provider responses, and protected content.
 
-## Interaction and continuation
+## Adapter configuration
 
-`confirmacoes.expiracao_segundos` controls interaction expiration. Human wait is not a cognitive task deadline and does not reset the provider-token ledger.
+Provider-specific settings live in `server/.env`.
 
-Persisted Session and pending continuation state are current-schema only. No runtime path promotes old Session/pending shapes.
+Start from:
 
-## Sandbox
+```bash
+cp server/.env.example server/.env
+```
 
-`providers.standard.sandbox.backend=auto` selects an available supported isolation backend. Sandbox CPU/RAM/process/file/output limits are physical safety controls, not cognitive quotas.
+Current variables include:
 
-For substantial edits, `run_command` may work in the isolated job copy and `promote_sandbox` may later freeze and promote exact hash-bound bytes after one physical confirmation.
+```dotenv
+PROVIDER_PROFILE=deepseek_v4
+UPSTREAM_BASE_URL=https://api.deepseek.com
+UPSTREAM_API_KEY=
+MODEL=deepseek-v4-flash
+HOST=127.0.0.1
+PORT=8080
+REQUEST_TIMEOUT_SECONDS=1800
+MAX_REQUEST_BYTES=10485760
+LOG_LEVEL=INFO
+PROXY_API_KEY=
+PROXY_ALLOW_LOOPBACK_NO_AUTH=true
+```
+
+See [`../server/README.md`](../server/README.md) for the Adapter contract.
+
+## Memory schema
+
+Runtime opens **Memory Graph v12 only**.
+
+An existing v11 database may be converted explicitly:
+
+```bash
+python -m eyle.devtools.migrate_memory_v11_to_v12 <storage-directory>
+```
+
+Normal Runtime code does not perform an in-process migration.
+
+## Session and continuation state
+
+Persisted Session and pending-interaction state are current-schema only. Historical shapes are not silently upgraded during a user request.
+
+## Configuration rule
+
+A configuration option should exist only when a deterministic component actually owns the behavior.
+
+Do not add configuration for semantic choices that belong to Main, and do not keep obsolete aliases solely to make old files appear valid.

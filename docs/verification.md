@@ -1,8 +1,18 @@
-# Verification — Rev3.7.2
+# Verification — Rev3.7.5.1
 
-Release verification is a current-contract check, not a museum of old runtime identities.
+Release verification checks the **current contract**. It is not a compatibility test for every historical runtime shape.
 
-## Required commands
+## Fast path
+
+From the repository root:
+
+```bash
+make verify
+```
+
+The Makefile runs the current release identity verifier, Python compilation, Eyle tests, Adapter tests, and JavaScript syntax check.
+
+## Individual commands
 
 ```bash
 python -B -m eyle.devtools.release_identity
@@ -12,51 +22,183 @@ python -m pytest -q server/tests
 node --check web/static/app.js
 ```
 
-For a publication artifact, remove generated caches/runtime state first, create the archive, extract it to a fresh directory and repeat verifier/tests against the extracted copy.
+For a publication artifact:
 
-## Canonical-cut gates
+1. remove generated caches/runtime state;
+2. build the archive;
+3. extract it into a fresh directory;
+4. rerun release identity and relevant tests against the extracted copy.
 
-The verifier and tests must prove:
+This catches accidental dependencies on a working tree.
 
-- exact Rev3.7.2 config identity; older config is rejected rather than promoted;
+## Release identity gates
+
+The verifier/tests must establish:
+
+- exact app/config/revision identity for Rev3.7.5.1;
 - current Session/pending/execution schemas only;
-- Memory runtime accepts v12 only;
-- v11→v12 exists only as an explicit devtool;
-- no `standard.py` facade or `standard_impl` package;
-- Host consumes `eyle.providers.standard` directly;
-- no dynamic `globals().setdefault` export path;
-- no generated-token fuse/cognitive deadline;
-- no fixed conversation snapshot count;
+- Memory Graph v12 only in Runtime;
+- v11 → v12 available only through the explicit devtool;
+- `eyle.providers.standard` as the canonical bundled provider;
+- no `standard_impl` compatibility package/facade;
+- no dynamic export path that restores removed providers/contracts;
+- no removed generated-token fuse or cognitive deadline;
+- no fixed conversation-message snapshot ceiling;
 - no automatic Temporary/global Memory projection;
-- explicit Memory activation remains available;
-- no removed search/file cognitive ceilings;
-- public symbol paging uses `page_size`;
-- Adapter local request rejects the removed `max_tokens` alias and accepts `max_completion_tokens`;
-- UI uses `interaction` without a `confirmation` compatibility alias;
-- ECC/Memory sidecar isolation remains intact;
-- repeated protocol error fingerprint remains bounded;
-- provider-token/context physical limits remain intact;
-- capability/Memory reachability is not reduced by smaller materialization.
+- no removed search/file cognitive paging aliases;
+- current public capability fields only;
+- current Adapter local transport fields only.
 
-## Behavioral gates
+## Structured provider-boundary gates
 
-Current regression tests must include:
+Rev3.7.5.1 specifically requires:
 
-1. trivial request uses one normal cognition when no continuation is required;
-2. current conversation continuity resolves recent references;
-3. topic switching does not let unrelated Task/Memory state invade the prompt automatically;
-4. invalid Memory sidecar does not invalidate Conclude/Explore/Build;
-5. repeated identical protocol failure terminates the repair episode mechanically;
-6. long conversation is token-budget materialized and reports omitted history;
-7. large Memory Graph does not proportionally enlarge a trivial prompt;
-8. nonmaterialized Memory remains reachable through recall/activation;
-9. v11 graph is rejected by runtime before explicit migration and accepted afterward;
-10. Service message snapshot/job ordering remains atomic under concurrency.
+1. Eyle supplies one caller JSON Schema for structured output.
+2. Adapter delivers that schema to the provider as the representation authority.
+3. Core does not duplicate the same wire contract as another provider-facing textual authority.
+4. Safe mechanical recovery may only recover representation, not Eyle meaning.
+5. Adapter validates against the same caller-supplied schema.
+6. Adapter performs at most **one** format-only repair.
+7. Repair context contains only:
+   - schema;
+   - previous candidate;
+   - validation errors.
+8. Repair does not replay conversation, Memory, tools, Task state, or the full Eyle prompt.
+9. `finish_reason=length` is reported as truncation and does not start a format repair.
+10. Adapter contains no Eyle-specific alias table for historical ECC/Memory forms.
+11. Adapter reports transport/usage/repair telemetry mechanically.
+
+## Conversation gates
+
+Current regression coverage should prove:
+
+- current request is the final provider `user` message;
+- current request appears exactly once;
+- recent conversation uses native `user` / `assistant` roles;
+- conversation materialization obeys token budget;
+- materialized/omitted counters are observable;
+- immediate references remain resolvable;
+- switching topics does not cause the previous answer to become the active request;
+- complete-history negative lookup does not substitute an unrelated fact.
+
+Representative behavioral sequences include:
+
+```text
+money -> "it"
+topic switch -> return to money -> "it"
+```
+
+and:
+
+```text
+context-heavy answer
+-> "hi"
+-> answer the new "hi", not the previous task
+```
+
+## Self-identity gates
+
+Tests should distinguish:
+
+```text
+"analyze your code"
+-> source="eyle"
+
+"analyze the project"
+-> source="workspace"
+```
+
+Self/internal analysis must use observable source/Runtime/log state, not claim access to hidden chain-of-thought.
+
+## Memory gates
+
+Regression coverage must prove:
+
+- invalid `memory_delta` cannot invalidate an otherwise valid ECC decision;
+- no paid LLM retry occurs solely to rescue Memory;
+- Memory Graph v12 preserves `domain` and `context_key`;
+- explicit activation remains available;
+- activated bodies materialize once through `memory_view`;
+- activation observations stay compact;
+- growing the graph does not proportionally grow a trivial prompt;
+- nonmaterialized nodes remain reachable by recall/activation/paging;
+- v11 is rejected by Runtime before explicit migration and accepted afterward.
+
+## Execution-progress gates
+
+Provider wire problems and valid Eyle execution loops are separate.
+
+Tests must prove:
+
+- malformed provider representation is handled at the Adapter boundary;
+- an exhausted Adapter repair can lead to one fresh Eyle decision while Session/observations remain intact;
+- repeated wire failure without execution progress cannot recurse indefinitely;
+- repeated valid action/result fixed points receive one `NO_PROGRESS` feedback opportunity;
+- the same fixed point repeating again terminates as `ECC_NO_PROGRESS_UNRECOVERABLE`;
+- real new observations/effects/Task transitions reset fixed-point state;
+- long cognition that keeps producing new information is not truncated by a hidden `MAX_TURNS`.
+
+## Build and workspace gates
+
+Persistent-write tests must cover:
+
+- project-root confinement;
+- protected-resource rejection;
+- dry-run/exact proposal;
+- confirmation where required;
+- stale-state/hash rejection;
+- atomic transaction behavior;
+- rollback;
+- post-write re-observation;
+- sandbox staging/promotion hash verification;
+- `merge` vs explicit `mirror` behavior.
+
+## Service and concurrency gates
+
+Service/queue tests should verify:
+
+- conversation/job snapshot ordering;
+- atomic message/job state transitions;
+- worker heartbeat/staleness handling;
+- pending interaction continuity;
+- current execution diagnostics under concurrency.
+
+## Observability gates
+
+User-visible diagnostics should make it possible to distinguish:
+
+- normal cognition;
+- continuation;
+- fresh wire retry;
+- Adapter format repair;
+- provider transport failure;
+- model truncation;
+- Memory rejection;
+- fixed-point termination.
+
+Token diagnostics must preserve provider-reported usage as the ledger authority while keeping local component estimates clearly diagnostic.
 
 ## Environment-sensitive tests
 
-Sandbox/process isolation tests must run in an environment that does not inject unrelated Python `sitecustomize` imports or exhaust the sandbox process limit before the tested command starts. A host-environment failure is reported separately; the Runtime must not be weakened to satisfy an invalid test environment.
+Sandbox/process-isolation tests require an environment that does not inject unrelated Python startup hooks or exhaust process limits before the tested command starts.
 
-## Documentation rule
+A host-environment failure should be reported separately. Runtime security must not be weakened merely to make an invalid test host pass.
 
-Historical contracts live in `CHANGELOG.md` and explicit migration tools. Current architecture/configuration/model docs describe only active paths.
+Web security tests may require Flask and the current web dependencies to be installed.
+
+## Documentation gate
+
+Current behavior belongs in:
+
+- root `README.md`;
+- `docs/`;
+- `server/README.md`;
+- security/project-policy documents.
+
+Historical runtime behavior belongs in:
+
+- `CHANGELOG.md`;
+- Git history;
+- explicit migration tooling when still required.
+
+Documentation must not describe removed compatibility paths as active behavior.

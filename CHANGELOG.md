@@ -1,5 +1,53 @@
 # Changelog
 
+This file records Eyle's public architectural evolution. Current behavior is documented in `README.md` and `docs/`; Git history remains the detailed implementation record.
+
+## Rev3.7.5.1 — Provider Contract Delivery
+
+- Delivers Eyle's caller-supplied JSON Schema exactly once to the provider as the representation contract; Adapter remains branch-neutral and owns no Eyle semantics.
+- Removes the duplicated textual ECC wire reminder from Core/Main prompt construction.
+- Keeps exactly one format-only repair, now isolated to schema + previous candidate + validation errors instead of replaying conversation, Memory, tools and Task context.
+- Treats provider `finish_reason=length` as truncation, not as a formatting defect; no second repair generation is launched for a truncated candidate.
+- Adds Adapter boundary telemetry for structured-contract characters and repair context mode.
+- Adds no new prompt/output token ceiling; token savings come from removing repeated/irrelevant context.
+- Documentation refresh: reorganized the root README around the project rather than the revision, added a documentation index and commercial-use summary, aligned the closed-contribution policy with the current project, and removed stale/duplicated documentation contracts.
+
+## Rev3.7.5 — Simple Adapter Boundary
+
+- Restored the component rule: Adapter owns connection/mechanical wire conformance; Core owns Eyle logic.
+- Current ECC wire is strict at the caller-supplied JSON Schema boundary, while Memory sidecar semantics remain independently validated by Eyle.
+- Adapter performs mechanical JSON recovery and at most one format-only provider repair; no Eyle-specific aliases/capability negotiation/global execution budget live there.
+- If the repaired candidate remains invalid, Eyle preserves Session/observations and may request one fresh current decision; this allowance resets only after real execution progress.
+- Removed cognition/protocol episode tracking from Core. Runtime retains only deterministic valid-execution fixed-point detection.
+- Removed static handshake/model-discovery surfaces; `/health` and `/ready` report only facts they can actually prove.
+
+## Rev3.7.4 — Bounded Cognition & Episode Safety
+
+Corrective release on Rev3.7.3 focused on the execution loop exposed by a trivial greeting.
+
+- replaces consecutive-fingerprint recovery with execution-local cognition episodes;
+- protocol error budget is preserved across syntactically valid decisions until Runtime proves observable progress;
+- different structured-error shapes cannot rotate to evade the repair bound;
+- repeated deterministic action/result fixed points terminate with `ECC_NO_PROGRESS_UNRECOVERABLE` after one feedback opportunity;
+- long cognition with novel Runtime results remains allowed; no `MAX_TURNS` ceiling was added;
+- Memory read/navigation success no longer masquerades as physical progress;
+- `memory_activate` dispatch now accepts its documented `domain` and `context_key` filters;
+- first-call token telemetry is correctly classified as `normal`, not `continuation`;
+- ordinary conversational requests are explicitly directed to `concluir` without manufacturing body/Memory evidence.
+
+## Rev3.7.3 — Coherence, Continuity & Self-Identity
+
+Corrective release on Rev3.7.2. No planner, semantic router, embedding ranker or hidden Memory projection was added.
+
+- current request is transported as the final user message after native-role recent conversation;
+- Eyle's operational self identity is explicit (`source="eyle"`), distinct from the user's `workspace`;
+- conversational guidance avoids default help-desk closings and requires safe negative historical lookup;
+- Memory v12 projection preserves `domain` and `context_key`, and `memory_activate` can filter by those physical fields;
+- activated Memory bodies are materialized only in `memory_view`; operation observations remain compact;
+- Runtime feedback is materialized under a physical token budget;
+- conversation materialized/omitted counters are surfaced in diagnostics.
+
+
 ## Rev3.7.2 — Canonical Cut Review
 
 Rev3.7.2 is intentionally a cut-only consolidation release. It introduces no new cognitive move, semantic router, provider or Memory tier.
@@ -18,7 +66,6 @@ Rev3.7.2 is intentionally a cut-only consolidation release. It introduces no new
 
 Migration policy: compatibility is not maintained in the normal runtime. Where persisted user data still requires a safe transition, use an explicit migration tool before starting the current runtime.
 
-This file summarizes the public architectural evolution of Eyle. Detailed construction audits from the pre-Rev3 development cycle were intentionally removed from the public tree; Git history remains the detailed historical record.
 
 ## Rev3.6.1 — Deterministic DeepSeek Adapter
 

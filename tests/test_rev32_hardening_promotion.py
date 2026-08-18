@@ -143,22 +143,11 @@ def test_rev32_sandbox_mirror_deletes_only_absent_files_inside_target(tmp_path):
     assert (workspace / "outside.txt").read_text(encoding="utf-8") == "outside"
 
 
-def test_rev32_eyle_rejects_adapter_without_completion_ceiling():
+def test_rev375_eyle_rejects_adapter_with_wrong_transport_protocol():
     import llm.executar as llm_mod
-    body = {
-        "handshake_schema": llm_mod.ADAPTER_HANDSHAKE_SCHEMA,
-        "adapter_protocol": llm_mod.ADAPTER_TRANSPORT_PROTOCOL,
-        "authority":"transport-only", "semantic_protocol":"client-owned",
-        "capabilities": {
-            "chat_completions":True, "client_json_schema_hint":True,
-            "json_candidate_passthrough":True, "syntactic_json_recovery":True,
-        },
-        "endpoints":{"chat_completions":"/v1/chat/completions", "readiness":"/ready"},
-    }
     import pytest
-    with pytest.raises(ValueError, match="ADAPTER_REQUIRED_CAPABILITY_MISSING"):
-        llm_mod._validate_adapter_handshake(body)
-
+    with pytest.raises(ValueError, match="ADAPTER_PROTOCOL_INCOMPATIBLE"):
+        llm_mod._validate_adapter_health({"status":"ok","adapter_protocol":"old-protocol"})
 
 def test_rev32_standard_guidance_prefers_contract_then_sandbox_promotion():
     from eyle.providers.standard.registry import get_provider

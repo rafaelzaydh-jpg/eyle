@@ -291,8 +291,8 @@ class ExecutionContext:
 
     def usage_view(self) -> Dict[str, Any]:
         effective_total = int(self.prompt_tokens_effective or 0) + int(self.completion_tokens_actual or 0)
-        reason_tokens = {"normal": 0, "protocol_repair": 0, "continuation": 0}
-        reason_calls = {"normal": 0, "protocol_repair": 0, "continuation": 0}
+        reason_tokens = {"normal": 0, "wire_retry": 0, "continuation": 0}
+        reason_calls = {"normal": 0, "wire_retry": 0, "continuation": 0}
         conversation_materialized = 0
         conversation_omitted = 0
         for call in self.llm_calls:
@@ -343,9 +343,9 @@ class ExecutionContext:
             "conversation_messages_materialized": conversation_materialized,
             "conversation_messages_omitted": conversation_omitted,
             "number_of_llm_calls": len(self.llm_calls),
-            "number_of_protocol_repairs": reason_calls["protocol_repair"],
+            "number_of_wire_retries": reason_calls["wire_retry"],
             "normal_cognition_tokens": reason_tokens["normal"],
-            "protocol_recovery_tokens": reason_tokens["protocol_repair"],
+            "wire_retry_tokens": reason_tokens["wire_retry"],
             "continuation_tokens": reason_tokens["continuation"],
             "execution_resume_count": int(self.resume_count or 0),
             "active_elapsed_seconds": round(self.active_consumed_seconds, 3),

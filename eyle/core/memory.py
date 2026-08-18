@@ -429,7 +429,9 @@ def _evaluate_node(
     ]
     freshness = _combine_anchor_statuses(statuses)
     out = {
-        "id": node_id, "scope": raw.get("scope"), "kind": raw.get("kind"),
+        "id": node_id, "scope": raw.get("scope"),
+        "domain": raw.get("domain") or "knowledge", "context_key": raw.get("context_key"),
+        "kind": raw.get("kind"),
         "retention": raw.get("retention") or "persistent", "status": raw.get("status") or "current",
         "content": str(raw.get("content") or ""),
         "epistemic": copy.deepcopy(raw.get("epistemic") or {"nature": "unclassified", "volatility": "unknown", "temporal": {}, "context": {}}),
@@ -650,13 +652,19 @@ def memory_activate_result(
         "tags": [str(v) for v in arguments.get("tags") or [] if str(v).strip()],
         "scope": str(arguments.get("scope") or "all"),
         "retention": str(arguments.get("retention") or "all"),
+        "domain": str(arguments.get("domain") or "all").strip().lower(),
+        "context_key": str(arguments.get("context_key") or "").strip() or None,
         "natures": [str(v) for v in arguments.get("natures") or [] if str(v).strip()],
         "volatilities": [str(v) for v in arguments.get("volatilities") or [] if str(v).strip()],
         "relation_labels": [str(v) for v in arguments.get("relation_labels") or [] if str(v).strip()],
         "include_neighbors": bool(arguments.get("include_neighbors") is True),
     }
-    if not selector["query"] and not selector["queries"] and not selector["ids"] and not selector["tags"] and not selector["natures"] and not selector["volatilities"] and not selector["relation_labels"]:
-        return {"operation": "memory_activate", "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": "MEMORY_SELECTOR_REQUIRED", "detail": "Use query/queries, ids, tags, natures, volatilities or relation_labels; use memory_overview to browse the directory."}
+    if (
+        not selector["query"] and not selector["queries"] and not selector["ids"] and not selector["tags"]
+        and not selector["natures"] and not selector["volatilities"] and not selector["relation_labels"]
+        and selector["domain"] == "all" and not selector["context_key"]
+    ):
+        return {"operation": "memory_activate", "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": "MEMORY_SELECTOR_REQUIRED", "detail": "Use query/queries, ids, tags, domain/context_key, natures, volatilities or relation_labels; use memory_overview to browse the directory."}
     page_size = max(1, int(arguments.get("limit") or 30))
     snapshot_id = ""
     try:
@@ -669,10 +677,6 @@ def memory_activate_result(
         page = recall_snapshot_page(storage, snapshot_id, after_ordinal=0, limit=page_size)
         page_ids = list(page.get("node_ids") or [])
         page_items = [copy.deepcopy(v) for v in page.get("items") or [] if isinstance(v, dict)]
-        projected = _project_records(
-            graph_records(storage, page_ids, include_inactive=True), session=session, registry=registry, config=config,
-            provider_context=provider_context, storage=storage,
-        )
     except (OSError, ValueError) as exc:
         if snapshot_id:
             try:
@@ -692,7 +696,7 @@ def memory_activate_result(
         release_recall_snapshot(storage, snapshot_id)
     total = int(selection.get("selected_nodes") or 0)
     coverage = {
-        "scope": {"kind": "memory_graph", "scope": selector["scope"], "retention": selector.get("retention", "all"), "query": selector["query"], "tags": selector["tags"], "ids": selector["ids"], "natures": selector.get("natures", []), "volatilities": selector.get("volatilities", [])},
+        "scope": {"kind": "memory_graph", "scope": selector["scope"], "retention": selector.get("retention", "all"), "domain": selector.get("domain", "all"), "context_key": selector.get("context_key"), "query": selector["query"], "tags": selector["tags"], "ids": selector["ids"], "natures": selector.get("natures", []), "volatilities": selector.get("volatilities", [])},
         "examined": {"nodes": int(selection.get("scoped_nodes") or 0), "matches": total},
         "complete": not bool(frontier_ids), "boundaries": [],
         "facts": {
@@ -704,7 +708,14 @@ def memory_activate_result(
     session.memory_view = {"node_ids": page_ids, "coverage": coverage, "frontiers": frontier_ids, "selector": selector, "overview": copy.deepcopy(session.memory_view.get("overview") or {})}
     return {
         "operation": "memory_activate", "status": "success", "ok": True, "executed": True, "changed": False,
-        "detail": {"memory_view": projected, "matched_nodes": int(selection.get("matched_nodes") or 0), "selected_nodes": total, "search_backend": selection.get("backend"), "recall_provenance": page_items},
+        "detail": {
+            "activation": "materialized_in_memory_view",
+            "node_ids": page_ids,
+            "matched_nodes": int(selection.get("matched_nodes") or 0),
+            "selected_nodes": total,
+            "search_backend": selection.get("backend"),
+            "recall_provenance": page_items,
+        },
         "coverage": coverage,
         **({"frontiers": frontier_view(session.observation_ledger, frontier_ids)} if frontier_ids else {}),
     }
@@ -762,15 +773,8 @@ def memory_continue_result(
     for node_id in [*previous, *page_ids]:
         if node_id not in merged:
             merged.append(node_id)
-    try:
-        projected = _project_records(
-            graph_records(storage, merged, include_inactive=True), session=session, registry=registry, config=config,
-            provider_context=provider_context, storage=storage,
-        )
-    except (OSError, ValueError) as exc:
-        return {"operation": "continue", "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": str(exc).split(":", 1)[0]}
     coverage = {
-        "scope": {"kind": "memory_graph", "scope": selector.get("scope", "all"), "retention": selector.get("retention", "all"), "query": selector.get("query", ""), "tags": selector.get("tags", []), "ids": selector.get("ids", []), "natures": selector.get("natures", []), "volatilities": selector.get("volatilities", [])},
+        "scope": {"kind": "memory_graph", "scope": selector.get("scope", "all"), "retention": selector.get("retention", "all"), "domain": selector.get("domain", "all"), "context_key": selector.get("context_key"), "query": selector.get("query", ""), "tags": selector.get("tags", []), "ids": selector.get("ids", []), "natures": selector.get("natures", []), "volatilities": selector.get("volatilities", [])},
         "examined": {"nodes": int(selection.get("scoped_nodes") or 0), "matches": total},
         "complete": not bool(next_ids), "boundaries": [],
         "facts": {
@@ -782,7 +786,12 @@ def memory_continue_result(
     session.memory_view.update({"node_ids": merged, "coverage": coverage, "frontiers": next_ids, "selector": selector})
     return {
         "operation": "continue", "status": "success", "ok": True, "executed": True, "changed": False,
-        "detail": {"memory_view": projected, "new_nodes": len(page_ids), "recall_provenance": page_items}, "coverage": coverage,
+        "detail": {
+            "activation": "materialized_in_memory_view",
+            "node_ids": page_ids,
+            "new_nodes": len(page_ids),
+            "recall_provenance": page_items,
+        }, "coverage": coverage,
         **({"frontiers": frontier_view(session.observation_ledger, next_ids)} if next_ids else {}),
     }
 

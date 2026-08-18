@@ -139,7 +139,10 @@ def test_rev33_memory_overview_exposes_task_directory_without_bodies(tmp_path):
 def test_rev33_task_status_wire_is_canonical_and_strict():
     parsed = parse_ecc_response({
         "type":"concluir", "response":"ok",
-        "memory_delta":[{"op":"task_status","id":"mem-task","expected_state_revision":"2","status":"resolved"}],
+        "memory_delta":[{
+            "op":"task_status",
+            "arguments":{"id":"mem-task","expected_state_revision":2,"state":"resolved"},
+        }],
     })
     assert parsed["memory_delta"] == [{
         "op":"task_status","id":"mem-task","expected_state_revision":2,"state":"resolved"
@@ -165,9 +168,13 @@ def test_rev33_active_task_cannot_be_archived_until_terminal(tmp_path):
     assert node_record(storage, "mem-task")["status"] == "archived"
 
 
-def test_rev33_general_memory_change_is_not_task_progress_contract():
+def test_rev375_general_memory_change_is_not_execution_progress_contract():
     source = (Path(__file__).parents[1] / "eyle/core/agent.py").read_text(encoding="utf-8")
-    assert "no_new_reality = not physical_progress and not task_state_progress" in source
+    marker = "progress_tracker.observe("
+    assert marker in source
+    call = source[source.index(marker):source.index(marker) + 700]
+    assert "task_state_progress=task_state_progress" in call
+    assert "memory_changed" not in call
     assert "General Memory edits alone do not count as task progress" in source
 
 def test_rev33_task_can_be_created_and_resolved_in_one_atomic_delta_with_alias(tmp_path):

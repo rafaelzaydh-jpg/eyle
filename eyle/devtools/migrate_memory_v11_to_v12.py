@@ -1,6 +1,6 @@
 """One-shot Memory Graph v11 -> v12 migration.
 
-This module is intentionally outside Runtime. Rev3.7.2 accepts only the current
+This module is intentionally outside Runtime. Rev3.7.4 accepts only the current
 v12 store during normal operation; operators with a Rev3.6.1/v11 database must
 run this explicit migration before starting Eyle.
 """

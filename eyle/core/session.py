@@ -8,7 +8,7 @@ from eyle.runtime.observation import empty_ledger as empty_observation_ledger, p
 from .evidence import empty_evidence, validate_evidence
 from .memory import empty_memory_view
 
-SESSION_SCHEMA_VERSION = "2.7.5-r3.7.2-ecc"
+SESSION_SCHEMA_VERSION = "2.7.5-r3.7.5-ecc"
 
 
 def _validated_memory_view(value: Any) -> Dict[str, Any]:

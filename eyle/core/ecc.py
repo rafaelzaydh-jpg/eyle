@@ -197,9 +197,9 @@ def catalog(registry: Any, config: Dict[str, Any], available: Iterable[str], *, 
             {
                 "operation": "memory_activate",
                 "purpose": "Explicitly activate a Memory Graph region by query, exact mem-* IDs or tags. The requested page is materialized now; any remainder is exposed as Frontier and may be continued as many times as Main chooses.",
-                "inputs": {"query": "string?", "queries": "string[]?", "ids": "mem-*[]?", "tags": "string[]?", "natures": "epistemic nature[]?", "volatilities": "epistemic volatility[]?", "relation_labels": "string[]?", "scope": "all|user|world|global?", "retention": "all|temporary|persistent?", "include_neighbors": "bool?", "limit": "positive page size?"},
-                "returns": "Memory View, Coverage and optional fr-* Frontier. Frontier is continuation, never a stop signal.",
-                "caveats": ["At least one of query, ids, tags, natures or volatilities is required. Runtime never adds topology/importance fallback."],
+                "inputs": {"query": "string?", "queries": "string[]?", "ids": "mem-*[]?", "tags": "string[]?", "domain": "all|chat|task|eyle|knowledge?", "context_key": "physical context id?", "natures": "epistemic nature[]?", "volatilities": "epistemic volatility[]?", "relation_labels": "string[]?", "scope": "all|user|world|global?", "retention": "all|temporary|persistent?", "include_neighbors": "bool?", "limit": "positive page size?"},
+                "returns": "Activates exact Memory bodies into memory_view; operation result itself stays compact. Coverage and optional fr-* Frontier are returned.",
+                "caveats": ["Use semantic query/IDs/tags or exact physical domain/context_key filters. Runtime never adds topology/importance fallback."],
             },
         ])
         if not any(str(item.get("operation")) == "continue" for item in out["explorar"]):

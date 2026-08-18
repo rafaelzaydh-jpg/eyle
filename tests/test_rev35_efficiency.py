@@ -8,7 +8,6 @@ from eyle.core.session import AgentSession
 from eyle.runtime.config import validar_config
 from eyle.runtime.ecc_runtime import project_result
 from llm.executar import PROMPT_ECC
-from llm.structured import contract_instruction
 from tests.canonical import base_config, standard_registry
 
 
@@ -22,10 +21,9 @@ def _provider_context(root):
     }
 
 
-def test_rev35_stable_prompt_and_wire_reminder_are_compact_but_keep_depth_rule():
+def test_rev35_stable_prompt_keeps_depth_rule_without_provider_wire_duplication():
     lower = PROMPT_ECC.lower()
     assert len(PROMPT_ECC) <= 12000
-    assert len(contract_instruction("ecc")) <= 900
     assert "do not confuse an inventory with an analysis" in lower
     assert "inspect representative implementation before concluding" in lower
     assert "prefer a few targeted reads over a huge structural dump" in lower

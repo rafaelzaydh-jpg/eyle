@@ -2,7 +2,7 @@
 
 This module does not rank semantic relevance. It only serializes facts identified
 by Runtime identities and budgets: current conversation, explicit Memory
-activation, latest observations/effects and repair feedback.
+activation, latest observations/effects and bounded runtime feedback.
 """
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from eyle.runtime.token_budget import estimate_tokens
 
 DEFAULT_CONVERSATION_BUDGET_TOKENS = 1200
 DEFAULT_OBSERVATION_BUDGET_TOKENS = 2200
+DEFAULT_FEEDBACK_BUDGET_TOKENS = 320
 
 
 def _budget(config: Dict[str, Any], name: str, default: int) -> int:
@@ -88,15 +89,13 @@ def materialize_conversation(conversation_context: Any, config: Dict[str, Any]) 
     return out
 
 
-def materialize_latest_observations(results: Any, config: Dict[str, Any], *, repair: bool = False) -> list[Dict[str, Any]]:
+def materialize_latest_observations(results: Any, config: Dict[str, Any]) -> list[Dict[str, Any]]:
     """Bound observation bodies by physical token budget, newest first.
 
-    For protocol repair no observation bodies are rematerialized: the failed
-    serialization is repaired from compact structured feedback and the wire
-    contract, not by re-analysing source evidence.
+    Provider-format repair belongs to the Adapter. If Eyle asks Main for one
+    fresh current decision after a wire failure, existing observations remain
+    available so task progress is preserved.
     """
-    if repair:
-        return []
     items = [copy.deepcopy(v) for v in results or [] if isinstance(v, dict)]
     if not items:
         return []
@@ -114,6 +113,36 @@ def materialize_latest_observations(results: Any, config: Dict[str, Any], *, rep
             break
     return list(reversed(selected_reversed))
 
+
+
+def materialize_runtime_feedback(feedback: Any, config: Dict[str, Any]) -> list[Dict[str, Any]]:
+    """Materialize newest active Runtime feedback under a physical token budget."""
+    items = [copy.deepcopy(v) for v in feedback or [] if isinstance(v, dict)]
+    if not items:
+        return []
+    chars_per_token = _chars_per_token(config)
+    budget = _budget(config, "runtime_feedback_materialization_tokens", DEFAULT_FEEDBACK_BUDGET_TOKENS)
+    if budget <= 0:
+        return []
+    selected_reversed = []
+    used = 0
+    for item in reversed(items):
+        cost = estimate_tokens(item, chars_per_token)
+        if selected_reversed and used + cost > budget:
+            break
+        if not selected_reversed and cost > budget:
+            # Preserve the newest feedback identity/code; crop only verbose detail.
+            compact = copy.deepcopy(item)
+            for key in ("detail", "guidance"):
+                if isinstance(compact.get(key), str):
+                    compact[key] = compact[key][: max(120, budget * chars_per_token // 2)]
+            item = compact
+            cost = estimate_tokens(item, chars_per_token)
+        selected_reversed.append(item)
+        used += cost
+        if used >= budget:
+            break
+    return list(reversed(selected_reversed))
 
 def component_metrics(packet: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Dict[str, int]]:
     chars_per_token = _chars_per_token(config)

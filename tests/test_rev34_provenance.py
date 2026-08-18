@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from eyle.core.memory import apply_memory_sidecar, memory_activate_result, memory_history_result
+from eyle.core.memory import apply_memory_sidecar, memory_activate_result, memory_history_result, materialize_explicit_memory_view
 from eyle.core.session import AgentSession
 from eyle.runtime.memory_graph import (
     MEMORY_GRAPH_SCHEMA_VERSION,
@@ -64,8 +64,10 @@ def test_rev34_memory_support_pins_current_revision_and_reports_later_source_rev
     apply_memory_sidecar(session, [
         {"op": "revise", "id": a, "expected_revision": 1, "content": "A rev2"}
     ], registry=reg, provider_context=ctx)
-    recall = memory_activate_result(AgentSession("recall"), arguments={"ids": [b], "scope": "global"}, registry=reg, config=base_config(), provider_context=ctx)
-    source = recall["detail"]["memory_view"]["nodes"][0]["sources"][0]
+    recall_session = AgentSession("recall")
+    recall = memory_activate_result(recall_session, arguments={"ids": [b], "scope": "global"}, registry=reg, config=base_config(), provider_context=ctx)
+    view = materialize_explicit_memory_view(recall_session, registry=reg, config=base_config(), provider_context=ctx)
+    source = view["nodes"][0]["sources"][0]
     assert source["source_revision"] == 1
     assert source["current_revision"] == 2
     assert source["origin_state"] == "source_revised"
@@ -95,8 +97,10 @@ def test_rev34_relation_can_be_semantic_support_and_is_revision_pinned(tmp_path)
     apply_memory_sidecar(session, [
         {"op":"revise_relation","id":relation_id,"expected_revision":1,"relation":"integrates_with"}
     ], registry=reg, provider_context=ctx)
-    recall = memory_activate_result(AgentSession("recall"), arguments={"ids":[d],"scope":"global"}, registry=reg, config=base_config(), provider_context=ctx)
-    src = recall["detail"]["memory_view"]["nodes"][0]["sources"][0]
+    recall_session = AgentSession("recall")
+    recall = memory_activate_result(recall_session, arguments={"ids":[d],"scope":"global"}, registry=reg, config=base_config(), provider_context=ctx)
+    view = materialize_explicit_memory_view(recall_session, registry=reg, config=base_config(), provider_context=ctx)
+    src = view["nodes"][0]["sources"][0]
     assert src["kind"] == "relation" and src["origin_state"] == "source_revised"
     assert src["source_revision"] == 1 and src["current_revision"] == 2
 

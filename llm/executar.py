@@ -23,7 +23,7 @@ from llm.response_adapter import (  # noqa: E402
     NormalizedModelResponse, ResponseEnvelopeError, normalize_openai_chat_response,
 )
 from llm.structured import (  # noqa: E402
-    StructuredResponseError, contract_instruction, json_schema_response_format,
+    StructuredResponseError, json_schema_response_format,
     mandatory_top_level_keys, observed_top_level, parse_profile_response,
 )
 
@@ -51,10 +51,9 @@ _LLM_RESPONSE_LOCAL = threading.local()
 # Structured schemas and validation live in llm.structured.  This transport
 # layer only chooses the empirically verified mechanism for the active connection.
 
-ADAPTER_TRANSPORT_PROTOCOL = "eyle-adapter-transport-v1"
-ADAPTER_HANDSHAKE_SCHEMA = "eyle-adapter-handshake-v1"
-_ADAPTER_COMPATIBILITY_CACHE: dict[str, dict[str, Any]] = {}
-_ADAPTER_HANDSHAKE_TTL_SECONDS = 300.0
+ADAPTER_TRANSPORT_PROTOCOL = "eyle-adapter-transport-v2"
+_ADAPTER_STATUS_CACHE: dict[str, dict[str, Any]] = {}
+_ADAPTER_STATUS_TTL_SECONDS = 300.0
 
 
 def _diagnostico(codigo, **campos):
@@ -84,140 +83,120 @@ def _get_json(endpoint: str, timeout: float, *, protocol: bool = False):
     return body, response_headers
 
 
-def _validate_adapter_handshake(body: Any) -> dict[str, Any]:
-    if not isinstance(body, dict):
-        raise ValueError("ADAPTER_HANDSHAKE_INVALID")
-    if body.get("handshake_schema") != ADAPTER_HANDSHAKE_SCHEMA:
-        raise ValueError("ADAPTER_HANDSHAKE_SCHEMA_INCOMPATIBLE")
+def _validate_adapter_health(body: Any) -> dict[str, Any]:
+    """Validate only the current transport identity, not a capability catalog."""
+    if not isinstance(body, dict) or str(body.get("status") or "") != "ok":
+        raise ValueError("ADAPTER_HEALTH_INVALID")
     if body.get("adapter_protocol") != ADAPTER_TRANSPORT_PROTOCOL:
         raise ValueError("ADAPTER_PROTOCOL_INCOMPATIBLE")
-    if body.get("authority") != "transport-only" or body.get("semantic_protocol") != "client-owned":
-        raise ValueError("ADAPTER_AUTHORITY_CONTRACT_INVALID")
-    capabilities = body.get("capabilities")
-    if not isinstance(capabilities, dict):
-        raise ValueError("ADAPTER_CAPABILITIES_INVALID")
-    required = (
-        "chat_completions", "client_json_schema_hint", "json_candidate_passthrough",
-        "syntactic_json_recovery", "client_completion_ceiling", "client_reasoning_control",
-    )
-    if not all(capabilities.get(key) is True for key in required):
-        raise ValueError("ADAPTER_REQUIRED_CAPABILITY_MISSING")
-    endpoints = body.get("endpoints")
-    if not isinstance(endpoints, dict) or not str(endpoints.get("chat_completions") or "").strip() or not str(endpoints.get("readiness") or "").strip():
-        raise ValueError("ADAPTER_ENDPOINT_CONTRACT_INVALID")
     return body
 
 
 def diagnosticar_backend(config, timeout=None):
-    """Formal no-generation Eyle<->Adapter handshake followed by readiness.
+    """Check local Adapter process/protocol and local provider configuration.
 
-    Eyle does not infer Adapter compatibility from /v1/models. The
-    handshake validates transport authority/capabilities first; /ready then
-    checks provider/model readiness without paid generation.
+    This endpoint check does not pretend to prove remote provider connectivity.
+    The real POST /chat/completions result is the authority for that fact.
     """
     cfg_llm = (config or {}).get("llm", {})
     base_url = str(cfg_llm.get("base_url") or "http://127.0.0.1:8080").rstrip("/")
-    limite = timeout
-    if limite is None:
-        limite = cfg_llm.get("adapter_handshake_timeout_seconds", 3)
+    limite = timeout if timeout is not None else cfg_llm.get("adapter_status_timeout_seconds", 3)
     try:
         limite = max(0.1, min(float(limite), 10.0))
     except (TypeError, ValueError):
         limite = 3.0
 
-    handshake_endpoint = _endpoint_openai(base_url, "eyle/handshake")
+    root = _adapter_root(base_url)
+    health_endpoint = root + "/health"
     inicio = time.monotonic()
     try:
-        handshake, headers = _get_json(handshake_endpoint, limite, protocol=True)
-        _validate_adapter_handshake(handshake)
+        health, _headers = _get_json(health_endpoint, limite, protocol=True)
+        _validate_adapter_health(health)
     except urllib.error.HTTPError as erro:
         detalhe = _mensagem_http_error(base_url, erro, _ler_corpo_http_error(erro))
         return {
-            "ok": False, "reachable": True, "base_url": base_url, "endpoint": handshake_endpoint,
-            "error_code": "ADAPTER_HANDSHAKE_HTTP_ERROR", "status_code": getattr(erro, "code", None),
+            "ok": False, "reachable": True, "base_url": base_url, "endpoint": health_endpoint,
+            "error_code": "ADAPTER_HEALTH_HTTP_ERROR", "status_code": getattr(erro, "code", None),
             "detail": detalhe, "latency_ms": round((time.monotonic() - inicio) * 1000, 1),
         }
     except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError) as erro:
         return {
-            "ok": False, "reachable": False, "base_url": base_url, "endpoint": handshake_endpoint,
+            "ok": False, "reachable": False, "base_url": base_url, "endpoint": health_endpoint,
             "error_code": "BACKEND_UNREACHABLE",
-            "detail": f"Nao foi possivel acessar o Adapter em {handshake_endpoint}: {erro}",
+            "detail": f"Nao foi possivel acessar o Adapter em {health_endpoint}: {erro}",
             "latency_ms": round((time.monotonic() - inicio) * 1000, 1),
         }
     except Exception as erro:
         return {
-            "ok": False, "reachable": True, "base_url": base_url, "endpoint": handshake_endpoint,
-            "error_code": str(erro) if str(erro).startswith("ADAPTER_") else "ADAPTER_HANDSHAKE_INVALID",
-            "detail": f"Handshake incompatível: {type(erro).__name__}: {erro}",
+            "ok": False, "reachable": True, "base_url": base_url, "endpoint": health_endpoint,
+            "error_code": str(erro) if str(erro).startswith("ADAPTER_") else "ADAPTER_HEALTH_INVALID",
+            "detail": f"Adapter incompatível: {type(erro).__name__}: {erro}",
             "latency_ms": round((time.monotonic() - inicio) * 1000, 1),
         }
 
-    readiness_path = str((handshake.get("endpoints") or {}).get("readiness") or "/ready")
-    readiness_endpoint = _adapter_root(base_url) + "/" + readiness_path.lstrip("/")
+    ready_endpoint = root + "/ready"
     try:
-        ready, ready_headers = _get_json(readiness_endpoint, limite, protocol=True)
+        ready, _ready_headers = _get_json(ready_endpoint, limite, protocol=True)
     except urllib.error.HTTPError as erro:
         detalhe = _mensagem_http_error(base_url, erro, _ler_corpo_http_error(erro))
         return {
-            "ok": False, "reachable": True, "handshake_ok": True, "base_url": base_url,
-            "endpoint": readiness_endpoint, "handshake": handshake,
+            "ok": False, "reachable": True, "health_ok": True, "base_url": base_url,
+            "endpoint": ready_endpoint, "health": health,
             "error_code": "ADAPTER_NOT_READY", "status_code": getattr(erro, "code", None),
             "detail": detalhe, "latency_ms": round((time.monotonic() - inicio) * 1000, 1),
         }
     except Exception as erro:
         return {
-            "ok": False, "reachable": True, "handshake_ok": True, "base_url": base_url,
-            "endpoint": readiness_endpoint, "handshake": handshake,
+            "ok": False, "reachable": True, "health_ok": True, "base_url": base_url,
+            "endpoint": ready_endpoint, "health": health,
             "error_code": "ADAPTER_READINESS_ERROR",
-            "detail": f"Adapter handshake passou, mas readiness falhou: {type(erro).__name__}: {erro}",
+            "detail": f"Adapter respondeu health, mas readiness falhou: {type(erro).__name__}: {erro}",
             "latency_ms": round((time.monotonic() - inicio) * 1000, 1),
         }
 
-    if not isinstance(ready, dict) or str(ready.get("status") or "") not in {"ready", "ready_configured"}:
+    if not isinstance(ready, dict) or str(ready.get("status") or "") != "ready_configured":
         return {
-            "ok": False, "reachable": True, "handshake_ok": True, "base_url": base_url,
-            "endpoint": readiness_endpoint, "handshake": handshake, "readiness": ready,
-            "error_code": "ADAPTER_NOT_READY", "detail": "Adapter handshake compatível, mas upstream/modelo não está pronto.",
+            "ok": False, "reachable": True, "health_ok": True, "base_url": base_url,
+            "endpoint": ready_endpoint, "health": health, "readiness": ready,
+            "error_code": "ADAPTER_NOT_READY",
+            "detail": "Adapter está vivo, mas sua configuração local não está pronta.",
             "latency_ms": round((time.monotonic() - inicio) * 1000, 1),
         }
-    models = []
-    if isinstance(ready.get("models"), list):
-        models = [str(v) for v in ready.get("models") if str(v).strip()]
-    elif str(ready.get("model") or "").strip():
-        models = [str(ready.get("model")).strip()]
+
+    model = str(ready.get("model") or health.get("model") or "").strip()
     return {
-        "ok": True, "reachable": True, "handshake_ok": True, "base_url": base_url,
-        "endpoint": readiness_endpoint, "models": models[:20], "model_count": len(models),
-        "adapter_protocol": handshake.get("adapter_protocol"),
-        "adapter_profile": handshake.get("adapter_profile"),
-        "adapter_version": handshake.get("adapter_version"),
-        "handshake": handshake, "readiness": ready,
+        "ok": True, "reachable": True, "health_ok": True, "base_url": base_url,
+        "endpoint": ready_endpoint, "models": [model] if model else [], "model_count": 1 if model else 0,
+        "adapter_protocol": health.get("adapter_protocol"),
+        "adapter_profile": health.get("adapter_profile"),
+        "adapter_version": health.get("adapter_version"),
+        "health": health, "readiness": ready,
         "latency_ms": round((time.monotonic() - inicio) * 1000, 1),
     }
 
 
-def _ensure_adapter_handshake(config) -> dict[str, Any]:
+def _ensure_adapter_ready(config) -> dict[str, Any]:
     cfg_llm = (config or {}).get("llm") or {}
     base_url = str(cfg_llm.get("base_url") or "http://127.0.0.1:8080").rstrip("/")
     now = time.monotonic()
-    cached = _ADAPTER_COMPATIBILITY_CACHE.get(base_url)
+    cached = _ADAPTER_STATUS_CACHE.get(base_url)
     if isinstance(cached, dict) and float(cached.get("expires_at") or 0) > now:
         return cached
     diag = diagnosticar_backend(config)
     if diag.get("ok") is not True:
-        code = str(diag.get("error_code") or "ADAPTER_HANDSHAKE_FAILED")
+        code = str(diag.get("error_code") or "ADAPTER_NOT_READY")
         raise ErroLLM(
-            str(diag.get("detail") or "Adapter handshake/readiness failed."),
+            str(diag.get("detail") or "Adapter health/readiness failed."),
             transient=code in {"BACKEND_UNREACHABLE", "ADAPTER_NOT_READY", "ADAPTER_READINESS_ERROR"},
             status_code=diag.get("status_code"), error_code=code,
         )
     entry = {
-        "expires_at": now + _ADAPTER_HANDSHAKE_TTL_SECONDS,
+        "expires_at": now + _ADAPTER_STATUS_TTL_SECONDS,
         "adapter_protocol": diag.get("adapter_protocol"),
         "adapter_profile": diag.get("adapter_profile"),
         "adapter_version": diag.get("adapter_version"),
     }
-    _ADAPTER_COMPATIBILITY_CACHE[base_url] = entry
+    _ADAPTER_STATUS_CACHE[base_url] = entry
     return entry
 
 
@@ -384,6 +363,8 @@ def _adapter_response_metadata(headers) -> dict[str, Any]:
         "adapter_upstream_attempts": as_int("X-Eyle-Upstream-Attempts"),
         "adapter_max_upstream_attempts": as_int("X-Eyle-Max-Upstream-Attempts"),
         "adapter_structured_repairs": as_int("X-Eyle-Structured-Repairs"),
+        "adapter_structured_contract_characters": as_int("X-Eyle-Structured-Contract-Characters"),
+        "adapter_repair_context_mode": get("X-Eyle-Repair-Context-Mode"),
         "adapter_local_normalized": as_bool("X-Eyle-Local-Normalized"),
         "billing_may_have_occurred": as_bool("X-Eyle-Billing-May-Have-Occurred"),
         "retry_cost_risk": as_bool("X-Eyle-Retry-Cost-Risk"),
@@ -619,13 +600,13 @@ def _structured_response_format(profile):
 def _chamar_openai_compatible(
     base_url, model, prompt_sistema, prompt_usuario, temperature, timeout,
     read_timeout=None, on_chunk=None,
-    perfil=None, on_request=None, max_completion_tokens=None, provider_token_budget_remaining=None, reasoning_mode="off",
+    perfil=None, on_request=None, max_completion_tokens=None, reasoning_mode="off",
 ):
     """Call the local OpenAI-compatible Adapter.
 
-    For structured cognition Eyle sends only a tolerant wire-shape hint. The
-    Adapter owns provider transport choice; strict ECC semantics are validated
-    locally after deterministic canonicalization.
+    For structured cognition Eyle sends the current JSON Schema. The Adapter
+    owns provider connection and mechanical wire conformance; Eyle owns ECC
+    semantics after the candidate returns.
     """
     if on_request is not None:
         on_request()
@@ -639,8 +620,6 @@ def _chamar_openai_compatible(
     }
     if isinstance(max_completion_tokens, int) and max_completion_tokens > 0:
         payload["max_completion_tokens"] = int(max_completion_tokens)
-    if isinstance(provider_token_budget_remaining, int) and provider_token_budget_remaining > 0:
-        payload["provider_token_budget_remaining"] = int(provider_token_budget_remaining)
     if perfil is not None:
         # Eyle->Adapter has one stable wire protocol. Provider-specific structured
         # transport selection belongs entirely to the Adapter.
@@ -1029,7 +1008,7 @@ def _chamar_llm_impl(
     transport_policy = provider_policy(config)
     # Prove the local Adapter transport contract before any paid
     # generation. Success is cached mechanically per Adapter base URL.
-    _ensure_adapter_handshake(config)
+    _ensure_adapter_ready(config)
     _ensure_provider_token_budget(config, execution)
     connect_timeout, read_timeout = _timeouts_da_chamada(cfg_llm, perfil)
 
@@ -1043,8 +1022,8 @@ def _chamar_llm_impl(
     # forwards its stable model field but never performs discovery/probing.
 
     structured_mode = "json_schema" if perfil is not None else None
-    if perfil is not None:
-        prompt_sistema = prompt_sistema.rstrip() + "\n\n" + contract_instruction(perfil)
+    # The provider-facing representation contract is attached once by the Adapter
+    # from Eyle's supplied JSON Schema. Core keeps only Eyle semantics.
 
     if execution is not None:
         latest_call = execution.latest_call()
@@ -1163,7 +1142,6 @@ def _chamar_llm_impl(
                         base_url, model, prompt_sistema, prompt_usuario, temperature,
                         connect_atual, read_timeout=read_atual, on_chunk=callback,
                         on_request=None, perfil=perfil, max_completion_tokens=hard_remaining,
-                        provider_token_budget_remaining=remaining_provider,
                         reasoning_mode=str(cfg_llm.get("reasoning_mode") or "off"),
                     )
                     metadata_backend = _ultima_metadata_backend()
@@ -1206,7 +1184,7 @@ def _chamar_llm_impl(
                         # A successful billed structured generation with an empty
                         # assistant payload is a malformed cognition envelope, not
                         # a transport retry signal. Let local parsing turn it into
-                        # ECC_PROTOCOL_RECOVERY on the same execution.
+                        # one fresh current Eyle decision on the same execution.
                         resposta = ""
                         ultimo_erro = None
                         break
@@ -1406,44 +1384,48 @@ def _chamar_llm(
 
 
 
-PROMPT_ECC = """You are Eyle. Return one simple JSON cognition object. Do the basic semantic work; Eyle canonicalizes safe wire details.
+PROMPT_ECC = """You are Eyle, the running agent. Choose one ECC cognition.
 
-MAIN AUTHORITY
-Understand intent and references naturally. Main decides meaning, relevance, what to inspect/learn and when evidence is sufficient. Runtime owns physical IDs, schemas, budgets, permissions, transactions, persistence, Coverage and Frontier. Never create Runtime semantic ranking, memory_focus, Active Projection, HOT/WARM/COLD tiers, mini-agents or hidden working sets.
+AUTHORITY
+Do the basic semantic work. Main owns meaning, references, relevance, inspection and sufficiency. Runtime owns physical IDs, schemas, budgets, permissions, persistence, Coverage and Frontier. No Runtime semantic ranking, memory_focus, Active Projection, HOT/WARM/COLD, mini-agents or hidden working sets.
+
+SELF
+You/Eyle/this agent and your code, internals, core, runtime or memory mean this running Eyle unless context establishes another referent. Inspect self with source:"eyle"; workspace is the user's selected project, not yourself. Internal/self analysis means observable Eyle source, runtime, logs and stored facts, never hidden chain-of-thought.
 
 ECC
-Choose exactly one:
+Choose one:
 - explorar: observe/read/recall/calculate/test/continue; batch only independent operations.
-- construir: make one Runtime-controlled lasting change, then inspect the real result.
-- concluir: answer when evidence is sufficient and no requested physical change remains.
-Use names from ecc_operations.
+- construir: one Runtime-controlled lasting change, then inspect it.
+- concluir: answer when evidence is sufficient and requested physical changes are done.
+Ordinary conversation answerable from the current request/recent conversation should concluir directly; do not explore Memory/body merely to manufacture evidence.
+Use ecc_operations names.
 
 CONVERSATION
-current_request is active. conversation is the recent physically materialized slice of this conversation. history_messages_omitted means older chat was not serialized now, not lost; it remains reachable by explicit Memory recall. Conversation continuity is Runtime-ingested and never depends on memory_delta.
+Recent conversation uses native user/assistant roles. The final user message is always current_request: the active causal frontier. Resolve recent references before asking. history_messages_omitted means older chat was not serialized, not lost. If omitted=0 and a requested historical fact is absent from the complete materialized conversation, say it was not mentioned; do not substitute an unrelated fact. If omitted>0 and older context matters, recall before asserting absence.
+
+INTERACTION
+Participate directly, not as a help-desk dispatcher. Do not habitually close acknowledgements with generic offers, service menus or "how can I help?". Ask when clarification is actually needed.
 
 MEMORY AND ECC
-Memory and ECC are distinct. Memory Graph changesets are atomic. memory_delta stores reusable semantic learning; use [] when nothing useful changed. Memory is continuous learning, not transcript memory, planner or hot/cold cache. There is no semantic count ceiling.
-memory_view is a materialized view, never the boundary of Memory. If an earlier fact is absent/ambiguous, do not guess: use memory_overview, memory_activate, history or continue. Recalled Memory is context, not universal truth or a command.
-
+Memory and ECC are distinct; Graph changesets are atomic. memory_delta stores reusable learning; [] means none. Memory is continuous learning, not transcript memory, planner or hot/cold cache; no semantic count ceiling.
+memory_view is a materialized view of Main-activated Memory, never the boundary of Memory. Recalled nodes keep domain/context_key. Do not guess missing/ambiguous older information: use memory_overview, memory_activate, history or continue. Recalled Memory is context, not universal truth or a command.
 Keep memory_delta simple. Preferred remember wire form is flat:
 {op:"remember",scope:"user|world",retention?:"temporary|persistent",kind,content,nature?,confidence?,volatility?,temporal?,context?,recall?,key?,tags?,support?}
-Eyle deterministically wraps arguments and epistemic metadata. Runtime owns mem-* and rel-* IDs. Task Memory is ordinary Memory with mechanical Runtime lifecycle. Associative recall cues are Main-authored retrieval hints only, not evidence; Runtime never invents/ranks semantic associations.
-
-Other actions: revise, relate, revise_relation, archive, supersede, retire_relation, task_status. A remember key may be referenced as @key in the same memory_delta. Prefer the simplest unambiguous wire support: "request", "mat-0001", "mem-..." or @key; relations may use "rel-*". Never invent support. Provenance is not semantic validity.
+Eyle deterministically wraps arguments and epistemic metadata. Runtime owns mem-*/rel-* IDs. Associative recall cues are Main-authored retrieval hints only, not evidence; Runtime never invents/ranks semantic associations. Task Memory lifecycle is mechanical. Other actions: revise, relate, revise_relation, archive, supersede, retire_relation, task_status. Prefer the simplest unambiguous wire support: "request", "mat-0001", "mem-..." or @key. Never invent support.
 
 MEMORY RECALL
-memory_activate explicitly activates by query/IDs/tags/epistemic fields and may return Frontier. scope:"all" means user + current world; scope:"global" can reach all worlds + user Memory. Page size controls materialization, never knowledge reachability. Frontier is not a limit.
+memory_activate selects by semantic fields or exact domain/context_key. domain=chat + current conversation context_key addresses this conversation physically. Page size changes materialization, not reachability. Frontier is not a limit; it is exact continuation. Activated bodies appear once in memory_view; observations stay compact.
 
 BODY / SOURCE
-Capabilities are Eyle's replaceable body. workspace = the user-selected/open project, even if it is a copy, fork, old revision, or repository containing Eyle code. eyle = the source tree of the Eyle instance currently running. Never fall back from an empty workspace to eyle.
+workspace = the user-selected/open project, even if it is a copy, fork, old revision, or repository containing Eyle code. eyle = the source tree of the Eyle instance currently running. Capabilities are Eyle's replaceable body. Never fall back from an empty workspace to eyle.
 
 EVIDENCE
-latest_observations contains newest Runtime results; Material/Evidence preserve observed facts. Coverage says what was mechanically examined, not whether it is semantically enough. Do not confuse an inventory with an analysis: when source evidence matters, inspect representative implementation before concluding. Prefer a few targeted reads over a huge structural dump. Large artifact/source bodies remain Material instead of being copied into Memory.
+latest_observations has newest Runtime results; Material/Evidence preserve facts; Coverage is physical. Do not confuse an inventory with an analysis. When source evidence matters, inspect representative implementation before concluding; prefer a few targeted reads over a huge structural dump. Large artifact/source bodies remain Material, not Memory.
 
 EFFICIENCY
-Materialize only what is needed now while preserving reachability. Avoid redundant rereads and no-progress loops. Protocol repair fixes serialization; it must not re-analyse source evidence. Token efficiency must not weaken provenance or semantic judgment.
+Materialize only what is needed now; preserve reachability. Avoid redundant rereads/no-progress loops.
 
-If the user asks to create/change/fix/remove/apply something, explanation alone is not completion. Semantic user choices belong to Main; physical side-effect confirmation belongs to Runtime.
+A requested create/change/fix/remove/apply action is not complete by explanation alone. Main owns semantic choices; Runtime owns physical side-effect confirmation.
 """
 
 

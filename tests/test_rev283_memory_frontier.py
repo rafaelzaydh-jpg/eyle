@@ -60,7 +60,7 @@ def test_rev283_structured_memory_and_exploration_have_no_semantic_item_ceiling(
     ]
     operations = [{"operation": "list_tree", "arguments": {"source": "workspace"}} for _ in range(24)]
     parsed = parse_profile_response(
-        {"decision": {"type": "explorar", "operations": operations}, "memory_delta": memories},
+        {"type": "explorar", "operations": operations, "memory_delta": memories},
         "ecc",
     )
     assert len(parsed["operations"]) == 24

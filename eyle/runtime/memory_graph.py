@@ -1126,6 +1126,7 @@ def _fts_expression(terms: Iterable[str]) -> str:
 
 def _base_recall_where(
     *, scopes: tuple[str, ...] | None, retention: str, natures: Iterable[str], volatilities: Iterable[str],
+    domain: str | None = None, context_key: str | None = None,
     include_epistemic: bool = True,
 ) -> tuple[str, list[Any]]:
     scope_sql, scope_params = _scope_clause("n.scope", scopes)
@@ -1134,6 +1135,12 @@ def _base_recall_where(
     if retention != "all":
         clauses.append("n.retention=?")
         params.append(retention)
+    if domain and domain != "all":
+        clauses.append("n.domain=?")
+        params.append(domain)
+    if context_key:
+        clauses.append("n.context_key=?")
+        params.append(context_key)
     if include_epistemic:
         nature_values = [str(v).strip() for v in natures or [] if str(v).strip()]
         if nature_values:
@@ -1159,6 +1166,8 @@ def create_recall_snapshot(
     scope: str = "all",
     include_neighbors: bool = False,
     retention: str = "all",
+    domain: str = "all",
+    context_key: str | None = None,
     natures: Iterable[str] = (),
     volatilities: Iterable[str] = (),
     relation_labels: Iterable[str] = (),
@@ -1175,6 +1184,10 @@ def create_recall_snapshot(
     retention_value = str(retention or "all").strip().lower()
     if retention_value not in {"all", "temporary", "persistent"}:
         raise ValueError("MEMORY_RETENTION_INVALID")
+    domain_value = str(domain or "all").strip().lower()
+    if domain_value != "all":
+        domain_value = normalize_domain(domain_value)
+    context_key_value = normalize_context_key(context_key)
     wanted_ids = [str(v).strip() for v in ids or [] if str(v).strip()]
     wanted_tags = [str(v).strip() for v in tags or [] if str(v).strip()]
     wanted_natures = [str(v).strip() for v in natures or [] if str(v).strip()]
@@ -1182,14 +1195,18 @@ def create_recall_snapshot(
     wanted_relation_labels = [str(v).strip() for v in relation_labels or [] if str(v).strip()]
     query_variants = [str(v).strip() for v in queries or [] if str(v).strip()]
     terms = _terms([query, *query_variants])
+    physical_only = bool(domain_value != "all" or context_key_value) and not (
+        terms or wanted_ids or wanted_tags or wanted_natures or wanted_volatilities or wanted_relation_labels
+    )
     epistemic_only = bool(wanted_natures or wanted_volatilities or wanted_relation_labels) and not (terms or wanted_ids or wanted_tags)
-    if not (epistemic_only or terms or wanted_ids or wanted_tags):
+    if not (physical_only or epistemic_only or terms or wanted_ids or wanted_tags):
         raise ValueError("MEMORY_SELECTOR_REQUIRED")
 
     snapshot_id = _new_id("mrs")
     selector = {
         "query": str(query or "")[:4000], "queries": query_variants, "ids": wanted_ids, "tags": wanted_tags,
-        "scope": scope, "retention": retention_value, "natures": wanted_natures,
+        "scope": scope, "retention": retention_value, "domain": domain_value,
+        "context_key": context_key_value, "natures": wanted_natures,
         "volatilities": wanted_volatilities, "relation_labels": wanted_relation_labels, "include_neighbors": bool(include_neighbors),
         "terms": terms,
     }
@@ -1197,10 +1214,12 @@ def create_recall_snapshot(
     try:
         backend = "fts5" if _fts_available(conn) else "sql_like"
         scope_where, scope_params = _base_recall_where(
-            scopes=scopes, retention=retention_value, natures=(), volatilities=(), include_epistemic=False,
+            scopes=scopes, retention=retention_value, domain=domain_value, context_key=context_key_value,
+            natures=(), volatilities=(), include_epistemic=False,
         )
         base_where, base_params = _base_recall_where(
-            scopes=scopes, retention=retention_value, natures=wanted_natures, volatilities=wanted_volatilities,
+            scopes=scopes, retention=retention_value, domain=domain_value, context_key=context_key_value,
+            natures=wanted_natures, volatilities=wanted_volatilities,
         )
         if wanted_relation_labels:
             rel_marks = ",".join("?" for _ in wanted_relation_labels)
@@ -1247,7 +1266,7 @@ def create_recall_snapshot(
             id_marks = ",".join("?" for _ in wanted_ids)
             direct_expr = f"CASE WHEN b.id IN ({id_marks}) THEN 1 ELSE 0 END"
             direct_params.extend(wanted_ids)
-        include_all_flag = 1 if epistemic_only else 0
+        include_all_flag = 1 if (epistemic_only or physical_only) else 0
         raw_cte = (
             "raw AS (SELECT b.id,b.updated_at," + direct_expr + " AS direct_hit,"
             "COALESCE(th.hits,0) AS tag_hits,CASE WHEN qh.node_id IS NULL THEN 0 ELSE 1 END AS query_hit,"
@@ -1277,7 +1296,8 @@ def create_recall_snapshot(
                 # set. Epistemic filters apply to direct matches; neighbours retain
                 # only scope/retention boundaries, matching the historical contract.
                 neighbor_where, neighbor_params = _base_recall_where(
-                    scopes=scopes, retention=retention_value, natures=(), volatilities=(), include_epistemic=False,
+                    scopes=scopes, retention=retention_value, domain=domain_value, context_key=context_key_value,
+                    natures=(), volatilities=(), include_epistemic=False,
                 )
                 conn.execute(
                     "WITH matched AS (SELECT node_id FROM memory_recall_items WHERE snapshot_id=? AND source_kind='match'),"

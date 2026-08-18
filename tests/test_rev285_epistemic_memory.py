@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 from pathlib import Path
 
-from eyle.core.memory import apply_memory_sidecar, memory_activate_result, memory_history_result
+from eyle.core.memory import apply_memory_sidecar, memory_activate_result, memory_history_result, materialize_explicit_memory_view
 from eyle.core.session import AgentSession
 from eyle.runtime.config import validar_config
 from eyle.runtime.memory_graph import graph_overview, node_record, world_scope
@@ -33,10 +33,10 @@ def test_rev285_provider_schema_exposes_open_epistemic_metadata_without_truth_en
     assert "maxItems" not in schema["properties"]["memory_delta"]
 
 
-def test_rev285_wire_parser_preserves_epistemic_classification_and_old_wire_remains_compatible():
+def test_rev375_wire_parser_preserves_epistemic_classification_with_optional_metadata():
     parsed = parse_profile_response(
         {
-            "decision": {"type": "concluir", "response": "ok"},
+            "type": "concluir", "response": "ok",
             "memory_delta": [
                 {
                     "op": "remember",
@@ -60,8 +60,8 @@ def test_rev285_wire_parser_preserves_epistemic_classification_and_old_wire_rema
                     "arguments": {
                         "scope": "world",
                         "retention": "temporary",
-                        "kind": "legacy_shape",
-                        "content": "Old wire without epistemic remains accepted.",
+                        "kind": "plain_shape",
+                        "content": "Current Memory without epistemic remains accepted.",
                     },
                 },
             ],
@@ -177,7 +177,9 @@ def test_rev285_memory_activate_can_mechanically_filter_epistemic_region(tmp_pat
         registry=registry, config=base_config(), provider_context=context,
     )
     assert result["ok"] is True
-    nodes = result["detail"]["memory_view"]["nodes"]
+    nodes = materialize_explicit_memory_view(
+        recall, registry=registry, config=base_config(), provider_context=context,
+    )["nodes"]
     assert len(nodes) == 2
     assert all(n["epistemic"]["nature"] == "hypothesis" and n["epistemic"]["volatility"] == "high" for n in nodes)
 

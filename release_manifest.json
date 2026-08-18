@@ -1,9 +1,9 @@
 {
   "release": "2.7.5",
   "app_version": "2.7.5",
-  "config_schema_version": "2.7.5-r3.7.2-ecc",
-  "revision": "rev3.7.2-ecc",
-  "title": "Rev3.7.2 — Canonical Cut Review",
+  "config_schema_version": "2.7.5-r3.7.5.1-ecc",
+  "revision": "rev3.7.5.1-ecc",
+  "title": "Rev3.7.5.1 — Provider Contract Delivery",
   "python": ">=3.11",
   "architecture": {
     "semantic_authority": "Main LLM",
@@ -13,12 +13,12 @@
       "concluir"
     ],
     "memory": "Memory Graph v12 with explicit domain/context identity; Runtime materializes only Main-explicit Memory activation.",
-    "runtime": "Mechanical truth, safety, persistence, Evidence/Material, Coverage/Frontier, per-call context safety, provider-reported per-message token budget, transactions",
-    "adapter": "Deterministic transport-only DeepSeek V4 profile on port 8080; fixed configured model, JSON Output, direct thinking/max_tokens translation, one format-only repair, provider usage aggregation; no discovery/probing/negotiation"
+    "runtime": "Physical truth/execution invariants, persistence, Memory/Evidence/Material reachability, Task state, per-call context safety, provider-reported per-message token budget and transactions.",
+    "adapter": "Simple DeepSeek connection boundary: fixed configured model, request/response transport, one caller-supplied JSON Schema contract delivered once to the provider, mechanical JSON recovery, schema validation, one isolated format-only repair, usage/transport telemetry; no Eyle semantics or execution policy."
   },
   "memory_graph_schema": "2.7.5-r3.7.1-memory-graph-v12",
-  "session_schema": "2.7.5-r3.7.2-ecc",
-  "adapter_protocol": "eyle-adapter-transport-v1",
+  "session_schema": "2.7.5-r3.7.5-ecc",
+  "adapter_protocol": "eyle-adapter-transport-v2",
   "execution_continuity": "execution-continuity-v3",
   "bundled_providers": [
     "standard"
@@ -74,47 +74,49 @@
     ]
   },
   "contracts": {
-    "wire": "Main emits tolerant simple wire; Eyle canonicalizes and semantically validates strict ECC locally.",
+    "wire": "Main owns the current flat ECC wire semantics and supplies its JSON Schema. Adapter communicates that schema to the provider without Eyle-specific aliases, validates the result and may mechanically repair representation once. Core accepts current JSON only.",
     "memory": "Memory remains current-by-default semantic knowledge with preserved revision history. Task Memory reuses ordinary mem-* nodes/relations. Semantic supports are revision-pinned when created; source revision drift is exposed mechanically, never interpreted as falsity.",
-    "recall": "FTS5/SQL candidate discovery is literal/mechanical. scope=all reaches user + current world; scope=global reaches all current nodes across every world. Exact selections are DB-cursor paged and Main judges relevance.",
+    "recall": "FTS5/SQL candidate discovery is literal/mechanical. scope=all reaches user + current world; scope=global reaches all current nodes across every world. Exact physical domain/context_key filters are supported. Activated bodies are materialized once through memory_view; operation observations stay compact. Main judges semantic relevance.",
     "frontier": "Frontier is exact continuation after the current materialized page, never a semantic reading limit.",
-    "adapter": "Adapter remains semantically blind and deterministic: static handshake, fixed configured DeepSeek V4 profile/model, json_object structured transport, direct reasoning/output translation, no remote model discovery or runtime capability negotiation.",
-    "execution": "Each user-message execution owns its pending gates and provider-token ledger. Human wait is not charged as a cognitive deadline; the 50000-token context window is enforced per physical LLM call, while provider-reported usage.total_tokens is accumulated across all calls and Adapter internal attempts under the 150000-token per-message budget. If billable usage becomes unknown, further paid calls stop fail-closed.",
+    "adapter": "Adapter owns connection/auth, fixed DeepSeek request translation, delivery of Eyle's caller-supplied JSON Schema as the single provider-facing representation contract, mechanical JSON recovery, validation, exactly one isolated format-only repair and transport/usage facts. Repair reuses only schema + prior candidate + validation errors, never the full Eyle context.",
+    "execution": "Eyle owns execution progress. If Adapter's single format repair still leaves an invalid current wire candidate, Eyle preserves Session/observations and may request one fresh current decision; that allowance resets only after real observable/physical/Task progress. Repeated valid action/result fixed points terminate as ECC_NO_PROGRESS_UNRECOVERABLE. No MAX_TURNS ceiling exists.",
     "source": "workspace and eyle are physical source identities, never inferred semantically.",
-    "interaction": "Main authors semantic choices; Runtime owns physical confirmations. Both use persisted user gates and a common UI, but only physical confirmation authorizes an exact prepared mutation.",
+    "interaction": "Main participates directly rather than defaulting to help-desk offers/menus. Main authors semantic choices; Runtime owns physical confirmations. Only physical confirmation authorizes an exact prepared mutation.",
     "sandbox_promotion": "A tested sandbox file/subtree can be frozen as a hash-bound durable staging artifact and promoted to the real workspace with one exact confirmation; merge does not delete unrelated target files and mirror is explicit.",
-    "context_hygiene": "Deterministic ContextMaterializer pages conversation, observations and explicit Memory activations by physical token budget. No fixed semantic item ceiling or automatic Memory projection is part of the runtime.",
+    "context_hygiene": "Deterministic ContextMaterializer pages conversation, observations, runtime feedback and explicit Memory activations by physical token budget. No fixed semantic item ceiling or automatic Memory projection is part of the runtime.",
     "task_memory": "A task is an ordinary kind=task Memory node. Runtime maintains only active/blocked/resolved/cancelled lifecycle state and state revisions; task relations and semantic content remain Main-authored. Task Memory never creates a recall boundary.",
     "provenance": "Memory/relation support freezes the exact referenced source revision. Revision history exposes changeset execution/turn and revision-specific anchors. A later source revision is reported as source_revised, not semantically invalidated.",
     "optimization": "Optimization remains monotonic: compact presentation may reduce prompt cost, but no physical Material, Evidence, Frontier, or Memory becomes unreachable to Main.",
-    "investigation_quality": "Structural inventory is orientation, not sufficient evidence for behavioral/architectural analysis. Main is instructed to inspect representative implementation before concluding material claims."
+    "investigation_quality": "Structural inventory is orientation, not sufficient evidence for behavioral/architectural analysis. Main is instructed to inspect representative implementation before concluding material claims.",
+    "conversation": "Recent conversation is transported with native user/assistant roles; the active current_request is emitted exactly once as the final provider user message. Materialization is physical-token-budgeted and omitted history remains reachable.",
+    "self_identity": "Eyle is the running agent. Main interprets unqualified self references against the running Eyle instance; source=eyle is self source and source=workspace is the user's selected project. Runtime does not semantically route these references."
   },
   "publication": {
     "requires_extracted_artifact_verification": true,
     "public_docs_are_revision_neutral": false,
     "runtime_state_committed": false,
     "experimental": false,
-    "mainline_base": "Rev3.7.1",
+    "mainline_base": "Rev3.7.5",
     "stability": "candidate"
   },
   "release_notes": {
-    "canonical_paths": "One responsibility has one canonical implementation path; compatibility facades and runtime promotion branches are removed.",
-    "config": "Runtime accepts only Rev3.7.2 configuration identity. Historical configuration is not promoted in-process.",
-    "memory": "Runtime accepts only Memory Graph v12. The one-shot v11→v12 migrator lives under eyle.devtools and is not on the runtime path.",
-    "standard_provider": "The bundled provider is the canonical eyle.providers.standard package; workspace transaction and sandbox promotion live inside that domain.",
-    "execution": "Dead cognitive-deadline/generated-token aliases are removed; provider usage remains the token authority.",
-    "context": "Fixed message snapshot limits and automatic temporary-memory projection paths are removed."
-  },
-  "rev372": {
-    "revision_focus": "cuts_only",
-    "runtime_backward_compatibility": false,
-    "canonical_standard_provider": "eyle.providers.standard",
-    "config_runtime_migration": false,
-    "memory_runtime_migration": false,
-    "explicit_memory_materialization_only": true,
-    "legacy_deadline_path_removed": true,
-    "fixed_history_snapshot_limit_removed": true
+    "boundary": "Rev3.7.5.1 completes the Rev3.7.5 Adapter boundary: the schema Eyle supplies is now actually delivered to the provider.",
+    "deduplication": "The textual ECC wire instruction is no longer duplicated in Core. Provider repair does not replay conversation, Memory, tools or Task context.",
+    "repair": "Exactly one representation-only repair remains. It receives schema + previous candidate + validation errors only.",
+    "truncation": "Provider finish_reason=length is returned as truncation and never triggers a second format-repair generation.",
+    "tokens": "No new semantic prompt-size or output-size ceiling was added; savings come from eliminating duplicated/irrelevant context.",
+    "compatibility": "No Rev2.7 aliases or Eyle semantics were added to the Adapter."
   },
   "pending_schema": "13-ecc",
-  "adapter_version": "2.7.5-rev3.7.2"
+  "adapter_version": "2.7.5-rev3.7.5.1",
+  "rev3751": {
+    "revision_focus": "provider_contract_delivery_and_prompt_deduplication",
+    "adapter_format_repairs": 1,
+    "schema_delivered_to_provider": true,
+    "repair_replays_full_eyle_context": false,
+    "truncation_triggers_format_repair": false,
+    "runtime_backward_compatibility": false,
+    "adapter_semantic_aliases": false,
+    "new_token_ceiling": false
+  }
 }

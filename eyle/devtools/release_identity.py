@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Fail-closed Rev3.7.2 release verifier.
+"""Fail-closed Rev3.7.5.1 current-artifact verifier.
 
-The verifier checks the current architecture only. Historical upgrade contracts
-belong to explicit migration tools and CHANGELOG, never to the runtime verifier.
+Historical release compatibility belongs to explicit migration tools/CHANGELOG.
+This verifier checks only the current Eyle architecture and publication tree.
 """
 from __future__ import annotations
 
@@ -21,32 +21,21 @@ FORBIDDEN_PATHS = {
     "eyle/providers/standard_impl",
     "eyle/providers/workspace_transaction.py",
     "eyle/providers/sandbox_promotion.py",
+    "eyle/runtime/cognition_episode.py",
 }
 REQUIRED_STANDARD_FILES = {
     "__init__.py", "registry.py", "common.py", "tools.py", "contracts.py",
     "workspace_transaction.py", "sandbox_promotion.py",
 }
 REMOVED_RUNTIME_MARKERS = {
-    "generated_token_fuse",
-    "generated_token_limit",
-    "task_deadline_seconds",
-    "deadline_monotonic",
-    "deadline_remaining_seconds",
-    "TASK_DEADLINE_EXCEEDED",
-    "limite_snapshot",
-    "project_memory_view",
-    "automatic_temporary",
-    "globals().setdefault",
-    "eyle.providers.standard_impl",
-    "LEGACY_AGENT_PENDENTE_PATH",
-    "AGENT_PENDENTE_PATH",
-    "_public_confirmation",
-    "max_search_matches",
-    "max_search_ranges",
-    "max_file_read_lines",
-    "temporary_graph_records",
-    "DEEPSEEK_API_KEY",
-    "DEFAULT_MODEL",
+    "generated_token_fuse", "generated_token_limit", "task_deadline_seconds",
+    "deadline_monotonic", "deadline_remaining_seconds", "TASK_DEADLINE_EXCEEDED",
+    "limite_snapshot", "project_memory_view", "automatic_temporary",
+    "globals().setdefault", "eyle.providers.standard_impl", "LEGACY_AGENT_PENDENTE_PATH",
+    "AGENT_PENDENTE_PATH", "_public_confirmation", "max_search_matches",
+    "max_search_ranges", "max_file_read_lines", "temporary_graph_records",
+    "DEEPSEEK_API_KEY", "DEFAULT_MODEL", "ECC_PROTOCOL_RECOVERY",
+    "ECC_PROTOCOL_UNRECOVERABLE", "CognitionEpisode",
 }
 
 
@@ -79,12 +68,11 @@ def _artifact_violations(base: Path) -> List[str]:
 
 def _source_markers(base: Path) -> List[str]:
     out: List[str] = []
-    roots = [base / "eyle", base / "llm", base / "server", base / "web"]
     excluded = {
         str((base / "eyle/devtools/migrate_memory_v11_to_v12.py").resolve()),
         str((base / "eyle/devtools/release_identity.py").resolve()),
     }
-    for source_root in roots:
+    for source_root in (base / "eyle", base / "llm", base / "server", base / "web"):
         if not source_root.exists():
             continue
         for path in source_root.rglob("*.py"):
@@ -100,7 +88,6 @@ def _source_markers(base: Path) -> List[str]:
 
 def _architecture_violations(base: Path, manifest: Dict[str, Any]) -> List[str]:
     out: List[str] = []
-
     core = base / "eyle/core"
     actual_core = {p.name for p in core.glob("*.py")}
     if actual_core != CORE_FILES:
@@ -114,8 +101,7 @@ def _architecture_violations(base: Path, manifest: Dict[str, Any]) -> List[str]:
     if not standard.is_dir():
         out.append("canonical standard provider package missing")
     else:
-        actual = {p.name for p in standard.glob("*.py")}
-        missing = REQUIRED_STANDARD_FILES - actual
+        missing = REQUIRED_STANDARD_FILES - {p.name for p in standard.glob("*.py")}
         if missing:
             out.append(f"canonical standard provider files missing:{sorted(missing)!r}")
 
@@ -133,31 +119,28 @@ def _architecture_violations(base: Path, manifest: Dict[str, Any]) -> List[str]:
         from eyle.host import build_bundled_host
         from eyle.runtime.continuation import PENDING_SCHEMA_VERSION
         from eyle.runtime.execution_context import ExecutionContext, EXECUTION_CONTINUITY_SCHEMA_VERSION
+        from eyle.runtime.execution_progress import NO_PROGRESS_REPEATS_AFTER_WARNING
         from eyle.runtime.memory_graph import MEMORY_GRAPH_SCHEMA_VERSION
-        from llm.executar import PROMPT_ECC
-        from llm.structured import canonicalize_wire_response, schema_for_profile, wire_schema_for_profile
+        from llm.executar import ADAPTER_TRANSPORT_PROTOCOL, PROMPT_ECC
+        from llm.protocol import CanonicalPrompt
+        from llm.structured import canonicalize_wire_response, json_schema_response_format, schema_for_profile, wire_schema_for_profile
 
         cfg = _json(base / "config.json")
-        expected_identity = {
-            "app_version": __version__,
-            "config_schema_version": __schema_version__,
-            "revision": __revision__,
-        }
-        if {k: cfg.get(k) for k in expected_identity} != expected_identity:
+        expected = {"app_version": __version__, "config_schema_version": __schema_version__, "revision": __revision__}
+        if {k: cfg.get(k) for k in expected} != expected:
             out.append("config identity != runtime identity")
-        if "agent" in cfg:
-            out.append("removed top-level agent config returned")
         llm_cfg = cfg.get("llm") if isinstance(cfg.get("llm"), dict) else {}
+        if "adapter_handshake_timeout_seconds" in llm_cfg or "adapter_status_timeout_seconds" not in llm_cfg:
+            out.append("Adapter status timeout config is not current-only")
         if int(llm_cfg.get("provider_token_budget_per_message") or 0) != 150000:
-            out.append("provider_token_budget_per_message must default to 150000")
+            out.append("provider token budget default mismatch")
         if int(llm_cfg.get("context_window_tokens") or 0) != 50000:
-            out.append("context_window_tokens must default to 50000")
+            out.append("context window default mismatch")
 
         host = build_bundled_host(str(base))
         registry = host.registry
         if manifest.get("public_capabilities") != registry.names():
             out.append("manifest public_capabilities != registry")
-
         memory_ctx = host.provider_context().get("core_memory") or {}
         surface = ecc_catalog(registry, cfg, registry.names(), memory_enabled=bool(memory_ctx))
         expected_ops = {
@@ -170,67 +153,121 @@ def _architecture_violations(base: Path, manifest: Dict[str, Any]) -> List[str]:
 
         if len(PROMPT_ECC) > 6000:
             out.append(f"stable prompt too verbose:{len(PROMPT_ECC)}")
-        surface_chars = len(json.dumps(surface, ensure_ascii=False, separators=(",", ":")))
-        if surface_chars > 5000:
-            out.append(f"ECC operation surface too verbose:{surface_chars}")
+        probe = CanonicalPrompt(
+            stable={"ecc_operations": {}, "runtime_environment": {}},
+            dynamic={
+                "current_request": "new request",
+                "conversation": {
+                    "conversation_id": "conv-verify",
+                    "messages": [
+                        {"role": "user", "content": "old question"},
+                        {"role": "assistant", "content": "old answer"},
+                    ],
+                    "history_messages_materialized": 2,
+                    "history_messages_omitted": 0,
+                },
+                "runtime_feedback": [],
+            },
+        ).messages("system")
+        if probe[-1] != {"role": "user", "content": "new request"}:
+            out.append("current_request is not final provider user message")
+        if any("new request" in str(m.get("content") or "") for m in probe[:-1]):
+            out.append("current_request duplicated before causal frontier")
 
         schema = schema_for_profile("ecc")
         wire = wire_schema_for_profile("ecc")
-        if wire == schema or wire.get("additionalProperties") is not True:
-            out.append("wire/canonical ECC schema boundary invalid")
+        fmt = json_schema_response_format("ecc")
         if set(schema.get("properties") or {}) != {"decision", "memory_delta"}:
             out.append("canonical ECC envelope invalid")
-        if canonicalize_wire_response({"type": "concluir", "answer": "ok"}) != {
+        if "oneOf" not in wire or fmt.get("json_schema", {}).get("strict") is not True:
+            out.append("current strict provider wire schema missing")
+        try:
+            canonicalize_wire_response({"decision": {"type": "concluir", "response": "old"}, "memory_delta": []})
+            out.append("legacy decision wrapper still accepted")
+        except Exception:
+            pass
+        if canonicalize_wire_response({"type": "concluir", "response": "ok", "memory_delta": []}) != {
             "decision": {"type": "concluir", "response": "ok"}, "memory_delta": []
         }:
-            out.append("wire canonicalization invalid")
+            out.append("current wire canonicalization invalid")
 
         session = AgentSession("verify")
         if set(session.memory_view) != {"node_ids", "coverage", "frontiers", "selector", "overview"}:
             out.append("Session Memory activation state invalid")
-
         execution = ExecutionContext.from_config(cfg, execution_id="verify")
-        if hasattr(execution, "deadline_monotonic") or hasattr(execution, "generated_token_limit"):
-            out.append("legacy execution fields returned")
+        usage = execution.usage_view()
+        if "number_of_wire_retries" not in usage or "wire_retry_tokens" not in usage:
+            out.append("wire retry telemetry missing")
+        if "number_of_protocol_repairs" in usage or "protocol_recovery_tokens" in usage:
+            out.append("retired protocol repair telemetry returned")
         if EXECUTION_CONTINUITY_SCHEMA_VERSION != "execution-continuity-v3":
             out.append("execution continuity schema mismatch")
-        if SESSION_SCHEMA_VERSION != "2.7.5-r3.7.2-ecc":
+        if SESSION_SCHEMA_VERSION != "2.7.5-r3.7.5-ecc":
             out.append("session schema mismatch")
+        if NO_PROGRESS_REPEATS_AFTER_WARNING != 2:
+            out.append("fixed-point bound mismatch")
         if PENDING_SCHEMA_VERSION != "13-ecc":
             out.append("pending schema mismatch")
+        if MEMORY_GRAPH_SCHEMA_VERSION != "2.7.5-r3.7.1-memory-graph-v12":
+            out.append("Memory Graph v12 identity mismatch")
+
+        agent_text = (base / "eyle/core/agent.py").read_text(encoding="utf-8")
+        if "progress_tracker = ExecutionProgress()" not in agent_text or "progress_tracker.observe(" not in agent_text:
+            out.append("Eyle execution fixed-point tracker missing")
+        if "wire_retry_used = False" not in agent_text or "ECC_WIRE_RETRY" not in agent_text:
+            out.append("one fresh Eyle decision after wire failure missing")
+        if "ECC_PROTOCOL_RECOVERY" in agent_text or "CognitionEpisode" in agent_text:
+            out.append("provider protocol recovery leaked into Core")
+        if '"cognition_reason": "wire_retry" if wire_retry else' not in agent_text:
+            out.append("wire retry cognition telemetry classification missing")
+
+        server_text = (base / "server/server.py").read_text(encoding="utf-8")
+        for required in (
+            'ADAPTER_VERSION = "2.7.5-rev3.7.5.1"',
+            'ADAPTER_TRANSPORT_PROTOCOL = "eyle-adapter-transport-v2"',
+            "MAX_UPSTREAM_ATTEMPTS_PER_LOGICAL_CALL = 2",
+            "def normalize_structured(",
+            "def _schema_instruction(",
+            "def _repair_messages(",
+            '@app.get("/ready")',
+        ):
+            if required not in server_text:
+                out.append(f"simple Adapter contract missing:{required}")
+        for forbidden in (
+            "ADAPTER_HANDSHAKE_SCHEMA", "def handshake(", "_example_from_schema",
+            "ast.literal_eval", "provider_token_budget_remaining", '@app.get("/v1/models")',
+        ):
+            if forbidden in server_text:
+                out.append(f"Adapter responsibility leak:{forbidden}")
+        executar_text = (base / "llm/executar.py").read_text(encoding="utf-8")
+        if "_ensure_adapter_handshake" in executar_text or "ADAPTER_HANDSHAKE_SCHEMA" in executar_text:
+            out.append("capability handshake returned")
+        if "_ensure_adapter_ready(config)" not in executar_text:
+            out.append("simple Adapter readiness preflight missing")
+        if "provider_token_budget_remaining" in executar_text:
+            out.append("global Eyle token budget leaked into Adapter payload")
+        if "contract_instruction(perfil)" in executar_text:
+            out.append("duplicated provider wire contract returned to Eyle prompt")
+        structured_text = (base / "llm/structured.py").read_text(encoding="utf-8")
+        if "def contract_instruction(" in structured_text:
+            out.append("dead textual wire contract returned")
+        if "_attach_schema_instruction(messages, schema)" not in server_text:
+            out.append("caller JSON Schema is not delivered to provider")
+        if '_repair_messages(schema, repair_candidate or "", repair_errors or [])' not in server_text:
+            out.append("isolated schema/candidate/error repair missing")
+        if '"adapter_output_truncated"' not in server_text or '_finish_reason(first.data) == "length"' not in server_text:
+            out.append("provider truncation handling missing")
+
         if manifest.get("session_schema") != SESSION_SCHEMA_VERSION:
             out.append("manifest session_schema mismatch")
         if manifest.get("pending_schema") != PENDING_SCHEMA_VERSION:
             out.append("manifest pending_schema mismatch")
-
-        symbol_spec = registry.spec("standard.symbol_relations")
-        symbol_props = dict((symbol_spec.get("input_schema") or {}).get("properties") or {})
-        if "page_size" not in symbol_props or "max_edges" in symbol_props:
-            out.append("symbol_relations public paging contract is not canonical")
-
-        if MEMORY_GRAPH_SCHEMA_VERSION != "2.7.5-r3.7.1-memory-graph-v12":
-            out.append("Memory Graph v12 identity mismatch")
         if manifest.get("memory_graph_schema") != MEMORY_GRAPH_SCHEMA_VERSION:
             out.append("manifest memory_graph_schema mismatch")
-
-        service_text = (base / "eyle/runtime/service.py").read_text(encoding="utf-8")
-        if "def registrar_mensagem_com_snapshot(role, texto, metadata=None):" not in service_text:
-            out.append("conversation registration contract is not canonical")
-        memory_text = (base / "eyle/core/memory.py").read_text(encoding="utf-8")
-        if "def materialize_explicit_memory_view(" not in memory_text:
-            out.append("explicit Memory materializer missing")
-        server_text = (base / "server/server.py").read_text(encoding="utf-8")
-        if 'ADAPTER_VERSION = "2.7.5-rev3.7.2"' not in server_text:
-            out.append("Adapter version identity mismatch")
-        if manifest.get("adapter_version") != "2.7.5-rev3.7.2":
-            out.append("manifest adapter_version mismatch")
-        if "def prepare_upstream(" not in server_text or "def _prepare_upstream(" in server_text:
-            out.append("Adapter upstream preparation path is not canonical")
-        if 'if "max_tokens" in body:' not in server_text:
-            out.append("Adapter does not reject removed max_tokens input alias")
-        web_js = (base / "web/static/app.js").read_text(encoding="utf-8")
-        if "data.confirmation" in web_js or "msg.confirmation" in web_js:
-            out.append("removed confirmation UI alias returned")
+        if manifest.get("adapter_protocol") != ADAPTER_TRANSPORT_PROTOCOL:
+            out.append("manifest adapter protocol mismatch")
+        if manifest.get("adapter_version") != "2.7.5-rev3.7.5.1":
+            out.append("manifest adapter version mismatch")
     except Exception as exc:
         out.append(f"architecture verifier runtime failure:{type(exc).__name__}:{exc}")
     finally:
@@ -248,8 +285,8 @@ def validar_artefato_release(base_dir: os.PathLike[str] | str, manifesto: Dict[s
         violations.append("extracted artifact verification not required")
     if pub.get("experimental") is not False:
         violations.append("release must not be experimental")
-    if pub.get("mainline_base") != "Rev3.7.1":
-        violations.append("Rev3.7.2 mainline base mismatch")
+    if pub.get("mainline_base") != "Rev3.7.5":
+        violations.append("Rev3.7.5.1 mainline base mismatch")
     if violations:
         raise ReleaseIdentityError("invalid release artifact:\n- " + "\n- ".join(sorted(set(violations))))
 

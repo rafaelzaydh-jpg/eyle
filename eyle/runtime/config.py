@@ -23,13 +23,13 @@ _TOP_LEVEL_FIELDS = {
 _LLM_FIELDS = {
     "base_url", "model", "temperature", "provider_token_budget_per_message",
     "context_window_tokens", "connect_timeout_seconds", "read_timeout_seconds",
-    "adapter_handshake_timeout_seconds",
+    "adapter_status_timeout_seconds",
     "retry_max_attempts", "retry_base_delay_seconds", "retry_max_delay_seconds",
     "retry_jitter_seconds", "max_concurrent_requests", "cooldown_seconds",
     "retry_read_timeouts", "stream_responses",
     "reasoning_mode",
 }
-_CONTEXT_FIELDS = {"safety_margin_tokens", "chars_per_token_fallback", "conversation_materialization_tokens", "observation_materialization_tokens"}
+_CONTEXT_FIELDS = {"safety_margin_tokens", "chars_per_token_fallback", "conversation_materialization_tokens", "observation_materialization_tokens", "runtime_feedback_materialization_tokens"}
 _WORKER_FIELDS = {
     "heartbeat_interval_seconds", "queue_error_backoff_seconds",
     "max_invalid_jobs_per_reservation", "max_parallel_jobs", "isolate_jobs",
@@ -120,7 +120,7 @@ def validar_config(config, registry: CapabilityRegistry):
     _validate_bool(llm, "retry_read_timeouts", False, "llm")
     if str(llm.get("reasoning_mode") or "off") not in {"off", "on", "provider_default"}:
         raise ConfigError("llm.reasoning_mode inválido")
-    for key, default in (("connect_timeout_seconds", 5), ("adapter_handshake_timeout_seconds", 3)):
+    for key, default in (("connect_timeout_seconds", 5), ("adapter_status_timeout_seconds", 3)):
         _validate_positive_number(llm, key, default, "llm")
     if llm.get("read_timeout_seconds") is not None:
         _validate_positive_number(llm, "read_timeout_seconds", 1, "llm")
@@ -178,6 +178,7 @@ def validar_config(config, registry: CapabilityRegistry):
         ("chars_per_token_fallback", 3),
         ("conversation_materialization_tokens", 1200),
         ("observation_materialization_tokens", 2200),
+        ("runtime_feedback_materialization_tokens", 320),
     ):
         _validate_int(context, key, default, minimum=1, prefix="context_engine")
 

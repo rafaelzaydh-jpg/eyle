@@ -4,7 +4,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-from eyle.core.memory import apply_memory_sidecar, memory_activate_result, memory_overview_result
+from eyle.core.memory import apply_memory_sidecar, memory_activate_result, memory_overview_result, materialize_explicit_memory_view
 from eyle.core.session import AgentSession
 from eyle.runtime.config import validar_config
 from eyle.runtime.memory_graph import (
@@ -39,15 +39,19 @@ def test_rev290_wire_supports_main_authored_associative_recall_without_hidden_se
             "response": "ok",
             "memory_delta": [{
                 "op": "remember",
-                "scope": "user",
-                "retention": "persistent",
-                "kind": "preference",
-                "content": "User likes The Beatles.",
-                "nature": "preference",
-                "aliases": ["Fab Four", "Beatles"],
-                "concepts": ["music taste", "bands"],
-                "cues": ["favorite music", "what bands do they like"],
-                "support": "request",
+                "arguments": {
+                    "scope": "user",
+                    "retention": "persistent",
+                    "kind": "preference",
+                    "content": "User likes The Beatles.",
+                    "epistemic": {"nature": "preference"},
+                    "recall": {
+                        "aliases": ["Fab Four", "Beatles"],
+                        "concepts": ["music taste", "bands"],
+                        "cues": ["favorite music", "what bands do they like"],
+                    },
+                    "supports": [{"kind": "request"}],
+                },
             }],
         },
         "ecc",
@@ -121,7 +125,8 @@ def test_rev290_recall_finds_alias_concept_and_cue_without_embedding_ranker(tmp_
             config=base_config(), provider_context=context,
         )
         assert result["ok"] is True
-        projected = {n["id"]: n for n in result["detail"]["memory_view"]["nodes"]}
+        view = materialize_explicit_memory_view(recall, registry=registry, config=base_config(), provider_context=context)
+        projected = {n["id"]: n for n in view["nodes"]}
         assert node_id in projected
         assert projected[node_id]["recall"]["aliases"] == ["Beatles", "Fab Four"]
 
@@ -141,7 +146,8 @@ def test_rev290_multi_query_variants_union_main_authored_search_paths(tmp_path):
         arguments={"queries": ["Beatles", "Michael Jackson"], "limit": 10},
         registry=registry, config=base_config(), provider_context=context,
     )
-    ids = {n["id"] for n in result["detail"]["memory_view"]["nodes"]}
+    view = materialize_explicit_memory_view(recall, registry=registry, config=base_config(), provider_context=context)
+    ids = {n["id"] for n in view["nodes"]}
     assert {learned["aliases"]["a"], learned["aliases"]["b"]}.issubset(ids)
     assert result["detail"]["matched_nodes"] == 2
 
@@ -162,7 +168,8 @@ def test_rev290_relation_label_filter_is_mechanical_consolidation_navigation(tmp
         recall, arguments={"relation_labels": ["supports"], "limit": 10}, registry=registry,
         config=base_config(), provider_context=context,
     )
-    ids = {n["id"] for n in result["detail"]["memory_view"]["nodes"]}
+    view = materialize_explicit_memory_view(recall, registry=registry, config=base_config(), provider_context=context)
+    ids = {n["id"] for n in view["nodes"]}
     assert ids == {learned["aliases"]["obs"], learned["aliases"]["hyp"]}
 
 
@@ -213,11 +220,13 @@ def test_rev290_sql_fallback_searches_main_authored_associative_recall(tmp_path)
         conn.commit()
     finally:
         conn.close()
+    recall = AgentSession("fallback-query")
     result = memory_activate_result(
-        AgentSession("fallback-query"), arguments={"query": "unique-fallback-alias", "limit": 10},
+        recall, arguments={"query": "unique-fallback-alias", "limit": 10},
         registry=registry, config=base_config(), provider_context=context,
     )
-    ids = {n["id"] for n in result["detail"]["memory_view"]["nodes"]}
+    view = materialize_explicit_memory_view(recall, registry=registry, config=base_config(), provider_context=context)
+    ids = {n["id"] for n in view["nodes"]}
     assert learned["aliases"]["x"] in ids
     assert result["detail"]["search_backend"] == "sql_like"
 

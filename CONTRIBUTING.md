@@ -1,52 +1,85 @@
-# Contributing to Eyle
+# Development, Feedback, and Contributions
 
-Thanks for helping improve Eyle.
+Eyle is currently developed and maintained by its author.
 
-Eyle is source-available under the **Eyle Personal Use License** in `LICENSE.md`; it is not an open-source project. Please read the license and the contributor terms below before submitting a contribution.
+**External code contributions and pull requests are not currently accepted.**
 
-## Development setup
+This file exists to make that policy explicit while still documenting how to work with a private fork and how to report useful feedback.
+
+## Personal forks and modifications
+
+Private modifications for personal, non-commercial use are allowed only under the terms of [`LICENSE.md`](LICENSE.md).
+
+The public repository being visible or forkable on GitHub does not grant permission to publish modified versions, redistribute the software, or use it commercially.
+
+## Technical feedback
+
+Bug reports and technical feedback are useful when they contain reproducible evidence. When the repository has an appropriate issue or discussion channel available, include:
+
+- the Eyle app version and revision;
+- the operating system and Python version;
+- the smallest reproducible request or flow;
+- relevant observable job/error codes;
+- whether the problem affects Core, Runtime, Memory, a capability provider, Adapter, or UI;
+- logs with secrets and protected content removed.
+
+Do not include hidden credentials, private keys, raw protected workspace content, or other sensitive material.
+
+Security vulnerabilities must follow [`SECURITY.md`](SECURITY.md) rather than a public issue.
+
+## Local development
+
+Create an environment:
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
+```
+
+Install the current development and Adapter dependencies:
+
+```bash
 python -m pip install -r requirements-dev.lock
+python -m pip install -r server/requirements.txt
+```
+
+Run verification:
+
+```bash
+make verify
+```
+
+Or run the main suites directly:
+
+```bash
+python -B -m eyle.devtools.release_identity
 python -m pytest -q
+python -m pytest -q server/tests
 ```
 
-## Pull requests
+## Architectural rules for private modifications
 
-1. Keep changes focused and explain the user-visible behavior.
-2. Add or update tests for every behavior change.
-3. Preserve the fail-closed write, execution, and sandbox guarantees.
-4. Never commit generated data from `memory/`, `context/`, or `workspace/`.
-5. Run the full test suite before opening the pull request.
-6. Before reintroducing a removed architecture or compatibility path, document the concrete current failure and add a regression test or metric that justifies the change; consult Git history for prior removals.
-7. Keep Core abstractions domain-neutral. Coding-language, repository, framework, document, network, or device semantics belong in capabilities/toolpacks unless the state is demonstrably universal to the agent protocol.
-8. Keep shipped behavior and future direction distinct. `docs/architecture.md` documents the current runtime; proposed semantic changes should be justified in the pull request rather than presented as shipped behavior.
-9. Do not submit code, assets, documentation, or other material that you do not have the right to contribute under these terms.
+If you maintain a personal fork, the current architecture follows these invariants:
 
-## Contribution terms
+1. **Main owns meaning.**
+2. **Core contains Eyle-specific logic.**
+3. **Runtime owns physical truth and execution invariants.**
+4. **Memory remains an independent sidecar to ECC decisions.**
+5. **Capability providers own domain mechanics, not semantic planning.**
+6. **Adapter owns provider transport and mechanical wire conformance, not Eyle semantics.**
+7. **Current runtime paths remain canonical; historical compatibility belongs in explicit migration tooling.**
+8. **Observability must distinguish hypothesis from physical evidence.**
+9. **Persistent workspace changes remain confirmable, verifiable, and reversible where the current contract requires it.**
 
-By submitting a pull request, patch, commit, or other contribution to Eyle, you represent that you have the right to submit it.
+See [`docs/architecture.md`](docs/architecture.md) before making structural changes.
 
-You retain copyright in your original contribution. In addition, you grant the Eyle project maintainers a perpetual, worldwide, non-exclusive, irrevocable, royalty-free license to use, reproduce, modify, adapt, distribute, sublicense, relicense, and commercialize your contribution as part of Eyle or related works.
+## Documentation language
 
-You also agree that accepted contributions may be made available to users under the repository's current license or under a future license selected by the project maintainers, without requiring additional permission from you.
+Public documentation and canonical external contracts are written in English.
 
-If you do not agree to these contributor terms, do not submit a contribution.
+Internal agent instructions, tool contracts, state-machine messages, and structured JSON schemas are kept in English for model reliability.
 
-## Commit style
+## Future contribution policy
 
-Use short imperative messages, for example:
+If external code contributions are opened in the future, the repository will publish explicit contribution and intellectual-property terms before accepting them.
 
-```text
-Fix stale patch hash validation
-Add grounded symbol-not-found result
-Document Adapter handshake behavior
-```
-
-## Language
-
-Public documentation and canonical external contracts are written in English. Internal
-agent instructions, tool contracts, state-machine messages, and structured JSON
-schemas are kept in English for model reliability.
+Until then, do not submit pull requests containing code, documentation, assets, or patches for incorporation into the official Eyle codebase.

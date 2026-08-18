@@ -1,10 +1,12 @@
 # Memory Graph v12
 
-Memory is intrinsic learned state beside ECC, not a fourth cognitive move and not a hidden context router.
+Eyle Memory is persistent learned state attached to the agent, not a hidden prompt router and not a fourth ECC movement.
 
-## Schema dimensions
+Main decides what knowledge means. Runtime owns mechanical storage, revision, reachability, provenance identity, and retrieval mechanics.
 
-Each node has separate physical dimensions:
+## Core model
+
+A Memory node has separate physical dimensions:
 
 ```text
 scope        reachability boundary
@@ -12,62 +14,189 @@ domain       chat | task | eyle | knowledge
 context_key  optional physical context identity
 ```
 
-`scope` retains the current `user`, world, `all` and `global` reachability semantics. `domain` never replaces scope.
+These dimensions are intentionally independent.
+
+- `scope` answers **where can this node be reached from?**
+- `domain` answers **what physical class of context does it belong to?**
+- `context_key` identifies a concrete context when the domain needs one.
+
+`domain` does not replace `scope`.
 
 ## Authorship
 
-Main authors semantic knowledge through `memory_delta`: remember, revise, relate, revise relations, archive/supersede, retire relations and task lifecycle decisions.
+### Main-authored state
 
-Runtime authors only mechanically knowable state. In particular, current user/assistant message identity and ordering may be persisted in the `chat` domain without asking Main to summarize what was said.
+Main authors semantic knowledge through `memory_delta`, including:
 
-## Sidecar contract
+- remember;
+- revise;
+- relate;
+- revise relation state;
+- archive;
+- supersede;
+- retire relation;
+- Task meaning/lifecycle decisions.
 
-Memory cannot veto an already valid ECC decision. Wire parsing first obtains/validates the decision; Memory is parsed/applied as an independent sidecar. A Memory rejection is observable telemetry/feedback and the valid ECC path continues.
+### Runtime-authored facts
 
-## Retention and epistemic state
+Runtime may persist facts that are mechanically knowable without semantic interpretation, such as:
 
-`temporary` and `persistent` are retention choices, not truth labels or automatic prompt tiers.
+- conversation ID;
+- message ID;
+- role;
+- ordering;
+- timestamps;
+- current physical context identity.
 
-Nodes/relations can carry the shared canonical epistemic structure, including nature, confidence, volatility, temporal/context fields and evidence timestamps. Parser and storage validate the same definition at separate boundaries.
+Runtime does not summarize user meaning on its own.
 
-## Current state and history
+## Memory as an ECC sidecar
 
-A node/relation exposes its current revision by default. Revision history remains persisted and inspectable. Support references are pinned to the exact referenced Memory/relation revision used when committed; later revision drift is reported mechanically rather than interpreted as semantic invalidation.
+Memory is validated independently from the ECC decision.
+
+```text
+valid ECC decision
++ invalid/rejected memory_delta
+=
+ECC continues
++ Memory rejection is recorded
+```
+
+A Memory parser/storage problem must not create an extra paid cognition solely to rescue the sidecar.
+
+## Retention
+
+Retention is a persistence choice, not a truth label or automatic prompt tier.
+
+Current retention classes include:
+
+- `temporary`;
+- `persistent`.
+
+A Temporary node is not automatically "hot" and a Persistent node is not automatically projected.
+
+## Epistemic state
+
+Nodes and relations can carry canonical epistemic metadata such as:
+
+- nature;
+- confidence;
+- volatility;
+- temporal/context fields;
+- evidence timestamps;
+- support references.
+
+Parser and storage validate the same canonical structure at separate boundaries.
+
+Runtime stores the structure mechanically. Main remains responsible for what the knowledge means.
+
+## Revision history
+
+Current state is returned by default, while historical revisions remain persisted and inspectable.
+
+Support references are pinned to the exact Memory/relation revision used when committed. If the referenced object later changes, Runtime can report revision drift mechanically; it does not infer that the old support became semantically false.
+
+## Relations
+
+Graph relations connect Memory nodes without creating a second semantic engine.
+
+Main chooses the semantic relation. Runtime owns:
+
+- relation identity;
+- current revision;
+- revision history;
+- support references;
+- mechanical retirement.
 
 ## Task Memory
 
-A task is an ordinary `kind=task` graph node plus minimal mechanical lifecycle state:
+A Task is an ordinary `kind=task` Memory node plus minimal mechanical lifecycle state:
 
 ```text
 active | blocked | resolved | cancelled
 ```
 
-Task meaning and relations remain Main-authored. Task state never creates an automatic prompt working set or narrows global recall.
+Task meaning and relations remain Main-authored.
+
+Task state does not create a hidden automatic working set and does not narrow global recall.
 
 ## Recall
 
-Recall uses literal/mechanical candidate discovery (FTS5 with SQL fallback), persists the exact selection in SQLite and materializes a page. An exact cursor Frontier exposes the remainder without storing the full match universe in Session.
+Recall performs literal/mechanical candidate discovery.
 
-Main may supply queries, exact IDs/tags, epistemic filters, relation labels and neighbor expansion. Runtime never treats lexical rank as semantic importance.
+Current mechanics use:
+
+- FTS5 when available;
+- SQL fallback;
+- exact IDs;
+- tags;
+- scope;
+- `domain`;
+- `context_key`;
+- retention/epistemic filters;
+- relation labels;
+- optional neighbor expansion.
+
+Main decides whether returned candidates are semantically relevant.
+
+Runtime never promotes lexical rank into universal meaning.
+
+## Activation
+
+Recall discovery and prompt materialization are separate.
+
+When Main explicitly activates Memory:
+
+1. Runtime selects/persists the exact result set;
+2. the next page is materialized in `memory_view`;
+3. an exact Frontier represents any remaining page;
+4. the operation observation contains compact IDs/counts/provenance instead of duplicating the node bodies.
+
+This gives Memory bodies one prompt authority.
 
 ## No automatic projection
 
-Normal cognition does not call a global `project_memory_view`. Only explicit Main activation is materialized as Memory context.
+Normal cognition does not call a global `project_memory_view`.
 
-There is no `memory_focus`, Active Projection, HOT/WARM/COLD tier, automatic Temporary Memory working set or hidden semantic selector.
+There is no:
 
-## Graph size independence
+- `memory_focus`;
+- Active Projection;
+- HOT/WARM/COLD tier;
+- automatic Temporary Memory working set;
+- hidden semantic selector;
+- embedding-based prompt insertion.
 
-Growing the graph must not proportionally increase a trivial prompt. Nodes that are not materialized remain reachable through explicit recall/activation/paging.
+The graph can grow without proportionally growing a trivial prompt.
+
+## Graph-size invariant
+
+A larger Memory Graph must not increase baseline prompt size merely because more nodes exist.
+
+The intended relationship is:
+
+```text
+graph growth
+    !=
+automatic prompt growth
+```
+
+Nonmaterialized nodes remain reachable through explicit recall/activation/paging.
+
+## Conversation continuity
+
+Recent conversation is provided directly through native conversation roles. Memory is not used as a substitute for the current conversation window.
+
+Older conversation can remain reachable through the `chat` domain and its context identity when explicit recall is required.
 
 ## Migration boundary
 
 Runtime opens v12 only.
 
-The sole retained historical conversion for this release is the explicit one-shot v11→v12 tool:
+The retained historical conversion is an explicit one-shot v11 → v12 tool:
 
 ```bash
 python -m eyle.devtools.migrate_memory_v11_to_v12 <storage-directory>
 ```
 
-It performs mechanical metadata conversion only. It does not ask an LLM to reinterpret historical nodes and it is not imported by the normal runtime.
+The migration performs mechanical metadata conversion. It does not ask an LLM to reinterpret historical Memory and is not imported by the normal request path.

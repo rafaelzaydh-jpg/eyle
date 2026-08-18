@@ -14,7 +14,7 @@ import llm.executar as llm_mod
 @pytest.fixture(autouse=True)
 def _adapter_handshake_already_verified(monkeypatch):
     monkeypatch.setattr(
-        llm_mod, "_ensure_adapter_handshake",
+        llm_mod, "_ensure_adapter_ready",
         lambda config: {"adapter_protocol": llm_mod.ADAPTER_TRANSPORT_PROTOCOL},
     )
 
@@ -63,7 +63,7 @@ def _capture(monkeypatch, response):
 
 
 def _agent_json(answer="ok"):
-    return json.dumps({"decision":{"type":"concluir","response":answer},"memory_delta":[]})
+    return json.dumps({"type":"concluir","response":answer,"memory_delta":[]})
 
 
 def test_rev282_has_no_ollama_transport_or_local_model_fallback():
@@ -79,7 +79,7 @@ def test_rev282_adapter_request_has_no_arbitrary_per_call_max_tokens(monkeypatch
     assert "max_tokens" not in calls[0][1]
 
 
-def test_structured_openai_uses_tolerant_wire_schema(monkeypatch):
+def test_structured_openai_uses_current_wire_schema(monkeypatch):
     body = _agent_json()
     calls = _capture(monkeypatch, {"choices": [{"message": {"content": body}}]})
     parsed = llm_mod._chamar_llm("s", "u", _config(), perfil="ecc")
@@ -87,13 +87,10 @@ def test_structured_openai_uses_tolerant_wire_schema(monkeypatch):
     assert parsed["response"] == "ok"
     fmt = calls[0][1]["response_format"]
     assert fmt["type"] == "json_schema"
-    assert fmt["json_schema"]["strict"] is False
+    assert fmt["json_schema"]["strict"] is True
     wire = fmt["json_schema"]["schema"]
-    assert wire["type"] == "object"
-    assert wire["additionalProperties"] is True
-    assert {"decision", "type", "memory_delta"} <= set(wire["properties"])
-    # Provider sees only a forgiving wire object; strict ECC lives inside Eyle.
-    assert "oneOf" not in wire.get("properties", {}).get("decision", {})
+    assert "oneOf" in wire
+    assert all(branch.get("additionalProperties") is False for branch in wire["oneOf"])
 
 
 def test_structured_json_schema_is_required_and_fails_closed(monkeypatch):
@@ -159,12 +156,12 @@ def test_invalid_openai_envelope_fails_at_transport_boundary(monkeypatch):
     assert exc.value.error_code == "BACKEND_RESPONSE_INVALID"
 
 
-def test_structured_parser_recovers_first_json_object_from_markdown_or_prose(monkeypatch):
-    content = '```json\n' + _agent_json() + '\n```\n' + _agent_json("second")
+def test_core_does_not_recover_provider_markdown_or_prose(monkeypatch):
+    content = '```json\n' + _agent_json() + '\n```'
     _capture(monkeypatch, {"choices": [{"message": {"content": content}}]})
-    parsed = llm_mod._chamar_llm("s", "u", _config(), perfil="ecc")
-    assert parsed["type"] == "concluir"
-    assert parsed["response"] == "ok"
+    with pytest.raises(llm_mod.ErroLLM) as exc:
+        llm_mod._chamar_llm("s", "u", _config(), perfil="ecc")
+    assert exc.value.error_code.startswith("STRUCTURED_RESPONSE_INVALID:ecc:")
 
 
 def test_http_error_keeps_backend_detail(monkeypatch):
@@ -454,7 +451,7 @@ def test_structured_call_records_real_system_prompt_size(monkeypatch):
     parsed = llm_mod._chamar_llm("short system", "{}", cfg, execution=execution, perfil="ecc")
     assert parsed["type"] == "concluir"
     prompt = execution.latest_call()["prompt"]
-    assert prompt["system_prompt_characters"] > len("short system")
+    assert prompt["system_prompt_characters"] == len("short system")
     assert prompt["system_prompt_estimated_tokens"] > 0
 
 
@@ -467,7 +464,7 @@ def test_rev286_eyle_always_sends_wire_schema_and_adapter_owns_upstream_mode(mon
         fmt=calls[-1][1]["response_format"]
         assert fmt["type"]=="json_schema"
         assert fmt["json_schema"]["name"]=="eyle_cognition_wire"
-        assert fmt["json_schema"]["strict"] is False
+        assert fmt["json_schema"]["strict"] is True
 
 
 def test_rev28_canonical_prompt_sends_stable_message_before_dynamic(monkeypatch):
@@ -478,9 +475,10 @@ def test_rev28_canonical_prompt_sends_stable_message_before_dynamic(monkeypatch)
     parsed=llm_mod._chamar_llm("system",prompt,_config(),perfil="ecc")
     assert parsed["response"]=="ok"
     messages=calls[0][1]["messages"]
-    assert [m["role"] for m in messages]==["system","user","user"]
+    assert [m["role"] for m in messages]==["system","user","user","user"]
     assert "ecc_operations" in messages[1]["content"]
-    assert "current_request" in messages[2]["content"]
+    assert "runtime_feedback" in messages[2]["content"]
+    assert messages[-1] == {"role": "user", "content": "hello"}
 
 
 def test_rev281_success_adapter_headers_are_observable(monkeypatch):
@@ -588,31 +586,20 @@ def test_rev281_zero_usage_adapter_transport_failure_keeps_bounded_outer_retry(m
     assert calls["n"] == 3
 
 
-def test_rev288_diagnosticar_backend_uses_formal_handshake_then_ready_not_models(monkeypatch):
+def test_rev375_diagnosticar_backend_uses_health_then_ready(monkeypatch):
     calls = []
-    handshake = {
+    health = {
         "status": "ok",
-        "handshake_schema": llm_mod.ADAPTER_HANDSHAKE_SCHEMA,
         "adapter_protocol": llm_mod.ADAPTER_TRANSPORT_PROTOCOL,
-        "adapter_profile": "eyle-provider-transport-v3",
-        "adapter_version": "2.7.5-rev3.2",
-        "authority": "transport-only",
-        "semantic_protocol": "client-owned",
-        "endpoints": {"chat_completions": "/v1/chat/completions", "readiness": "/ready", "models": "/v1/models"},
-        "capabilities": {
-            "chat_completions": True,
-            "client_json_schema_hint": True,
-            "json_candidate_passthrough": True,
-            "syntactic_json_recovery": True,
-            "client_completion_ceiling": True,
-            "client_reasoning_control": True,
-        },
+        "adapter_profile": "simple",
+        "adapter_version": "2.7.5-rev3.7.5",
+        "model": "provider-model",
     }
 
     def fake_get(endpoint, timeout, *, protocol=False):
         calls.append((endpoint, protocol))
-        if endpoint.endswith("/v1/eyle/handshake"):
-            return handshake, {}
+        if endpoint.endswith("/health"):
+            return health, {}
         if endpoint.endswith("/ready"):
             return {"status": "ready_configured", "model": "provider-model"}, {}
         raise AssertionError(endpoint)
@@ -623,30 +610,17 @@ def test_rev288_diagnosticar_backend_uses_formal_handshake_then_ready_not_models
     assert result["adapter_protocol"] == llm_mod.ADAPTER_TRANSPORT_PROTOCOL
     assert result["models"] == ["provider-model"]
     assert [item[0] for item in calls] == [
-        "http://localhost:8080/v1/eyle/handshake",
+        "http://localhost:8080/health",
         "http://localhost:8080/ready",
     ]
     assert all(item[1] is True for item in calls)
 
 
-def test_rev288_handshake_incompatibility_blocks_before_paid_generation(monkeypatch):
-    monkeypatch.undo()  # remove autouse stub for this test only
-    llm_mod._ADAPTER_COMPATIBILITY_CACHE.clear()
+def test_rev375_protocol_incompatibility_blocks_before_paid_generation(monkeypatch):
+    monkeypatch.undo()  # remove autouse readiness stub for this test only
+    llm_mod._ADAPTER_STATUS_CACHE.clear()
     calls = []
-    bad = {
-        "status": "ok",
-        "handshake_schema": llm_mod.ADAPTER_HANDSHAKE_SCHEMA,
-        "adapter_protocol": "old-protocol",
-        "authority": "transport-only",
-        "semantic_protocol": "client-owned",
-        "endpoints": {"chat_completions": "/v1/chat/completions", "readiness": "/ready"},
-        "capabilities": {
-            "chat_completions": True,
-            "client_json_schema_hint": True,
-            "json_candidate_passthrough": True,
-            "syntactic_json_recovery": True,
-        },
-    }
+    bad = {"status": "ok", "adapter_protocol": "old-protocol"}
 
     def fake_get(endpoint, timeout, *, protocol=False):
         calls.append(endpoint)
@@ -659,4 +633,17 @@ def test_rev288_handshake_incompatibility_blocks_before_paid_generation(monkeypa
         llm_mod._chamar_llm_impl("s", "u", _config(), execution=None)
     assert exc.value.error_code == "ADAPTER_PROTOCOL_INCOMPATIBLE"
     assert paid["n"] == 0
-    assert calls == ["http://localhost:8080/v1/eyle/handshake"]
+    assert calls == ["http://localhost:8080/health"]
+
+
+
+
+def test_rev3751_adapter_boundary_metadata_is_observable():
+    meta = llm_mod._adapter_response_metadata({
+        "X-Eyle-Structured-Contract-Characters": "1234",
+        "X-Eyle-Repair-Context-Mode": "isolated",
+        "X-Eyle-Structured-Repairs": "1",
+    })
+    assert meta["adapter_structured_contract_characters"] == 1234
+    assert meta["adapter_repair_context_mode"] == "isolated"
+    assert meta["adapter_structured_repairs"] == 1

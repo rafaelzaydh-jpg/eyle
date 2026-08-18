@@ -1,4 +1,4 @@
-"""Deterministic composed prompt-floor measurement for Rev3.7.1."""
+"""Deterministic composed prompt-floor measurement for Rev3.7.5.1."""
 from __future__ import annotations
 
 import json
@@ -9,7 +9,7 @@ from eyle.core.memory import memory_environment
 from eyle.runtime.ecc_runtime import available_internal
 from eyle.runtime.token_budget import estimate_tokens
 from llm.executar import PROMPT_ECC
-from llm.structured import contract_instruction
+from llm.structured import wire_schema_for_profile
 
 
 def measure_static_cognitive_floor(
@@ -43,7 +43,7 @@ def measure_static_cognitive_floor(
     }
     pieces = {
         "system": PROMPT_ECC.rstrip(),
-        "contract": contract_instruction("ecc"),
+        "provider_wire_schema": wire_schema_for_profile("ecc"),
         "capability_surface": capabilities,
         "runtime_environment": runtime_environment,
         "minimal_runtime_packet": minimal_runtime_packet,

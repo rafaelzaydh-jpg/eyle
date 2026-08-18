@@ -89,21 +89,21 @@ def test_semantic_choices_pause_and_resume_same_logical_execution(monkeypatch, t
     assert details2["llm_usage"]["execution_resume_count"] == 1
 
 
-def test_memory_wire_normalizes_basic_variants_without_second_llm():
+def test_memory_wire_uses_current_canonical_fields_without_second_llm():
     parsed = parse_ecc_response({
         "type": "concluir",
         "response": "ok",
         "memory_delta": [{
-            "operation": "remember",
+            "op": "remember",
             "arguments": {
-                "namespace": "personal",
-                "category": "preference",
-                "text": "O usuário prefere respostas compactas.",
-                "nature": "preference",
-                "confidence": "0.8",
-                "tag": "communication",
-                "source": "request",
-                "aliases": "respostas curtas",
+                "scope": "user",
+                "retention": "temporary",
+                "kind": "preference",
+                "content": "O usuário prefere respostas compactas.",
+                "epistemic": {"nature": "preference", "confidence": 0.8},
+                "tags": ["communication"],
+                "supports": [{"kind": "request"}],
+                "recall": {"aliases": ["respostas curtas"]},
             },
         }],
     })
@@ -116,7 +116,6 @@ def test_memory_wire_normalizes_basic_variants_without_second_llm():
     assert item["tags"] == ["communication"]
     assert item["supports"] == [{"kind": "request"}]
     assert item["recall"]["aliases"] == ["respostas curtas"]
-
 
 def test_web_panel_uses_hidden_submit_value_and_choice_resolution_code_exists():
     root = Path(__file__).resolve().parents[1]

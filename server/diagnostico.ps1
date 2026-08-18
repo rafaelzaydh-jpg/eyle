@@ -12,15 +12,14 @@ try {
     exit 1
 }
 
-Write-Host "`n=== Adapter -> upstream: ready ===" -ForegroundColor Cyan
+Write-Host "`n=== Eyle Adapter: local readiness ===" -ForegroundColor Cyan
 try {
     Invoke-RestMethod "$Base/ready" | ConvertTo-Json -Depth 8
 } catch {
-    Write-Host "Adapter esta online, mas o upstream nao ficou pronto." -ForegroundColor Red
+    Write-Host "Adapter esta online, mas a configuracao local nao esta pronta." -ForegroundColor Red
     if ($_.ErrorDetails.Message) { Write-Host $_.ErrorDetails.Message -ForegroundColor Yellow }
     else { Write-Host $_.Exception.Message -ForegroundColor Yellow }
     exit 2
 }
 
-Write-Host "`n=== OpenAI /v1/models ===" -ForegroundColor Cyan
-Invoke-RestMethod "$Base/v1/models" | ConvertTo-Json -Depth 8
+Write-Host "`nA conectividade remota e comprovada somente por uma chamada real /chat/completions." -ForegroundColor DarkGray

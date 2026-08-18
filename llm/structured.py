@@ -1,15 +1,12 @@
-"""Wire + canonical structured cognition boundary for Eyle.
+"""Canonical structured cognition contract owned by Eyle.
 
-The provider-facing wire is intentionally tolerant: Main does the semantic work
-and may emit a simple flat JSON object. Eyle deterministically canonicalizes safe
-aliases into its strict internal {decision,memory_delta} contract and validates
-semantics locally. The Adapter owns only provider transport and JSON recovery; it
-never owns ECC or Memory meaning.
+Eyle defines the current ECC wire shape and Memory semantics. The Adapter receives
+this schema, performs transport-only JSON recovery/validation and at most one
+format repair. Core does not negotiate provider quirks or repair transport syntax.
 """
 from __future__ import annotations
 
 from eyle.contracts.memory import EPISTEMIC_SCHEMA, normalize_epistemic
-import ast
 import json
 import re
 from copy import deepcopy
@@ -250,7 +247,7 @@ _MEMORY_DELTA_SCHEMA = {"type": "array", "items": _MEMORY_ACTION_SCHEMA}
 _OPERATION_SCHEMA = {
     "type": "object",
     "properties": {
-        "operation": {"type": "string", "minLength": 1, "pattern": r"^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)?$"},
+        "operation": {"type": "string", "minLength": 1, "pattern": r"^[A-Za-z0-9_-]+$"},
         "arguments": {"type": "object"},
     },
     "required": ["operation", "arguments"],
@@ -300,458 +297,113 @@ _EYLE_RESPONSE_SCHEMA = {
     "additionalProperties": False,
 }
 
-# Eyle separates the provider-facing wire shape from the canonical ECC
-# contract.  The wire schema deliberately asks the model/provider for only the
-# basic physical property the Adapter can help with: return a JSON object.  Eyle
-# itself owns aliases, canonicalization and semantic validation.
+# Provider-facing ECC wire: strict about the decision family, deliberately
+# shallow about Memory. This lets the Adapter reject malformed ECC such as
+# explorar.operations=[] while preserving the invariant that an invalid
+# Memory sidecar never vetoes an otherwise valid ECC decision.
+_WIRE_MEMORY_DELTA_SCHEMA = {"type": "array"}
 _EYLE_WIRE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "decision": {"type": "object"},
-        "type": {"type": "string"},
-        "response": {},
-        "answer": {},
-        "choices": {},
-        "options": {},
-        "allow_free_text": {},
-        "operation": {},
-        "operations": {},
-        "arguments": {},
-        "memory_delta": {},
-        "memory": {},
-        "memories": {},
-    },
-    "additionalProperties": True,
+    "oneOf": [
+        {
+            "type": "object",
+            "properties": {
+                "type": {"type": "string", "enum": ["explorar"]},
+                "operations": {"type": "array", "minItems": 1, "items": _OPERATION_SCHEMA},
+                "memory_delta": _WIRE_MEMORY_DELTA_SCHEMA,
+            },
+            "required": ["type", "operations", "memory_delta"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "type": {"type": "string", "enum": ["construir"]},
+                "operation": _OPERATION_SCHEMA["properties"]["operation"],
+                "arguments": {"type": "object"},
+                "memory_delta": _WIRE_MEMORY_DELTA_SCHEMA,
+            },
+            "required": ["type", "operation", "arguments", "memory_delta"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "type": {"type": "string", "enum": ["concluir"]},
+                "response": {"type": "string", "minLength": 1},
+                "choices": {"type": "array", "minItems": 2, "items": {"type": "string", "minLength": 1}},
+                "allow_free_text": {"type": "boolean"},
+                "memory_delta": _WIRE_MEMORY_DELTA_SCHEMA,
+            },
+            "required": ["type", "response", "memory_delta"],
+            "additionalProperties": False,
+        },
+    ]
 }
 
 
 def schema_for_profile(profile: str) -> Dict[str, Any]:
-    """Return Eyle's strict *internal* canonical schema."""
+    """Return Eyle's strict internal canonical schema."""
     if profile != "ecc":
         raise StructuredResponseError("STRUCTURED_PROFILE_UNKNOWN", f"unknown structured profile: {profile}")
     return deepcopy(_EYLE_RESPONSE_SCHEMA)
 
 
 def wire_schema_for_profile(profile: str) -> Dict[str, Any]:
-    """Return the intentionally tolerant provider-facing wire schema."""
+    """Return the current provider-facing ECC wire schema."""
     if profile != "ecc":
         raise StructuredResponseError("STRUCTURED_PROFILE_UNKNOWN", f"unknown structured profile: {profile}")
     return deepcopy(_EYLE_WIRE_SCHEMA)
 
 
 def json_schema_response_format(profile: str) -> Dict[str, Any]:
-    # Provider native-schema modes are an aid, never the semantic authority.
-    # strict=False is intentional: safe aliases are canonicalized inside Eyle.
     schema = wire_schema_for_profile(profile)
-    return {"type": "json_schema", "json_schema": {"name": "eyle_cognition_wire", "strict": False, "schema": schema}}
+    return {"type": "json_schema", "json_schema": {"name": "eyle_cognition_wire", "strict": True, "schema": schema}}
 
 
 def mandatory_top_level_keys(profile: str) -> tuple[str, ...]:
-    schema_for_profile(profile)
-    return ("decision", "memory_delta")
-
-
-def contract_instruction(profile: str) -> str:
     wire_schema_for_profile(profile)
-    return (
-        'Return one JSON object only. Do the basic semantic work; Eyle will canonicalize safe wire aliases. '
-        'Preferred wire form is flat: {"type":"explorar|construir|concluir",...,"memory_delta":[]}. '
-        'explorar uses operations:[{operation,arguments}]; construir uses operation+arguments; concluir uses response and may include semantic choices. '
-        'A nested {"decision":{...},"memory_delta":[]} envelope is also accepted. '
-        'memory_delta is always an array and may use flat memory actions; safe supports include "request", "mat-0001", "mem-...", "rel-..." or canonical objects. '
-        'Preserve meaning; do not spend cognition trying to serialize Eyle internals perfectly.'
-    )
+    return ("type", "memory_delta")
 
 
-_WHOLE_FENCE_RE = re.compile(r"^\s*```(?:json|javascript|python)?\s*(.*?)\s*```\s*$", re.I | re.S)
-
-
-def _balanced_json_fragment(text: str) -> str | None:
-    """Extract the first balanced object/array without interpreting semantics."""
-    start = None
-    opener = ""
-    for index, char in enumerate(text):
-        if char in "{[":
-            start = index
-            opener = char
-            break
-    if start is None:
-        return None
-    stack = [opener]
-    quote = None
-    escaped = False
-    pairs = {"}": "{", "]": "["}
-    for index in range(start + 1, len(text)):
-        char = text[index]
-        if quote is not None:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == quote:
-                quote = None
-            continue
-        if char in {'"', "'"}:
-            quote = char
-            continue
-        if char in "{[":
-            stack.append(char)
-            continue
-        if char in "}]":
-            if not stack or stack[-1] != pairs[char]:
-                continue
-            stack.pop()
-            if not stack:
-                return text[start:index + 1]
-    return None
-
-
-def _decode_jsonish(candidate: str) -> Any:
-    last_error: Exception | None = None
-    for decoder in (json.loads, ast.literal_eval):
-        try:
-            value = decoder(candidate)
-            # Models/providers occasionally JSON-encode the JSON string itself.
-            if isinstance(value, str):
-                nested = value.strip()
-                if nested.startswith(("{", "[")):
-                    try:
-                        return json.loads(nested)
-                    except (json.JSONDecodeError, TypeError):
-                        try:
-                            return ast.literal_eval(nested)
-                        except (ValueError, SyntaxError, TypeError):
-                            pass
-            return value
-        except (json.JSONDecodeError, ValueError, SyntaxError, TypeError) as exc:  # deterministic fall-through only
-            last_error = exc
-    if last_error is not None:
-        raise last_error
-    raise ValueError("empty JSON decoder set")
 
 
 def parse_json_representation(raw: Any) -> Any:
-    """Recover a JSON/Python-literal representation without inventing meaning."""
+    """Decode the current JSON representation only.
+
+    Mechanical fence/prose/fragment recovery belongs to the Adapter.
+    """
     if isinstance(raw, (dict, list)):
         return deepcopy(raw)
     if not isinstance(raw, str) or not raw.strip():
         raise StructuredResponseError("STRUCTURED_EMPTY", "structured response is empty")
-    text = raw.strip()
-    candidates: list[str] = []
-    fence = _WHOLE_FENCE_RE.match(text)
-    if fence:
-        candidates.append(fence.group(1).strip())
-    candidates.append(text)
-    fragment = _balanced_json_fragment(text)
-    if fragment and fragment not in candidates:
-        candidates.append(fragment)
-    last: Exception | None = None
-    for candidate in candidates:
-        try:
-            return _decode_jsonish(candidate)
-        except (json.JSONDecodeError, ValueError, SyntaxError, TypeError) as exc:
-            last = exc
-    detail = type(last).__name__ if last is not None else "unknown"
-    raise StructuredResponseError("STRUCTURED_JSON_INVALID", f"response does not contain a recoverable JSON object: {detail}") from last
-
-
-def _movement(value: Any) -> str:
-    token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
-    return {
-        "explore": "explorar", "exploration": "explorar", "observe": "explorar", "explorar": "explorar",
-        "build": "construir", "construct": "construir", "write": "construir", "construir": "construir",
-        "final": "concluir", "finish": "concluir", "conclude": "concluir", "answer": "concluir", "concluir": "concluir",
-    }.get(token, str(value or "").strip())
-
-
-def _memory_op(value: Any) -> str:
-    token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
-    return {
-        "remember": "remember", "store": "remember", "memorize": "remember",
-        "revise": "revise", "update": "revise",
-        "relate": "relate", "link": "relate",
-        "revise_relation": "revise_relation", "update_relation": "revise_relation", "revise_edge": "revise_relation", "update_edge": "revise_relation",
-        "archive": "archive",
-        "supersede": "supersede", "replace": "supersede",
-        "retire_relation": "retire_relation", "retire_edge": "retire_relation",
-        "task_status": "task_status", "set_task_status": "task_status", "task_state": "task_status",
-    }.get(token, str(value or "").strip())
-
-
-def _wire_operation(raw: Any) -> Any:
-    if isinstance(raw, str) and raw.strip():
-        return {"operation": raw.strip(), "arguments": {}}
-    if not isinstance(raw, dict):
-        return raw
-    operation = raw.get("operation")
-    if not isinstance(operation, str) or not operation.strip():
-        for alias in ("name", "tool"):
-            if isinstance(raw.get(alias), str) and raw.get(alias).strip():
-                operation = raw.get(alias).strip()
-                break
-    arguments = raw.get("arguments")
-    if not isinstance(arguments, dict):
-        for alias in ("args", "input"):
-            if isinstance(raw.get(alias), dict):
-                arguments = raw.get(alias)
-                break
-    if arguments is None:
-        arguments = {}
-    return {"operation": operation, "arguments": arguments}
-
-
-def _wire_memory_item(raw: Any) -> Any:
-    """Normalize common Memory wire variants without inventing knowledge.
-
-    Main remains responsible only for the semantic payload.
-    Eyle handles harmless transport variation: wrapper placement, singular/list
-    forms, spelling aliases and the conservative omitted-retention default.
-    Unknown fields are preserved so strict validation can still reject semantic
-    ambiguity instead of silently discarding meaning.
-    """
-    if not isinstance(raw, dict):
-        return raw
-    item = deepcopy(raw)
-    op = item.get("op")
-    if not isinstance(op, str) or not op.strip():
-        op = item.get("action") or item.get("operation")
-    op = _memory_op(op)
-
-    if isinstance(item.get("arguments"), dict):
-        args = deepcopy(item["arguments"])
-        # Models sometimes put part of a flat memory item beside arguments.
-        # Merge only when the nested object did not already choose the field.
-        for key, value in item.items():
-            if key not in {"op", "action", "operation", "arguments"} and key not in args:
-                args[key] = deepcopy(value)
-    else:
-        args = {k: deepcopy(v) for k, v in item.items() if k not in {"op", "action", "operation", "arguments"}}
-
-    # Pure serialization aliases.
-    aliases = {
-        "scope": ("namespace", "memory_scope"),
-        "retention": ("lifetime", "duration", "memory_retention"),
-        "kind": ("category", "memory_kind", "memory_type"),
-        "content": ("text", "statement", "fact", "memory_content"),
-        "supports": ("support", "evidence", "sources", "provenance"),
-        "tags": ("tag",),
-    }
-    for canonical, candidates in aliases.items():
-        if canonical in args:
-            continue
-        for alias in candidates:
-            if alias in args:
-                args[canonical] = args.pop(alias)
-                break
-
-    scope_token = str(args.get("scope") or "").strip().lower().replace("-", "_")
-    if scope_token in {"personal", "person", "self", "profile", "user_memory"}:
-        args["scope"] = "user"
-    elif scope_token in {"global", "external", "environment", "world_memory", "project", "workspace"}:
-        args["scope"] = "world"
-
-    retention = args.get("retention")
-    token = str(retention or "").strip().lower().replace("-", "_")
-    if token in {"temp", "temporary", "transient", "short", "short_term", "working"}:
-        args["retention"] = "temporary"
-    elif token in {"permanent", "durable", "persistent", "long", "long_term"}:
-        args["retention"] = "persistent"
-    elif op == "remember" and retention is None:
-        # Omission is a wire-level conservative default, not a truth judgment:
-        # temporary can later be promoted by Main; silent durable storage cannot
-        # be undone epistemically.
-        args["retention"] = "temporary"
-
-    if op == "remember" and "kind" not in args:
-        # Reuse a label Main already authored instead of inventing a category.
-        epi_source = args.get("epistemic") if isinstance(args.get("epistemic"), dict) else args
-        nature = epi_source.get("nature") if isinstance(epi_source, dict) else None
-        if isinstance(nature, str) and nature.strip():
-            args["kind"] = nature.strip()
-
-    if isinstance(args.get("expected_revision"), str) and args["expected_revision"].strip().isdigit():
-        args["expected_revision"] = int(args["expected_revision"].strip())
-    if isinstance(args.get("expected_state_revision"), str) and args["expected_state_revision"].strip().isdigit():
-        args["expected_state_revision"] = int(args["expected_state_revision"].strip())
-    if op == "task_status" and "state" not in args:
-        for alias in ("status", "task_state"):
-            if alias in args:
-                args["state"] = args.pop(alias)
-                break
-    if isinstance(args.get("confidence"), str):
-        try:
-            numeric = float(args["confidence"].strip())
-        except (TypeError, ValueError):
-            pass
-        else:
-            args["confidence"] = numeric
-    if isinstance(args.get("epistemic"), dict) and isinstance(args["epistemic"].get("confidence"), str):
-        epi = deepcopy(args["epistemic"])
-        try:
-            epi["confidence"] = float(epi["confidence"].strip())
-        except (TypeError, ValueError):
-            pass
-        args["epistemic"] = epi
-
-    if "supports" not in args and "source" in args:
-        # Only promote source when it already looks like an unambiguous support.
-        source = args.get("source")
-        if isinstance(source, str) and (source in {"request", "current_request"} or re.fullmatch(_MATERIAL_REF, source) or re.fullmatch(_MEMORY_REF, source) or re.fullmatch(_RELATION_REF, source)):
-            args["supports"] = args.pop("source")
-
-    if isinstance(args.get("tags"), str) and args["tags"].strip():
-        args["tags"] = [args["tags"].strip()]
-
-    # Flat epistemic fields are a serialization alias only; no value is inferred.
-    if "epistemic" not in args:
-        epi = {k: args.pop(k) for k in ("nature", "confidence", "volatility", "temporal", "context") if k in args}
-        if epi:
-            args["epistemic"] = epi
-
-    # Associative-recall aliases remain Main-authored semantics. Eyle merely
-    # nests them and accepts singular strings as one-element lists.
-    if "recall" not in args:
-        recall = {}
-        for canonical, recall_aliases in {
-            "aliases": ("recall_aliases", "aliases"),
-            "concepts": ("recall_concepts", "concepts"),
-            "cues": ("recall_cues", "cues"),
-        }.items():
-            for alias in recall_aliases:
-                if alias in args:
-                    value = args.pop(alias)
-                    if isinstance(value, str) and value.strip():
-                        value = [value.strip()]
-                    recall[canonical] = value
-                    break
-        if recall:
-            args["recall"] = recall
-    elif isinstance(args.get("recall"), dict):
-        recall = deepcopy(args["recall"])
-        for key in ("aliases", "concepts", "cues"):
-            if isinstance(recall.get(key), str) and recall[key].strip():
-                recall[key] = [recall[key].strip()]
-        args["recall"] = recall
-
-    return {"op": op, "arguments": args}
+    try:
+        return json.loads(raw.strip())
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise StructuredResponseError(
+            "STRUCTURED_JSON_INVALID",
+            f"response is not valid current JSON: {type(exc).__name__}",
+        ) from exc
 
 
 def _canonicalize_wire(raw: Any) -> tuple[Dict[str, Any], list[str]]:
+    """Split the current flat ECC wire into Eyle's internal envelope.
+
+    No historical wrappers, field aliases or movement aliases are accepted here.
+    Transport syntax repair belongs to the Adapter; Core only maps the current
+    Eyle-owned wire into its internal decision + Memory sidecar representation.
+    """
     value = parse_json_representation(raw)
-    steps: list[str] = []
-    if isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict):
-        value = value[0]
-        steps.append("unwrap_single_array")
     if not isinstance(value, dict):
         raise StructuredResponseError("STRUCTURED_OBJECT_REQUIRED", "top-level wire value must be an object")
-    value = deepcopy(value)
-    for wrapper in ("output", "result", "ecc"):
-        if "decision" not in value and "type" not in value and isinstance(value.get(wrapper), dict):
-            value = deepcopy(value[wrapper])
-            steps.append(f"unwrap_{wrapper}")
-            break
-
-    memory_source = None
-    for key in ("memory_delta", "memory", "memories"):
-        if key in value:
-            memory_source = value.get(key)
-            if key != "memory_delta":
-                steps.append(f"alias_{key}_to_memory_delta")
-            break
-    if memory_source is None:
-        memory_source = []
-        steps.append("default_memory_delta")
-    elif isinstance(memory_source, dict):
-        memory_source = [memory_source]
-        steps.append("wrap_single_memory")
-
-    decision = value.get("decision")
-    if isinstance(decision, str) and decision.strip() and "type" not in value:
-        decision = {"type": decision.strip()}
-        for key in ("response", "answer", "operation", "operations", "arguments"):
-            if key in value:
-                decision[key] = deepcopy(value[key])
-        steps.append("decision_string_to_object")
-    if not isinstance(decision, dict):
-        if any(k in value for k in ("type", "operation", "operations", "response", "answer", "final", "text")):
-            decision = {k: deepcopy(v) for k, v in value.items() if k in {
-                "type", "operation", "operations", "arguments", "response", "answer", "final", "text", "choices", "options", "allow_free_text", "on_success"
-            }}
-            steps.append("wrap_flat_decision")
-        else:
-            decision = value.get("decision")
-    if not isinstance(decision, dict):
-        return {"decision": decision, "memory_delta": memory_source}, steps
-
-    kind = _movement(decision.get("type") or decision.get("kind"))
-    out_decision: Dict[str, Any] = {"type": kind}
-    if kind == "explorar":
-        operations = decision.get("operations")
-        if isinstance(operations, dict):
-            operations = [operations]
-            steps.append("wrap_single_operation")
-        if not isinstance(operations, list) and decision.get("operation") is not None:
-            operations = [{"operation": decision.get("operation"), "arguments": decision.get("arguments") or {}}]
-            steps.append("single_explore_to_batch")
-        if isinstance(operations, list):
-            operations = [_wire_operation(item) for item in operations]
-        out_decision["operations"] = operations
-    elif kind == "construir":
-        op = _wire_operation({
-            "operation": decision.get("operation") or decision.get("name") or decision.get("tool"),
-            "arguments": decision.get("arguments") if isinstance(decision.get("arguments"), dict) else decision.get("args") if isinstance(decision.get("args"), dict) else {},
-        })
-        if isinstance(op, dict):
-            out_decision.update(op)
-        # on_success is a retired wire field. Ignoring it cannot change the
-        # physical operation chosen by Main and avoids reviving old semantics.
-        if "on_success" in decision:
-            steps.append("drop_retired_on_success")
-    elif kind == "concluir":
-        response = decision.get("response")
-        if response is None:
-            for alias in ("answer", "final", "text"):
-                if alias in decision:
-                    response = decision.get(alias)
-                    steps.append(f"alias_{alias}_to_response")
-                    break
-        out_decision["response"] = response
-        raw_choices = decision.get("choices") if "choices" in decision else decision.get("options")
-        if raw_choices is not None:
-            if isinstance(raw_choices, (str, dict)):
-                raw_choices = [raw_choices]
-            if isinstance(raw_choices, list):
-                choices = []
-                for item in raw_choices:
-                    if isinstance(item, str):
-                        label = item.strip()
-                    elif isinstance(item, dict):
-                        label = str(item.get("label") or item.get("text") or item.get("title") or "").strip()
-                    else:
-                        label = ""
-                    if label and label not in choices:
-                        choices.append(label)
-                if choices:
-                    out_decision["choices"] = choices
-            if "options" in decision:
-                steps.append("alias_options_to_choices")
-        if "allow_free_text" in decision:
-            out_decision["allow_free_text"] = bool(decision.get("allow_free_text"))
-    else:
-        # Preserve unknown decision data so strict canonical validation can give
-        # Main a precise error rather than the canonicalizer guessing semantics.
-        out_decision.update({k: deepcopy(v) for k, v in decision.items() if k not in {"type", "kind"}})
-
-    normalized_memory = memory_source
-    if isinstance(memory_source, list):
-        normalized_memory = [_wire_memory_item(item) for item in memory_source]
-        if normalized_memory != memory_source:
-            steps.append("normalize_memory_wire")
-    return {"decision": out_decision, "memory_delta": normalized_memory}, steps
+    if "type" not in value:
+        raise StructuredResponseError("EYLE_ENVELOPE_INVALID", "current ECC wire requires top-level type")
+    memory_source = deepcopy(value.get("memory_delta", []))
+    decision = {key: deepcopy(item) for key, item in value.items() if key != "memory_delta"}
+    return {"decision": decision, "memory_delta": memory_source}, []
 
 
 def canonicalize_wire_response(raw: Any) -> Dict[str, Any]:
-    """Deterministically turn tolerant wire JSON into the canonical envelope."""
+    """Deterministically map the current flat wire into the canonical envelope."""
     envelope, _ = _canonicalize_wire(raw)
     return envelope
 
@@ -1109,11 +761,7 @@ def _clean_operation(raw: Any, label: str) -> Dict[str, Any]:
     if not isinstance(operation, str) or not operation.strip() or not isinstance(arguments, dict):
         raise StructuredResponseError("ECC_OPERATION_INVALID", f"{label} requires operation and object arguments")
     operation = operation.strip()
-    for prefix in ("explorar.", "construir."):
-        if operation.startswith(prefix):
-            operation = operation[len(prefix):]
-            break
-    if re.fullmatch(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)?", operation) is None:
+    if re.fullmatch(r"[A-Za-z0-9_-]+", operation) is None:
         raise StructuredResponseError("ECC_OPERATION_INVALID", f"{label}.operation invalid")
     return {"operation": operation, "arguments": dict(arguments)}
 
@@ -1174,8 +822,8 @@ def _parse_ecc_decision(decision: Any) -> Dict[str, Any]:
 
 
 def parse_ecc_response(raw: Any) -> Dict[str, Any]:
-    # Tolerant wire -> deterministic canonical envelope. ECC is validated first;
-    # Memory is then parsed independently as a non-vetoing sidecar.
+    # Current flat wire -> canonical envelope. ECC is validated first;
+    # Memory is then parsed independently as a non-vetoing Eyle sidecar.
     envelope = canonicalize_wire_response(raw)
     if set(envelope) != {"decision", "memory_delta"}:
         raise StructuredResponseError("EYLE_ENVELOPE_INVALID", "canonical top-level must contain exactly decision and memory_delta")

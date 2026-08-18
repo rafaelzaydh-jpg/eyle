@@ -9,6 +9,7 @@ from eyle.core.memory import (
     memory_activate_result,
     memory_continue_result,
     memory_relation_history_result,
+    materialize_explicit_memory_view,
 )
 from eyle.core.session import AgentSession
 from eyle.runtime.memory_graph import (
@@ -81,7 +82,9 @@ def test_rev287_recall_frontier_is_db_cursor_not_full_id_snapshot(tmp_path):
     )
     assert first["ok"] is True
     assert first["detail"]["matched_nodes"] == 120
-    assert len(first["detail"]["memory_view"]["nodes"]) == 7
+    view = materialize_explicit_memory_view(session, registry=registry, config=base_config(), provider_context=context)
+    assert len(view["nodes"]) == 7
+    assert "memory_view" not in first["detail"]
     assert first["coverage"]["facts"]["db_cursor"] is True
     assert first["frontiers"][0]["count"] == 113
     snapshots = session.observation_ledger["snapshots"]
@@ -190,8 +193,11 @@ def test_rev287_wire_supports_revise_relation_without_closed_epistemic_ontology(
         {
             "type": "concluir", "response": "ok",
             "memory_delta": [{
-                "op": "update_edge", "id": "rel-demo", "expected_revision": 2,
-                "nature": "causal_guess", "confidence": 0.4, "volatility": "very_contextual",
+                "op": "revise_relation",
+                "arguments": {
+                    "id": "rel-demo", "expected_revision": 2,
+                    "epistemic": {"nature": "causal_guess", "confidence": 0.4, "volatility": "very_contextual"},
+                },
             }],
         },
         "ecc",

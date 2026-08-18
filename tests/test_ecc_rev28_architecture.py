@@ -48,39 +48,38 @@ def test_rev28_canonical_envelope_places_memory_beside_ecc():
     assert set(schema["properties"])=={"decision","memory_delta"}
     assert schema["required"]==["decision","memory_delta"]
     assert "objective" not in json.dumps(schema).lower()
-    raw={"decision":{"type":"concluir","response":"ok"},"memory_delta":[]}
+    raw={"type":"concluir","response":"ok","memory_delta":[]}
     assert parse_profile_response(raw,"ecc")=={"type":"concluir","response":"ok","memory_delta":[]}
-    # Rev2.8.6 wire is intentionally tolerant; flat decision + memory alias is
-    # canonicalized inside Eyle before strict Runtime validation.
-    assert parse_profile_response({"type":"concluir","response":"old","memory":[]},"ecc") == {
-        "type":"concluir","response":"old","memory_delta":[]
-    }
+    with pytest.raises(StructuredResponseError):
+        parse_profile_response({"decision":{"type":"concluir","response":"old"},"memory_delta":[]},"ecc")
+    with pytest.raises(StructuredResponseError):
+        parse_profile_response({"type":"concluir","response":"old","memory":[]},"ecc")
 
 
 def test_rev283_explore_batch_has_no_semantic_operation_ceiling():
-    raw={"decision":{"type":"explorar","operations":[
+    raw={"type":"explorar","operations":[
         {"operation":"git_status","arguments":{"source":"workspace"}},
         {"operation":"list_tree","arguments":{"source":"workspace"}},
-    ]},"memory_delta":[]}
+    ],"memory_delta":[]}
     parsed=parse_profile_response(raw,"ecc")
     assert len(parsed["operations"])==2
-    many={"decision":{"type":"explorar","operations":[{"operation":"list_tree","arguments":{"source":"workspace"}} for _ in range(12)]},"memory_delta":[]}
+    many={"type":"explorar","operations":[{"operation":"list_tree","arguments":{"source":"workspace"}} for _ in range(12)],"memory_delta":[]}
     assert len(parse_profile_response(many,"ecc")["operations"])==12
     with pytest.raises(StructuredResponseError):
-        parse_profile_response({"decision":{"type":"explorar","operations":[]},"memory_delta":[]},"ecc")
+        parse_profile_response({"type":"explorar","operations":[],"memory_delta":[]},"ecc")
 
 
-def test_rev283_build_must_return_to_main_after_real_observation():
-    raw={"decision":{"type":"construir","operation":"transaction","arguments":{},"on_success":"Feito."},"memory_delta":[]}
+def test_rev375_build_wire_is_current_only():
+    raw={"type":"construir","operation":"transaction","arguments":{},"memory_delta":[]}
     parsed=parse_profile_response(raw,"ecc")
-    # Retired on_success is a harmless wire artifact and is deterministically
-    # dropped; it never re-enters Runtime semantics.
-    assert parsed["type"]=="construir" and "on_success" not in parsed
+    assert parsed["type"]=="construir"
+    with pytest.raises(StructuredResponseError):
+        parse_profile_response({"type":"construir","operation":"transaction","arguments":{},"on_success":"Feito.","memory_delta":[]},"ecc")
 
 
 def test_persisted_identity_is_current_only():
     state=AgentSession("x").to_dict()
-    assert state["session_schema_version"]==SESSION_SCHEMA_VERSION=="2.7.5-r3.7.2-ecc"
+    assert state["session_schema_version"]==SESSION_SCHEMA_VERSION=="2.7.5-r3.7.5-ecc"
     assert MEMORY_GRAPH_SCHEMA_VERSION=="2.7.5-r3.7.1-memory-graph-v12"
     assert PENDING_SCHEMA_VERSION=="13-ecc"
     assert state["memory_view"]["node_ids"]==[]

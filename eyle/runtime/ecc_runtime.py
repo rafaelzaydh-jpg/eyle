@@ -234,22 +234,24 @@ def dispatch(
         if "scope" in arguments and str(arguments.get("scope")) not in {"all", "user", "world", "global"}:
             return DispatchOutcome({"operation": operation, "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": "ECC_OPERATION_ARGUMENTS_INVALID"})
         result = memory_overview_result(session, arguments=arguments, provider_context=provider_context)
-        return DispatchOutcome(result, physical_progress=result.get("ok") is True)
+        # Memory navigation is cognitive materialization, not physical-world
+        # progress. Episode safety decides whether the returned facts are novel.
+        return DispatchOutcome(result, physical_progress=False)
 
     if operation == "memory_history":
         if action_kind != "explorar" or set(arguments) != {"id"} or not isinstance(arguments.get("id"), str):
             return DispatchOutcome({"operation": operation, "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": "ECC_OPERATION_ARGUMENTS_INVALID"})
         result = memory_history_result(session, arguments=arguments, provider_context=provider_context)
-        return DispatchOutcome(result, physical_progress=result.get("ok") is True)
+        return DispatchOutcome(result, physical_progress=False)
 
     if operation == "memory_relation_history":
         if action_kind != "explorar" or set(arguments) != {"id"} or not isinstance(arguments.get("id"), str):
             return DispatchOutcome({"operation": operation, "status": "failed", "ok": False, "executed": False, "changed": False, "error_code": "ECC_OPERATION_ARGUMENTS_INVALID"})
         result = memory_relation_history_result(session, arguments=arguments, provider_context=provider_context)
-        return DispatchOutcome(result, physical_progress=result.get("ok") is True)
+        return DispatchOutcome(result, physical_progress=False)
 
     if operation == "memory_activate":
-        allowed_memory_args = {"query", "queries", "ids", "tags", "natures", "volatilities", "relation_labels", "scope", "retention", "include_neighbors", "limit"}
+        allowed_memory_args = {"query", "queries", "ids", "tags", "natures", "volatilities", "relation_labels", "scope", "retention", "domain", "context_key", "include_neighbors", "limit"}
         valid = action_kind == "explorar" and not (set(arguments) - allowed_memory_args)
         valid = valid and ("query" not in arguments or isinstance(arguments.get("query"), str))
         valid = valid and ("queries" not in arguments or (isinstance(arguments.get("queries"), list) and all(isinstance(v, str) for v in arguments.get("queries") or [])))
@@ -260,6 +262,8 @@ def dispatch(
         valid = valid and ("relation_labels" not in arguments or (isinstance(arguments.get("relation_labels"), list) and all(isinstance(v, str) for v in arguments.get("relation_labels") or [])))
         valid = valid and ("scope" not in arguments or str(arguments.get("scope")) in {"all", "user", "world", "global"})
         valid = valid and ("retention" not in arguments or str(arguments.get("retention")) in {"all", "temporary", "persistent"})
+        valid = valid and ("domain" not in arguments or str(arguments.get("domain") or "").strip().lower() in {"all", "chat", "task", "eyle", "knowledge"})
+        valid = valid and ("context_key" not in arguments or arguments.get("context_key") is None or isinstance(arguments.get("context_key"), str))
         valid = valid and ("include_neighbors" not in arguments or isinstance(arguments.get("include_neighbors"), bool))
         valid = valid and ("limit" not in arguments or (isinstance(arguments.get("limit"), int) and not isinstance(arguments.get("limit"), bool) and int(arguments.get("limit")) >= 1))
         if not valid:
@@ -267,7 +271,7 @@ def dispatch(
         result = memory_activate_result(
             session, arguments=arguments, registry=registry, config=config, provider_context=provider_context,
         )
-        return DispatchOutcome(result, physical_progress=result.get("ok") is True)
+        return DispatchOutcome(result, physical_progress=False)
 
     if operation == "continue" and action_kind == "explorar" and set(arguments) == {"frontier"}:
         frontier_id = str(arguments.get("frontier") or "")
@@ -276,7 +280,7 @@ def dispatch(
             result = memory_continue_result(
                 session, frontier_id=frontier_id, registry=registry, config=config, provider_context=provider_context,
             )
-            return DispatchOutcome(result, physical_progress=result.get("ok") is True)
+            return DispatchOutcome(result, physical_progress=False)
 
     available = available_internal(registry, config, provider_context)
     capability = resolve(operation, action_kind, registry, available)

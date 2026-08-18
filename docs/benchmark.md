@@ -1,80 +1,206 @@
-# Benchmarks — Rev3.7.2
+# Benchmarks — Rev3.7.5.1
 
-Rev3.7.2 is a cut/canonicalization release. Its benchmark goal is to prove that removing alternate paths did not reduce reachability or reintroduce cost growth.
+Eyle benchmarks both **behavioral correctness** and **execution efficiency**.
+
+The objective is not to minimize tokens at any cost. The objective is to avoid duplicated/irrelevant materialization while preserving the information and capabilities required to complete the task correctly.
+
+## Principles
+
+A benchmark is meaningful only when it measures the whole request path:
+
+```text
+request
++ semantic system
++ capability/runtime surface
++ materialized conversation
++ explicit Memory
++ observations/feedback
++ Adapter structured contract
++ provider usage
+```
+
+Provider-reported token usage is the accounting authority. Local estimates are diagnostic decompositions.
 
 ## Required scenarios
 
-1. `"oi"` — one normal cognition, compact static floor.
-2. short conversation reference — recent physical conversation resolves naturally.
-3. topic switch — unrelated Task/Memory does not enter automatically.
-4. 200+ message conversation — token-budget slice stays bounded; omitted count/frontier/reachability remain correct.
-5. Memory scaling — compare 100, 1,000 and 10,000+ nodes on the same trivial request; prompt size must not grow proportionally.
-6. explicit old Memory recall — absent from baseline prompt, found when Main asks for it.
-7. protocol repair — same fingerprint is bounded and repair does not resend large observations.
-8. invalid Memory sidecar — valid ECC executes with zero extra LLM call caused solely by Memory rejection.
-9. large observation/search/file result — page is bounded physically and exact remainder remains reachable.
-10. sandbox Build — exact confirmed mutation, post-write verification and rollback invariants remain intact.
+### Conversation and identity
 
-## Metrics
+1. **Greeting** — a trivial `"hi"` should normally require one Eyle cognition and no tools.
+2. **Immediate reference** — recent references such as `money -> it` resolve from native-role conversation.
+3. **Topic return** — switching topics and returning to a prior adjacent subject preserves causality.
+4. **Negative history** — asking for an entity never mentioned does not produce a nearby unrelated fact.
+5. **Active-request boundary** — a new trivial request after a context-heavy turn answers the new request.
+6. **Self identity** — `"analyze your code"` targets `source="eyle"` while `"analyze the project"` targets `source="workspace"`.
+7. **Ordinal reference** — references such as `"the second function"` preserve the ordering established by the previous answer.
 
-Per provider call:
+### Context scaling
+
+8. **200+ message conversation** — recent slice stays within configured materialization budget; omitted count remains correct.
+9. **Memory scaling** — compare a trivial request with 100, 1,000, and 10,000+ Memory nodes; prompt size must not grow proportionally.
+10. **Explicit old Memory recall** — old state absent from baseline prompt remains reachable when Main asks for recall.
+11. **Large physical result** — a large search/file result is bounded in the prompt while exact remainder remains reachable through Material/Coverage/Frontier.
+
+### Structured boundary
+
+12. **First-pass valid wire** — normal structured calls should usually validate without Adapter repair.
+13. **Mechanical repair** — malformed representation gets at most one Adapter repair.
+14. **Repair isolation** — repair does not replay Eyle conversation/Memory/tools/Task context.
+15. **Invalid after repair** — Eyle can make one fresh decision without losing Session/observations.
+16. **Truncation** — provider `finish_reason=length` is reported directly and does not start a format repair.
+
+### Memory and execution
+
+17. **Invalid Memory sidecar** — valid ECC still executes with no extra LLM call solely for Memory repair.
+18. **Recall single materialization** — activated node bodies appear once in the next cognition.
+19. **Valid fixed point** — repeated identical action/result without progress terminates through Runtime fixed-point safety.
+20. **Long useful cognition** — many turns with genuinely new Runtime information remain allowed.
+
+### Persistent Build
+
+21. **Sandbox candidate** — isolated command/test work does not mutate the real workspace.
+22. **Promotion** — exact staged bytes/hash/freshness/confirmation are verified before real mutation.
+23. **Transaction rollback** — failed persistent mutation does not leave a partial workspace state.
+
+## Per-provider-call metrics
 
 ```text
 provider_prompt_tokens
 provider_completion_tokens
 provider_total_tokens
-cached_tokens
+cached_prompt_tokens
+uncached_prompt_tokens
 cognition_reason
-estimated_static_tokens
-estimated_conversation_tokens
-estimated_memory_tokens
-estimated_observation_tokens
-estimated_feedback_tokens
-estimated_capability_tokens
+adapter_upstream_attempts
+adapter_structured_repairs
+adapter_schema_enforcement
+adapter_structured_contract_characters
+adapter_repair_context_mode
+prompt_estimated_tokens
 ```
 
-Per execution:
+Prompt component estimates should include at least:
+
+```text
+conversation
+current_request
+ecc/capability surface
+runtime environment
+memory environment
+memory view
+latest observations
+runtime effects
+runtime feedback
+```
+
+## Per-execution metrics
 
 ```text
 total_provider_tokens
 normal_cognition_tokens
-protocol_recovery_tokens
+wire_retry_tokens
 number_of_llm_calls
-number_of_protocol_repairs
+number_of_wire_retries
+physical_capability_calls
+operation_replays
 memory_rejections
 conversation_messages_materialized
 conversation_messages_omitted
+older_history_available
+failure_code
+duration
 ```
 
-Provider-reported usage remains the ledger authority; local component estimates are diagnostic only.
+## Structured-repair rate
+
+Adapter repair is an exception path, not the normal path.
+
+Track:
+
+```text
+repair_rate =
+logical structured calls requiring Adapter repair
+/
+all structured logical calls
+```
+
+A rising repair rate is a provider-boundary regression even if requests eventually succeed, because it increases latency, provider generations, and token use.
 
 ## Static cognitive floor
 
-Measure the composed floor, not isolated components:
+Measure the composed floor, not isolated files:
 
 ```text
-system/wire semantics
-+ current contract
-+ compact capability surface
-+ minimal runtime packet
+semantic system
++ current capability/runtime contract
++ minimal Runtime packet
++ Adapter-delivered structured schema
 ```
 
-A larger Memory Graph must not raise this floor simply because more knowledge exists.
+A larger Memory Graph must not raise this floor merely because more knowledge exists.
 
-## Cut regression criterion
+## Token-efficiency rule
 
-A Rev3.7.2 change is not an improvement if it makes an old hidden/duplicate path disappear by also making useful state unreachable. The desired transformation is:
+Optimization should remove duplication before it removes reachable information.
+
+Prefer:
 
 ```text
-multiple competing paths
+one canonical representation
+one body materialization
+one repair context
+```
+
+over:
+
+```text
+smaller prompt
+but missing context/capabilities
+```
+
+The target transformation is:
+
+```text
+multiple competing copies
         ↓
-one canonical path
+one canonical copy
 ```
 
 not:
 
 ```text
-multiple paths
+multiple copies
         ↓
 lost capability
 ```
+
+## Fixed-point benchmark
+
+A valid Eyle investigation is bounded by **progress**, not by an arbitrary turn count.
+
+Synthetic tests should prove both sides:
+
+```text
+same valid action/result repeatedly
+-> bounded termination
+```
+
+and:
+
+```text
+many turns + genuinely new Runtime facts
+-> allowed to continue
+```
+
+This distinguishes execution-loop safety from a hidden `MAX_TURNS` ceiling.
+
+## Comparing releases
+
+Use the bundled CLI:
+
+```bash
+python main.py benchmark
+python main.py compare-coverage <baseline.json> <candidate.json>
+python main.py compare-efficiency <baseline.json> <candidate.json>
+```
+
+Coverage regressions take priority over superficial token reductions. Efficiency comparisons are useful only after the candidate still reaches the same required behavior.

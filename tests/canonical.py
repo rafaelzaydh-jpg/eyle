@@ -17,8 +17,8 @@ def run_agent(module, *args, **kwargs):
 def base_config(*, tests_enabled=False):
     return {
         "app_version": "2.7.5",
-        "config_schema_version": "2.7.5-r3.7.2-ecc",
-        "revision": "rev3.7.2-ecc",
+        "config_schema_version": "2.7.5-r3.7.5.1-ecc",
+        "revision": "rev3.7.5.1-ecc",
         "llm": {
             "base_url": "http://127.0.0.1:8080",
             "model": "deepseek-v4-flash",
@@ -27,7 +27,7 @@ def base_config(*, tests_enabled=False):
             "context_window_tokens": None,
             "connect_timeout_seconds": 5,
             "read_timeout_seconds": None,
-            "adapter_handshake_timeout_seconds": 3,
+            "adapter_status_timeout_seconds": 3,
             "retry_max_attempts": 3,
             "retry_base_delay_seconds": 0.0,
             "retry_max_delay_seconds": 0.0,
