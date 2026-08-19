@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_rev372_config_accepts_only_current_identity():
     registry = standard_registry()
     current = base_config()
-    assert validar_config(copy.deepcopy(current), registry)["revision"] == "rev3.7.5.1-ecc"
+    assert validar_config(copy.deepcopy(current), registry)["revision"] == "rev4.0.0-ecc"
 
     older = copy.deepcopy(current)
     older["config_schema_version"] = "2.7.5-r3.7.1-ecc"
@@ -51,7 +51,7 @@ def test_rev372_removed_config_fields_are_rejected(section, key, value):
 
 def test_rev372_session_and_pending_are_current_schema_only():
     session = AgentSession("x").to_dict()
-    assert session["session_schema_version"] == SESSION_SCHEMA_VERSION == "2.7.5-r3.7.5-ecc"
+    assert session["session_schema_version"] == SESSION_SCHEMA_VERSION == "2.7.5-r4.0.0-ecc"
     older = copy.deepcopy(session)
     older["session_schema_version"] = "2.7.5-r3.7.1-ecc"
     with pytest.raises(ValueError, match="SESSION_SCHEMA_INCOMPATIBLE"):
@@ -59,7 +59,7 @@ def test_rev372_session_and_pending_are_current_schema_only():
 
     with pytest.raises(ValueError, match="PENDING_SCHEMA_INCOMPATIBLE"):
         validate_pending_continuation({"pending_schema_version": "12-ecc"})
-    assert PENDING_SCHEMA_VERSION == "13-ecc"
+    assert PENDING_SCHEMA_VERSION == "16-ecc"
 
 
 def test_rev372_memory_runtime_rejects_v11_and_one_shot_migrator_converts(tmp_path):

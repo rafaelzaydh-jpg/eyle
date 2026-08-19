@@ -79,7 +79,7 @@ def run_compileall_for_changes(project_root: str, paths: Iterable[str], timeout_
                 "files": [],
             }
 
-        command = [sys.executable, "-m", "compileall", "-q", "--", *copied]
+        command = [sys.executable, "-S", "-m", "compileall", "-q", "--", *copied]
         try:
             completed = subprocess.run(
                 command,

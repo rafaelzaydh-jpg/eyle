@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from tests.canonical import adapt_legacy_ecc_script
 import copy
 import time
 from pathlib import Path
@@ -31,7 +32,7 @@ def test_rev288_human_wait_does_not_consume_active_budget(monkeypatch, tmp_path)
         build("transaction", {"patches": [{"operation": "update", "path": "app.py", "line_start": 1, "line_end": 1, "new_code": "x = 2\n"}]}),
         conclude("done"),
     ])
-    monkeypatch.setattr(agent, "executar_ecc_llm", lambda prompt, config: next(outputs))
+    monkeypatch.setattr(agent, "_call_surface_llm", adapt_legacy_ecc_script(lambda prompt, config: next(outputs)))
     status, _, pending, _ = run_agent(
         agent, "mude x", cfg, provider_context=provider_context(tmp_path),
         retornar_detalhes=True, execution_id="logical-deadline", source_job_id=1,
@@ -123,7 +124,7 @@ def test_rev288_confirmation_pending_keeps_memory_cursor_until_logical_task_term
         explore("read_file", {"source": "workspace", "path": "app.py", "line_start": 1, "line_end": 1}),
         build("transaction", {"patches": [{"operation": "update", "path": "app.py", "line_start": 1, "line_end": 1, "new_code": "x = 2\n"}]}),
     ])
-    monkeypatch.setattr(agent, "executar_ecc_llm", lambda prompt, config: next(outputs))
+    monkeypatch.setattr(agent, "_call_surface_llm", adapt_legacy_ecc_script(lambda prompt, config: next(outputs)))
     status, _, pending, _ = run_agent(
         agent, "mude x", cfg, provider_context=provider_context(tmp_path),
         retornar_detalhes=True, execution_id="pending-cleanup", source_job_id=1,

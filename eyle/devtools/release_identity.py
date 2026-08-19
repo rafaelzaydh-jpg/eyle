@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed Rev3.7.5.1 current-artifact verifier.
+"""Fail-closed Rev4.0.0 current-artifact verifier.
 
 Historical release compatibility belongs to explicit migration tools/CHANGELOG.
 This verifier checks only the current Eyle architecture and publication tree.
@@ -154,7 +154,7 @@ def _architecture_violations(base: Path, manifest: Dict[str, Any]) -> List[str]:
         if len(PROMPT_ECC) > 6000:
             out.append(f"stable prompt too verbose:{len(PROMPT_ECC)}")
         probe = CanonicalPrompt(
-            stable={"ecc_operations": {}, "runtime_environment": {}},
+            stable={"ecc_navigation": {}, "runtime_environment": {}},
             dynamic={
                 "current_request": "new request",
                 "conversation": {
@@ -174,22 +174,33 @@ def _architecture_violations(base: Path, manifest: Dict[str, Any]) -> List[str]:
         if any("new request" in str(m.get("content") or "") for m in probe[:-1]):
             out.append("current_request duplicated before causal frontier")
 
-        schema = schema_for_profile("ecc")
-        wire = wire_schema_for_profile("ecc")
-        fmt = json_schema_response_format("ecc")
-        if set(schema.get("properties") or {}) != {"decision", "memory_delta"}:
-            out.append("canonical ECC envelope invalid")
-        if "oneOf" not in wire or fmt.get("json_schema", {}).get("strict") is not True:
-            out.append("current strict provider wire schema missing")
+        for profile in ("navigation", "explore", "build"):
+            schema = schema_for_profile(profile)
+            wire = wire_schema_for_profile(profile)
+            fmt = json_schema_response_format(profile)
+            if "oneOf" not in schema or "oneOf" not in wire:
+                out.append(f"{profile} structured surface schema missing")
+            if fmt.get("json_schema", {}).get("strict") is not True:
+                out.append(f"{profile} strict provider wire schema missing")
         try:
-            canonicalize_wire_response({"decision": {"type": "concluir", "response": "old"}, "memory_delta": []})
+            schema_for_profile("ecc")
+            out.append("legacy monolithic ecc profile still accepted")
+        except Exception:
+            pass
+        try:
+            canonicalize_wire_response(
+                {"decision": {"type": "concluir", "response": "old"}, "memory_delta": []},
+                "navigation",
+            )
             out.append("legacy decision wrapper still accepted")
         except Exception:
             pass
-        if canonicalize_wire_response({"type": "concluir", "response": "ok", "memory_delta": []}) != {
-            "decision": {"type": "concluir", "response": "ok"}, "memory_delta": []
-        }:
-            out.append("current wire canonicalization invalid")
+        current = canonicalize_wire_response(
+            {"type": "concluir", "response": "ok", "memory_delta": []},
+            "navigation",
+        )
+        if current.get("primary") != {"type": "concluir", "response": "ok"} or current.get("memory_delta") != []:
+            out.append("current navigation wire canonicalization invalid")
 
         session = AgentSession("verify")
         if set(session.memory_view) != {"node_ids", "coverage", "frontiers", "selector", "overview"}:
@@ -200,21 +211,21 @@ def _architecture_violations(base: Path, manifest: Dict[str, Any]) -> List[str]:
             out.append("wire retry telemetry missing")
         if "number_of_protocol_repairs" in usage or "protocol_recovery_tokens" in usage:
             out.append("retired protocol repair telemetry returned")
-        if EXECUTION_CONTINUITY_SCHEMA_VERSION != "execution-continuity-v3":
+        if EXECUTION_CONTINUITY_SCHEMA_VERSION != "execution-continuity-v6":
             out.append("execution continuity schema mismatch")
-        if SESSION_SCHEMA_VERSION != "2.7.5-r3.7.5-ecc":
+        if SESSION_SCHEMA_VERSION != "2.7.5-r4.0.0-ecc":
             out.append("session schema mismatch")
         if NO_PROGRESS_REPEATS_AFTER_WARNING != 2:
             out.append("fixed-point bound mismatch")
-        if PENDING_SCHEMA_VERSION != "13-ecc":
+        if PENDING_SCHEMA_VERSION != "16-ecc":
             out.append("pending schema mismatch")
         if MEMORY_GRAPH_SCHEMA_VERSION != "2.7.5-r3.7.1-memory-graph-v12":
             out.append("Memory Graph v12 identity mismatch")
 
         agent_text = (base / "eyle/core/agent.py").read_text(encoding="utf-8")
-        if "progress_tracker = ExecutionProgress()" not in agent_text or "progress_tracker.observe(" not in agent_text:
+        if "ExecutionProgress.from_dict(session.execution_progress)" not in agent_text or "progress_tracker.observe(" not in agent_text:
             out.append("Eyle execution fixed-point tracker missing")
-        if "wire_retry_used = False" not in agent_text or "ECC_WIRE_RETRY" not in agent_text:
+        if "wire_retry_surface: Optional[str] = None" not in agent_text or "ECC_WIRE_RETRY" not in agent_text:
             out.append("one fresh Eyle decision after wire failure missing")
         if "ECC_PROTOCOL_RECOVERY" in agent_text or "CognitionEpisode" in agent_text:
             out.append("provider protocol recovery leaked into Core")
@@ -223,7 +234,7 @@ def _architecture_violations(base: Path, manifest: Dict[str, Any]) -> List[str]:
 
         server_text = (base / "server/server.py").read_text(encoding="utf-8")
         for required in (
-            'ADAPTER_VERSION = "2.7.5-rev3.7.5.1"',
+            'ADAPTER_VERSION = "2.7.5-rev3.7.6"',
             'ADAPTER_TRANSPORT_PROTOCOL = "eyle-adapter-transport-v2"',
             "MAX_UPSTREAM_ATTEMPTS_PER_LOGICAL_CALL = 2",
             "def normalize_structured(",
@@ -266,7 +277,7 @@ def _architecture_violations(base: Path, manifest: Dict[str, Any]) -> List[str]:
             out.append("manifest memory_graph_schema mismatch")
         if manifest.get("adapter_protocol") != ADAPTER_TRANSPORT_PROTOCOL:
             out.append("manifest adapter protocol mismatch")
-        if manifest.get("adapter_version") != "2.7.5-rev3.7.5.1":
+        if manifest.get("adapter_version") != "2.7.5-rev3.7.6":
             out.append("manifest adapter version mismatch")
     except Exception as exc:
         out.append(f"architecture verifier runtime failure:{type(exc).__name__}:{exc}")
@@ -285,8 +296,8 @@ def validar_artefato_release(base_dir: os.PathLike[str] | str, manifesto: Dict[s
         violations.append("extracted artifact verification not required")
     if pub.get("experimental") is not False:
         violations.append("release must not be experimental")
-    if pub.get("mainline_base") != "Rev3.7.5":
-        violations.append("Rev3.7.5.1 mainline base mismatch")
+    if pub.get("mainline_base") != "Rev3.7.8":
+        violations.append("Rev4.0.0 mainline base mismatch")
     if violations:
         raise ReleaseIdentityError("invalid release artifact:\n- " + "\n- ".join(sorted(set(violations))))
 

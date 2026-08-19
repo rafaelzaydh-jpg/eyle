@@ -153,6 +153,6 @@ Operators are responsible for:
 
 ## Supported security contract
 
-Security documentation describes the current Rev3.7.5.1 runtime.
+Security documentation describes the current Rev4.0.0 runtime.
 
 Historical behavior should not be assumed to have the same guarantees. Use the current release identity and verification gates when evaluating a deployment.

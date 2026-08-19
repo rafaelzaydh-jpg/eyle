@@ -1,181 +1,88 @@
-# Model Surface — Rev3.7.5.1
+# Model Surface — Rev4.0.0
 
-This document describes the deterministic surface around Main: what context is materialized, how current conversation is represented, and what structured ECC wire Main must return.
+Rev4 uses **three structured protocol surfaces** around the same three ECC movements. Surfaces are not phases and do not give Runtime semantic authority.
 
-Eyle owns the semantics. The Adapter owns provider-specific transport and mechanical JSON/schema conformance.
+## Provider chronology
 
-## Provider message order
-
-The normal provider-facing chronology is:
+Every call keeps the canonical provider chronology:
 
 ```text
-1. Eyle semantic system instruction
-2. stable/capability Runtime surface
-3. bounded Runtime state
-4. recent conversation as native user/assistant roles
+1. surface-specific Eyle system instruction
+2. stable physical surface/catalog
+3. bounded dynamic Runtime state
+4. recent native user/assistant conversation
 5. current_request as the final user message
 ```
 
-The active request appears exactly once.
+`current_request` appears exactly once.
 
-This prevents recent historical assistant output from appearing after the current user request and becoming the apparent active instruction.
+## Navigation
 
-## Context packet
+Navigation contains no detailed tool schemas. Main chooses exactly one ECC movement:
 
-`ContextMaterializer` can include:
+```json
+{"type":"explorar","memory_delta":[]}
+```
 
-- Runtime environment;
-- current Task mechanics;
-- explicit Memory activation;
-- latest observations;
-- runtime effects;
-- compact exploration/frontier state;
-- Runtime feedback;
-- recent conversation;
-- current request.
+```json
+{"type":"construir","memory_delta":[]}
+```
 
-Conversation, observations, and feedback are bounded by physical token budgets.
+```json
+{"type":"concluir","response":"...","memory_delta":[]}
+```
 
-The packet does not contain a hidden semantic topic selector.
+Optional `task_binding` is a semantic persistence sidecar. Trivial conversation can conclude in this one call.
 
-## Current ECC wire
+## Explore
 
-### Explore
+Only observe/execute capabilities are exposed:
 
 ```json
 {
-  "type": "explorar",
-  "operations": [
-    {
-      "operation": "read_file",
-      "arguments": {
-        "source": "workspace",
-        "path": "calc.py"
-      }
-    }
+  "operations":[
+    {"operation":"read_file","arguments":{"source":"workspace","path":"a.py"}}
   ],
-  "memory_delta": []
+  "memory_delta":[]
 }
 ```
 
-### Build
+or:
 
 ```json
-{
-  "type": "construir",
-  "operation": "transaction",
-  "arguments": {},
-  "memory_delta": []
-}
+{"return_to_ecc":true,"memory_delta":[]}
 ```
 
-### Conclude
+Batches are Main-authored and should contain independent operations. Runtime never chooses a next tool.
+
+## Build
+
+Only mutate capabilities are exposed:
 
 ```json
-{
-  "type": "concluir",
-  "response": "Final answer",
-  "memory_delta": []
-}
+{"operation":"transaction","arguments":{},"memory_delta":[]}
 ```
 
-The current JSON Schema is supplied by Eyle as data. There is one representation authority.
+or:
 
-Core does not maintain a second textual copy of the same wire contract.
-
-## Adapter representation contract
-
-For structured calls, the Adapter:
-
-1. receives Eyle's JSON Schema;
-2. communicates that exact schema to the provider as the required output representation;
-3. mechanically strips a code fence or extracts one balanced JSON object when safe;
-4. validates the candidate against the same schema;
-5. if necessary, performs exactly one isolated format-only repair using only:
-   - schema;
-   - previous candidate;
-   - validation errors.
-
-The Adapter does not translate historical Eyle aliases or wrappers.
-
-Examples of intentionally unsupported compatibility behavior include:
-
-- `explore` → `explorar`;
-- `answer` → `response`;
-- wrapper unwrapping such as `decision` / `ecc`;
-- Python-literal parsing as an alternative semantic wire;
-- Memory operation aliases.
-
-If a provider needs help conforming to the wire, it receives the current schema rather than a growing compatibility dictionary.
-
-## Truncation
-
-Provider `finish_reason=length` is treated as output truncation.
-
-It is not classified as a format defect and does not trigger the Adapter format-repair generation.
-
-## Fresh Eyle decision after wire failure
-
-If the Adapter's single repair still leaves a schema-invalid candidate, Eyle keeps the existing Session, observations, Task state, and physical progress.
-
-Core may ask Main for one fresh current decision. This is a new Eyle cognition, not a second Adapter repair.
-
-The allowance is replenished only after real Eyle execution progress; syntactic validity by itself is not progress.
-
-## Memory wire
-
-Memory travels as `memory_delta` beside the ECC decision.
-
-Nodes may use:
-
-- `scope`;
-- `domain`;
-- `context_key`;
-- retention;
-- epistemic fields;
-- supports;
-- relation/revision state.
-
-Decision parsing and Memory parsing are isolated.
-
-```text
-valid ECC + invalid memory_delta
-        =
-execute ECC + record Memory error
+```json
+{"return_to_ecc":true,"memory_delta":[]}
 ```
 
-## Explicit Memory activation
+After one mutation attempt, Runtime returns to Navigation.
 
-Memory is not injected globally.
+## Active Task projection
 
-Main explicitly requests recall/activation. Activated node bodies appear in `memory_view` once. The corresponding operation observation carries compact activation metadata rather than the same node bodies again.
+If Main explicitly binds a `kind=task/domain=task` Memory node, Runtime can project exactly that ID as `active_task`. It performs no recall, ranking or neighbor expansion. Without an explicit binding, there is no automatic Task projection.
 
-## Capability surface
+## Memory
 
-Main receives the compact public capability/argument surface.
+Memory Graph remains explicit. `memory_view` contains explicitly activated Memory. Active Task projection is a separate exact-ID execution binding and does not turn Memory into a prompt router.
 
-The canonical Registry remains the full validation authority. Documentation compaction must not make a registered public capability unreachable.
+## Structured authority
 
-The model may decide which capability is semantically appropriate; Runtime validates whether that concrete operation is physically allowed.
+Eyle owns three current schemas: `navigation`, `explore`, and `build`. Adapter receives the exact caller-supplied schema, validates representation and may perform at most one isolated format repair. The historical monolithic `ecc` structured profile is not current.
 
-## Frontier
+## Context policy
 
-A `fr-*` Frontier means exact continuation exists after the currently materialized page.
-
-A page size is a physical presentation choice, not a semantic knowledge limit.
-
-## Observability
-
-Per-call diagnostics can report facts such as:
-
-- prompt component estimates;
-- provider prompt/completion/total tokens;
-- cached prompt tokens;
-- cognition reason;
-- Adapter schema enforcement;
-- Adapter repair count;
-- structured contract size;
-- isolated repair-context mode;
-- parse/validation status.
-
-Diagnostics do not expose raw hidden prompts or raw provider responses in the normal user-facing history.
+Rev4.0.0 first removes irrelevant **capability schemas**. It deliberately retains `current_request` on specialized surfaces. Further conversation/request/runtime minimization requires benchmark evidence and must not introduce semantic Runtime selection.

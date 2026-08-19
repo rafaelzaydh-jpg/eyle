@@ -17,6 +17,9 @@ CASES = (
     "greeting",
     "analyze_single_file",
     "analyze_two_files",
+    "long_file_2k",
+    "long_file_10k",
+    "multi_file_long",
     "edit_confirmed",
     "multi_file_edit",
 )
@@ -50,6 +53,23 @@ def _build_case(root: str, case_id: str) -> str:
         _write(root, "config.py", "PREFIX = 'eyle'\n")
         _write(root, "core.py", "from config import PREFIX\n\ndef make_id(n):\n    return f'{PREFIX}-{n}'\n")
         return "Explain where the prefix used by make_id comes from."
+    if case_id == "long_file_2k":
+        lines = [f"VALUE_{index} = {index}\n" for index in range(1, 2001)]
+        lines[1799] = "TARGET_LONG_2K = 'found-near-end'\n"
+        _write(root, "long_2k.py", "".join(lines))
+        return "Find TARGET_LONG_2K in long_2k.py and report its exact value and line."
+    if case_id == "long_file_10k":
+        lines = [f"VALUE_{index} = {index}\n" for index in range(1, 10001)]
+        lines[9599] = "TARGET_LONG_10K = 'found-near-end'\n"
+        _write(root, "long_10k.py", "".join(lines))
+        return "Find TARGET_LONG_10K in long_10k.py and report its exact value and line."
+    if case_id == "multi_file_long":
+        for file_index in range(1, 4):
+            lines = [f"FILE_{file_index}_VALUE_{index} = {index}\n" for index in range(1, 2501)]
+            if file_index == 3:
+                lines[2199] = "MULTI_LONG_TARGET = 'third-file'\n"
+            _write(root, f"part_{file_index}.py", "".join(lines))
+        return "Find MULTI_LONG_TARGET across the project and explain which file and exact value define it."
     if case_id == "edit_confirmed":
         _write(root, "app.py", "def add(a, b):\n    return a + b\n")
         return "Add a short docstring to add without changing behavior."

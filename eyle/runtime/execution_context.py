@@ -15,7 +15,7 @@ from contextvars import ContextVar
 from typing import Any, Dict, List, Optional
 
 
-EXECUTION_CONTINUITY_SCHEMA_VERSION = "execution-continuity-v3"
+EXECUTION_CONTINUITY_SCHEMA_VERSION = "execution-continuity-v6"
 
 
 def _finite_number(value: Any, default: float) -> float:
@@ -45,7 +45,8 @@ def validate_execution_continuity_state(value: Any) -> Dict[str, Any]:
         "prompt_tokens_budgeted_physical", "prompt_tokens_estimated_raw",
         "prompt_tokens_actual", "prompt_tokens_cached", "prompt_tokens_uncached",
         "prompt_tokens_effective", "completion_tokens_actual", "reasoning_tokens_actual",
-        "terminal_capabilities", "resume_count",
+        "terminal_capabilities", "resume_count", "salvage_checkpoint_emitted",
+        "task_bind_count", "surface_transitions",
     }
     if set(value) != required or value.get("schema_version") != EXECUTION_CONTINUITY_SCHEMA_VERSION:
         raise ValueError("EXECUTION_CONTINUITY_INVALID")
@@ -61,7 +62,7 @@ def validate_execution_continuity_state(value: Any) -> Dict[str, Any]:
         "prompt_tokens_budgeted_physical", "prompt_tokens_estimated_raw",
         "prompt_tokens_actual", "prompt_tokens_cached", "prompt_tokens_uncached",
         "prompt_tokens_effective", "completion_tokens_actual", "reasoning_tokens_actual",
-        "resume_count",
+        "resume_count", "task_bind_count", "surface_transitions",
     )
     for key in ints:
         item = value.get(key)
@@ -69,6 +70,8 @@ def validate_execution_continuity_state(value: Any) -> Dict[str, Any]:
         if not isinstance(item, int) or isinstance(item, bool) or item < minimum:
             raise ValueError("EXECUTION_CONTINUITY_INVALID")
     if not isinstance(value.get("provider_usage_unknown"), bool):
+        raise ValueError("EXECUTION_CONTINUITY_INVALID")
+    if not isinstance(value.get("salvage_checkpoint_emitted"), bool):
         raise ValueError("EXECUTION_CONTINUITY_INVALID")
     request_hash = value.get("canonical_request_hash")
     if request_hash is not None and (not isinstance(request_hash, str) or len(request_hash) != 64):
@@ -116,6 +119,9 @@ class ExecutionContext:
     provider_state: Dict[str, Dict[str, Any]] = field(default_factory=dict, repr=False, compare=False)
     provider_cleanup_callbacks: List[Any] = field(default_factory=list, repr=False, compare=False)
     terminal_capabilities: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    salvage_checkpoint_emitted: bool = False
+    task_bind_count: int = 0
+    surface_transitions: int = 0
 
     def __post_init__(self) -> None:
         if float(self.started_wall_time or 0) <= 0:
@@ -170,6 +176,9 @@ class ExecutionContext:
             provider_usage_unknown=bool(state.get("provider_usage_unknown", False)),
             resume_count=int(state.get("resume_count") or 0) + 1,
             terminal_capabilities=copy.deepcopy(state.get("terminal_capabilities") or {}),
+            salvage_checkpoint_emitted=bool(state.get("salvage_checkpoint_emitted", False)),
+            task_bind_count=int(state.get("task_bind_count") or 0),
+            surface_transitions=int(state.get("surface_transitions") or 0),
         )
         return execution
 
@@ -201,6 +210,9 @@ class ExecutionContext:
             "reasoning_tokens_actual": int(self.reasoning_tokens_actual or 0),
             "terminal_capabilities": copy.deepcopy(self.terminal_capabilities),
             "resume_count": int(self.resume_count or 0),
+            "salvage_checkpoint_emitted": bool(self.salvage_checkpoint_emitted),
+            "task_bind_count": int(self.task_bind_count or 0),
+            "surface_transitions": int(self.surface_transitions or 0),
         }
         validate_execution_continuity_state(state)
         return state
@@ -317,8 +329,19 @@ class ExecutionContext:
                         total = int(pp) + int(cc)
                 if isinstance(total, (int, float)):
                     reason_tokens[reason] += max(0, int(total))
+        surface_calls = {"navigation": 0, "explore": 0, "build": 0}
+        for call in self.llm_calls:
+            if isinstance(call, dict):
+                mode = str(call.get("mode") or "")
+                if mode in surface_calls:
+                    surface_calls[mode] += 1
         return {
             "llm_calls": len(self.llm_calls),
+            "navigation_calls": surface_calls["navigation"],
+            "explore_calls": surface_calls["explore"],
+            "build_calls": surface_calls["build"],
+            "task_bind_count": int(self.task_bind_count or 0),
+            "surface_transitions": int(self.surface_transitions or 0),
             "llm_requests": self.llm_request_count,
             "prompt_tokens_budgeted_physical": int(self.prompt_tokens_budgeted_physical or 0),
             "prompt_tokens_estimated_raw": int(self.prompt_tokens_estimated_raw or 0),

@@ -183,10 +183,10 @@ def test_rev287_relation_can_be_epistemically_revised_and_history_preserved(tmp_
 
 
 def test_rev287_wire_supports_revise_relation_without_closed_epistemic_ontology():
-    schema = schema_for_profile("ecc")
+    schema = schema_for_profile("navigation")
     ops = {
         item["properties"]["op"]["enum"][0]
-        for item in schema["properties"]["memory_delta"]["items"]["oneOf"]
+        for item in next(b for b in schema["oneOf"] if "memory_delta" in b["properties"])["properties"]["memory_delta"]["items"]["oneOf"]
     }
     assert "revise_relation" in ops
     parsed = parse_profile_response(
@@ -200,7 +200,7 @@ def test_rev287_wire_supports_revise_relation_without_closed_epistemic_ontology(
                 },
             }],
         },
-        "ecc",
+        "navigation",
     )
     item = parsed["memory_delta"][0]
     assert item["op"] == "revise_relation"

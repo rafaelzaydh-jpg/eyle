@@ -82,14 +82,14 @@ def test_rev282_eyle_boundary_is_adapter_openai_only():
         assert legacy not in source
 
 
-def test_rev283_prompt_tells_main_to_search_memory_and_not_treat_it_as_truth():
+def test_rev4_navigation_keeps_memory_view_explicit_and_non_authoritative():
     prompt = llm_exec.PROMPT_ECC.lower()
     assert "memory_view is a materialized view" in prompt
     assert "never the boundary of memory" in prompt
-    assert "memory_overview" in prompt and "memory_activate" in prompt
-    assert "not universal truth" in prompt
+    assert "never universal truth" in prompt
+    assert "explicit memory activation remains separate from active task projection" in prompt
     assert "do not guess" in prompt
-    assert "frontier is not a limit" in prompt
+    assert "frontier is available continuation, never an instruction to consume it" in llm_exec.PROMPT_EXPLORE.lower()
 
 
 def test_rev282_temporary_memory_is_not_auto_archived_at_48_nodes(tmp_path):

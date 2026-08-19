@@ -12,7 +12,7 @@ import re
 
 from eyle.runtime.execution_context import validate_execution_continuity_state
 
-PENDING_SCHEMA_VERSION = "13-ecc"
+PENDING_SCHEMA_VERSION = "16-ecc"
 
 _BASE_FIELDS = {
     "pending_schema_version",
@@ -21,10 +21,11 @@ _BASE_FIELDS = {
     "session",
     "execution_state",
 }
-_PERSISTED_FIELDS = {"id", "created_at", "expires_at", "provider_context_hash"}
+_PERSISTED_FIELDS = {"id", "created_at", "expires_at", "provider_identity_hash"}
 _KIND_FIELDS = {
     "capability_confirmation": {"capability", "provider", "confirmation_id"},
     "semantic_choice": {"interaction_id", "options", "allow_free_text"},
+    "recoverable_execution": {"checkpoint_reason", "resume_hint"},
 }
 
 
@@ -98,6 +99,8 @@ def validate_pending_continuation(value: Any, *, persisted: bool = False) -> Dic
     if kind not in _KIND_FIELDS:
         raise ValueError("PENDING_SCHEMA_INVALID")
     expected = _BASE_FIELDS | _KIND_FIELDS[kind] | (_PERSISTED_FIELDS if persisted else set())
+    if persisted and kind == "recoverable_execution":
+        expected = expected | {"checkpoint_generation"}
     if set(value) != expected:
         raise ValueError("PENDING_SCHEMA_INVALID")
 
@@ -121,6 +124,11 @@ def validate_pending_continuation(value: Any, *, persisted: bool = False) -> Dic
             raise ValueError("PENDING_SCHEMA_INVALID")
         if len({str(item).strip().casefold() for item in options}) != len(options):
             raise ValueError("PENDING_SCHEMA_INVALID")
+    elif kind == "recoverable_execution":
+        if value.get("checkpoint_reason") not in {"budget_salvage", "stalled_recoverable"}:
+            raise ValueError("PENDING_SCHEMA_INVALID")
+        if not _non_empty_text(value.get("resume_hint")):
+            raise ValueError("PENDING_SCHEMA_INVALID")
 
     if persisted:
         if not isinstance(value.get("id"), str) or not value["id"].strip():
@@ -131,8 +139,14 @@ def validate_pending_continuation(value: Any, *, persisted: bool = False) -> Dic
         if kind in {"capability_confirmation", "semantic_choice"}:
             if not _non_empty_text(expires_at):
                 raise ValueError("PENDING_SCHEMA_INVALID")
-        context_hash = value.get("provider_context_hash")
-        if context_hash is not None and not _non_empty_text(context_hash):
+        identity_hash = value.get("provider_identity_hash")
+        if identity_hash is not None and not _non_empty_text(identity_hash):
             raise ValueError("PENDING_SCHEMA_INVALID")
+        if kind == "recoverable_execution":
+            if not _non_empty_text(identity_hash):
+                raise ValueError("PENDING_SCHEMA_INVALID")
+            generation = value.get("checkpoint_generation")
+            if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+                raise ValueError("PENDING_SCHEMA_INVALID")
 
     return value

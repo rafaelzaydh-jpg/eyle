@@ -198,6 +198,7 @@ def test_runtime_assigns_confirmation_metadata_once(monkeypatch, tmp_path):
         core_pending,
         provider_context={"standard": {"caminho_origem": str(project)}},
         config={"confirmacoes": {"expiracao_segundos": 600}},
+        provider_identity={"standard": {"workspace_root": str(project)}},
     )
 
     assert saved["id"] == "A1B2"
@@ -206,7 +207,7 @@ def test_runtime_assigns_confirmation_metadata_once(monkeypatch, tmp_path):
     assert [item["label"] for item in public["options"]] == ["Aceitar", "Recusar"]
     assert public["options"][0]["submit_text"] == "confirmar A1B2"
     assert "A1B2" not in public["title"]
-    assert saved["provider_context_hash"] == service_mod._hash_provider_context(
-        {"standard": {"caminho_origem": str(project)}}
+    assert saved["provider_identity_hash"] == service_mod._hash_provider_identity(
+        {"standard": {"workspace_root": str(project)}}
     )
     assert "id" not in core_pending

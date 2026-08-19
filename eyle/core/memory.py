@@ -86,6 +86,107 @@ def memory_environment(provider_context: Dict[str, Any]) -> Dict[str, Any]:
     return {"available": True, "world_scope": world_scope(scope)}
 
 
+
+def materialize_active_task(session: Any, provider_context: Dict[str, Any]) -> Dict[str, Any]:
+    """Project exactly the Main-bound Task; never search, rank or expand Memory.
+
+    ``active_task_id`` is semantic identity authored by Main and persisted by the
+    Session. Runtime only performs an exact node lookup and exposes compact
+    mechanical lifecycle/revision state. A terminal Task may remain projected so
+    Main can observe that fact and decide how to conclude or rebind.
+    """
+    task_id = str(getattr(session, "active_task_id", None) or "").strip()
+    if not task_id:
+        return {}
+    storage, _world_scope_id = _context(provider_context)
+    if not storage:
+        return {
+            "id": task_id,
+            "available": False,
+            "error_code": "ACTIVE_TASK_CONTEXT_UNAVAILABLE",
+        }
+    try:
+        record = node_record(storage, task_id)
+    except (OSError, ValueError) as exc:
+        return {
+            "id": task_id,
+            "available": False,
+            "error_code": str(exc).split(":", 1)[0] or "ACTIVE_TASK_NOT_FOUND",
+        }
+    task = record.get("task") if isinstance(record.get("task"), dict) else None
+    if str(record.get("kind") or "") != "task" or str(record.get("domain") or "") != "task" or task is None:
+        return {
+            "id": task_id,
+            "available": False,
+            "error_code": "ACTIVE_TASK_INVALID",
+        }
+    return {
+        "id": task_id,
+        "available": True,
+        "revision": int(record.get("revision") or 0),
+        "state": str(task.get("state") or ""),
+        "state_revision": int(task.get("state_revision") or 0),
+        "content": str(record.get("content") or ""),
+    }
+
+
+def apply_task_binding(
+    session: Any,
+    binding: Any,
+    *,
+    aliases: Dict[str, str] | None,
+    provider_context: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Apply one explicit Main-authored active-Task binding mechanically.
+
+    Omission/``None`` means no binding change. Runtime never discovers a Task.
+    New bindings accept only current ``active``/``blocked`` Task nodes. Unbinding
+    is explicit. Exact @aliases may refer to a Task created in the same atomic
+    Memory sidecar.
+    """
+    if binding is None:
+        return {"ok": True, "changed": False, "active_task_id": getattr(session, "active_task_id", None)}
+    if not isinstance(binding, dict):
+        return {"ok": False, "changed": False, "error_code": "TASK_BINDING_INVALID"}
+    action = str(binding.get("action") or "").strip()
+    if action == "unbind":
+        if set(binding) != {"action"}:
+            return {"ok": False, "changed": False, "error_code": "TASK_BINDING_INVALID"}
+        changed = getattr(session, "active_task_id", None) is not None
+        session.active_task_id = None
+        return {"ok": True, "changed": changed, "active_task_id": None}
+    if action != "bind" or set(binding) != {"action", "ref"}:
+        return {"ok": False, "changed": False, "error_code": "TASK_BINDING_INVALID"}
+
+    ref = str(binding.get("ref") or "").strip()
+    if not ref:
+        return {"ok": False, "changed": False, "error_code": "TASK_BINDING_INVALID"}
+    try:
+        task_id = _resolve_ref(ref, dict(aliases or {}))
+    except ValueError as exc:
+        return {"ok": False, "changed": False, "error_code": str(exc).split(":", 1)[0], "detail": str(exc)}
+    storage, _world_scope_id = _context(provider_context)
+    if not storage:
+        return {"ok": False, "changed": False, "error_code": "MEMORY_CONTEXT_UNAVAILABLE"}
+    try:
+        record = node_record(storage, task_id)
+    except (OSError, ValueError) as exc:
+        return {"ok": False, "changed": False, "error_code": str(exc).split(":", 1)[0], "detail": str(exc)}
+    task = record.get("task") if isinstance(record.get("task"), dict) else None
+    if str(record.get("kind") or "") != "task" or str(record.get("domain") or "") != "task" or task is None:
+        return {"ok": False, "changed": False, "error_code": "TASK_BINDING_TARGET_INVALID"}
+    if str(task.get("state") or "") not in {"active", "blocked"}:
+        return {"ok": False, "changed": False, "error_code": "TASK_BINDING_TARGET_TERMINAL"}
+    previous = getattr(session, "active_task_id", None)
+    session.active_task_id = task_id
+    return {
+        "ok": True,
+        "changed": previous != task_id,
+        "active_task_id": task_id,
+        "previous_active_task_id": previous,
+    }
+
+
 def _resolve_ref(value: Any, aliases: Dict[str, str]) -> str:
     text = str(value or "").strip()
     if text.startswith("@"):

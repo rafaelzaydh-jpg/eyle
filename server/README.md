@@ -1,4 +1,4 @@
-# Eyle Adapter — Rev3.7.5.1
+# Eyle Adapter — Rev4.0.0
 
 The bundled Adapter is Eyle's local connection boundary for the configured DeepSeek model.
 

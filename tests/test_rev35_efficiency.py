@@ -7,7 +7,7 @@ from eyle.core.ecc import catalog
 from eyle.core.session import AgentSession
 from eyle.runtime.config import validar_config
 from eyle.runtime.ecc_runtime import project_result
-from llm.executar import PROMPT_ECC
+from llm.executar import PROMPT_ECC, PROMPT_EXPLORE
 from tests.canonical import base_config, standard_registry
 
 
@@ -22,12 +22,12 @@ def _provider_context(root):
 
 
 def test_rev35_stable_prompt_keeps_depth_rule_without_provider_wire_duplication():
-    lower = PROMPT_ECC.lower()
-    assert len(PROMPT_ECC) <= 12000
+    lower = PROMPT_EXPLORE.lower()
+    assert len(PROMPT_EXPLORE) <= 12000
     assert "do not confuse an inventory with an analysis" in lower
     assert "inspect representative implementation before concluding" in lower
-    assert "prefer a few targeted reads over a huge structural dump" in lower
-    assert "frontier is not a limit" in lower
+    assert "prefer targeted reads over structural dumps" in lower
+    assert "frontier is available continuation, never an instruction to consume it" in lower
     assert "memory_view is a materialized view" in lower
 
 
@@ -223,6 +223,55 @@ def test_rev35_explicit_large_file_scope_is_paged_not_dumped_or_lost(tmp_path):
         frontier = frontiers[0]["id"] if frontiers else ""
     assert seen == [(1, 400), (401, 800), (801, 1200), (1201, 1600), (1601, 1800)]
 
+
+
+def test_rev376_repeated_large_file_read_replays_recovery_coordinates_and_continue_advances(tmp_path):
+    from eyle.runtime.ecc_runtime import dispatch
+    from eyle.runtime.continuation import PENDING_SCHEMA_VERSION, validate_pending_continuation
+
+    (tmp_path / "large_recovery.py").write_text(
+        "\n".join(f"line_{index}" for index in range(1, 901)),
+        encoding="utf-8",
+    )
+    registry = standard_registry()
+    cfg = base_config()
+    context = _provider_context(tmp_path)
+    session = AgentSession("read large file with accidental replay")
+
+    first = dispatch(
+        session, action_kind="explorar", operation="read_file",
+        arguments={"source": "workspace", "path": "large_recovery.py"},
+        config=cfg, provider_context=context, registry=registry,
+        pending_schema_version=PENDING_SCHEMA_VERSION, validate_pending=validate_pending_continuation,
+    )
+    assert first.result["detail"]["line_start"] == 1
+    assert first.result["detail"]["line_end"] == 400
+    frontier = first.result["frontiers"][0]["id"]
+    evidence_ids = list(first.result.get("evidence_ids") or [])
+    assert frontier == "fr-0001"
+    assert evidence_ids
+
+    replay = dispatch(
+        session, action_kind="explorar", operation="read_file",
+        arguments={"source": "workspace", "path": "large_recovery.py"},
+        config=cfg, provider_context=context, registry=registry,
+        pending_schema_version=PENDING_SCHEMA_VERSION, validate_pending=validate_pending_continuation,
+    )
+    assert replay.result["status"] == "already_observed"
+    assert replay.result["executed"] is False
+    assert replay.result["evidence_ids"] == evidence_ids
+    assert [item["id"] for item in replay.result["frontiers"]] == [frontier]
+
+    continued = dispatch(
+        session, action_kind="explorar", operation="continue",
+        arguments={"frontier": frontier},
+        config=cfg, provider_context=context, registry=registry,
+        pending_schema_version=PENDING_SCHEMA_VERSION, validate_pending=validate_pending_continuation,
+    )
+    assert continued.result["ok"] is True
+    materialized = continued.result["detail"]["materialized"]
+    assert materialized["ranges"][0]["line_start"] == 401
+    assert materialized["ranges"][0]["line_end"] == 800
 
 def test_rev35_memory_write_count_has_no_semantic_ceiling(tmp_path):
     from eyle.core.memory import apply_memory_sidecar

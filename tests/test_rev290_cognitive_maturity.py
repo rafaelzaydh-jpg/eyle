@@ -54,7 +54,7 @@ def test_rev290_wire_supports_main_authored_associative_recall_without_hidden_se
                 },
             }],
         },
-        "ecc",
+        "navigation",
     )
     memory = parsed["memory_delta"][0]
     assert memory["recall"] == {
@@ -63,7 +63,7 @@ def test_rev290_wire_supports_main_authored_associative_recall_without_hidden_se
         "cues": ["favorite music", "what bands do they like"],
     }
     assert memory["supports"] == [{"kind": "request"}]
-    remember = schema_for_profile("ecc")["properties"]["memory_delta"]["items"]["oneOf"][0]
+    remember = next(b for b in schema_for_profile("navigation")["oneOf"] if "memory_delta" in b["properties"])["properties"]["memory_delta"]["items"]["oneOf"][0]
     assert "recall" in remember["properties"]["arguments"]["properties"]
 
 
@@ -237,7 +237,7 @@ def test_rev290_memory_tags_have_no_small_semantic_count_or_length_ceiling(tmp_p
     parsed = parse_profile_response({
         "type": "concluir", "response": "ok",
         "memory_delta": [{"op": "remember", "scope": "user", "retention": "persistent", "kind": "note", "content": "tag stress", "tags": tags}],
-    }, "ecc")
+    }, "navigation")
     assert parsed["memory_delta"][0]["tags"][-1] == long_tag
     registry = standard_registry(); context = _context(tmp_path); session = AgentSession("tag-seed")
     learned = apply_memory_sidecar(session, parsed["memory_delta"], registry=registry, provider_context=context)

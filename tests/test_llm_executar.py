@@ -82,7 +82,7 @@ def test_rev282_adapter_request_has_no_arbitrary_per_call_max_tokens(monkeypatch
 def test_structured_openai_uses_current_wire_schema(monkeypatch):
     body = _agent_json()
     calls = _capture(monkeypatch, {"choices": [{"message": {"content": body}}]})
-    parsed = llm_mod._chamar_llm("s", "u", _config(), perfil="ecc")
+    parsed = llm_mod._chamar_llm("s", "u", _config(), perfil="navigation")
     assert parsed["type"] == "concluir"
     assert parsed["response"] == "ok"
     fmt = calls[0][1]["response_format"]
@@ -106,7 +106,7 @@ def test_structured_json_schema_is_required_and_fails_closed(monkeypatch):
 
     monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(llm_mod.ErroLLM) as exc:
-        llm_mod._chamar_llm("s", "u", _config(retry_max_attempts=1), perfil="ecc")
+        llm_mod._chamar_llm("s", "u", _config(retry_max_attempts=1), perfil="navigation")
     assert exc.value.error_code == "LLM_STRUCTURED_OUTPUT_UNAVAILABLE"
     assert len(calls) == 1
     assert calls[0]["response_format"]["type"] == "json_schema"
@@ -117,8 +117,8 @@ def test_reasoning_content_is_never_executable(monkeypatch):
         "choices": [{"message": {"content": "", "reasoning_content": _agent_json()}}]
     })
     with pytest.raises(llm_mod.ErroLLM) as exc:
-        llm_mod._chamar_llm("s", "u", _config(), perfil="ecc")
-    assert exc.value.error_code == "STRUCTURED_RESPONSE_INVALID:ecc:STRUCTURED_EMPTY"
+        llm_mod._chamar_llm("s", "u", _config(), perfil="navigation")
+    assert exc.value.error_code == "STRUCTURED_RESPONSE_INVALID:navigation:STRUCTURED_EMPTY"
 
 
 def test_explicit_openai_model_is_not_silently_replaced(monkeypatch):
@@ -160,8 +160,8 @@ def test_core_does_not_recover_provider_markdown_or_prose(monkeypatch):
     content = '```json\n' + _agent_json() + '\n```'
     _capture(monkeypatch, {"choices": [{"message": {"content": content}}]})
     with pytest.raises(llm_mod.ErroLLM) as exc:
-        llm_mod._chamar_llm("s", "u", _config(), perfil="ecc")
-    assert exc.value.error_code.startswith("STRUCTURED_RESPONSE_INVALID:ecc:")
+        llm_mod._chamar_llm("s", "u", _config(), perfil="navigation")
+    assert exc.value.error_code.startswith("STRUCTURED_RESPONSE_INVALID:navigation:")
 
 
 def test_http_error_keeps_backend_detail(monkeypatch):
@@ -237,7 +237,7 @@ def test_transport_timeout_is_recorded_as_started_physical_attempt_not_preflight
 
     monkeypatch.setattr(llm_mod.urllib.request, "urlopen", timeout_urlopen)
     with pytest.raises(llm_mod.ErroLLM) as exc:
-        llm_mod._chamar_llm("s", "u", cfg, execution, perfil="ecc")
+        llm_mod._chamar_llm("s", "u", cfg, execution, perfil="navigation")
     assert exc.value.error_code == "READ_TIMEOUT"
     attempt = execution.llm_calls[-1]["attempts"][0]
     assert attempt["request_status"] == "read_timeout"
@@ -268,7 +268,7 @@ def test_true_preflight_rejection_has_no_physical_attempt(monkeypatch):
 
     monkeypatch.setattr(llm_mod.urllib.request, "urlopen", should_not_send)
     with pytest.raises(llm_mod.ErroLLM) as exc:
-        llm_mod._chamar_llm("system contract", "user request", cfg, execution, perfil="ecc")
+        llm_mod._chamar_llm("system contract", "user request", cfg, execution, perfil="navigation")
     assert exc.value.error_code == "PROMPT_CONTEXT_BUDGET_EXCEEDED"
     assert calls == []
     assert execution.llm_calls[-1]["attempts"] == []
@@ -357,7 +357,7 @@ def test_rev22_adapter_structured_502_is_not_retried_and_error_usage_is_accounte
 
     monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(llm_mod.ErroLLM) as exc:
-        llm_mod._chamar_llm("s", "u", cfg, execution, perfil="ecc")
+        llm_mod._chamar_llm("s", "u", cfg, execution, perfil="navigation")
     assert exc.value.error_code == "LLM_STRUCTURED_RESPONSE_UNSATISFIED"
     assert exc.value.transient is False
     assert calls["n"] == 1
@@ -400,7 +400,7 @@ def test_rev251_adapter_structured_failure_surfaces_repair_diagnostics(monkeypat
 
     monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(llm_mod.ErroLLM) as exc:
-        llm_mod._chamar_llm("s", "u", cfg, execution, perfil="ecc")
+        llm_mod._chamar_llm("s", "u", cfg, execution, perfil="navigation")
     assert exc.value.error_code == "LLM_STRUCTURED_RESPONSE_UNSATISFIED"
     assert "$.memory.operations[0].scope" in str(exc.value)
     assert calls["n"] == 1
@@ -433,7 +433,7 @@ def test_rev22_adapter_upstream_timeout_http_504_is_not_blindly_retried(monkeypa
 
     monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(llm_mod.ErroLLM) as exc:
-        llm_mod._chamar_llm("s", "u", cfg, execution, perfil="ecc")
+        llm_mod._chamar_llm("s", "u", cfg, execution, perfil="navigation")
     assert exc.value.error_code == "READ_TIMEOUT"
     assert exc.value.transient is False
     assert calls["n"] == 1
@@ -448,7 +448,7 @@ def test_structured_call_records_real_system_prompt_size(monkeypatch):
     execution = ExecutionContext.from_config(cfg)
     execution.begin_call(mode="ecc", turn=1, prompt={"characters": 2, "estimated_tokens": 1})
 
-    parsed = llm_mod._chamar_llm("short system", "{}", cfg, execution=execution, perfil="ecc")
+    parsed = llm_mod._chamar_llm("short system", "{}", cfg, execution=execution, perfil="navigation")
     assert parsed["type"] == "concluir"
     prompt = execution.latest_call()["prompt"]
     assert prompt["system_prompt_characters"] == len("short system")
@@ -459,11 +459,11 @@ def test_rev286_eyle_always_sends_wire_schema_and_adapter_owns_upstream_mode(mon
     body=_agent_json()
     for legacy_override in ("json_object", "prompt_json"):
         calls=_capture(monkeypatch,{"choices":[{"message":{"content":body}}]})
-        parsed=llm_mod._chamar_llm("s","u",_config(structured_output_mode=legacy_override),perfil="ecc")
+        parsed=llm_mod._chamar_llm("s","u",_config(structured_output_mode=legacy_override),perfil="navigation")
         assert parsed["response"]=="ok"
         fmt=calls[-1][1]["response_format"]
         assert fmt["type"]=="json_schema"
-        assert fmt["json_schema"]["name"]=="eyle_cognition_wire"
+        assert fmt["json_schema"]["name"]=="eyle_navigation_wire"
         assert fmt["json_schema"]["strict"] is True
 
 
@@ -472,7 +472,7 @@ def test_rev28_canonical_prompt_sends_stable_message_before_dynamic(monkeypatch)
     body=_agent_json()
     calls=_capture(monkeypatch,{"choices":[{"message":{"content":body}}]})
     prompt=CanonicalPrompt(stable={"ecc_operations":{"x":1}},dynamic={"current_request":"hello","runtime_feedback":[]})
-    parsed=llm_mod._chamar_llm("system",prompt,_config(),perfil="ecc")
+    parsed=llm_mod._chamar_llm("system",prompt,_config(),perfil="navigation")
     assert parsed["response"]=="ok"
     messages=calls[0][1]["messages"]
     assert [m["role"] for m in messages]==["system","user","user","user"]
@@ -508,7 +508,7 @@ def test_rev281_success_adapter_headers_are_observable(monkeypatch):
     monkeypatch.setattr(llm_mod.urllib.request, "urlopen", lambda req, timeout=None: Response(payload))
     cfg = _config(retry_max_attempts=3)
     execution = ExecutionContext.from_config(cfg)
-    parsed = llm_mod._chamar_llm("s", "u", cfg, execution, perfil="ecc")
+    parsed = llm_mod._chamar_llm("s", "u", cfg, execution, perfil="navigation")
     assert parsed["type"] == "concluir"
     attempt = execution.llm_calls[-1]["attempts"][0]
     assert attempt["adapter_upstream_attempts"] == 1
@@ -554,7 +554,7 @@ def test_rev281_billed_adapter_transport_failure_is_not_retried(monkeypatch):
 
     monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(llm_mod.ErroLLM) as exc:
-        llm_mod._chamar_llm("s", "u", cfg, execution, perfil="ecc")
+        llm_mod._chamar_llm("s", "u", cfg, execution, perfil="navigation")
     assert exc.value.error_code == "TRANSPORT_ERROR"
     assert exc.value.transient is False
     assert calls["n"] == 1
@@ -581,7 +581,7 @@ def test_rev281_zero_usage_adapter_transport_failure_keeps_bounded_outer_retry(m
 
     monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(llm_mod.ErroLLM) as exc:
-        llm_mod._chamar_llm("s", "u", cfg, perfil="ecc")
+        llm_mod._chamar_llm("s", "u", cfg, perfil="navigation")
     assert exc.value.error_code == "TRANSPORT_ERROR"
     assert calls["n"] == 3
 

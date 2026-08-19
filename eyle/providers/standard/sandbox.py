@@ -396,6 +396,28 @@ def _ambiente_trusted_local():
     return env
 
 
+
+def _ambiente_process_sandbox():
+    """Ambiente minimo para o backend process.
+
+    O processo não herda PYTHONPATH/PYTHONHOME/sitecustomize do host. Além de
+    tornar os limites POSIX reproduzíveis, isso evita que código de bootstrap
+    externo seja carregado antes do comando solicitado dentro da cópia isolada.
+    """
+    permitidas = (
+        "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC",
+        "TEMP", "TMP", "USERPROFILE", "HOME", "LANG", "LC_ALL",
+        "VIRTUAL_ENV",
+    )
+    env = {chave: os.environ[chave] for chave in permitidas if os.environ.get(chave)}
+    env["EYLE_SANDBOX"] = "process"
+    env["PYTHONUNBUFFERED"] = "1"
+    # Keep common numerical runtimes inside the same process-count envelope.
+    env.setdefault("OPENBLAS_NUM_THREADS", "1")
+    env.setdefault("OMP_NUM_THREADS", "1")
+    env.setdefault("MKL_NUM_THREADS", "1")
+    return env
+
 def _comando_trusted_local(caminho_projeto, argv, cfg, limites):
     if cfg.get("allow_trusted_local") is not True:
         raise ErroSandbox(
@@ -835,7 +857,11 @@ def executar_no_sandbox(caminho_projeto, comando, cfg_sandbox=None):
             stderr=subprocess.STDOUT,
             start_new_session=True,
             shell=False,
-            env=_ambiente_trusted_local() if backend == "trusted_local" else None,
+            env=(
+                _ambiente_trusted_local() if backend == "trusted_local"
+                else _ambiente_process_sandbox() if backend == "process"
+                else None
+            ),
         )
         try:
             codigo = processo.wait(timeout=timeout)

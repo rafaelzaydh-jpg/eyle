@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from tests.canonical import adapt_legacy_ecc_script
 import json
 import pytest
 from pathlib import Path
@@ -64,7 +65,7 @@ def test_ecc_source_is_fail_closed_when_model_omits_it(monkeypatch, tmp_path):
         assert error["error_code"] == "ECC_SOURCE_REQUIRED"
         return conclude("corrigível")
 
-    monkeypatch.setattr(agent, "executar_ecc_llm", fake)
+    monkeypatch.setattr(agent, "_call_surface_llm", adapt_legacy_ecc_script(fake))
     status, text, _, details = run_agent(
         agent, "leia app.py", base_config(),
         provider_context=provider_context(tmp_path), retornar_detalhes=True,
@@ -91,7 +92,7 @@ def test_eyle_source_remains_available_without_user_workspace(monkeypatch, tmp_p
         assert observed["detail"]["source"] == "eyle"
         return conclude("achou")
 
-    monkeypatch.setattr(agent, "executar_ecc_llm", fake)
+    monkeypatch.setattr(agent, "_call_surface_llm", adapt_legacy_ecc_script(fake))
     status, text, _, details = run_agent(
         agent, "onde AgentSession está na Eyle?", base_config(),
         provider_context=provider_context(None, eyle_root), retornar_detalhes=True,
@@ -137,7 +138,7 @@ def test_negative_search_cache_invalidates_when_external_file_appears(monkeypatc
         assert observed["detail"]["files_with_matches"] >= 1
         return conclude("atualizou")
 
-    monkeypatch.setattr(agent, "executar_ecc_llm", fake)
+    monkeypatch.setattr(agent, "_call_surface_llm", adapt_legacy_ecc_script(fake))
     status, text, _, details = run_agent(
         agent, "procure AgentSession", base_config(),
         provider_context=provider_context(tmp_path), retornar_detalhes=True,
@@ -165,7 +166,7 @@ def test_positive_read_cache_invalidates_on_external_content_change(monkeypatch,
         assert "x = 222" in json.dumps(observed, ensure_ascii=False)
         return conclude("novo")
 
-    monkeypatch.setattr(agent, "executar_ecc_llm", fake)
+    monkeypatch.setattr(agent, "_call_surface_llm", adapt_legacy_ecc_script(fake))
     status, text, _, details = run_agent(
         agent, "leia duas vezes", base_config(),
         provider_context=provider_context(tmp_path), retornar_detalhes=True,
@@ -215,16 +216,21 @@ def test_repeated_identical_internal_failure_counts_as_no_progress_not_no_execut
             assert feedback["physical_execution"] is True
             assert feedback["new_physical_observation"] is False
             assert feedback["repeat_count"] == 1
+            return explore("fail", {})
+        if len(prompts) >= 4:
+            return {"type": "concluir", "response": "failure observed; recovered", "memory_delta": []}
         return explore("fail", {})
 
-    monkeypatch.setattr(agent, "executar_ecc_llm", fake)
+    monkeypatch.setattr(agent, "_call_surface_llm", adapt_legacy_ecc_script(fake))
     status, text, _, details = agent.executar_agente(
         "falhe", base_config(), provider_context={"boom": {}}, registry=registry, retornar_detalhes=True,
     )
-    assert status == "failed"
-    assert details["failure_code"] == "ECC_NO_PROGRESS_UNRECOVERABLE"
-    assert details["physical_capability_calls"] == 3
-    assert len(prompts) == 3
+    assert (status, text) == ("completed", "failure observed; recovered")
+    # The third identical decision is blocked mechanically instead of invoking
+    # the failing physical capability again or terminating the whole task.
+    assert details["physical_capability_calls"] == 2
+    assert len(prompts) == 4
+    assert "failure_code" not in details
 
 
 def test_run_tests_is_not_replay_cached_and_logs_source(monkeypatch, tmp_path):
@@ -263,7 +269,7 @@ def test_pending_mutation_requires_explicit_confirmation_at_agent_boundary(monke
         explore("read_file", {"source": "workspace", "path": "app.py", "line_start": 1, "line_end": 1}),
         build("transaction", {"patches": [{"operation": "update", "path": "app.py", "line_start": 1, "line_end": 1, "new_code": "x = 2\n"}]}),
     ])
-    monkeypatch.setattr(agent, "executar_ecc_llm", lambda prompt, cfg: next(outputs))
+    monkeypatch.setattr(agent, "_call_surface_llm", adapt_legacy_ecc_script(lambda prompt, cfg: next(outputs)))
     cfg = base_config()
     status, _, pending, _ = run_agent(
         agent, "mude x", cfg, provider_context=provider_context(tmp_path), retornar_detalhes=True,
@@ -291,13 +297,25 @@ def test_pending_mutation_requires_explicit_confirmation_at_agent_boundary(monke
 def test_runtime_environment_exposes_physical_source_availability_without_routing(monkeypatch, tmp_path):
     eyle_root = tmp_path / "self"
     eyle_root.mkdir()
-    prompts = []
-    monkeypatch.setattr(agent, "executar_ecc_llm", lambda prompt, cfg: prompts.append(json.loads(str(prompt))) or conclude("ok"))
+    captured = {}
+
+    calls = {"navigation": 0}
+    def fake(surface, prompt, cfg):
+        if surface == "navigation":
+            calls["navigation"] += 1
+            if calls["navigation"] == 1:
+                return {"type": "explorar", "memory_delta": []}
+            return {"type": "concluir", "response": "ok", "memory_delta": []}
+        assert surface == "explore"
+        captured["runtime_environment"] = prompt.stable["runtime_environment"]
+        return {"return_to_ecc": True, "memory_delta": []}
+
+    monkeypatch.setattr(agent, "_call_surface_llm", fake)
     status, _, _, _ = run_agent(
         agent, "estado", base_config(), provider_context=provider_context(None, eyle_root), retornar_detalhes=True,
     )
     assert status == "completed"
-    resources = prompts[0]["runtime_environment"]["providers"]["standard"]["resources"]
+    resources = captured["runtime_environment"]["providers"]["standard"]["resources"]
     assert resources["workspace"]["available"] is False
     assert resources["eyle_source"]["available"] is True
 
@@ -392,7 +410,7 @@ def test_source_change_during_operation_is_not_cached_as_current(monkeypatch):
         assert payload["latest_observations"][0]["freshness_reason"] == "source_changed_during_operation"
         return conclude("race detectada")
 
-    monkeypatch.setattr(agent, "executar_ecc_llm", fake)
+    monkeypatch.setattr(agent, "_call_surface_llm", adapt_legacy_ecc_script(fake))
     status, text, _, details = agent.executar_agente(
         "observe", base_config(), provider_context={"race": {}}, registry=registry, retornar_detalhes=True,
     )
@@ -424,7 +442,7 @@ def test_eyle_observation_cannot_authorize_workspace_write_with_same_path(monkey
         assert "observe the existing file" in str(failed.get("detail"))
         return conclude("bloqueado")
 
-    monkeypatch.setattr(agent, "executar_ecc_llm", fake)
+    monkeypatch.setattr(agent, "_call_surface_llm", adapt_legacy_ecc_script(fake))
     status, text, pending, _ = run_agent(
         agent, "altere same.py", base_config(),
         provider_context=provider_context(workspace, eyle_root), retornar_detalhes=True,
@@ -476,11 +494,11 @@ def test_workspace_transaction_uses_canonical_registry_run_tests(monkeypatch, tm
 def test_rev375_type_is_single_family_authority_and_operation_names_are_current_only():
     from llm.structured import parse_profile_response, StructuredResponseError
 
-    direct = parse_profile_response({"type":"explorar","operations":[{"operation":"search","arguments":{}}],"memory_delta":[]}, "ecc")
+    direct = parse_profile_response({"operations":[{"operation":"search","arguments":{}}],"memory_delta":[]}, "explore")
     assert direct["operations"][0]["operation"] == "search"
     for retired in ("explorar.search", "construir.transaction"):
         with pytest.raises(StructuredResponseError):
-            parse_profile_response({"type":"explorar","operations":[{"operation":retired,"arguments":{}}],"memory_delta":[]}, "ecc")
+            parse_profile_response({"operations":[{"operation":retired,"arguments":{}}],"memory_delta":[]}, "explore")
 
 
 def test_rev22_structured_retry_resets_after_a_valid_decision(monkeypatch, tmp_path):
@@ -488,9 +506,9 @@ def test_rev22_structured_retry_resets_after_a_valid_decision(monkeypatch, tmp_p
 
     (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
     sequence = iter([
-        ErroLLM("bad1", transient=False, error_code="STRUCTURED_RESPONSE_INVALID:ecc:ECC_OPERATION_INVALID"),
+        ErroLLM("bad1", transient=False, error_code="STRUCTURED_RESPONSE_INVALID:navigation:ECC_OPERATION_INVALID"),
         explore("read_file", {"source": "workspace", "path": "a.py", "line_start": 1, "line_end": 1}),
-        ErroLLM("bad2", transient=False, error_code="STRUCTURED_RESPONSE_INVALID:ecc:ECC_OPERATION_INVALID"),
+        ErroLLM("bad2", transient=False, error_code="STRUCTURED_RESPONSE_INVALID:explore:ECC_OPERATION_INVALID"),
         conclude("ok"),
     ])
 
@@ -500,7 +518,7 @@ def test_rev22_structured_retry_resets_after_a_valid_decision(monkeypatch, tmp_p
             raise item
         return item
 
-    monkeypatch.setattr(agent, "executar_ecc_llm", fake)
+    monkeypatch.setattr(agent, "_call_surface_llm", adapt_legacy_ecc_script(fake))
     status, text, pending, details = run_agent(
         agent, "observe", base_config(), provider_context=provider_context(tmp_path), retornar_detalhes=True,
     )
@@ -527,7 +545,7 @@ def test_rev22_search_material_supports_line_selected_learning(monkeypatch, tmp_
             "support": {"material_id": mat, "line_start": 2, "line_end": 3},
         }])
 
-    monkeypatch.setattr(agent, "executar_ecc_llm", fake)
+    monkeypatch.setattr(agent, "_call_surface_llm", adapt_legacy_ecc_script(fake))
     status, text, _, details = run_agent(
         agent, "find AgentSession", base_config(), provider_context=provider_context(tmp_path), retornar_detalhes=True,
     )

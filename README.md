@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  Python 3.11+ · Eyle 2.7.5 · Rev3.7.5.1
+  Python 3.11+ · Eyle 2.7.5 · Rev4.0.0
 </p>
 
 ---
@@ -21,6 +21,13 @@ It is designed for long-lived conversations and technical work where an agent mu
 Eyle is not a prompt-only wrapper, a multi-agent swarm, or a semantic router around an LLM. The model remains the semantic authority; deterministic components own the facts and invariants that can be decided mechanically.
 
 > **Design rule:** every component does only what it exists to do.
+
+
+## Rev4 — Task-Anchored Cognitive Surfaces
+
+Rev4 keeps ECC at exactly **Explore / Build / Conclude**, but stops materializing the full operation surface on every cognition. Main chooses the ECC movement in a compact Navigation surface; Runtime then materializes only the selected Explore or Build capability family. An existing Memory Graph Task may be explicitly bound by Main as `active_task_id` and projected by exact ID—never searched/ranked automatically.
+
+This is a prompt/materialization boundary, not a planner or phase router. See `docs/task-anchored-cognitive-surfaces.md`.
 
 ## What Eyle does
 
@@ -246,7 +253,7 @@ python main.py status
 
 ## Configuration
 
-Runtime configuration lives in `config.json`. Rev3.7.5.1 is **current-schema only**: unknown, removed, or older configuration shapes are rejected instead of being silently upgraded.
+Runtime configuration lives in `config.json`. Rev4.0.0 is **current-schema only**: unknown, removed, or older configuration shapes are rejected instead of being silently upgraded.
 
 Important physical budgets include:
 
@@ -386,3 +393,8 @@ See [`LICENSE.md`](LICENSE.md) and [`COMMERCIAL.md`](COMMERCIAL.md).
 ---
 
 **Eyle's core idea is simple:** the model should decide meaning; deterministic software should own everything that can be proven mechanically.
+
+
+Rev3.7.8 closes durable recovery around physical identity: live file/search Frontiers are bound to the source revision that created them, provider recovery uses stable Host-owned identity rather than mutable provider status, and each execution has at most one atomically replaced recoverable checkpoint.
+
+See `docs/recoverable-continuity.md` for the Rev3.7.8 reality-bound recovery contract.

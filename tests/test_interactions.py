@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from tests.canonical import adapt_legacy_ecc_script
 import copy
 from pathlib import Path
 
@@ -64,7 +65,7 @@ def test_semantic_choices_pause_and_resume_same_logical_execution(monkeypatch, t
         assert any(item.get("code") == "USER_CHOICE" and item.get("selected") == "Corrigir apenas o bug" for item in seen[-1][2])
         return {"type": "concluir", "response": "caminho escolhido", "memory_delta": []}
 
-    monkeypatch.setattr(agent, "executar_ecc_llm", fake)
+    monkeypatch.setattr(agent, "_call_surface_llm", adapt_legacy_ecc_script(fake))
     status, text, pending, _ = run_agent(
         agent, "qual caminho?", cfg, provider_context=provider_context(tmp_path),
         retornar_detalhes=True, execution_id="choice", source_job_id=1,

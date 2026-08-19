@@ -1,4 +1,4 @@
-"""Simple DeepSeek V4 transport adapter for Eyle Rev3.7.5.1.
+"""Simple DeepSeek V4 transport adapter for Eyle Rev3.7.6.
 
 The Adapter does only provider-boundary work: connect/authenticate, translate the
 current local request to the one configured DeepSeek model, recover JSON syntax
@@ -77,7 +77,7 @@ S = Settings(
     proxy_allow_loopback_no_auth=env_bool("PROXY_ALLOW_LOOPBACK_NO_AUTH", True),
 )
 
-ADAPTER_VERSION = "2.7.5-rev3.7.5.1"
+ADAPTER_VERSION = "2.7.5-rev3.7.6"
 ADAPTER_PROFILE = "eyle-deepseek-v4-simple-wire-v3"
 ADAPTER_TRANSPORT_PROTOCOL = "eyle-adapter-transport-v2"
 PROVIDER_PROFILE = "deepseek_v4"

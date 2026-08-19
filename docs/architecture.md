@@ -1,10 +1,24 @@
-# Architecture — Rev3.7.5.1
+# Architecture — Rev4.0.0
 
 Eyle is a single-agent runtime built around one ownership rule:
 
 > **Every component does only what it exists to do.**
 
 The architecture separates semantic authority from deterministic execution so that the model decides meaning while software enforces everything that can be established mechanically.
+
+
+## Rev4 cognitive-surface boundary
+
+Rev4 adds `AgentSession.active_task_id` and `cognitive_surface`. The Task ID is selected only by Main and resolves by exact Memory ID. `cognitive_surface` is physical protocol state (`navigation|explore|build`), not a semantic phase.
+
+```text
+Navigation --Main:explorar--> Explore Surface (observe/execute only)
+Navigation --Main:construir--> Build Surface   (mutate only)
+Navigation --Main:concluir--> response
+Explore/Build --return--> Navigation
+```
+
+Runtime chooses no movement: it only materializes the surface corresponding to Main's explicit prior ECC decision. See `docs/task-anchored-cognitive-surfaces.md`.
 
 ## Component ownership
 
@@ -174,11 +188,9 @@ Progress is mechanical evidence such as:
 
 Already-observed/replayed results are not new progress.
 
-A repeated deterministic action/result fixed point receives one `NO_PROGRESS` feedback opportunity. If the same fixed point repeats again without progress, execution terminates as:
+A repeated deterministic action/result fixed point is a **local recoverable navigation state**, not a terminal task failure. The first proven no-progress state blocks that exact action signature for the current reality epoch. If Main repeats it, Runtime returns `ECC_FIXED_POINT_BLOCKED` without physically executing/replaying the capability again.
 
-```text
-ECC_NO_PROGRESS_UNRECOVERABLE
-```
+The Session, Observation Ledger, Evidence and open Frontiers remain alive. Main decides whether to continue an available Frontier, recall existing Evidence, refine physical scope, choose another operation, or conclude. Genuine observable/physical/Task progress clears the local block.
 
 There is deliberately no `MAX_TURNS` semantic ceiling. A long investigation may continue while it keeps producing new observable information and remains inside physical provider/context budgets.
 
@@ -267,6 +279,8 @@ not materialized now != inaccessible
 
 Paging is a presentation mechanism, not a semantic knowledge limit.
 
+Continuations that later re-read mutable sources are revision-bound by the provider. `reality_epoch` tracks physical changes known to the live execution; an exact resource revision additionally detects external drift across checkpoint/restart. Runtime reports the drift and marks the affected Frontier stale without reinterpreting historical Evidence.
+
 ## Provider and execution accounting
 
 One user-message execution carries one provider-token ledger across normal cognition, continuation, and a fresh wire retry.
@@ -313,9 +327,9 @@ Active readers are current-schema only.
 
 Current identities include:
 
-- configuration: `2.7.5-r3.7.5.1-ecc`;
-- Session: current Rev3.7.5 line;
-- execution continuity: v3;
+- configuration: `2.7.5-r4.0.0-ecc`;
+- Session: `2.7.5-r4.0.0-ecc`;
+- execution continuity: `execution-continuity-v6`;
 - Memory Graph: v12.
 
 The retained historical Memory conversion is an explicit one-shot v11 → v12 devtool. It is not imported into the normal Runtime path.
@@ -349,8 +363,12 @@ versus:
 ```text
 valid Eyle action
   -> Runtime executes
-  -> same result again -> NO_PROGRESS feedback
-  -> same fixed point again -> ECC_NO_PROGRESS_UNRECOVERABLE
+  -> same result again -> NO_PROGRESS + block exact action
+  -> same blocked action again -> ECC_FIXED_POINT_BLOCKED (no physical re-execution)
+  -> continue/recall/refine/other/conclude -> task remains recoverable
 ```
 
 Adapter does not repair Eyle execution. Runtime does not repair provider syntax.
+
+
+See `docs/recoverable-continuity.md` for the Rev3.7.8 durable recovery and convergence-signal contract.

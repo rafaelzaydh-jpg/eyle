@@ -1,4 +1,53 @@
+## Rev4.0.0 — Task-Anchored Cognitive Surfaces
+
+- Closes Rev3 with Rev3.7.8 as the physical recoverable-continuity baseline and begins Rev4 as an architectural prompt-surface revision.
+- Adds explicit Main-authored `AgentSession.active_task_id` binding to the existing Memory Graph Task; no Task DB/TaskFrame/planner is introduced.
+- Adds exact-ID Active Task projection with no recall, ranking or neighbor expansion.
+- Splits the current structured cognition protocol into `navigation`, `explore`, and `build` surfaces while preserving exactly three ECC movements: explorar/construir/concluir.
+- Navigation receives a compact capability directory; detailed schemas are materialized only for the selected Explore or Build family.
+- Explore exposes only observe/execute capabilities and can batch independent Main-authored operations; Build exposes only one mutate operation attempt.
+- Surface transitions return through Navigation; Runtime never chooses the next ECC movement from meaning.
+- Checkpoints persist `active_task_id` and `cognitive_surface`; execution continuity advances to `execution-continuity-v6` and pending schema to `16-ecc`.
+- Adds surface/token telemetry (`navigation_calls`, `explore_calls`, `build_calls`, `task_bind_count`, `surface_transitions`).
+- Fixes fixed-point checkpoint serialization so the `checkpointed_blocks` mark is persisted before checkpoint creation, preventing duplicate recovery checkpoints after restart.
+- Current Session/config schema: `2.7.5-r4.0.0-ecc`.
+
+## Rev3.7.8 — Reality-Bound Recoverable Continuity
+
+- Binds live-source `read_file` Frontiers to the canonical whole-file `source_version` already used by file Materials.
+- Binds each pending `search_code` range to the exact source revision that produced its locator.
+- A continuation whose live source changed is rejected mechanically as `FRONTIER_SOURCE_REVISED`; the Frontier becomes `stale` while historical Evidence/Materials remain intact.
+- Mechanical file coverage is revision-aware and never merges line ranges from different source revisions.
+- Separates stable Host-owned `provider_identity` from mutable provider execution context for persisted continuation binding.
+- Replaces `provider_context_hash` with `provider_identity_hash` in the current pending schema.
+- Makes `recoverable_execution` storage singular per `execution_id`, using atomic replacement and monotonic `checkpoint_generation`.
+- Keeps human confirmation/semantic-choice continuations independently addressed.
+- Runs post-write `compileall` with Python `-S` so deterministic syntax verification cannot execute unrelated host `sitecustomize` hooks.
+- Current schemas: Session/config `2.7.5-r3.7.8-ecc`, pending `15-ecc`, execution continuity `execution-continuity-v5`.
+- No semantic wandering detector, automatic Frontier consumption, Evidence usefulness score, or Runtime planning was added.
+
+## Rev3.7.7 — Persisted Recoverable Continuity
+
+- Adds `recoverable_execution` as a Runtime-owned, non-interactive continuation kind for canonical checkpoint/resume.
+- Persists `AgentSession` recovery state including hot pending Runtime results, Evidence, Observation Ledger, Frontiers, `reality_epoch`, fixed-point blocks and execution budget accounting.
+- Budget salvage and first local fixed-point block can create a durable checkpoint when the execution has a stable identity; Service resumes it automatically and a restarted worker can rehydrate it by `execution_id`.
+- Adds **Execution Convergence Signals** (`operations_since_task_state_progress`, `provider_tokens_since_task_state_progress`, `fixed_points_blocked`, `coverage_advanced`, `physical_mutations`). These are mechanical facts only; Main interprets whether they indicate legitimate investigation, consolidation pressure, wandering or a need for more exploration.
+- Adds accumulated mechanical file coverage/open-Frontier state to the model and diagnostic surfaces.
+- Recovery guidance is factual/coordinate-based rather than a Runtime semantic recommendation.
+- Adds telemetry for recovery checkpoints/resumes and avoided observation replays.
+- Keeps the Runtime boundary explicit: no heuristic relevance, sufficiency or semantic wandering detector was added.
+
 # Changelog
+
+## Rev3.7.6 — Recoverable Fixed-Point Runtime
+
+- Fixed P0 no-progress behavior: deterministic fixed points now block only the repeated action instead of terminating the whole ECC task.
+- Cached Observation replay now preserves active `evidence_ids` and open `frontiers`, allowing `recall`/`continue` recovery after an accidental repeated read.
+- Added explicit `recovery_required` results for blocked actions; blocked actions are not physically re-executed/replayed.
+- Real observable progress clears the local fixed-point block and resumes normal exploration.
+- Added `BUDGET_SALVAGE` feedback in the final 15% of provider token budget so Main can consolidate evidence and conclude before hard exhaustion.
+- Added regressions for large-file replay/Frontier recovery, fixed-point recovery, alternate-path recovery, and budget salvage.
+
 
 This file records Eyle's public architectural evolution. Current behavior is documented in `README.md` and `docs/`; Git history remains the detailed implementation record.
 

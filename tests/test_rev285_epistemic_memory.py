@@ -22,15 +22,15 @@ def _context(root: Path) -> dict:
 
 
 def test_rev285_provider_schema_exposes_open_epistemic_metadata_without_truth_enum():
-    schema = schema_for_profile("ecc")
-    memory = schema["properties"]["memory_delta"]["items"]["oneOf"]
+    schema = schema_for_profile("navigation")
+    memory = next(b for b in schema["oneOf"] if "memory_delta" in b["properties"])["properties"]["memory_delta"]["items"]["oneOf"]
     remember = memory[0]["properties"]["arguments"]["properties"]
     epistemic = remember["epistemic"]
     assert set(epistemic["properties"]) == {"nature", "confidence", "volatility", "temporal", "context"}
     assert epistemic["required"] == ["nature"]
     assert "enum" not in epistemic["properties"]["nature"]
     assert "enum" not in epistemic["properties"]["volatility"]
-    assert "maxItems" not in schema["properties"]["memory_delta"]
+    assert "maxItems" not in next(b for b in schema["oneOf"] if "memory_delta" in b["properties"])["properties"]["memory_delta"]
 
 
 def test_rev375_wire_parser_preserves_epistemic_classification_with_optional_metadata():
@@ -66,7 +66,7 @@ def test_rev375_wire_parser_preserves_epistemic_classification_with_optional_met
                 },
             ],
         },
-        "ecc",
+        "navigation",
     )
     first, second = parsed["memory_delta"]
     assert first["epistemic"]["nature"] == "preference"

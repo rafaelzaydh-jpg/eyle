@@ -15,8 +15,9 @@ def _conclude(memory_delta):
 
 
 def test_rev284_provider_schema_describes_every_memory_operation_and_support_shape():
-    schema = schema_for_profile("ecc")
-    item = schema["properties"]["memory_delta"]["items"]
+    schema = schema_for_profile("navigation")
+    branch = next(b for b in schema["oneOf"] if "memory_delta" in b.get("properties", {}))
+    item = branch["properties"]["memory_delta"]["items"]
     variants = item["oneOf"]
     assert [v["properties"]["op"]["enum"][0] for v in variants] == [
         "remember", "revise", "relate", "revise_relation", "task_status", "archive", "supersede", "retire_relation",
@@ -58,7 +59,7 @@ def test_rev284_safe_support_wire_aliases_normalize_before_memory_graph():
             },
         },
     ])
-    parsed = parse_profile_response(raw, "ecc")
+    parsed = parse_profile_response(raw, "navigation")
     assert parsed["memory_delta"][0]["supports"] == [{"kind": "request"}]
     assert parsed["memory_delta"][1]["supports"] == [{"kind": "material", "material_id": "mat-0007"}]
     assert parsed["memory_delta"][2]["supports"] == [{"kind": "memory", "memory_id": "mem-abc"}]
@@ -76,7 +77,7 @@ def test_rev284_flattened_memory_action_is_a_boundary_alias_not_internal_shape()
                 "supports": [{"kind": "request"}],
             }
         ]),
-        "ecc",
+        "navigation",
     )
     assert parsed["memory_delta"] == [
         {
@@ -107,7 +108,7 @@ def test_rev284_opaque_material_selector_and_memory_content_have_no_hidden_local
                 },
             }
         ]),
-        "ecc",
+        "navigation",
     )
     assert parsed["memory_delta"][0]["content"] == content
     assert parsed["memory_delta"][0]["supports"][0]["selector"] == deep
@@ -124,7 +125,7 @@ def test_rev371_ambiguous_memory_support_rejects_sidecar_not_valid_ecc():
                 },
             }
         ]),
-        "ecc",
+        "navigation",
     )
     assert parsed["type"] == "concluir"
     assert parsed["response"] == "ok"
@@ -132,13 +133,10 @@ def test_rev371_ambiguous_memory_support_rejects_sidecar_not_valid_ecc():
     assert parsed["memory_error"]["code"] == "EYLE_MEMORY_INVALID"
 
 
-def test_rev286_prompt_teaches_simple_wire_and_delegates_canonicalization():
+def test_rev4_prompt_keeps_memory_semantic_sidecar_out_of_planner_role():
     lower = PROMPT_ECC.lower()
-    assert 'keep memory_delta simple' in lower
-    assert 'preferred remember wire form is flat' in lower
-    assert 'eyle deterministically wraps arguments and epistemic metadata' in lower
-    assert 'simplest unambiguous wire support' in lower
-    assert '"request", "mat-0001", "mem-..." or @key' in lower
-    assert 'supports is always a json array' not in lower
-
+    assert "memory_delta stores reusable learning" in lower
+    assert "memory is continuous learning, not a planner or hidden working set" in lower
+    assert "task_binding" in lower
+    assert "do not persist transient tool-next-step reasoning as task content" in lower
 

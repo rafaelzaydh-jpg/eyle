@@ -20,11 +20,26 @@ class Host:
     registry: CapabilityRegistry
     context_factory: Callable[[], Dict[str, Any]]
     describe_factory: Optional[Callable[[], Dict[str, Any]]] = None
+    identity_factory: Optional[Callable[[], Dict[str, Any]]] = None
 
     def provider_context(self) -> Dict[str, Any]:
         value = self.context_factory()
         if not isinstance(value, dict):
             raise ValueError("HOST_PROVIDER_CONTEXT_INVALID")
+        return value
+
+    def provider_identity(self) -> Dict[str, Any]:
+        """Return stable Host-owned physical environment identity.
+
+        This identity must not include mutable workspace state. Runtime hashes it
+        opaquely to bind persisted continuations to the environment that created
+        them.
+        """
+        if self.identity_factory is None:
+            return {}
+        value = self.identity_factory()
+        if not isinstance(value, dict):
+            raise ValueError("HOST_PROVIDER_IDENTITY_INVALID")
         return value
 
     def describe(self) -> Dict[str, Any]:
@@ -63,6 +78,20 @@ def build_bundled_host(base_dir: str) -> Host:
             },
         }
 
+    def identity_factory() -> Dict[str, Any]:
+        standard = workspace_context() or {}
+        workspace_root = standard.get("caminho_origem")
+        eyle_root = standard.get("eyle_root")
+        return {
+            "standard": {
+                "workspace_root": os.path.realpath(workspace_root) if workspace_root else None,
+                "eyle_root": os.path.realpath(eyle_root) if eyle_root else root,
+            },
+            "core_memory": {
+                "world_scope_id": f"workspace:{os.path.realpath(workspace_root) if workspace_root else os.path.join(root, 'workspace')}",
+            },
+        }
+
     def describe_factory() -> Dict[str, Any]:
         return {"workspace": workspace_context()}
 
@@ -70,4 +99,5 @@ def build_bundled_host(base_dir: str) -> Host:
         registry=registry,
         context_factory=context_factory,
         describe_factory=describe_factory,
+        identity_factory=identity_factory,
     )

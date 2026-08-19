@@ -17,8 +17,8 @@ def run_agent(module, *args, **kwargs):
 def base_config(*, tests_enabled=False):
     return {
         "app_version": "2.7.5",
-        "config_schema_version": "2.7.5-r3.7.5.1-ecc",
-        "revision": "rev3.7.5.1-ecc",
+        "config_schema_version": "2.7.5-r4.0.0-ecc",
+        "revision": "rev4.0.0-ecc",
         "llm": {
             "base_url": "http://127.0.0.1:8080",
             "model": "deepseek-v4-flash",
@@ -129,3 +129,79 @@ def select_graph_nodes_for_test(
         }
     finally:
         release_recall_snapshot(storage_dir, snapshot_id)
+
+
+def adapt_legacy_ecc_script(legacy_callable):
+    """Adapt Rev3 monolithic scripted decisions to the Rev4 surface protocol.
+
+    This is test-only migration support. Production exposes no legacy `ecc`
+    profile: the helper preserves historical behavioral scenarios while
+    exercising Navigation -> Explore/Build transitions explicitly.
+    """
+    pending = {"decision": None}
+
+    def _sidecars(decision):
+        return {
+            "memory_delta": list(decision.get("memory_delta") or []),
+            **({"task_binding": decision["task_binding"]} if "task_binding" in decision else {}),
+        }
+
+    def _for_navigation(decision):
+        kind = decision.get("type")
+        sidecars = _sidecars(decision)
+        if kind == "concluir":
+            out = {
+                "type": "concluir",
+                "response": decision.get("response", ""),
+                **sidecars,
+            }
+            for key in ("choices", "allow_free_text"):
+                if key in decision:
+                    out[key] = decision[key]
+            return out
+        if kind == "explorar":
+            pending["decision"] = {**decision, "memory_delta": []}
+            return {"type": "explorar", **sidecars}
+        if kind == "construir":
+            pending["decision"] = {**decision, "memory_delta": []}
+            return {"type": "construir", **sidecars}
+        return decision
+
+    def _for_explore(decision):
+        kind = decision.get("type")
+        if kind == "explorar":
+            out = {
+                "operations": list(decision.get("operations") or []),
+                **_sidecars(decision),
+            }
+            return out
+        pending["decision"] = decision
+        return {"return_to_ecc": True, "memory_delta": []}
+
+    def _for_build(decision):
+        kind = decision.get("type")
+        if kind == "construir":
+            return {
+                "operation": decision.get("operation"),
+                "arguments": dict(decision.get("arguments") or {}),
+                **_sidecars(decision),
+            }
+        pending["decision"] = decision
+        return {"return_to_ecc": True, "memory_delta": []}
+
+    def adapted(surface, prompt, cfg):
+        decision = pending["decision"]
+        if decision is not None:
+            pending["decision"] = None
+        else:
+            decision = legacy_callable(prompt, cfg)
+
+        if surface == "navigation":
+            return _for_navigation(decision)
+        if surface == "explore":
+            return _for_explore(decision)
+        if surface == "build":
+            return _for_build(decision)
+        raise AssertionError(f"unexpected Rev4 surface: {surface}")
+
+    return adapted

@@ -54,11 +54,11 @@ def test_rev373_current_request_is_final_provider_message_after_native_conversat
 def test_rev373_self_identity_and_non_helpdesk_contract_are_explicit():
     low = PROMPT_ECC.lower()
     assert "you are eyle, the running agent" in low
-    assert 'source:"eyle"' in low
+    assert 'source=eyle' in low
     assert "workspace is the user's selected project" in low
     assert "help-desk dispatcher" in low
     assert "final user message is always current_request" in low
-    assert "if omitted=0" in low and "do not substitute an unrelated fact" in low
+    assert "history_messages_omitted=0" in low and "do not substitute an unrelated fact" in low
 
 
 def test_rev373_memory_projection_preserves_domain_and_context_key(tmp_path):

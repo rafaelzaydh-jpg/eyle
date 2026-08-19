@@ -244,6 +244,7 @@ _MEMORY_ACTION_SCHEMA = {
     ]
 }
 _MEMORY_DELTA_SCHEMA = {"type": "array", "items": _MEMORY_ACTION_SCHEMA}
+
 _OPERATION_SCHEMA = {
     "type": "object",
     "properties": {
@@ -253,117 +254,181 @@ _OPERATION_SCHEMA = {
     "required": ["operation", "arguments"],
     "additionalProperties": False,
 }
-_DECISION_SCHEMA = {
+
+_TASK_BINDING_SCHEMA = {
     "oneOf": [
         {
             "type": "object",
             "properties": {
-                "type": {"type": "string", "enum": ["explorar"]},
-                "operations": {"type": "array", "minItems": 1, "items": _OPERATION_SCHEMA},
+                "action": {"type": "string", "enum": ["bind"]},
+                "ref": {"type": "string", "pattern": _MEMORY_REF},
             },
-            "required": ["type", "operations"],
+            "required": ["action", "ref"],
             "additionalProperties": False,
         },
         {
             "type": "object",
-            "properties": {
-                "type": {"type": "string", "enum": ["construir"]},
-                "operation": _OPERATION_SCHEMA["properties"]["operation"],
-                "arguments": {"type": "object"},
-            },
-            "required": ["type", "operation", "arguments"],
-            "additionalProperties": False,
-        },
-        {
-            "type": "object",
-            "properties": {
-                "type": {"type": "string", "enum": ["concluir"]},
-                "response": {"type": "string", "minLength": 1},
-                "choices": {"type": "array", "minItems": 2, "items": {"type": "string", "minLength": 1}},
-                "allow_free_text": {"type": "boolean"},
-            },
-            "required": ["type", "response"],
+            "properties": {"action": {"type": "string", "enum": ["unbind"]}},
+            "required": ["action"],
             "additionalProperties": False,
         },
     ]
 }
-_EYLE_RESPONSE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "decision": _DECISION_SCHEMA,
-        "memory_delta": _MEMORY_DELTA_SCHEMA,
-    },
-    "required": ["decision", "memory_delta"],
-    "additionalProperties": False,
+
+# Memory and Task binding are semantic persistence sidecars. The provider-facing
+# schema deliberately validates only their container shape; Eyle parses them
+# independently so a sidecar defect never vetoes a valid primary cognition.
+_WIRE_MEMORY_DELTA_SCHEMA = {"type": "array"}
+_WIRE_TASK_BINDING_SCHEMA = {"type": "object"}
+
+_CONCLUDE_PROPERTIES = {
+    "type": {"type": "string", "enum": ["concluir"]},
+    "response": {"type": "string", "minLength": 1},
+    "choices": {"type": "array", "minItems": 2, "items": {"type": "string", "minLength": 1}},
+    "allow_free_text": {"type": "boolean"},
+    "memory_delta": _WIRE_MEMORY_DELTA_SCHEMA,
+    "task_binding": _WIRE_TASK_BINDING_SCHEMA,
 }
 
-# Provider-facing ECC wire: strict about the decision family, deliberately
-# shallow about Memory. This lets the Adapter reject malformed ECC such as
-# explorar.operations=[] while preserving the invariant that an invalid
-# Memory sidecar never vetoes an otherwise valid ECC decision.
-_WIRE_MEMORY_DELTA_SCHEMA = {"type": "array"}
-_EYLE_WIRE_SCHEMA = {
+_NAVIGATION_WIRE_SCHEMA = {
     "oneOf": [
         {
             "type": "object",
             "properties": {
                 "type": {"type": "string", "enum": ["explorar"]},
-                "operations": {"type": "array", "minItems": 1, "items": _OPERATION_SCHEMA},
                 "memory_delta": _WIRE_MEMORY_DELTA_SCHEMA,
+                "task_binding": _WIRE_TASK_BINDING_SCHEMA,
             },
-            "required": ["type", "operations", "memory_delta"],
+            "required": ["type", "memory_delta"],
             "additionalProperties": False,
         },
         {
             "type": "object",
             "properties": {
                 "type": {"type": "string", "enum": ["construir"]},
-                "operation": _OPERATION_SCHEMA["properties"]["operation"],
-                "arguments": {"type": "object"},
                 "memory_delta": _WIRE_MEMORY_DELTA_SCHEMA,
+                "task_binding": _WIRE_TASK_BINDING_SCHEMA,
             },
-            "required": ["type", "operation", "arguments", "memory_delta"],
+            "required": ["type", "memory_delta"],
             "additionalProperties": False,
         },
         {
             "type": "object",
-            "properties": {
-                "type": {"type": "string", "enum": ["concluir"]},
-                "response": {"type": "string", "minLength": 1},
-                "choices": {"type": "array", "minItems": 2, "items": {"type": "string", "minLength": 1}},
-                "allow_free_text": {"type": "boolean"},
-                "memory_delta": _WIRE_MEMORY_DELTA_SCHEMA,
-            },
+            "properties": _CONCLUDE_PROPERTIES,
             "required": ["type", "response", "memory_delta"],
             "additionalProperties": False,
         },
     ]
 }
 
+_EXPLORE_WIRE_SCHEMA = {
+    "oneOf": [
+        {
+            "type": "object",
+            "properties": {
+                "operations": {"type": "array", "minItems": 1, "items": _OPERATION_SCHEMA},
+                "memory_delta": _WIRE_MEMORY_DELTA_SCHEMA,
+                "task_binding": _WIRE_TASK_BINDING_SCHEMA,
+            },
+            "required": ["operations", "memory_delta"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "return_to_ecc": {"type": "boolean", "enum": [True]},
+                "memory_delta": _WIRE_MEMORY_DELTA_SCHEMA,
+                "task_binding": _WIRE_TASK_BINDING_SCHEMA,
+            },
+            "required": ["return_to_ecc", "memory_delta"],
+            "additionalProperties": False,
+        },
+    ]
+}
+
+_BUILD_WIRE_SCHEMA = {
+    "oneOf": [
+        {
+            "type": "object",
+            "properties": {
+                "operation": _OPERATION_SCHEMA["properties"]["operation"],
+                "arguments": {"type": "object"},
+                "memory_delta": _WIRE_MEMORY_DELTA_SCHEMA,
+                "task_binding": _WIRE_TASK_BINDING_SCHEMA,
+            },
+            "required": ["operation", "arguments", "memory_delta"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "return_to_ecc": {"type": "boolean", "enum": [True]},
+                "memory_delta": _WIRE_MEMORY_DELTA_SCHEMA,
+                "task_binding": _WIRE_TASK_BINDING_SCHEMA,
+            },
+            "required": ["return_to_ecc", "memory_delta"],
+            "additionalProperties": False,
+        },
+    ]
+}
+
+_PROFILE_WIRE_SCHEMAS = {
+    "navigation": _NAVIGATION_WIRE_SCHEMA,
+    "explore": _EXPLORE_WIRE_SCHEMA,
+    "build": _BUILD_WIRE_SCHEMA,
+}
+
+
+def _canonical_profile_schema(wire_schema: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the strict local contract for one current Rev4 surface.
+
+    Provider validation intentionally keeps semantic persistence sidecars
+    shallow so a malformed optional Memory/Task sidecar cannot veto a valid
+    primary cognition before Eyle can isolate that error. Local parsing remains
+    strict and is described by this canonical schema.
+    """
+    schema = deepcopy(wire_schema)
+    for branch in schema.get("oneOf", []):
+        props = branch.get("properties") or {}
+        if "memory_delta" in props:
+            props["memory_delta"] = deepcopy(_MEMORY_DELTA_SCHEMA)
+        if "task_binding" in props:
+            props["task_binding"] = deepcopy(_TASK_BINDING_SCHEMA)
+    return schema
+
+
+_PROFILE_CANONICAL_SCHEMAS = {
+    name: _canonical_profile_schema(schema)
+    for name, schema in _PROFILE_WIRE_SCHEMAS.items()
+}
+
 
 def schema_for_profile(profile: str) -> Dict[str, Any]:
-    """Return Eyle's strict internal canonical schema."""
-    if profile != "ecc":
+    """Return Eyle's strict local contract for a current Rev4 surface."""
+    schema = _PROFILE_CANONICAL_SCHEMAS.get(str(profile or ""))
+    if schema is None:
         raise StructuredResponseError("STRUCTURED_PROFILE_UNKNOWN", f"unknown structured profile: {profile}")
-    return deepcopy(_EYLE_RESPONSE_SCHEMA)
+    return deepcopy(schema)
 
 
 def wire_schema_for_profile(profile: str) -> Dict[str, Any]:
-    """Return the current provider-facing ECC wire schema."""
-    if profile != "ecc":
+    schema = _PROFILE_WIRE_SCHEMAS.get(str(profile or ""))
+    if schema is None:
         raise StructuredResponseError("STRUCTURED_PROFILE_UNKNOWN", f"unknown structured profile: {profile}")
-    return deepcopy(_EYLE_WIRE_SCHEMA)
+    return deepcopy(schema)
 
 
 def json_schema_response_format(profile: str) -> Dict[str, Any]:
     schema = wire_schema_for_profile(profile)
-    return {"type": "json_schema", "json_schema": {"name": "eyle_cognition_wire", "strict": True, "schema": schema}}
+    name = f"eyle_{str(profile)}_wire"
+    return {"type": "json_schema", "json_schema": {"name": name, "strict": True, "schema": schema}}
 
 
 def mandatory_top_level_keys(profile: str) -> tuple[str, ...]:
     wire_schema_for_profile(profile)
-    return ("type", "memory_delta")
-
+    if profile == "navigation":
+        return ("type", "memory_delta")
+    return ("memory_delta",)
 
 
 
@@ -385,32 +450,38 @@ def parse_json_representation(raw: Any) -> Any:
         ) from exc
 
 
-def _canonicalize_wire(raw: Any) -> tuple[Dict[str, Any], list[str]]:
-    """Split the current flat ECC wire into Eyle's internal envelope.
 
-    No historical wrappers, field aliases or movement aliases are accepted here.
-    Transport syntax repair belongs to the Adapter; Core only maps the current
-    Eyle-owned wire into its internal decision + Memory sidecar representation.
-    """
+def _canonicalize_wire(raw: Any, profile: str) -> tuple[Dict[str, Any], list[str]]:
+    """Split one current Rev4 surface wire into primary cognition + sidecars."""
+    wire_schema_for_profile(profile)
     value = parse_json_representation(raw)
     if not isinstance(value, dict):
         raise StructuredResponseError("STRUCTURED_OBJECT_REQUIRED", "top-level wire value must be an object")
-    if "type" not in value:
-        raise StructuredResponseError("EYLE_ENVELOPE_INVALID", "current ECC wire requires top-level type")
     memory_source = deepcopy(value.get("memory_delta", []))
-    decision = {key: deepcopy(item) for key, item in value.items() if key != "memory_delta"}
-    return {"decision": decision, "memory_delta": memory_source}, []
+    task_binding = deepcopy(value.get("task_binding")) if "task_binding" in value else None
+    primary = {
+        key: deepcopy(item)
+        for key, item in value.items()
+        if key not in {"memory_delta", "task_binding"}
+    }
+    if profile == "navigation" and "type" not in primary:
+        raise StructuredResponseError("EYLE_ENVELOPE_INVALID", "navigation wire requires top-level type")
+    return {
+        "primary": primary,
+        "memory_delta": memory_source,
+        "task_binding": task_binding,
+    }, []
 
 
-def canonicalize_wire_response(raw: Any) -> Dict[str, Any]:
-    """Deterministically map the current flat wire into the canonical envelope."""
-    envelope, _ = _canonicalize_wire(raw)
+def canonicalize_wire_response(raw: Any, profile: str = "navigation") -> Dict[str, Any]:
+    """Deterministically map the current flat surface wire into an envelope."""
+    envelope, _ = _canonicalize_wire(raw, profile)
     return envelope
 
 
-def wire_canonicalization_steps(raw: Any) -> list[str]:
+def wire_canonicalization_steps(raw: Any, profile: str = "navigation") -> list[str]:
     """Diagnostic-only list of deterministic boundary normalizations."""
-    _, steps = _canonicalize_wire(raw)
+    _, steps = _canonicalize_wire(raw, profile)
     return steps
 
 
@@ -420,6 +491,27 @@ def observed_top_level(raw: Any) -> Dict[str, Any] | None:
         return dict(value) if isinstance(value, dict) else None
     except StructuredResponseError:
         return None
+
+
+def _clean_task_binding(raw: Any) -> Dict[str, Any] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise StructuredResponseError("EYLE_TASK_BINDING_INVALID", "task_binding must be an object")
+    action = str(raw.get("action") or "").strip()
+    if action == "unbind":
+        if set(raw) != {"action"}:
+            raise StructuredResponseError("EYLE_TASK_BINDING_INVALID", "unbind accepts only action")
+        return {"action": "unbind"}
+    if action == "bind":
+        if set(raw) != {"action", "ref"}:
+            raise StructuredResponseError("EYLE_TASK_BINDING_INVALID", "bind requires exactly action and ref")
+        ref = raw.get("ref")
+        if not isinstance(ref, str) or re.fullmatch(_MEMORY_REF, ref) is None:
+            raise StructuredResponseError("EYLE_TASK_BINDING_INVALID", "task binding ref must be mem-* or @alias")
+        return {"action": "bind", "ref": ref}
+    raise StructuredResponseError("EYLE_TASK_BINDING_INVALID", "task_binding.action must be bind or unbind")
+
 
 
 def _clean_json_value(value: Any, label: str) -> Any:
@@ -766,69 +858,94 @@ def _clean_operation(raw: Any, label: str) -> Dict[str, Any]:
     return {"operation": operation, "arguments": dict(arguments)}
 
 
-def _parse_ecc_decision(decision: Any) -> Dict[str, Any]:
-    """Validate only the semantic ECC decision.
 
-    Rev3.7 invariant: Memory is a sidecar. A malformed memory delta must never
-    prevent a valid ECC decision from reaching Runtime.
-    """
-    if not isinstance(decision, dict):
-        raise StructuredResponseError("ECC_DECISION_INVALID", "decision must be an object")
-    kind = decision.get("type")
-    normalized: Dict[str, Any] = {"type": kind}
-    if kind == "explorar":
-        if set(decision) != {"type", "operations"}:
-            raise StructuredResponseError("ECC_SHAPE_INVALID", "explorar requires exactly type and operations")
-        operations = decision.get("operations")
-        if not isinstance(operations, list) or len(operations) < 1:
-            raise StructuredResponseError("ECC_OPERATION_INVALID", "explorar.operations must contain at least one operation")
-        normalized["operations"] = [_clean_operation(item, f"decision.operations[{i}]") for i, item in enumerate(operations)]
-        return normalized
-    if kind == "construir":
-        if set(decision) != {"type", "operation", "arguments"}:
-            raise StructuredResponseError("ECC_SHAPE_INVALID", "construir requires exactly type, operation and arguments")
-        op = _clean_operation({"operation": decision.get("operation"), "arguments": decision.get("arguments")}, "decision")
-        normalized.update(op)
-        return normalized
+def _parse_conclude(decision: Dict[str, Any]) -> Dict[str, Any]:
+    allowed = {"type", "response", "choices", "allow_free_text"}
+    if set(decision) - allowed:
+        raise StructuredResponseError("ECC_SHAPE_INVALID", "concluir contains unsupported fields")
+    response = decision.get("response")
+    if not isinstance(response, str) or not response.strip():
+        raise StructuredResponseError("ECC_RESPONSE_INVALID", "concluir requires a non-empty response")
+    normalized: Dict[str, Any] = {"type": "concluir", "response": response.strip()}
+    if "choices" in decision:
+        raw_choices = decision.get("choices")
+        if not isinstance(raw_choices, list):
+            raise StructuredResponseError("ECC_CHOICE_INVALID", "concluir.choices must be an array")
+        choices = []
+        seen = set()
+        for value in raw_choices:
+            if not isinstance(value, str) or not value.strip():
+                raise StructuredResponseError("ECC_CHOICE_INVALID", "concluir.choices must contain non-empty strings")
+            label = value.strip()
+            folded = label.casefold()
+            if folded not in seen:
+                seen.add(folded)
+                choices.append(label)
+        if len(choices) < 2:
+            raise StructuredResponseError("ECC_CHOICE_INVALID", "concluir.choices requires at least two distinct options")
+        normalized["choices"] = choices
+        normalized["allow_free_text"] = bool(decision.get("allow_free_text", True))
+    elif "allow_free_text" in decision:
+        raise StructuredResponseError("ECC_CHOICE_INVALID", "allow_free_text requires choices")
+    return normalized
+
+
+def _parse_navigation_primary(primary: Any) -> Dict[str, Any]:
+    if not isinstance(primary, dict):
+        raise StructuredResponseError("ECC_DECISION_INVALID", "navigation decision must be an object")
+    kind = primary.get("type")
+    if kind in {"explorar", "construir"}:
+        if set(primary) != {"type"}:
+            raise StructuredResponseError("ECC_SHAPE_INVALID", f"navigation {kind} requires only type")
+        return {"type": kind}
     if kind == "concluir":
-        allowed = {"type", "response", "choices", "allow_free_text"}
-        if set(decision) - allowed:
-            raise StructuredResponseError("ECC_SHAPE_INVALID", "concluir contains unsupported fields")
-        response = decision.get("response")
-        if not isinstance(response, str) or not response.strip():
-            raise StructuredResponseError("ECC_RESPONSE_INVALID", "concluir requires a non-empty response")
-        normalized["response"] = response.strip()
-        if "choices" in decision:
-            raw_choices = decision.get("choices")
-            if not isinstance(raw_choices, list):
-                raise StructuredResponseError("ECC_CHOICE_INVALID", "concluir.choices must be an array")
-            choices = []
-            seen = set()
-            for value in raw_choices:
-                if not isinstance(value, str) or not value.strip():
-                    raise StructuredResponseError("ECC_CHOICE_INVALID", "concluir.choices must contain non-empty strings")
-                label = value.strip()
-                folded = label.casefold()
-                if folded not in seen:
-                    seen.add(folded); choices.append(label)
-            if len(choices) < 2:
-                raise StructuredResponseError("ECC_CHOICE_INVALID", "concluir.choices requires at least two distinct options")
-            normalized["choices"] = choices
-            normalized["allow_free_text"] = bool(decision.get("allow_free_text", True))
-        elif "allow_free_text" in decision:
-            raise StructuredResponseError("ECC_CHOICE_INVALID", "allow_free_text requires choices")
-        return normalized
-    raise StructuredResponseError("ECC_TYPE_INVALID", "decision.type must be explorar, construir or concluir")
+        return _parse_conclude(primary)
+    raise StructuredResponseError("ECC_TYPE_INVALID", "navigation type must be explorar, construir or concluir")
 
 
-def parse_ecc_response(raw: Any) -> Dict[str, Any]:
-    # Current flat wire -> canonical envelope. ECC is validated first;
-    # Memory is then parsed independently as a non-vetoing Eyle sidecar.
-    envelope = canonicalize_wire_response(raw)
-    if set(envelope) != {"decision", "memory_delta"}:
-        raise StructuredResponseError("EYLE_ENVELOPE_INVALID", "canonical top-level must contain exactly decision and memory_delta")
+def _parse_explore_primary(primary: Any) -> Dict[str, Any]:
+    if not isinstance(primary, dict):
+        raise StructuredResponseError("ECC_EXPLORE_INVALID", "Explore Surface result must be an object")
+    if primary.get("return_to_ecc") is True:
+        if set(primary) != {"return_to_ecc"}:
+            raise StructuredResponseError("ECC_EXPLORE_INVALID", "return_to_ecc cannot include operations")
+        return {"return_to_ecc": True}
+    if set(primary) != {"operations"}:
+        raise StructuredResponseError("ECC_EXPLORE_INVALID", "Explore Surface requires operations or return_to_ecc")
+    operations = primary.get("operations")
+    if not isinstance(operations, list) or len(operations) < 1:
+        raise StructuredResponseError("ECC_OPERATION_INVALID", "explore.operations must contain at least one operation")
+    return {
+        "operations": [_clean_operation(item, f"operations[{i}]") for i, item in enumerate(operations)]
+    }
 
-    normalized = _parse_ecc_decision(envelope.get("decision"))
+
+def _parse_build_primary(primary: Any) -> Dict[str, Any]:
+    if not isinstance(primary, dict):
+        raise StructuredResponseError("ECC_BUILD_INVALID", "Build Surface result must be an object")
+    if primary.get("return_to_ecc") is True:
+        if set(primary) != {"return_to_ecc"}:
+            raise StructuredResponseError("ECC_BUILD_INVALID", "return_to_ecc cannot include mutation fields")
+        return {"return_to_ecc": True}
+    if set(primary) != {"operation", "arguments"}:
+        raise StructuredResponseError("ECC_BUILD_INVALID", "Build Surface requires operation+arguments or return_to_ecc")
+    return _clean_operation(primary, "build")
+
+
+def _parse_surface_response(raw: Any, profile: str) -> Dict[str, Any]:
+    envelope = canonicalize_wire_response(raw, profile)
+    primary = envelope.get("primary")
+    if profile == "navigation":
+        normalized = _parse_navigation_primary(primary)
+    elif profile == "explore":
+        normalized = _parse_explore_primary(primary)
+    elif profile == "build":
+        normalized = _parse_build_primary(primary)
+    else:
+        raise StructuredResponseError("STRUCTURED_PROFILE_UNKNOWN", f"unknown structured profile: {profile}")
+
+    # Sidecars are isolated from the valid primary cognition. They can be
+    # rejected locally without requiring a second paid Main call.
     try:
         normalized["memory_delta"] = _clean_memory(envelope.get("memory_delta"))
     except StructuredResponseError as error:
@@ -836,10 +953,41 @@ def parse_ecc_response(raw: Any) -> Dict[str, Any]:
             raise
         normalized["memory_delta"] = []
         normalized["memory_error"] = {"code": error.code, "detail": error.detail}
+    try:
+        task_binding = _clean_task_binding(envelope.get("task_binding"))
+        if task_binding is not None:
+            normalized["task_binding"] = task_binding
+    except StructuredResponseError as error:
+        if not str(error.code).startswith("EYLE_TASK_BINDING_"):
+            raise
+        normalized["task_binding"] = None
+        normalized["task_binding_error"] = {"code": error.code, "detail": error.detail}
     return normalized
 
 
+def parse_navigation_response(raw: Any) -> Dict[str, Any]:
+    return _parse_surface_response(raw, "navigation")
+
+
+def parse_explore_response(raw: Any) -> Dict[str, Any]:
+    return _parse_surface_response(raw, "explore")
+
+
+def parse_build_response(raw: Any) -> Dict[str, Any]:
+    return _parse_surface_response(raw, "build")
+
+
+
+def parse_ecc_response(raw: Any) -> Dict[str, Any]:
+    """Parse the current ECC Navigation response.
+
+    Rev4 keeps ECC as the three semantic movements; this function name denotes
+    the Navigation choice, not the removed monolithic tool-execution wire.
+    """
+    return parse_navigation_response(raw)
+
 def parse_profile_response(raw: Any, profile: str) -> Dict[str, Any]:
-    if profile != "ecc":
+    if profile not in _PROFILE_WIRE_SCHEMAS:
         raise StructuredResponseError("STRUCTURED_PROFILE_UNKNOWN", f"unknown structured profile: {profile}")
-    return parse_ecc_response(raw)
+    return _parse_surface_response(raw, profile)
+

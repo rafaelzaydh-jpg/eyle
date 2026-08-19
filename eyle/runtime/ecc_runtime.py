@@ -15,6 +15,7 @@ from eyle.core.ecc import public_name, resolve
 from eyle.core.evidence import evidence_record, retain_observation_evidence, evidence_ids_for_materials
 from eyle.core.memory import memory_activate_result, memory_continue_result, memory_history_result, memory_overview_result, memory_relation_history_result
 from eyle.runtime.execution_context import current_execution
+from eyle.runtime import telemetry
 from eyle.runtime.observation import (
     lookup as lookup_observation,
     record as record_observation,
@@ -25,6 +26,7 @@ from eyle.runtime.observation import (
     physical_effect_index_view,
     equivalent_result_seen,
     frontier_store,
+    frontier_view,
 )
 
 
@@ -106,18 +108,57 @@ def project_result(session: Any, capability: str, result: Dict[str, Any], regist
     return {k: v for k, v in out.items() if v not in (None, "", [], {})}
 
 
-def _compact_cached(entry: Dict[str, Any], operation: str) -> Dict[str, Any]:
-    return {
+def _compact_cached(session: Any, entry: Dict[str, Any], operation: str) -> Dict[str, Any]:
+    """Project a cached Observation without dropping recovery coordinates.
+
+    Rev3.7.5.1 compacted away Evidence and Frontier ids. That made the recovery
+    instruction self-defeating: Main was told to recall/continue while the exact
+    coordinates could disappear from the next hot observation. Rev3.7.6 keeps
+    only still-valid public coordinates; source bodies remain compact.
+    """
+    replay_result = entry.get("replay_result") if isinstance(entry.get("replay_result"), dict) else {}
+    evidence_ids = [str(v) for v in replay_result.get("evidence_ids") or [] if str(v)]
+
+    open_frontiers = []
+    for item in frontier_view(
+        session.observation_ledger,
+        [str(v) for v in entry.get("frontier_ids") or [] if str(v)],
+    ):
+        if not isinstance(item, dict) or item.get("status") != "open":
+            continue
+        frontier_id = str(item.get("id") or "")
+        raw = frontier_store(session.observation_ledger).get(frontier_id)
+        if not isinstance(raw, dict):
+            continue
+        if int(raw.get("reality_epoch") or 0) != int(getattr(session, "reality_epoch", 0) or 0):
+            continue
+        open_frontiers.append(copy.deepcopy(item))
+
+    if open_frontiers:
+        message = (
+            "Requested physical scope is already covered. "
+            "Runtime has preserved open continuation coordinate(s) in frontiers; operation=continue is available for those coordinates; "
+            "Evidence coordinates are also returned when available. Main decides how to proceed."
+        )
+    else:
+        message = (
+            "Requested physical scope is already covered and no open Frontier is attached to this cached scope. "
+            "Evidence coordinates are returned when available. Main decides whether another physical scope is needed."
+        )
+    out = {
         "operation": operation,
         "status": "already_observed",
         "ok": True,
         "executed": False,
         "changed": False,
         "grounding_ids": [str(v) for v in entry.get("grounding_ids") or []],
+        "evidence_ids": evidence_ids,
+        "frontiers": open_frontiers,
         "coverage": copy.deepcopy(entry.get("coverage") or {}),
         "source_turn": entry.get("turn"),
-        "message": "Requested physical scope is already covered. Use type=explorar with operation=recall and an ev-* ID only if exact source text must become cognitively present again.",
+        "message": message,
     }
+    return {k: v for k, v in out.items() if v not in (None, "", [], {})}
 
 
 def _advance_epoch(session: Any, result: Dict[str, Any]) -> None:
@@ -358,8 +399,24 @@ def dispatch(
                 capability, previous, material_items(session.observation_ledger), runtime_ctx,
             )
             if fresh:
-                compact = _compact_cached(previous, operation)
+                compact = _compact_cached(session, previous, operation)
                 record_replay(session, previous, compact, reason=replay_reason, public_result=compact)
+                try:
+                    execution = current_execution()
+                    telemetry.record(
+                        "observation", "replay_avoided", "success", 0.0,
+                        execution_id=(execution.execution_id if execution is not None else None),
+                        job_id=(execution.source_job_id if execution is not None else None),
+                        metadata={
+                            "operation": operation,
+                            "capability": capability,
+                            "reason": replay_reason,
+                            "open_frontiers": len(compact.get("frontiers") or []),
+                            "evidence_ids": len(compact.get("evidence_ids") or []),
+                        },
+                    )
+                except Exception:
+                    pass
                 return DispatchOutcome(compact, physical_progress=False)
             previous = None
 

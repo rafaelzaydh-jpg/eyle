@@ -19,7 +19,7 @@ def _payload():
             {"role": "user", "content": '{"ecc_operations":{"example":true}}'},
             {"role": "user", "content": "Olá"},
         ],
-        "response_format": json_schema_response_format("ecc"),
+        "response_format": json_schema_response_format("navigation"),
         "reasoning_mode": "off",
         "stream": False,
     }

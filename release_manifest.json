@@ -1,9 +1,9 @@
 {
   "release": "2.7.5",
   "app_version": "2.7.5",
-  "config_schema_version": "2.7.5-r3.7.5.1-ecc",
-  "revision": "rev3.7.5.1-ecc",
-  "title": "Rev3.7.5.1 — Provider Contract Delivery",
+  "config_schema_version": "2.7.5-r4.0.0-ecc",
+  "revision": "rev4.0.0-ecc",
+  "title": "Rev4.0.0 — Task-Anchored Cognitive Surfaces",
   "python": ">=3.11",
   "architecture": {
     "semantic_authority": "Main LLM",
@@ -12,14 +12,14 @@
       "construir",
       "concluir"
     ],
-    "memory": "Memory Graph v12 with explicit domain/context identity; Runtime materializes only Main-explicit Memory activation.",
-    "runtime": "Physical truth/execution invariants, persistence, Memory/Evidence/Material reachability, Task state, per-call context safety, provider-reported per-message token budget and transactions.",
+    "memory": "Memory Graph v12 with explicit domain/context identity; an exact Main-bound Task may be projected mechanically without Memory search/ranking.",
+    "runtime": "Physical truth/execution invariants, persistence, exact Active Task projection, surface materialization, Memory/Evidence/Material reachability, per-call context safety, provider-reported per-message token budget and transactions; no semantic routing.",
     "adapter": "Simple DeepSeek connection boundary: fixed configured model, request/response transport, one caller-supplied JSON Schema contract delivered once to the provider, mechanical JSON recovery, schema validation, one isolated format-only repair, usage/transport telemetry; no Eyle semantics or execution policy."
   },
   "memory_graph_schema": "2.7.5-r3.7.1-memory-graph-v12",
-  "session_schema": "2.7.5-r3.7.5-ecc",
+  "session_schema": "2.7.5-r4.0.0-ecc",
   "adapter_protocol": "eyle-adapter-transport-v2",
-  "execution_continuity": "execution-continuity-v3",
+  "execution_continuity": "execution-continuity-v6",
   "bundled_providers": [
     "standard"
   ],
@@ -74,12 +74,12 @@
     ]
   },
   "contracts": {
-    "wire": "Main owns the current flat ECC wire semantics and supplies its JSON Schema. Adapter communicates that schema to the provider without Eyle-specific aliases, validates the result and may mechanically repair representation once. Core accepts current JSON only.",
+    "wire": "Rev4 uses three Eyle-owned structured protocol surfaces: navigation chooses one of the existing ECC movements; explore exposes only observe/execute operations; build exposes only mutate operations. Adapter remains generic and receives exactly the current caller-supplied surface schema.",
     "memory": "Memory remains current-by-default semantic knowledge with preserved revision history. Task Memory reuses ordinary mem-* nodes/relations. Semantic supports are revision-pinned when created; source revision drift is exposed mechanically, never interpreted as falsity.",
     "recall": "FTS5/SQL candidate discovery is literal/mechanical. scope=all reaches user + current world; scope=global reaches all current nodes across every world. Exact physical domain/context_key filters are supported. Activated bodies are materialized once through memory_view; operation observations stay compact. Main judges semantic relevance.",
-    "frontier": "Frontier is exact continuation after the current materialized page, never a semantic reading limit.",
+    "frontier": "Frontier is an exact continuation after the current materialized page. Live-source Frontiers are revision-bound; source drift is reported mechanically and makes the Frontier stale without semantic invalidation of historical Evidence.",
     "adapter": "Adapter owns connection/auth, fixed DeepSeek request translation, delivery of Eyle's caller-supplied JSON Schema as the single provider-facing representation contract, mechanical JSON recovery, validation, exactly one isolated format-only repair and transport/usage facts. Repair reuses only schema + prior candidate + validation errors, never the full Eyle context.",
-    "execution": "Eyle owns execution progress. If Adapter's single format repair still leaves an invalid current wire candidate, Eyle preserves Session/observations and may request one fresh current decision; that allowance resets only after real observable/physical/Task progress. Repeated valid action/result fixed points terminate as ECC_NO_PROGRESS_UNRECOVERABLE. No MAX_TURNS ceiling exists.",
+    "execution": "Eyle owns deterministic execution progress and durable logical continuity. Rev4 checkpoints preserve active_task_id and cognitive_surface in addition to the existing canonical session/runtime state. Cognitive surface is protocol state, never semantic intent.",
     "source": "workspace and eyle are physical source identities, never inferred semantically.",
     "interaction": "Main participates directly rather than defaulting to help-desk offers/menus. Main authors semantic choices; Runtime owns physical confirmations. Only physical confirmation authorizes an exact prepared mutation.",
     "sandbox_promotion": "A tested sandbox file/subtree can be frozen as a hash-bound durable staging artifact and promoted to the real workspace with one exact confirmation; merge does not delete unrelated target files and mirror is explicit.",
@@ -89,26 +89,28 @@
     "optimization": "Optimization remains monotonic: compact presentation may reduce prompt cost, but no physical Material, Evidence, Frontier, or Memory becomes unreachable to Main.",
     "investigation_quality": "Structural inventory is orientation, not sufficient evidence for behavioral/architectural analysis. Main is instructed to inspect representative implementation before concluding material claims.",
     "conversation": "Recent conversation is transported with native user/assistant roles; the active current_request is emitted exactly once as the final provider user message. Materialization is physical-token-budgeted and omitted history remains reachable.",
-    "self_identity": "Eyle is the running agent. Main interprets unqualified self references against the running Eyle instance; source=eyle is self source and source=workspace is the user's selected project. Runtime does not semantically route these references."
+    "self_identity": "Eyle is the running agent. Main interprets unqualified self references against the running Eyle instance; source=eyle is self source and source=workspace is the user's selected project. Runtime does not semantically route these references.",
+    "task_surface": "Tasks remain Memory Graph kind=task/domain=task. Main alone binds active_task_id; Runtime validates and projects that exact ID without recall/ranking. Persisted state may be complete while each cognitive surface is purpose-bounded."
   },
   "publication": {
     "requires_extracted_artifact_verification": true,
     "public_docs_are_revision_neutral": false,
     "runtime_state_committed": false,
     "experimental": false,
-    "mainline_base": "Rev3.7.5",
-    "stability": "candidate"
+    "mainline_base": "Rev3.7.8",
+    "stability": "candidate",
+    "compatibility": "Current-schema only: Session/config 2.7.5-r4.0.0-ecc, execution-continuity-v6, pending 16-ecc. Rev3.7.8 is the historical base, not an accepted current wire/session schema."
   },
   "release_notes": {
-    "boundary": "Rev3.7.5.1 completes the Rev3.7.5 Adapter boundary: the schema Eyle supplies is now actually delivered to the provider.",
-    "deduplication": "The textual ECC wire instruction is no longer duplicated in Core. Provider repair does not replay conversation, Memory, tools or Task context.",
-    "repair": "Exactly one representation-only repair remains. It receives schema + previous candidate + validation errors only.",
-    "truncation": "Provider finish_reason=length is returned as truncation and never triggers a second format-repair generation.",
-    "tokens": "No new semantic prompt-size or output-size ceiling was added; savings come from eliminating duplicated/irrelevant context.",
-    "compatibility": "No Rev2.7 aliases or Eyle semantics were added to the Adapter."
+    "reality_binding": "Live read_file/search_code continuations are bound to exact source revisions and reject source drift as FRONTIER_SOURCE_REVISED before materializing new bytes.",
+    "checkpoint_identity": "recoverable_execution storage is singular per execution_id with atomic replacement and monotonic checkpoint_generation.",
+    "provider_identity": "Persisted continuations bind to stable Host-owned provider_identity_hash rather than mutable provider execution context.",
+    "coverage": "Mechanical file coverage is source-revision aware and never merges ranges from different file revisions.",
+    "provenance": "Historical Evidence/Materials remain intact when a live source changes; Runtime reports physical drift without semantic invalidation.",
+    "compatibility": "Current-schema only: Session/config 2.7.5-r4.0.0-ecc, execution-continuity-v6, pending 16-ecc."
   },
-  "pending_schema": "13-ecc",
-  "adapter_version": "2.7.5-rev3.7.5.1",
+  "pending_schema": "16-ecc",
+  "adapter_version": "2.7.5-rev3.7.6",
   "rev3751": {
     "revision_focus": "provider_contract_delivery_and_prompt_deduplication",
     "adapter_format_repairs": 1,
@@ -118,5 +120,24 @@
     "runtime_backward_compatibility": false,
     "adapter_semantic_aliases": false,
     "new_token_ceiling": false
+  },
+  "rev377": {
+    "revision_focus": "persisted_recoverable_continuity_and_mechanical_convergence_signals",
+    "recoverable_continuation_kind": "recoverable_execution",
+    "checkpoint_reasons": [
+      "budget_salvage",
+      "stalled_recoverable"
+    ],
+    "runtime_semantic_wandering_detector": false,
+    "main_remains_semantic_authority": true
+  },
+  "rev378": {
+    "revision_focus": "reality_bound_recoverable_continuity",
+    "live_frontiers_revision_bound": true,
+    "recoverable_checkpoint_singular_per_execution": true,
+    "provider_identity_separate_from_mutable_context": true,
+    "runtime_semantic_wandering_detector": false,
+    "automatic_frontier_consumption": false,
+    "main_remains_semantic_authority": true
   }
 }

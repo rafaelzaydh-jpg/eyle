@@ -10,7 +10,7 @@ from eyle.providers.standard.registry import CAPABILITIES
 from eyle.providers.standard.contracts import _material_source_root
 from tests.canonical import standard_registry
 from eyle.providers.standard.workspace import discover_project
-from llm.executar import PROMPT_ECC
+from llm.executar import PROMPT_ECC, PROMPT_EXPLORE
 from tests.canonical import base_config
 
 
@@ -179,11 +179,11 @@ def test_export_packages_only_active_snapshot_and_never_overwrites(tmp_path):
 
 
 def test_prompt_keeps_workspace_and_running_eyle_identity_explicit():
-    lowered = PROMPT_ECC.lower()
+    lowered = PROMPT_EXPLORE.lower()
     assert "workspace = the user-selected/open project" in lowered
     assert "eyle = the source tree of the eyle instance" in lowered
     assert "even if it is a copy, fork, old revision, or repository containing eyle code" in lowered
-    assert "never fall back from an empty workspace to eyle" in lowered
+    assert "never infer one from the other or fall back from workspace to eyle" in lowered
     assert "capabilities are eyle's replaceable body" in lowered
 
 

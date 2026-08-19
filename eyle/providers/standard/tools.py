@@ -7,9 +7,9 @@ import re
 import subprocess
 
 from eyle.contracts.capability import physical_effect
-from eyle.contracts.observation import (CoverageContractError, materialize_snapshot_handle, normalize_coverage, register_snapshot_handle)
-from eyle.runtime.observation import resolve_frontier, consume_frontier
-from eyle.providers.standard.workspace_io import ErroLeituraProjeto, ler_faixa_projeto, listar_arvore_projeto
+from eyle.contracts.observation import (CoverageContractError, materialize_snapshot_handle, normalize_coverage, register_snapshot_handle, release_snapshot_handle)
+from eyle.runtime.observation import resolve_frontier, consume_frontier, stale_frontier
+from eyle.providers.standard.workspace_io import ErroLeituraProjeto, ler_faixa_projeto, listar_arvore_projeto, revisao_arquivo_projeto
 from eyle.providers.standard import editing as _editing
 from eyle.providers.standard.project_inspection import calculate as calculate_expression, count_tokens as count_project_tokens, inspect_project as inspect_project_signals, project_stats as measure_project_stats
 from eyle.providers.standard.git_tools import git_status as inspect_git_status, git_diff as inspect_git_diff
@@ -468,9 +468,30 @@ def _tool_search_code(arguments, ctx):
     ledger = (ctx or {}).get("observation_ledger")
     handle_store = ledger.setdefault("handles", {}) if isinstance(ledger, dict) else None
     if remaining_ranges:
+        revision_by_file = {}
+        revision_failures = {}
+        for item in remaining_ranges:
+            path = str((item or {}).get("file") or "")
+            if not path or path in revision_by_file or path in revision_failures:
+                continue
+            revision, revision_error = _current_resource_revision(root, path)
+            if revision_error is not None:
+                revision_failures[path] = revision_error.error_code
+            else:
+                revision_by_file[path] = str(revision or "")
+        revision_bound_ranges = []
+        for item in remaining_ranges:
+            clone = dict(item)
+            path = str(clone.get("file") or "")
+            revision = revision_by_file.get(path)
+            if revision:
+                clone["resource_revision"] = revision
+            elif path in revision_failures:
+                clone["resource_revision_error"] = revision_failures[path]
+            revision_bound_ranges.append(clone)
         payload = {
             "query": query,
-            "items": remaining_ranges,
+            "items": revision_bound_ranges,
             "kind": "search_range_locator",
             "source": _source_name(arguments),
         }
@@ -651,6 +672,23 @@ def _tool_symbol_relations(arguments, ctx):
         return _falha("RELATION_SCAN_FAILED", str(error), executed=True)
 
 
+def _revision_mismatch_detail(*, source, path, expected, current, frontier_kind):
+    return {
+        "source_capability": frontier_kind,
+        "source": str(source or "workspace"),
+        "path": str(path or ""),
+        "expected_revision": str(expected or ""),
+        "current_revision": str(current or ""),
+    }
+
+
+def _current_resource_revision(root, path):
+    try:
+        return revisao_arquivo_projeto(root, path), None
+    except ErroLeituraProjeto as error:
+        return None, error
+
+
 def _continue_read_file_page(payload, ctx):
     """Materialize the exact next file range behind a read_file Frontier."""
     if not isinstance(payload, dict) or payload.get("kind") != "read_file_ranges":
@@ -659,6 +697,32 @@ def _continue_read_file_page(payload, ctx):
     root = _caminho_fonte(ctx, {"source": source})
     if not root:
         return {}
+    expected_revision = str(payload.get("resource_revision") or "").strip()
+    if expected_revision:
+        current_revision, revision_error = _current_resource_revision(root, str(payload.get("path") or ""))
+        if revision_error is not None:
+            return {
+                "ok": False,
+                "error_code": "FRONTIER_SOURCE_REVISED",
+                "retryable": True,
+                "detail": {
+                    **_revision_mismatch_detail(
+                        source=source, path=payload.get("path"), expected=expected_revision,
+                        current="", frontier_kind="read_file",
+                    ),
+                    "revision_error_code": revision_error.error_code,
+                },
+            }
+        if str(current_revision or "") != expected_revision:
+            return {
+                "ok": False,
+                "error_code": "FRONTIER_SOURCE_REVISED",
+                "retryable": True,
+                "detail": _revision_mismatch_detail(
+                    source=source, path=payload.get("path"), expected=expected_revision,
+                    current=current_revision, frontier_kind="read_file",
+                ),
+            }
     projected = []
     materials = []
     failures = []
@@ -679,7 +743,10 @@ def _continue_read_file_page(payload, ctx):
     return {
         "observations": materials,
         "coverage": _coverage_record(
-            scope={"kind": "file_range_continuation", "source": source, "path": payload.get("path")},
+            scope={
+                "kind": "file_range_continuation", "source": source, "path": payload.get("path"),
+                **({"source_revision": expected_revision} if expected_revision else {}),
+            },
             examined={"ranges": len(payload.get("items") or []), "materialized": len(projected)},
             complete=not failures,
             boundaries=[{"kind": "read_failure", "count": len(failures)}] if failures else [],
@@ -751,6 +818,54 @@ def _continue_search_code_page(payload, ctx):
         return {}
     query = str(payload.get("query") or "")
     max_lines = _SEARCH_RANGE_PAGE_LINES
+    revision_mismatches = []
+    checked = {}
+    expected_by_path = {}
+    binding_error_by_path = {}
+    for item in payload.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("file") or "")
+        if not path:
+            continue
+        expected = str(item.get("resource_revision") or "").strip()
+        if expected:
+            expected_by_path.setdefault(path, expected)
+        elif item.get("resource_revision_error"):
+            binding_error_by_path.setdefault(path, str(item.get("resource_revision_error") or "REVISION_UNAVAILABLE"))
+        else:
+            binding_error_by_path.setdefault(path, "REVISION_BINDING_MISSING")
+    for path in sorted(set(expected_by_path) | set(binding_error_by_path)):
+        expected = expected_by_path.get(path, "")
+        if path in binding_error_by_path:
+            revision_mismatches.append({
+                **_revision_mismatch_detail(
+                    source=source, path=path, expected=expected, current="",
+                    frontier_kind="search_code",
+                ),
+                "revision_error_code": binding_error_by_path[path],
+            })
+            continue
+        current, revision_error = _current_resource_revision(root, path)
+        checked[path] = (current, revision_error)
+        if revision_error is not None or str(current or "") != expected:
+            revision_mismatches.append({
+                **_revision_mismatch_detail(
+                    source=source, path=path, expected=expected, current=current,
+                    frontier_kind="search_code",
+                ),
+                **({"revision_error_code": revision_error.error_code} if revision_error is not None else {}),
+            })
+    if revision_mismatches:
+        return {
+            "ok": False,
+            "error_code": "FRONTIER_SOURCE_REVISED",
+            "retryable": True,
+            "detail": {
+                "source_capability": "search_code",
+                "revision_mismatches": revision_mismatches,
+            },
+        }
     material_candidates = []
     projected = []
     failures = []
@@ -870,6 +985,31 @@ def _tool_continue_observation(arguments, ctx):
     payload = materialized.get("payload") if isinstance(materialized, dict) else None
     source_capability = str((materialized or {}).get("source_capability") or "")
     projection = _continue_source_projection(source_capability, payload, ctx)
+    if isinstance(projection, dict) and projection.get("ok") is False and projection.get("error_code") == "FRONTIER_SOURCE_REVISED":
+        for next_frontier in (materialized or {}).get("frontiers") or []:
+            if isinstance(next_frontier, dict) and next_frontier.get("handle"):
+                release_snapshot_handle(ledger, str(next_frontier.get("handle") or ""))
+        stale_frontier(ledger, frontier_id, reason="source_revision_changed")
+        try:
+            from eyle.runtime import telemetry as _telemetry
+            from eyle.runtime.execution_context import current_execution as _current_execution
+            execution = _current_execution()
+            _telemetry.record(
+                "frontier", "source_revision", "changed", 0.0,
+                execution_id=(execution.execution_id if execution is not None else None),
+                job_id=(execution.source_job_id if execution is not None else None),
+                metadata={"frontier": frontier_id, "source_capability": source_capability},
+            )
+        except Exception:
+            pass
+        return _falha(
+            "FRONTIER_SOURCE_REVISED",
+            copy.deepcopy(projection.get("detail") or {}),
+            executed=True,
+            retryable=True,
+            failure_scope="resource",
+            failure_resource=str((projection.get("detail") or {}).get("path") or frontier_id),
+        )
     observations = [copy.deepcopy(item) for item in (projection.get("observations") or []) if isinstance(item, dict)] if isinstance(projection, dict) else []
     if not observations:
         if isinstance(payload, dict) and isinstance(payload.get("items"), list):
@@ -1137,7 +1277,10 @@ def _tool_read_file(arguments, ctx):
             cursor=finish+1
         handle=register_snapshot_handle(
             ledger, kind="read_file.ranges",
-            payload={"kind":"read_file_ranges","source":_source_name(arguments),"path":caminho_relativo,"items":ranges},
+            payload={
+                "kind":"read_file_ranges","source":_source_name(arguments),"path":caminho_relativo,
+                "resource_revision": str(leitura.get("file_hash") or ""), "items":ranges,
+            },
             reality_epoch=int((ctx or {}).get("reality_epoch") or 0), source_capability="read_file",
             description=f"Continue {caminho_relativo} after line {physical_end} through line {target_end}", page_size=1,
         )

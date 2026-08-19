@@ -104,12 +104,10 @@ def test_continuation_does_not_confuse_snapshot_exhaustion_with_source_materiali
     continued = standard_registry().execute(
         "standard.continue_observation", {"frontier": frontier}, ctx,
     )
-    assert continued["ok"] is True
-    facts = continued["coverage"]["facts"]
-    assert facts["snapshot_exhausted"] is True
-    assert facts["source_materialization_complete"] is False
-    assert continued["coverage"]["complete"] is False
-    assert any(item.get("kind") == "read_failure" for item in continued["coverage"]["boundaries"])
+    assert continued["ok"] is False
+    assert continued["error_code"] == "FRONTIER_SOURCE_REVISED"
+    assert session.observation_ledger["frontiers"][frontier]["status"] == "stale"
+    assert session.observation_ledger["frontiers"][frontier]["stale_reason"] == "source_revision_changed"
 
 
 

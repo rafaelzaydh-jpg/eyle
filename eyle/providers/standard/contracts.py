@@ -414,6 +414,9 @@ def _coverage_file(arguments, result):
     if not path:
         return _coverage_record(scope={"kind": "file"}, complete=False)
     scope = {"kind": "file", "source": _source_name(arguments), "path": path}
+    source_revision = str(detail.get("file_hash") or "").strip()
+    if source_revision:
+        scope["source_revision"] = source_revision
     if arguments.get("line_start") is not None and arguments.get("line_end") is not None:
         scope["requested_lines"] = [int(arguments["line_start"]), int(arguments["line_end"])]
     examined = {

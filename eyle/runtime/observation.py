@@ -317,6 +317,8 @@ def resolve_frontier(ledger: Dict[str, Any], frontier_id: str, *, reality_epoch:
     item = frontier_store(ledger).get(canonical_id)
     if not isinstance(item, dict):
         return None, "FRONTIER_NOT_FOUND"
+    if item.get("status") == "stale":
+        return None, "FRONTIER_STALE"
     if item.get("status") != "open":
         return None, "FRONTIER_CONSUMED"
     if int(item.get("reality_epoch") or 0) != int(reality_epoch or 0):
@@ -335,6 +337,20 @@ def consume_frontier(ledger: Dict[str, Any], frontier_id: str) -> None:
         release_snapshot_handle(ledger, str(item.get("handle") or ""))
 
 
+def stale_frontier(ledger: Dict[str, Any], frontier_id: str, *, reason: str) -> None:
+    """Mark a Frontier physically stale and release its private cursor.
+
+    Staleness is a Runtime fact. Historical Evidence/Materials remain intact;
+    Main decides the semantic consequence of the changed source.
+    """
+    canonical_id = _canonical_frontier_id(ledger, frontier_id)
+    item = frontier_store(ledger).get(canonical_id)
+    if isinstance(item, dict):
+        item["status"] = "stale"
+        item["stale_reason"] = str(reason or "physical_source_changed")
+        release_snapshot_handle(ledger, str(item.get("handle") or ""))
+
+
 def frontier_view(ledger: Dict[str, Any], ids: Optional[Iterable[str]] = None) -> List[Dict[str, Any]]:
     wanted = set(str(item) for item in (ids or []) if str(item)) if ids is not None else None
     out: List[Dict[str, Any]] = []
@@ -348,6 +364,7 @@ def frontier_view(ledger: Dict[str, Any], ids: Optional[Iterable[str]] = None) -
             "reason": item.get("reason"),
             "count": item.get("count"),
             "status": item.get("status"),
+            "stale_reason": item.get("stale_reason"),
         }
         out.append({k: v for k, v in entry.items() if v is not None})
     return out
@@ -535,6 +552,90 @@ def navigation_view(session: Any) -> List[Dict[str, Any]]:
     return out
 
 
+
+def mechanical_coverage_state(session: Any) -> Dict[str, Any]:
+    """Return accumulated physical coverage without judging relevance.
+
+    Runtime may merge exact file line intervals because they are physical
+    coordinates. It never decides whether that coverage is sufficient for the
+    task. Non-file Coverage remains available as canonical records.
+    """
+    ledger = _ledger(session)
+    current_epoch = int(getattr(session, "reality_epoch", 0) or 0)
+    records = []
+    files: Dict[str, Dict[str, Any]] = {}
+    for item in _entries(session).values():
+        if not isinstance(item, dict) or int(item.get("reality_epoch") or 0) != current_epoch:
+            continue
+        coverage = item.get("coverage")
+        if not isinstance(coverage, dict) or not coverage:
+            continue
+        scope = coverage.get("scope") if isinstance(coverage.get("scope"), dict) else {}
+        examined = coverage.get("examined") if isinstance(coverage.get("examined"), dict) else {}
+        frontier_ids = [
+            str(v) for v in item.get("frontier_ids") or []
+            if str(v)
+        ]
+        open_ids = [
+            str(frontier.get("id"))
+            for frontier in frontier_view(ledger, frontier_ids)
+            if isinstance(frontier, dict) and frontier.get("status") == "open" and frontier.get("id")
+        ]
+        records.append({
+            "turn": int(item.get("turn") or 0),
+            "capability": item.get("capability"),
+            "scope": copy.deepcopy(scope),
+            "examined": copy.deepcopy(examined),
+            "complete": bool(coverage.get("complete")),
+            "boundaries": copy.deepcopy(coverage.get("boundaries") or []),
+            "frontier_ids": open_ids,
+        })
+
+        path = str(scope.get("path") or "").replace("\\", "/").strip()
+        source = str(scope.get("source") or "").strip()
+        if path and source and isinstance(examined.get("line_start"), int) and isinstance(examined.get("line_end"), int):
+            source_revision = str(scope.get("source_revision") or "").strip()
+            key = f"{source}:{path}:{source_revision or 'unversioned'}"
+            state = files.setdefault(key, {
+                "source": source, "path": path,
+                **({"source_revision": source_revision} if source_revision else {}),
+                "ranges": [], "total_lines": 0, "frontier_ids": [],
+            })
+            state["ranges"].append([int(examined["line_start"]), int(examined["line_end"])])
+            if isinstance(examined.get("total_lines"), int):
+                state["total_lines"] = max(int(state["total_lines"]), int(examined["total_lines"]))
+            state["frontier_ids"].extend(v for v in open_ids if v not in state["frontier_ids"])
+
+    file_rows = []
+    for state in files.values():
+        ranges = sorted(state.pop("ranges"))
+        merged = []
+        for start, end in ranges:
+            if not merged or start > merged[-1][1] + 1:
+                merged.append([start, end])
+            else:
+                merged[-1][1] = max(merged[-1][1], end)
+        materialized = sum(end - start + 1 for start, end in merged)
+        total = int(state.get("total_lines") or 0)
+        file_rows.append({
+            **state,
+            "materialized_ranges": merged,
+            "materialized_lines": materialized,
+            "remaining_lines": max(0, total - materialized) if total else None,
+            "complete_file_coverage": bool(total and materialized >= total and merged and merged[0][0] <= 1),
+        })
+    file_rows.sort(key=lambda row: (str(row.get("source")), str(row.get("path"))))
+    records.sort(key=lambda row: (int(row.get("turn") or 0), str(row.get("capability") or "")))
+    return {
+        "reality_epoch": current_epoch,
+        "files": file_rows,
+        "coverage_records": records[-24:],
+        "open_frontiers": [
+            item for item in frontier_view(ledger)
+            if isinstance(item, dict) and item.get("status") == "open"
+        ],
+    }
+
 def physical_capability_calls(session: Any) -> int:
     return sum(1 for event in _events(session) if isinstance(event, dict) and event.get("executed") is True)
 
@@ -584,7 +685,7 @@ def persisted_view(ledger: Dict[str, Any]) -> Dict[str, Any]:
     safe_frontiers = {
         str(key): {
             field: copy.deepcopy(item.get(field))
-            for field in ("id", "handle", "reality_epoch", "source_capability", "kind", "at", "reason", "count", "status")
+            for field in ("id", "handle", "reality_epoch", "source_capability", "kind", "at", "reason", "count", "status", "stale_reason")
             if item.get(field) is not None
         }
         for key, item in frontier_store(ledger).items() if isinstance(item, dict)

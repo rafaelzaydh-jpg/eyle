@@ -1,4 +1,4 @@
-# Verification — Rev3.7.5.1
+# Verification — Rev4.0.0
 
 Release verification checks the **current contract**. It is not a compatibility test for every historical runtime shape.
 
@@ -35,7 +35,7 @@ This catches accidental dependencies on a working tree.
 
 The verifier/tests must establish:
 
-- exact app/config/revision identity for Rev3.7.5.1;
+- exact app/config/revision identity for Rev4.0.0;
 - current Session/pending/execution schemas only;
 - Memory Graph v12 only in Runtime;
 - v11 → v12 available only through the explicit devtool;
@@ -51,7 +51,7 @@ The verifier/tests must establish:
 
 ## Structured provider-boundary gates
 
-Rev3.7.5.1 specifically requires:
+Rev4.0.0 retains the provider-boundary requirements and additionally requires:
 
 1. Eyle supplies one caller JSON Schema for structured output.
 2. Adapter delivers that schema to the provider as the representation authority.
@@ -133,10 +133,33 @@ Tests must prove:
 - malformed provider representation is handled at the Adapter boundary;
 - an exhausted Adapter repair can lead to one fresh Eyle decision while Session/observations remain intact;
 - repeated wire failure without execution progress cannot recurse indefinitely;
-- repeated valid action/result fixed points receive one `NO_PROGRESS` feedback opportunity;
-- the same fixed point repeating again terminates as `ECC_NO_PROGRESS_UNRECOVERABLE`;
+- repeated valid action/result fixed points produce `NO_PROGRESS` and block the exact action in the current reality;
+- repeating a blocked fixed point is rejected mechanically as `ECC_FIXED_POINT_BLOCKED` without another physical execution;
+- the logical task remains alive and can recover via an open Frontier, existing Evidence, another scope/operation, or conclusion;
 - real new observations/effects/Task transitions reset fixed-point state;
 - long cognition that keeps producing new information is not truncated by a hidden `MAX_TURNS`.
+
+
+### Rev3.7.8 recoverable-continuity gates
+
+Regression coverage must additionally prove:
+
+- `recoverable_execution` is Runtime-owned, non-interactive, and does not consume a human confirmation slot;
+- a recoverable checkpoint persists `AgentSession`, hot pending observations, Observation Ledger, Evidence, Frontiers, `reality_epoch`, execution-progress blocks, and execution/token continuity;
+- rehydration by the same stable `execution_id` preserves a blocked fixed point instead of making the same action physically eligible again;
+- entering budget salvage with a stable execution id creates at most one salvage checkpoint for that execution continuity state;
+- a restarted Service can discover and resume a persisted recoverable checkpoint automatically;
+- mechanical coverage exposes exact/merged physical file ranges and open Frontiers without judging semantic relevance or sufficiency;
+- execution-convergence signals are mechanical counters only; Runtime does not classify the investigation as wandering, relevant, sufficient, or complete;
+- long-file regressions keep targets beyond the first 400-line materialization reachable at 2k and 10k scales;
+- `read_file` continuation snapshots are bound to the exact whole-file source revision that created them;
+- `search_code` pending live ranges are bound to the exact source revision of each file;
+- external source drift before continuation returns `FRONTIER_SOURCE_REVISED`, marks the Frontier stale, and never mixes bytes from different revisions;
+- historical Evidence/Material remains intact after source drift;
+- mechanical file coverage never merges ranges from different source revisions;
+- persisted continuation binding uses stable Host-owned `provider_identity_hash`, not mutable provider context;
+- one `execution_id` has at most one current `recoverable_execution` checkpoint;
+- recoverable checkpoint replacement is atomic and `checkpoint_generation` is monotonic.
 
 ## Build and workspace gates
 
@@ -174,7 +197,7 @@ User-visible diagnostics should make it possible to distinguish:
 - provider transport failure;
 - model truncation;
 - Memory rejection;
-- fixed-point termination.
+- recoverable fixed-point blocking/checkpoint/resume.
 
 Token diagnostics must preserve provider-reported usage as the ledger authority while keeping local component estimates clearly diagnostic.
 
@@ -202,3 +225,19 @@ Historical runtime behavior belongs in:
 - explicit migration tooling when still required.
 
 Documentation must not describe removed compatibility paths as active behavior.
+
+## Rev4 cognitive-surface gates
+
+Release tests must prove:
+
+- no current monolithic `ecc` structured profile;
+- Navigation has no detailed operation schema;
+- Explore exposes only observe/execute operations;
+- Build exposes only mutate operations;
+- trivial Navigation can conclude in one cognition without Task creation;
+- Runtime never auto-selects an active Task;
+- Active Task is exact-ID projection only;
+- sidecar failure does not veto a valid primary cognition;
+- `active_task_id` and `cognitive_surface` survive checkpoint serialization;
+- Build returns to Navigation after a mutation attempt;
+- Rev3.7.8 reality-bound recovery regressions remain green.

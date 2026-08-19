@@ -39,9 +39,10 @@ def _runtime_ctx(session: AgentSession, config: dict, provider_context: dict, re
 
 
 def test_rev283_structured_memory_and_exploration_have_no_semantic_item_ceiling():
-    schema = schema_for_profile("ecc")
-    memory_delta = schema["properties"]["memory_delta"]
-    explore = schema["properties"]["decision"]["oneOf"][0]["properties"]["operations"]
+    schema = schema_for_profile("navigation")
+    memory_delta = next(b for b in schema["oneOf"] if "memory_delta" in b["properties"])["properties"]["memory_delta"]
+    explore_schema = schema_for_profile("explore")
+    explore = next(b for b in explore_schema["oneOf"] if "operations" in b.get("properties", {}))["properties"]["operations"]
     assert "maxItems" not in memory_delta
     assert "maxItems" not in explore
 
@@ -60,8 +61,8 @@ def test_rev283_structured_memory_and_exploration_have_no_semantic_item_ceiling(
     ]
     operations = [{"operation": "list_tree", "arguments": {"source": "workspace"}} for _ in range(24)]
     parsed = parse_profile_response(
-        {"type": "explorar", "operations": operations, "memory_delta": memories},
-        "ecc",
+        {"operations": operations, "memory_delta": memories},
+        "explore",
     )
     assert len(parsed["operations"]) == 24
     assert len(parsed["memory_delta"]) == 512

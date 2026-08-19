@@ -28,6 +28,43 @@ class ErroLeituraProjeto(ValueError):
         self.detail = detail
 
 
+
+def revisao_arquivo_projeto(caminho_projeto, caminho_relativo):
+    """Return the canonical content revision of one readable project file.
+
+    The revision is the same normalized whole-file hash exposed as ``file_hash``
+    by ``ler_faixa_projeto``. This helper exists so continuation validation can
+    bind live projections to the exact physical source version without
+    materializing an arbitrary line range.
+    """
+    caminho_abs = _resolver_caminho_seguro(caminho_projeto, caminho_relativo)
+    if caminho_abs is None:
+        raise ErroLeituraProjeto(
+            "UNSAFE_PATH",
+            f"caminho inseguro rejeitado: '{caminho_relativo}' deve permanecer dentro do projeto",
+        )
+    if not os.path.isfile(caminho_abs):
+        raise ErroLeituraProjeto(
+            "FILE_NOT_FOUND",
+            f"arquivo '{caminho_relativo}' nao encontrado no disco",
+        )
+    read_error = validate_workspace_read(caminho_projeto, caminho_relativo)
+    if read_error:
+        raise ErroLeituraProjeto(
+            read_error,
+            "content access is restricted for this protected resource",
+        )
+    try:
+        with open(caminho_abs, "r", encoding="utf-8", errors="replace") as arquivo:
+            conteudo = normalizar_quebras(arquivo.read())
+    except OSError as erro:
+        raise ErroLeituraProjeto(
+            "FILE_READ_ERROR",
+            f"nao foi possivel ler '{caminho_relativo}': {erro}",
+        ) from erro
+    return hash_texto(conteudo)
+
+
 def ler_faixa_projeto(caminho_projeto, caminho_relativo, linha_inicio,
                       linha_fim, max_linhas=400):
     """Le uma faixa 1-based fresca, numerada e com hashes canonicos.

@@ -204,3 +204,26 @@ python main.py compare-efficiency <baseline.json> <candidate.json>
 ```
 
 Coverage regressions take priority over superficial token reductions. Efficiency comparisons are useful only after the candidate still reaches the same required behavior.
+
+## Rev3.7.8 long-task cases
+
+The canonical benchmark matrix now includes `long_file_2k`, `long_file_10k` and `multi_file_long`.
+Targets are deliberately placed near the end of the physical source so a successful run exercises
+bounded materialization, search/Frontier reachability, or another valid physical path rather than
+assuming the first read page is the whole file. These cases are model-facing benchmarks, not
+Runtime semantic completion gates.
+
+## Rev4 cognitive-surface benchmark
+
+Rev4 measurements must compare the Rev3.7.8 combined cognition baseline with the purpose-bounded `navigation`, `explore`, and `build` surfaces. `eyle.devtools.cognitive_floor.measure_static_cognitive_floor()` reports each current surface independently instead of summing them into a fictional mega-prompt.
+
+Required representative cases remain:
+
+- trivial direct conclusion (one Navigation cognition, no Task);
+- contextual conversation;
+- short exploration;
+- long repeated exploration with an active Task;
+- Explore → Build → verification → Conclude;
+- the same long task across recoverable restart.
+
+The target for long/tool-heavy cases is at least 25% lower prompt input than the Rev3.7.8 baseline without lowering task success. Rev4.0.0 does not remove `current_request` or aggressively strip conversation solely to hit this number; further context minimization is accepted only when measured.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from tests.canonical import adapt_legacy_ecc_script
 import json
 from pathlib import Path
 
@@ -43,59 +44,61 @@ def conclude(text, memory=None):
     return {"type":"concluir","response":text,"memory_delta":list(memory or [])}
 
 
-def test_rev28_canonical_envelope_places_memory_beside_ecc():
-    schema=schema_for_profile("ecc")
-    assert set(schema["properties"])=={"decision","memory_delta"}
-    assert schema["required"]==["decision","memory_delta"]
-    assert "objective" not in json.dumps(schema).lower()
+def test_rev4_structured_surfaces_replace_monolithic_ecc_wire():
+    navigation = schema_for_profile("navigation")
+    explore_schema = schema_for_profile("explore")
+    build_schema = schema_for_profile("build")
+    assert all("oneOf" in schema for schema in (navigation, explore_schema, build_schema))
+    assert "objective" not in json.dumps(navigation).lower()
     raw={"type":"concluir","response":"ok","memory_delta":[]}
-    assert parse_profile_response(raw,"ecc")=={"type":"concluir","response":"ok","memory_delta":[]}
+    assert parse_profile_response(raw,"navigation")=={"type":"concluir","response":"ok","memory_delta":[]}
     with pytest.raises(StructuredResponseError):
-        parse_profile_response({"decision":{"type":"concluir","response":"old"},"memory_delta":[]},"ecc")
+        schema_for_profile("ecc")
     with pytest.raises(StructuredResponseError):
-        parse_profile_response({"type":"concluir","response":"old","memory":[]},"ecc")
+        parse_profile_response({"decision":{"type":"concluir","response":"old"},"memory_delta":[]},"navigation")
+    with pytest.raises(StructuredResponseError):
+        parse_profile_response({"type":"concluir","response":"old","memory":[]},"navigation")
 
 
-def test_rev283_explore_batch_has_no_semantic_operation_ceiling():
-    raw={"type":"explorar","operations":[
+def test_rev4_explore_batch_has_no_semantic_operation_ceiling():
+    raw={"operations":[
         {"operation":"git_status","arguments":{"source":"workspace"}},
         {"operation":"list_tree","arguments":{"source":"workspace"}},
     ],"memory_delta":[]}
-    parsed=parse_profile_response(raw,"ecc")
+    parsed=parse_profile_response(raw,"explore")
     assert len(parsed["operations"])==2
-    many={"type":"explorar","operations":[{"operation":"list_tree","arguments":{"source":"workspace"}} for _ in range(12)],"memory_delta":[]}
-    assert len(parse_profile_response(many,"ecc")["operations"])==12
+    many={"operations":[{"operation":"list_tree","arguments":{"source":"workspace"}} for _ in range(12)],"memory_delta":[]}
+    assert len(parse_profile_response(many,"explore")["operations"])==12
     with pytest.raises(StructuredResponseError):
-        parse_profile_response({"type":"explorar","operations":[],"memory_delta":[]},"ecc")
+        parse_profile_response({"operations":[],"memory_delta":[]},"explore")
 
 
-def test_rev375_build_wire_is_current_only():
-    raw={"type":"construir","operation":"transaction","arguments":{},"memory_delta":[]}
-    parsed=parse_profile_response(raw,"ecc")
-    assert parsed["type"]=="construir"
+def test_rev4_build_wire_is_current_only():
+    raw={"operation":"transaction","arguments":{},"memory_delta":[]}
+    parsed=parse_profile_response(raw,"build")
+    assert parsed["operation"]=="transaction"
     with pytest.raises(StructuredResponseError):
-        parse_profile_response({"type":"construir","operation":"transaction","arguments":{},"on_success":"Feito.","memory_delta":[]},"ecc")
+        parse_profile_response({"operation":"transaction","arguments":{},"on_success":"Feito.","memory_delta":[]},"build")
 
 
 def test_persisted_identity_is_current_only():
     state=AgentSession("x").to_dict()
-    assert state["session_schema_version"]==SESSION_SCHEMA_VERSION=="2.7.5-r3.7.5-ecc"
+    assert state["session_schema_version"]==SESSION_SCHEMA_VERSION=="2.7.5-r4.0.0-ecc"
     assert MEMORY_GRAPH_SCHEMA_VERSION=="2.7.5-r3.7.1-memory-graph-v12"
-    assert PENDING_SCHEMA_VERSION=="13-ecc"
+    assert PENDING_SCHEMA_VERSION=="16-ecc"
     assert state["memory_view"]["node_ids"]==[]
 
 
-def test_prompt_defines_intrinsic_memory_and_provider_neutral_call_optimizations():
+def test_prompt_defines_rev4_authority_task_and_minimal_navigation():
     low=PROMPT_ECC.lower()
     for phrase in (
-        "memory and ecc are distinct", "memory_delta", 'retention?:"temporary|persistent"',
-        "memory is continuous learning", "batch", "coverage", "frontier",
-        "frontier is not a limit", "no semantic count ceiling", "atomic", "artifact", "material",
+        "main owns meaning", "runtime owns physical", "memory_delta",
+        "memory is continuous learning", "task", "navigation",
+        "detailed capability schemas are intentionally absent",
     ):
         assert phrase in low
+    assert "automatic" not in low or "automatically" not in low
     assert "on_success" not in low
-    assert "hot/cold" in low and "transcript memory" in low
-
 
 def test_catalog_memory_navigation_uses_temporary_persistent_filter():
     reg=standard_registry(); surface=catalog(reg,base_config(),reg.names(),memory_enabled=True)
@@ -131,11 +134,11 @@ def test_compile_prompt_has_stable_prefix_before_dynamic_state(monkeypatch,tmp_p
     def fake(prompt,cfg):
         assert isinstance(prompt,CanonicalPrompt)
         seen.append(prompt)
-        assert list(prompt.stable)==["ecc_operations","runtime_environment"]
+        assert list(prompt.stable)==["ecc_navigation","runtime_environment"]
         assert list(prompt.dynamic)[0]=="current_request"
-        assert list(prompt.dynamic)[-1]=="runtime_feedback"
+        assert list(prompt.dynamic)[-1]=="cognitive_surface"
         return conclude("ok")
-    monkeypatch.setattr(agent,"executar_ecc_llm",fake)
+    monkeypatch.setattr(agent, "_call_surface_llm", adapt_legacy_ecc_script(fake))
     status,_,_,_=run_agent(agent,"Oi",base_config(),provider_context=pc(tmp_path),retornar_detalhes=True)
     assert status=="completed" and seen[0].stable_hash
 
@@ -149,7 +152,7 @@ def test_batch_exploration_executes_two_independent_operations_in_one_llm_turn(m
             return explore_many([("list_tree",{"source":"workspace"}),("git_status",{"source":"workspace"})])
         assert len(prompt.dynamic["latest_observations"])==2
         return conclude("done")
-    monkeypatch.setattr(agent,"executar_ecc_llm",fake)
+    monkeypatch.setattr(agent, "_call_surface_llm", adapt_legacy_ecc_script(fake))
     status,text,_,details=run_agent(agent,"inspect both",base_config(),provider_context=pc(tmp_path),retornar_detalhes=True)
     assert (status,text)==("completed","done")
     assert len(calls)==2
@@ -169,7 +172,7 @@ def test_rev283_successful_build_returns_real_observation_to_main_before_conclus
             "op":"remember","scope":"world","retention":"temporary","kind":"result",
             "content":"The requested workspace change succeeded.","supports":[{"kind":"request"}],
         }])
-    monkeypatch.setattr(agent,"executar_ecc_llm",fake)
+    monkeypatch.setattr(agent, "_call_surface_llm", adapt_legacy_ecc_script(fake))
     monkeypatch.setattr(agent,"dispatch",lambda *a,**k: DispatchOutcome({"operation":"transaction","status":"success","ok":True,"executed":True,"changed":True},physical_progress=True))
     status,text,_,_=run_agent(agent,"mude",base_config(),provider_context=pc(tmp_path),retornar_detalhes=True)
     assert status=="completed" and text=="Corrigido." and len(calls)==2
@@ -177,9 +180,9 @@ def test_rev283_successful_build_returns_real_observation_to_main_before_conclus
 
 def test_rev371_temporary_memory_is_reachable_but_not_auto_projected(monkeypatch,tmp_path):
     context=pc(tmp_path)
-    monkeypatch.setattr(agent,"executar_ecc_llm",lambda prompt,cfg: conclude("Plano criado.",memory=[{
+    monkeypatch.setattr(agent, "_call_surface_llm", adapt_legacy_ecc_script(lambda prompt,cfg: conclude("Plano criado.",memory=[{
         "op":"remember","scope":"world","retention":"temporary","kind":"referent","content":"'o plano' means the current Eyle token-economy plan","supports":[{"kind":"request"}],
-    }]))
+    }])))
     status,_,_,_=run_agent(agent,"faça um plano",base_config(),provider_context=context,retornar_detalhes=True,conversation_context={"recent_messages":[]})
     assert status=="completed"
 
@@ -189,7 +192,7 @@ def test_rev371_temporary_memory_is_reachable_but_not_auto_projected(monkeypatch
     def follow(prompt,cfg):
         captured["nodes"] = list(prompt.dynamic["memory_view"]["nodes"])
         return conclude("Vou detalhar o plano.")
-    monkeypatch.setattr(agent,"executar_ecc_llm",follow)
+    monkeypatch.setattr(agent, "_call_surface_llm", adapt_legacy_ecc_script(follow))
     status,text,_,_=run_agent(agent,"Detalhe o plano",base_config(),provider_context=context,retornar_detalhes=True,conversation_context={"recent_messages":[]})
     assert (status,text)==("completed","Vou detalhar o plano.")
     assert captured["nodes"] == []
@@ -199,7 +202,7 @@ def test_rev28_cache_warmup_prompt_uses_same_stable_prefix(tmp_path):
     reg=standard_registry(); context=pc(tmp_path); cfg=base_config()
     warm=agent.compile_cache_warmup_prompt(cfg,context,reg)
     assert isinstance(warm,CanonicalPrompt)
-    assert list(warm.stable)==["ecc_operations","runtime_environment"]
+    assert list(warm.stable)==["ecc_navigation","runtime_environment"]
     assert warm.dynamic["current_request"].startswith("Provider cache warmup")
 
 

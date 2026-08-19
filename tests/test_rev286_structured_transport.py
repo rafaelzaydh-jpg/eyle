@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from tests.canonical import adapt_legacy_ecc_script
 import json
 from pathlib import Path
 
@@ -24,21 +25,21 @@ def provider_context(root: Path):
     }
 
 
-def test_rev375_wire_and_canonical_contracts_are_separate():
-    canonical = schema_for_profile("ecc")
-    wire = wire_schema_for_profile("ecc")
-    assert canonical["additionalProperties"] is False
-    assert canonical["required"] == ["decision", "memory_delta"]
-    assert "oneOf" in canonical["properties"]["decision"]
-    assert "oneOf" in wire
+def test_rev4_wire_and_local_sidecar_contracts_are_separate():
+    canonical = schema_for_profile("navigation")
+    wire = wire_schema_for_profile("navigation")
+    assert "oneOf" in canonical and "oneOf" in wire
     assert all(branch.get("additionalProperties") is False for branch in wire["oneOf"])
-    fmt = json_schema_response_format("ecc")
+    canonical_branch = next(b for b in canonical["oneOf"] if b["properties"]["type"]["enum"][0] == "concluir")
+    wire_branch = next(b for b in wire["oneOf"] if b["properties"]["type"]["enum"][0] == "concluir")
+    assert "items" in canonical_branch["properties"]["memory_delta"]
+    assert "items" not in wire_branch["properties"]["memory_delta"]
+    fmt = json_schema_response_format("navigation")
     assert fmt["json_schema"]["schema"] == wire
     assert fmt["json_schema"]["strict"] is True
 
-
 def test_rev3751_current_wire_schema_is_the_single_representation_contract():
-    wire = wire_schema_for_profile("ecc")
+    wire = wire_schema_for_profile("navigation")
     kinds = []
     for branch in wire["oneOf"]:
         kinds.append(branch["properties"]["type"]["enum"][0])
@@ -48,7 +49,7 @@ def test_rev3751_current_wire_schema_is_the_single_representation_contract():
 
 def test_rev375_core_accepts_current_json_only():
     assert parse_profile_response(
-        '{"type":"concluir","response":"ok","memory_delta":[]}', "ecc"
+        '{"type":"concluir","response":"ok","memory_delta":[]}', "navigation"
     ) == {"type":"concluir","response":"ok","memory_delta":[]}
 
     for raw in (
@@ -58,18 +59,18 @@ def test_rev375_core_accepts_current_json_only():
         {"decision": {"type":"concluir","response":"ok"}, "memory_delta": []},
     ):
         with pytest.raises(StructuredResponseError):
-            parse_profile_response(raw, "ecc")
+            parse_profile_response(raw, "navigation")
 
 
 def test_rev375_current_wire_rejects_empty_explore():
-    wire = wire_schema_for_profile("ecc")
+    wire = wire_schema_for_profile("navigation")
     import jsonschema
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate({"type":"explorar","operations":[],"memory_delta":[]}, wire)
 
 
 def test_rev375_ecc_wire_schema_does_not_semantically_validate_memory():
-    wire = wire_schema_for_profile("ecc")
+    wire = wire_schema_for_profile("navigation")
     import jsonschema
     # Sidecar validity belongs to Eyle Memory parser after ECC family validity.
     jsonschema.validate({
@@ -89,7 +90,7 @@ def test_rev375_one_fresh_eyle_decision_after_adapter_wire_failure(monkeypatch, 
         item=next(sequence)
         if isinstance(item,Exception): raise item
         return item
-    monkeypatch.setattr(agent,"executar_ecc_llm",fake)
+    monkeypatch.setattr(agent, "_call_surface_llm", adapt_legacy_ecc_script(fake))
     status,text,pending,details=run_agent(
         agent,"answer",base_config(),provider_context=provider_context(tmp_path),retornar_detalhes=True,
     )
@@ -102,7 +103,7 @@ def test_rev375_second_wire_failure_without_progress_is_terminal(monkeypatch,tmp
     def fake(prompt,cfg):
         calls["n"] += 1
         raise ErroLLM("bad",transient=False,error_code="LLM_STRUCTURED_RESPONSE_UNSATISFIED")
-    monkeypatch.setattr(agent,"executar_ecc_llm",fake)
+    monkeypatch.setattr(agent, "_call_surface_llm", adapt_legacy_ecc_script(fake))
     status,text,pending,details=run_agent(
         agent,"answer",base_config(),provider_context=provider_context(tmp_path),retornar_detalhes=True,
     )
@@ -111,12 +112,13 @@ def test_rev375_second_wire_failure_without_progress_is_terminal(monkeypatch,tmp
     assert calls["n"]==2
 
 
-def test_rev375_execution_progress_is_not_a_turn_ceiling():
+def test_rev376_execution_progress_blocks_local_fixed_points_without_turn_ceiling():
     source=Path(agent.__file__).read_text(encoding="utf-8")
     progress_source=Path(agent.__file__).parents[1]/"runtime"/"execution_progress.py"
     progress_text=progress_source.read_text(encoding="utf-8")
     assert "ExecutionProgress" in source
-    assert "ECC_NO_PROGRESS_UNRECOVERABLE" in source
+    assert "ECC_FIXED_POINT_BLOCKED" in source
+    assert "ECC_NO_PROGRESS_UNRECOVERABLE" not in source
     assert "NO_PROGRESS_REPEATS_AFTER_WARNING = 2" in progress_text
     assert "MAX_TURNS" not in source
     assert "cognition_episode" not in source
@@ -148,8 +150,8 @@ def test_rev375_structured_empty_is_wire_error_not_generic_transport_retry(monke
     cfg["llm"].update({"base_url":"http://127.0.0.1:8080","model":"auto","retry_max_attempts":3})
     execution=ExecutionContext.from_config(cfg)
     with pytest.raises(ErroLLM) as exc:
-        llm_mod._chamar_llm("s","u",cfg,execution=execution,perfil="ecc")
-    assert exc.value.error_code=="STRUCTURED_RESPONSE_INVALID:ecc:STRUCTURED_EMPTY"
+        llm_mod._chamar_llm("s","u",cfg,execution=execution,perfil="navigation")
+    assert exc.value.error_code=="STRUCTURED_RESPONSE_INVALID:navigation:STRUCTURED_EMPTY"
     assert calls["n"]==1
 
 
@@ -158,7 +160,7 @@ def test_rev37_valid_ecc_survives_invalid_memory_parser_sidecar():
         "type": "concluir",
         "response": "delivered",
         "memory_delta": [{"op": "remember", "scope": "not-a-scope", "content": ""}],
-    }, "ecc")
+    }, "navigation")
     assert parsed["type"] == "concluir"
     assert parsed["response"] == "delivered"
     assert parsed["memory_delta"] == []
@@ -177,7 +179,11 @@ def test_rev37_memory_parser_rejection_does_not_trigger_new_llm_call(monkeypatch
             "memory_error": {"code": "EYLE_MEMORY_INVALID", "detail": "bad sidecar"},
         }
 
-    monkeypatch.setattr(agent, "executar_ecc_llm", fake)
+    def surface_fake(surface, prompt, cfg):
+        assert surface == "navigation"
+        return fake(prompt, cfg)
+
+    monkeypatch.setattr(agent, "_call_surface_llm", surface_fake)
     status, text, pending, details = run_agent(
         agent, "answer", base_config(), provider_context=provider_context(tmp_path), retornar_detalhes=True,
     )
@@ -197,7 +203,7 @@ def test_rev37_memory_graph_rejection_does_not_trigger_new_llm_call(monkeypatch,
     def reject_sidecar(*args, **kwargs):
         return {"ok": False, "changed": False, "task_state_changed": False, "error_code": "MEMORY_NODE_NOT_FOUND", "detail": "missing"}
 
-    monkeypatch.setattr(agent, "executar_ecc_llm", fake_llm)
+    monkeypatch.setattr(agent, "_call_surface_llm", adapt_legacy_ecc_script(fake_llm))
     monkeypatch.setattr(agent, "apply_memory_sidecar", reject_sidecar)
     status, text, pending, details = run_agent(
         agent, "answer", base_config(), provider_context=provider_context(tmp_path), retornar_detalhes=True,

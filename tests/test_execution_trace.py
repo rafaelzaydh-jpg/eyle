@@ -31,7 +31,7 @@ def test_compile_prompt_records_context_composition_without_exposing_diagnostic_
         reset_execution(token)
     assert "execution_trace" not in allowed
     payload = json.loads(str(prompt))
-    assert "execution_trace" not in json.dumps(payload["ecc_operations"], ensure_ascii=False)
+    assert "execution_trace" not in json.dumps(payload["ecc_navigation"], ensure_ascii=False)
     snap = execution.llm_calls[-1]["prompt"]
     serialized = json.dumps(snap, ensure_ascii=False)
     assert "SECRET_MARKER" not in serialized

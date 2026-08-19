@@ -1,4 +1,4 @@
-# Configuration — Rev3.7.5.1
+# Configuration — Rev4.0.0
 
 Eyle uses a **current-contract** configuration policy. `config.json` is validated against the exact active schema; removed, unknown, or historical fields are not silently promoted or ignored.
 
@@ -8,8 +8,8 @@ The accepted identity is:
 
 ```text
 app_version = 2.7.5
-config_schema_version = 2.7.5-r3.7.5.1-ecc
-revision = rev3.7.5.1-ecc
+config_schema_version = 2.7.5-r4.0.0-ecc
+revision = rev4.0.0-ecc
 ```
 
 A different identity fails closed.
@@ -56,7 +56,7 @@ Provider `usage.total_tokens` is authoritative. `prompt_tokens + completion_toke
 
 If potentially billable provider usage cannot be established safely, execution fails closed rather than guessing the remaining ledger.
 
-Rev3.7.5.1 adds no additional semantic prompt-size or generated-output ceiling. Token efficiency comes from materializing only the required state and avoiding duplicate representation/context in repair paths.
+Rev3.7.6 adds no additional semantic prompt-size or generated-output ceiling. Token efficiency comes from materializing only the required state and avoiding duplicate representation/context in repair paths.
 
 ## Context materialization
 

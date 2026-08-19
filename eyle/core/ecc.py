@@ -214,3 +214,41 @@ def catalog(registry: Any, config: Dict[str, Any], available: Iterable[str], *, 
     out["explorar"] = [_compact_catalog_item(item) for item in out["explorar"]]
     out["construir"] = [_compact_catalog_item(item) for item in out["construir"]]
     return out
+
+def navigation_directory(
+    registry: Any,
+    config: Dict[str, Any],
+    available: Iterable[str],
+    *,
+    memory_enabled: bool = False,
+) -> Dict[str, Any]:
+    """Return a terse capability-name directory for ECC Navigation.
+
+    This is physical capability discovery, not semantic routing. Navigation uses
+    it only to know what families are physically available; detailed contracts
+    are materialized after Main chooses a family.
+    """
+    full = catalog(registry, config, available, memory_enabled=memory_enabled)
+    return {
+        "explorar": [str(item.get("operation") or "") for item in full.get("explorar") or [] if item.get("operation")],
+        "construir": [str(item.get("operation") or "") for item in full.get("construir") or [] if item.get("operation")],
+        "concluir": ["concluir"],
+    }
+
+
+def surface_catalog(
+    registry: Any,
+    config: Dict[str, Any],
+    available: Iterable[str],
+    surface: str,
+    *,
+    memory_enabled: bool = False,
+) -> Dict[str, Any]:
+    """Return only the capability family selected by Main's prior ECC choice."""
+    full = catalog(registry, config, available, memory_enabled=memory_enabled)
+    if surface == "explore":
+        return {"guidance": list(full.get("guidance") or []), "operations": list(full.get("explorar") or [])}
+    if surface == "build":
+        return {"guidance": list(full.get("guidance") or []), "operations": list(full.get("construir") or [])}
+    raise ValueError("COGNITIVE_SURFACE_INVALID")
+

@@ -2,13 +2,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import copy
 from typing import Any, Dict, List, Optional
 
 from eyle.runtime.observation import empty_ledger as empty_observation_ledger, persisted_view as persisted_observations
 from .evidence import empty_evidence, validate_evidence
 from .memory import empty_memory_view
+from eyle.runtime.execution_progress import ExecutionProgress
 
-SESSION_SCHEMA_VERSION = "2.7.5-r3.7.5-ecc"
+SESSION_SCHEMA_VERSION = "2.7.5-r4.0.0-ecc"
 
 
 def _validated_memory_view(value: Any) -> Dict[str, Any]:
@@ -45,6 +47,9 @@ class AgentSession:
     memory_view: Dict[str, Any] = field(default_factory=empty_memory_view)
     runtime_feedback: List[Dict[str, Any]] = field(default_factory=list)
     pending_operation: Dict[str, Any] = field(default_factory=dict)
+    execution_progress: Dict[str, Any] = field(default_factory=lambda: ExecutionProgress().to_dict())
+    active_task_id: Optional[str] = None
+    cognitive_surface: str = "navigation"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -58,13 +63,31 @@ class AgentSession:
             "memory_view": _validated_memory_view(self.memory_view),
             "runtime_feedback": [dict(v) for v in self.runtime_feedback if isinstance(v, dict)],
             "pending_operation": dict(self.pending_operation or {}),
+            "execution_progress": ExecutionProgress.from_dict(self.execution_progress).to_dict(),
+            "active_task_id": self.active_task_id,
+            "cognitive_surface": self.cognitive_surface,
         }
+
+    def to_checkpoint_dict(self) -> Dict[str, Any]:
+        """Serialize a recoverable execution checkpoint.
+
+        Human-gate continuations intentionally use ``to_dict`` and omit the hot
+        pending delta. Automatic execution recovery preserves that bounded
+        latest-result delta so the next cognition sees the same Runtime facts.
+        """
+        state = self.to_dict()
+        pending = self.observation_ledger.get("pending_results") if isinstance(self.observation_ledger, dict) else []
+        state["observation_ledger"]["pending_results"] = copy.deepcopy(
+            [dict(v) for v in (pending or []) if isinstance(v, dict)]
+        )
+        return state
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AgentSession":
         expected = {
             "session_schema_version", "request", "execution_id", "turn", "reality_epoch",
             "observation_ledger", "evidence", "memory_view", "runtime_feedback", "pending_operation",
+            "execution_progress", "active_task_id", "cognitive_surface",
         }
         if not isinstance(data, dict) or data.get("session_schema_version") != SESSION_SCHEMA_VERSION or set(data) != expected:
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
@@ -85,7 +108,7 @@ class AgentSession:
             "entries": {str(k): dict(v) for k, v in (obs.get("entries") or {}).items()},
             "events": [dict(v) for v in (obs.get("events") or [])],
             "replay_count": int(obs.get("replay_count") or 0),
-            "pending_results": [],
+            "pending_results": [dict(v) for v in (obs.get("pending_results") or []) if isinstance(v, dict)],
             "handles": {str(k): dict(v) for k, v in (obs.get("handles") or {}).items()},
             "snapshots": {str(k): dict(v) for k, v in (obs.get("snapshots") or {}).items()},
             "frontiers": {str(k): dict(v) for k, v in (obs.get("frontiers") or {}).items()},
@@ -100,4 +123,13 @@ class AgentSession:
         if not isinstance(data.get("pending_operation"), dict):
             raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
         session.pending_operation = dict(data.get("pending_operation") or {})
+        session.execution_progress = ExecutionProgress.from_dict(data.get("execution_progress")).to_dict()
+        active_task_id = data.get("active_task_id")
+        if active_task_id is not None and (not isinstance(active_task_id, str) or not active_task_id.strip()):
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        session.active_task_id = active_task_id.strip() if isinstance(active_task_id, str) else None
+        surface = data.get("cognitive_surface")
+        if surface not in {"navigation", "explore", "build"}:
+            raise ValueError("SESSION_SCHEMA_INCOMPATIBLE")
+        session.cognitive_surface = str(surface)
         return session

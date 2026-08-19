@@ -194,6 +194,6 @@ def test_rev33_no_memory_focus_surface_remains():
     prompt = (root / "llm/executar.py").read_text(encoding="utf-8")
     assert '"operation": "memory_focus"' not in ecc
     assert "- memory_focus:" not in prompt
-    assert "Active Projection" in prompt
-    assert "HOT/WARM/COLD" in prompt
+    assert "active_task" in prompt and "exact Task Main bound" in prompt
+    assert "not a planner or hidden working set" in prompt
     assert "hidden working" in prompt

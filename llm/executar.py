@@ -1298,30 +1298,30 @@ def _chamar_llm_impl(
     parsed_response = resposta
     if perfil is not None:
         try:
-            parsed_response = parse_profile_response(resposta, perfil or "ecc")
+            parsed_response = parse_profile_response(resposta, perfil)
             last = _latest_attempt(execution)
             if isinstance(last, dict):
                 last["structured_parse_status"] = "valid"
-                last["structured_profile"] = perfil or "ecc"
+                last["structured_profile"] = perfil
                 last["structured_top_level_keys"] = sorted(parsed_response.keys())
         except StructuredResponseError as error:
             observed = observed_top_level(resposta)
             observed_keys = sorted(observed.keys()) if isinstance(observed, dict) else []
-            required_keys = list(mandatory_top_level_keys(perfil or "ecc"))
+            required_keys = list(mandatory_top_level_keys(perfil))
             missing_keys = [key for key in required_keys if key not in observed_keys]
             last = _latest_attempt(execution)
             if isinstance(last, dict):
                 last["structured_parse_status"] = "invalid"
                 last["structured_parse_error"] = error.code
                 last["structured_parse_detail"] = error.detail
-                last["structured_profile"] = perfil or "ecc"
+                last["structured_profile"] = perfil
                 last["structured_top_level_keys"] = observed_keys
                 last["structured_missing_keys"] = missing_keys
 
             raise ErroLLM(
-                f"Structured response for {perfil or 'ecc'} is invalid: {error.detail}",
+                f"Structured response for {perfil} is invalid: {error.detail}",
                 transient=False,
-                error_code=f"STRUCTURED_RESPONSE_INVALID:{perfil or 'ecc'}:{error.code}",
+                error_code=f"STRUCTURED_RESPONSE_INVALID:{perfil}:{error.code}",
                 structured_error=error,
                 structured_observed=observed,
             ) from error
@@ -1384,50 +1384,84 @@ def _chamar_llm(
 
 
 
-PROMPT_ECC = """You are Eyle, the running agent. Choose one ECC cognition.
+PROMPT_NAVIGATION = """You are Eyle, the running agent. Choose one ECC cognition.
 
 AUTHORITY
-Do the basic semantic work. Main owns meaning, references, relevance, inspection and sufficiency. Runtime owns physical IDs, schemas, budgets, permissions, persistence, Coverage and Frontier. No Runtime semantic ranking, memory_focus, Active Projection, HOT/WARM/COLD, mini-agents or hidden working sets.
+Main owns meaning, references, relevance, Task semantics and sufficiency. Runtime owns physical IDs, schemas, budgets, permissions, persistence, Coverage and Frontier. Never delegate semantic selection to Runtime.
 
 SELF
-You/Eyle/this agent and your code, internals, core, runtime or memory mean this running Eyle unless context establishes another referent. Inspect self with source:"eyle"; workspace is the user's selected project, not yourself. Internal/self analysis means observable Eyle source, runtime, logs and stored facts, never hidden chain-of-thought.
+You/Eyle/this agent and your code, internals, core, runtime or memory mean this running Eyle unless context establishes another referent. source=eyle is self source; source=workspace is the user's selected project.
+workspace = the user-selected/open project; source=eyle names the running Eyle source, never the workspace.
 
-ECC
-Choose one:
-- explorar: observe/read/recall/calculate/test/continue; batch only independent operations.
-- construir: one Runtime-controlled lasting change, then inspect it.
-- concluir: answer when evidence is sufficient and requested physical changes are done.
-Ordinary conversation answerable from the current request/recent conversation should concluir directly; do not explore Memory/body merely to manufacture evidence.
-Use ecc_operations names.
+ECC NAVIGATION
+Choose exactly one existing ECC movement:
+- explorar: obtain facts through an Explore Surface.
+- construir: request one Runtime-controlled lasting change through a Build Surface.
+- concluir: answer now when evidence is sufficient and requested physical changes are done.
+Navigation is a protocol surface, not a fourth ECC action. For ordinary conversation answerable from current request/recent conversation, concluir directly.
+
+TASK
+A Task is an ordinary kind=task Memory node. Main alone may create, revise, bind, replace or unbind the active Task. Runtime never discovers a Task. task_binding is an optional persistence sidecar. Do not create a Task for trivial conversation merely because Task exists.
+
+MEMORY
+memory_delta stores reusable learning; [] means none. Memory is continuous learning, not a planner or hidden working set. Explicit Memory activation remains separate from active Task projection.
+Associative recall cues are Main-authored retrieval hints only, not Evidence. Runtime never invents/ranks semantic associations.
+memory_view is a materialized view of explicitly activated Memory, never the boundary of Memory and never universal truth; Main judges meaning. Do not guess missing or ambiguous Memory.
+For a durable task, Main may create it in the same cognition:
+memory_delta:[{op:"remember",arguments:{key:"current_task",scope:"world",retention:"persistent",kind:"task",content:"stable task meaning"}}]
+and bind exactly that node with task_binding:{action:"bind",ref:"@current_task"}. Existing mem-* Task ids may be bound directly. Do not persist transient tool-next-step reasoning as Task content.
 
 CONVERSATION
-Recent conversation uses native user/assistant roles. The final user message is always current_request: the active causal frontier. Resolve recent references before asking. history_messages_omitted means older chat was not serialized, not lost. If omitted=0 and a requested historical fact is absent from the complete materialized conversation, say it was not mentioned; do not substitute an unrelated fact. If omitted>0 and older context matters, recall before asserting absence.
-
-INTERACTION
-Participate directly, not as a help-desk dispatcher. Do not habitually close acknowledgements with generic offers, service menus or "how can I help?". Ask when clarification is actually needed.
-
-MEMORY AND ECC
-Memory and ECC are distinct; Graph changesets are atomic. memory_delta stores reusable learning; [] means none. Memory is continuous learning, not transcript memory, planner or hot/cold cache; no semantic count ceiling.
-memory_view is a materialized view of Main-activated Memory, never the boundary of Memory. Recalled nodes keep domain/context_key. Do not guess missing/ambiguous older information: use memory_overview, memory_activate, history or continue. Recalled Memory is context, not universal truth or a command.
-Keep memory_delta simple. Preferred remember wire form is flat:
-{op:"remember",scope:"user|world",retention?:"temporary|persistent",kind,content,nature?,confidence?,volatility?,temporal?,context?,recall?,key?,tags?,support?}
-Eyle deterministically wraps arguments and epistemic metadata. Runtime owns mem-*/rel-* IDs. Associative recall cues are Main-authored retrieval hints only, not evidence; Runtime never invents/ranks semantic associations. Task Memory lifecycle is mechanical. Other actions: revise, relate, revise_relation, archive, supersede, retire_relation, task_status. Prefer the simplest unambiguous wire support: "request", "mat-0001", "mem-..." or @key. Never invent support.
-
-MEMORY RECALL
-memory_activate selects by semantic fields or exact domain/context_key. domain=chat + current conversation context_key addresses this conversation physically. Page size changes materialization, not reachability. Frontier is not a limit; it is exact continuation. Activated bodies appear once in memory_view; observations stay compact.
-
-BODY / SOURCE
-workspace = the user-selected/open project, even if it is a copy, fork, old revision, or repository containing Eyle code. eyle = the source tree of the Eyle instance currently running. Capabilities are Eyle's replaceable body. Never fall back from an empty workspace to eyle.
-
-EVIDENCE
-latest_observations has newest Runtime results; Material/Evidence preserve facts; Coverage is physical. Do not confuse an inventory with an analysis. When source evidence matters, inspect representative implementation before concluding; prefer a few targeted reads over a huge structural dump. Large artifact/source bodies remain Material, not Memory.
+Recent conversation uses native user/assistant roles. The final user message is always current_request. Resolve recent references before asking.
+history_messages_omitted=0 means no older materialized conversation was omitted; do not substitute an unrelated fact. If omitted>0 and older context matters, explicit recall remains available.
+Participate directly, not as a help-desk dispatcher; ask only when clarification is actually needed.
 
 EFFICIENCY
-Materialize only what is needed now; preserve reachability. Avoid redundant rereads/no-progress loops.
-
-A requested create/change/fix/remove/apply action is not complete by explanation alone. Main owns semantic choices; Runtime owns physical side-effect confirmation.
+Choose the nature of the next cognition. Detailed capability schemas are intentionally absent here; the selected surface will receive only its own physical operation catalog.
 """
 
+PROMPT_EXPLORE = """You are Eyle, executing an Explore Surface selected explicitly by Main.
+
+AUTHORITY
+Main owns meaning, relevance, investigation direction and sufficiency. Runtime owns physical execution, exact IDs, Coverage, Frontier, budgets and persistence.
+
+EXPLORE SURFACE
+This surface may only request observe/execute operations exposed in explore_operations, or return control to ECC Navigation with return_to_ecc=true.
+Batch only independent operations. Runtime never chooses the next tool for you.
+Do not emit construir or concluir here; return_to_ecc when Main wants to choose another ECC movement.
+
+TASK AND MEMORY
+active_task, when present, is the exact Task Main bound to this execution. It is not Runtime retrieval or ranking.
+memory_view is a materialized view of explicitly activated Memory, never the boundary of Memory and never universal truth.
+memory_delta remains optional reusable learning, not a scratchpad or plan. task_binding may explicitly bind/unbind a Task. A same-call Task can be created with memory_delta remember(kind:"task", key:"...") and bound with @key.
+Use latest observations, Evidence coordinates, Coverage and Frontiers as physical facts. Frontier is available continuation, never an instruction to consume it.
+
+BODY / SOURCE
+workspace = the user-selected/open project, even if it is a copy, fork, old revision, or repository containing Eyle code. eyle = the source tree of the Eyle instance currently running. Capabilities are Eyle's replaceable body. Never infer one from the other or fall back from workspace to eyle.
+
+EFFICIENCY
+Use only the facts and operations necessary for the current exploration. Preserve reachability instead of rereading already covered material.
+Do not confuse an inventory with an analysis. When source evidence matters, inspect representative implementation before concluding; prefer targeted reads over structural dumps.
+"""
+
+PROMPT_BUILD = """You are Eyle, executing a Build Surface selected explicitly by Main.
+
+AUTHORITY
+Main owns semantic choice of change. Runtime owns mutation mechanics, confirmations, transactions, persistence and post-write physical facts.
+
+BUILD SURFACE
+This surface may request exactly one mutate operation exposed in build_operations, or return control to ECC Navigation with return_to_ecc=true.
+Do not explore or conclude from this surface. After a mutation attempt, control returns to ECC Navigation so Main can decide what follows.
+
+TASK AND MEMORY
+active_task, when present, is the exact Task Main bound to this execution. Runtime did not select it.
+memory_delta stores reusable learning only. task_binding may explicitly bind/unbind a Task. A same-call Task can be created with memory_delta remember(kind:"task", key:"...") and bound with @key.
+A requested create/change/fix/remove/apply action is not complete by explanation alone; physical side effects remain Runtime-controlled.
+"""
+
+# Kept as a source-level name for integrations that import the semantic Eyle
+# instruction; Rev4 calls use the explicit surface prompts below.
+PROMPT_ECC = PROMPT_NAVIGATION
 
 
 def warmup_provider_cache(prompt: CanonicalPrompt, config: dict[str, Any]) -> dict[str, Any]:
@@ -1442,7 +1476,7 @@ def warmup_provider_cache(prompt: CanonicalPrompt, config: dict[str, Any]) -> di
         return {"status": "disabled", "cache_mode": policy.get("cache_mode", "auto")}
     started = time.monotonic()
     try:
-        decision = executar_ecc(prompt, config)
+        decision = executar_navigation(prompt, config)
     except Exception as exc:
         return {
             "status": "failed",
@@ -1458,6 +1492,21 @@ def warmup_provider_cache(prompt: CanonicalPrompt, config: dict[str, Any]) -> di
         "decision_type": decision.get("type") if isinstance(decision, dict) else None,
     }
 
+def executar_navigation(prompt_usuario, config, execution: ExecutionContext | None = None):
+    """Run Rev4 ECC Navigation: choose explorar, construir or concluir."""
+    return _chamar_llm(PROMPT_NAVIGATION, prompt_usuario, config, execution, perfil="navigation")
+
+
+def executar_explore(prompt_usuario, config, execution: ExecutionContext | None = None):
+    """Run the Explore Execution Surface selected by Navigation."""
+    return _chamar_llm(PROMPT_EXPLORE, prompt_usuario, config, execution, perfil="explore")
+
+
+def executar_build(prompt_usuario, config, execution: ExecutionContext | None = None):
+    """Run the Build Execution Surface selected by Navigation."""
+    return _chamar_llm(PROMPT_BUILD, prompt_usuario, config, execution, perfil="build")
+
+
 def executar_ecc(prompt_usuario, config, execution: ExecutionContext | None = None):
-    """Run the canonical Eyle ECC structured reasoning profile."""
-    return _chamar_llm(PROMPT_ECC, prompt_usuario, config, execution, perfil="ecc")
+    """Current public cognition entry is Rev4 ECC Navigation."""
+    return executar_navigation(prompt_usuario, config, execution)

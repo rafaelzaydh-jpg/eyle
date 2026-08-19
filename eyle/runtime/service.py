@@ -24,6 +24,7 @@ from eyle.runtime.storage import lock_para, salvar_json_atomico
 from eyle.runtime.memory_graph import gc_orphan_recall_snapshots, ingest_chat_message, world_scope
 from eyle.runtime import queue as fila_persistente
 from eyle.runtime import progress as job_progress
+from eyle.runtime import telemetry
 from llm.executar import ErroLLM
 
 MEMORY_DIR = os.path.join(BASE_DIR, "memory")
@@ -51,6 +52,9 @@ def carregar_config():
 
 def carregar_provider_context():
     return HOST.provider_context()
+
+def carregar_provider_identity():
+    return HOST.provider_identity()
 
 def carregar_ambiente():
     """Return opaque Host presentation metadata for product shells.
@@ -356,24 +360,35 @@ def _parse_data_utc(valor):
         return None
 
 
-def _hash_provider_context(provider_context):
-    """Return a stable identity hash for the opaque provider context.
+def _hash_provider_identity(provider_identity):
+    """Hash the stable Host-owned environment identity opaquely.
 
-    Runtime does not interpret provider domains. It only binds a persisted
-    continuation to the same provider environment that prepared it.
+    Mutable provider context is deliberately excluded. Resource revisions bind
+    live continuations to source state separately.
     """
-    if not isinstance(provider_context, dict) or not provider_context:
+    if not isinstance(provider_identity, dict) or not provider_identity:
         return None
-    encoded = json.dumps(provider_context, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    encoded = json.dumps(provider_identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+def _recovery_dir():
+    return os.path.join(AGENT_PENDENTE_DIR, "recovery")
 
 def _pending_files():
     os.makedirs(AGENT_PENDENTE_DIR, exist_ok=True)
-    return [
+    recovery_dir = _recovery_dir()
+    os.makedirs(recovery_dir, exist_ok=True)
+    files = [
         os.path.join(AGENT_PENDENTE_DIR, name)
         for name in os.listdir(AGENT_PENDENTE_DIR)
         if name.endswith(".json")
     ]
+    files.extend(
+        os.path.join(recovery_dir, name)
+        for name in os.listdir(recovery_dir)
+        if name.endswith(".json")
+    )
+    return files
 
 
 def _pending_execution_id(pending):
@@ -384,10 +399,13 @@ def _pending_execution_id(pending):
 
 
 def _pending_storage_path(pending):
-    pending_id = str((pending or {}).get("id") or "").upper()
+    pending = pending or {}
+    pending_id = str(pending.get("id") or "").upper()
     execution_id = _pending_execution_id(pending) or "interactive"
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", execution_id).strip("._-")[:48] or "execution"
     digest = hashlib.sha256(execution_id.encode("utf-8")).hexdigest()[:12]
+    if pending.get("continuation_kind") == "recoverable_execution":
+        return os.path.join(_recovery_dir(), f"{safe}-{digest}.json")
     return os.path.join(AGENT_PENDENTE_DIR, f"{safe}-{digest}-{pending_id}.json")
 
 
@@ -423,13 +441,12 @@ def _novo_id_pendencia():
         if candidato not in existentes:
             return candidato
 
-def _preparar_pendencia(data, provider_context, config=None):
+def _preparar_pendencia(data, provider_identity, config=None, *, checkpoint_generation=None):
     data = dict(data or {})
     validate_pending_continuation(data)
     cfg = (config or {}).get("confirmacoes") or {}
     ttl = max(60, int(cfg.get("expiracao_segundos", _TTL_PENDENCIA_DEFAULT)))
     now = _agora_utc()
-    provider_context_hash = _hash_provider_context(provider_context)
     expires_at = (
         _formatar_data_utc(now + timedelta(seconds=ttl))
         if data.get("continuation_kind") in {"capability_confirmation", "semantic_choice"} else None
@@ -438,13 +455,18 @@ def _preparar_pendencia(data, provider_context, config=None):
         "id": _novo_id_pendencia(),
         "created_at": _formatar_data_utc(now),
         "expires_at": expires_at,
-        "provider_context_hash": provider_context_hash,
+        "provider_identity_hash": _hash_provider_identity(provider_identity),
     })
+    if data.get("continuation_kind") == "recoverable_execution":
+        generation = int(checkpoint_generation or 0)
+        if generation < 1:
+            raise ValueError("PENDING_CHECKPOINT_GENERATION_INVALID")
+        data["checkpoint_generation"] = generation
     validate_pending_continuation(data, persisted=True)
     return data
 
 
-def _validar_pendencia(pending, provider_context, now=None):
+def _validar_pendencia(pending, provider_identity, now=None):
     try:
         validate_pending_continuation(pending, persisted=True)
     except ValueError as error:
@@ -457,13 +479,16 @@ def _validar_pendencia(pending, provider_context, now=None):
             return False, "PENDING_EXPIRED"
     elif pending.get("expires_at") is not None:
         return False, "PENDING_SCHEMA_INVALID"
-    if pending.get("provider_context_hash") != _hash_provider_context(provider_context):
-        return False, "PENDING_PROVIDER_CONTEXT_MISMATCH"
+    if pending.get("provider_identity_hash") != _hash_provider_identity(provider_identity):
+        return False, "PENDING_PROVIDER_IDENTITY_MISMATCH"
     return True, None
 
 
-def carregar_agent_pendente(pergunta=None, execution_id=None):
+def carregar_agent_pendente(pergunta=None, execution_id=None, continuation_kinds=None):
     pendentes = listar_agent_pendentes()
+    if continuation_kinds is not None:
+        allowed = {str(v) for v in continuation_kinds}
+        pendentes = [item for item in pendentes if str(item.get("continuation_kind") or "") in allowed]
     if not pendentes:
         return None
     refs = [item.upper() for item in re.findall(r"\b[0-9A-Fa-f]{4}\b", str(pergunta or ""))]
@@ -484,9 +509,44 @@ def carregar_agent_pendente(pergunta=None, execution_id=None):
     return None
 
 
-def salvar_agent_pendente(estado_pendente, provider_context=None, config=None):
-    context = provider_context if isinstance(provider_context, dict) else carregar_provider_context()
-    data = _preparar_pendencia(estado_pendente, context, config)
+def salvar_agent_pendente(estado_pendente, provider_context=None, config=None, provider_identity=None):
+    identity = provider_identity if isinstance(provider_identity, dict) else carregar_provider_identity()
+    raw = dict(estado_pendente or {})
+    if raw.get("continuation_kind") == "recoverable_execution":
+        path = _pending_storage_path(raw)
+        with lock_para(path):
+            previous = _carregar_json(path, None)
+            generation = 1
+            if isinstance(previous, dict):
+                try:
+                    validate_pending_continuation(previous, persisted=True)
+                except ValueError:
+                    previous = None
+                else:
+                    if _pending_execution_id(previous) == _pending_execution_id(raw):
+                        generation = int(previous.get("checkpoint_generation") or 0) + 1
+            data = _preparar_pendencia(
+                raw, identity, config, checkpoint_generation=generation,
+            )
+            data["question"] = str(data["question"]).rstrip()
+            validate_pending_continuation(data, persisted=True)
+            _salvar_json(path, data)
+        try:
+            telemetry.record(
+                "recovery", "checkpoint", "replaced" if generation > 1 else "created", 0.0,
+                execution_id=_pending_execution_id(data),
+                job_id=_JOB_ATUAL_ID.get(),
+                metadata={
+                    "checkpoint_reason": data.get("checkpoint_reason"),
+                    "checkpoint_generation": generation,
+                    "resume_count": int((data.get("execution_state") or {}).get("resume_count") or 0),
+                },
+            )
+        except Exception:
+            pass
+        return dict(data)
+
+    data = _preparar_pendencia(raw, identity, config)
     data["question"] = str(data["question"]).rstrip()
     validate_pending_continuation(data, persisted=True)
     path = _pending_storage_path(data)
@@ -704,14 +764,17 @@ def _metadata_resposta_agente(status, detalhes, pending=None):
 
 def carregar_interacao_publica():
     """Return safe UI metadata for the active Runtime-owned user gate."""
-    pendings = listar_agent_pendentes()
+    pendings = [
+        item for item in listar_agent_pendentes()
+        if item.get("continuation_kind") in {"capability_confirmation", "semantic_choice"}
+    ]
     # Never choose a global winner when several executions are awaiting input.
     # Per-message metadata carries the exact pending ID to the UI.
     if len(pendings) != 1:
         return None
     pending = pendings[0]
     provider_context = carregar_provider_context()
-    valid, _ = _validar_pendencia(pending, provider_context)
+    valid, _ = _validar_pendencia(pending, carregar_provider_identity())
     if not valid:
         return None
     return _public_interaction(pending)
@@ -743,6 +806,14 @@ def _processar_agente(pergunta, config, provider_context, execution_id=None, con
         )
     except ErroLLM as erro:
         return _resultado_falha_llm(erro)
+    if status == "recoverable_checkpoint" and estado_pendente:
+        persisted = salvar_agent_pendente(
+            estado_pendente, provider_context=provider_context, config=config_execucao,
+        )
+        return _retomar_agente_pendente(
+            persisted, config_execucao, source_job_id=source_job_id,
+            execution_id=execution_id, automatic=True,
+        )
     if status in {"confirmation_required", "choice_required"} and estado_pendente:
         estado_pendente = salvar_agent_pendente(estado_pendente, provider_context=provider_context, config=config_execucao)
         texto = estado_pendente["question"]
@@ -752,7 +823,10 @@ def _processar_agente(pergunta, config, provider_context, execution_id=None, con
     return _resultado_agente(status, texto, detalhes)
 
 
-def _retomar_agente_pendente(pendente, config, resposta_usuario=None, source_job_id=None, execution_id=None):
+def _retomar_agente_pendente(
+    pendente, config, resposta_usuario=None, source_job_id=None,
+    execution_id=None, automatic=False,
+):
     provider_context = carregar_provider_context()
     try:
         status, texto, nova_pendencia, detalhes = _desempacotar_resultado_agente(
@@ -768,11 +842,38 @@ def _retomar_agente_pendente(pendente, config, resposta_usuario=None, source_job
         )
     except ErroLLM as erro:
         return _resultado_falha_llm(erro)
+    if status == "recoverable_checkpoint" and nova_pendencia:
+        nova_pendencia = salvar_agent_pendente(
+            nova_pendencia, provider_context=provider_context, config=config,
+        )
+        limpar_agent_pendente(pendente)
+        return _retomar_agente_pendente(
+            nova_pendencia, config, source_job_id=source_job_id,
+            execution_id=execution_id or _pending_execution_id(nova_pendencia),
+            automatic=True,
+        )
     if status in {"confirmation_required", "choice_required"} and nova_pendencia:
         nova_pendencia = salvar_agent_pendente(nova_pendencia, provider_context=provider_context, config=config)
         texto = nova_pendencia["question"]
+        limpar_agent_pendente(pendente)
     else:
         limpar_agent_pendente(pendente)
+    if pendente.get("continuation_kind") == "recoverable_execution":
+        try:
+            telemetry.record(
+                "recovery", "resume",
+                "success" if status not in {"failed", "recoverable_checkpoint"} else "failed",
+                0.0,
+                execution_id=_pending_execution_id(pendente),
+                job_id=source_job_id,
+                metadata={
+                    "checkpoint_reason": pendente.get("checkpoint_reason"),
+                    "result_status": status,
+                    "resume_count": int((detalhes.get("llm_usage") or {}).get("execution_resume_count") or 0),
+                },
+            )
+        except Exception:
+            pass
     registrar_mensagem("assistant", texto, metadata=_metadata_resposta_agente(status, detalhes, nova_pendencia))
     return _resultado_agente(status, texto, detalhes)
 
@@ -795,9 +896,27 @@ def processar(pergunta, registrar_pergunta=True, historico_snapshot=None,
     if registrar_pergunta:
         registrar_mensagem("user", pergunta)
 
-    pendente = carregar_agent_pendente(pergunta=pergunta)
+    # Recoverable checkpoints are Runtime-owned and never compete with user
+    # confirmation/choice routing. A restarted worker reuses the same execution
+    # id and resumes the persisted logical AgentSession before doing fresh work.
+    recovery = carregar_agent_pendente(
+        execution_id=execution_id, continuation_kinds={"recoverable_execution"},
+    ) if execution_id else None
+    if recovery:
+        valida, _motivo = _validar_pendencia(recovery, carregar_provider_identity())
+        if valida:
+            return _retomar_agente_pendente(
+                recovery, config, source_job_id=source_job_id,
+                execution_id=execution_id, automatic=True,
+            )
+        limpar_agent_pendente(recovery)
+
+    pendente = carregar_agent_pendente(
+        pergunta=pergunta,
+        continuation_kinds={"capability_confirmation", "semantic_choice"},
+    )
     if pendente:
-        valida, motivo = _validar_pendencia(pendente, provider_context)
+        valida, motivo = _validar_pendencia(pendente, carregar_provider_identity())
         if not valida:
             limpar_agent_pendente(pendente)
             pendente = None

@@ -12,11 +12,17 @@ import json
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from llm.executar import ErroLLM, PROMPT_ECC, executar_ecc as executar_ecc_llm
+from llm.executar import (
+    ErroLLM, PROMPT_NAVIGATION, PROMPT_EXPLORE, PROMPT_BUILD,
+    executar_navigation as executar_navigation_llm,
+    executar_explore as executar_explore_llm,
+    executar_build as executar_build_llm,
+)
 from llm.protocol import CanonicalPrompt
 from eyle.capabilities.registry import CapabilityRegistry
 from eyle.runtime.continuation import PENDING_SCHEMA_VERSION, validate_pending_continuation, confirmation_control, resolve_semantic_choice
 from eyle.runtime.ecc_runtime import (
+    DispatchOutcome,
     available_internal,
     cancel_pending,
     confirm_pending,
@@ -34,14 +40,17 @@ from eyle.runtime.observation import (
     event_history,
     seed_runtime_failure,
     set_pending_results,
+    frontier_view,
+    mechanical_coverage_state,
 )
 from eyle.runtime.token_budget import available_user_prompt_tokens, estimate_tokens
 from eyle.runtime.memory_graph import graph_counts
 from eyle.runtime.context_materializer import materialize_conversation, materialize_latest_observations, materialize_runtime_feedback, component_metrics
 from eyle.runtime.execution_progress import ExecutionProgress
-from .ecc import catalog as ecc_catalog, public_name
+from .ecc import catalog as ecc_catalog, navigation_directory, surface_catalog, public_name
 from .memory import (
-    apply_memory_sidecar, materialize_explicit_memory_view, memory_available, memory_environment,
+    apply_memory_sidecar, apply_task_binding, materialize_active_task,
+    materialize_explicit_memory_view, memory_available, memory_environment,
     release_memory_navigation, sync_memory_lifecycle,
 )
 from .session import AgentSession
@@ -62,6 +71,33 @@ def _terminal_return(
     """
     release_memory_navigation(session, provider_context)
     return _return(status, text, None, details, full)
+
+
+def _recoverable_pending(
+    session: AgentSession,
+    execution: Optional[ExecutionContext],
+    *,
+    reason: str,
+    resume_hint: str,
+) -> Dict[str, Any]:
+    """Build one canonical Runtime-owned checkpoint envelope.
+
+    This is not a user interaction and carries no semantic decision. It is a
+    durable physical continuation of the same logical AgentSession.
+    """
+    if execution is None:
+        raise RuntimeError("RECOVERABLE_CONTINUATION_REQUIRES_EXECUTION_CONTEXT")
+    pending = {
+        "pending_schema_version": PENDING_SCHEMA_VERSION,
+        "continuation_kind": "recoverable_execution",
+        "question": "Recoverable execution checkpoint.",
+        "session": session.to_checkpoint_dict(),
+        "execution_state": execution.continuation_state(),
+        "checkpoint_reason": str(reason),
+        "resume_hint": str(resume_hint),
+    }
+    validate_pending_continuation(pending)
+    return pending
 
 
 def _bounded_text(value: Any, max_chars: int) -> str:
@@ -131,19 +167,26 @@ def _compile_prompt(
     conversation_context: Any,
     registry: CapabilityRegistry,
 ) -> Tuple[CanonicalPrompt, set[str]]:
+    """Materialize the Rev4 protocol surface selected by explicit ECC state.
+
+    The Runtime never infers a surface from request meaning. ``cognitive_surface``
+    is either the initial Navigation protocol or the direct consequence of Main's
+    previous ECC choice.
+    """
     execution = current_execution()
     if execution is not None:
         execution.assert_canonical_request(session.request)
 
+    surface_name = str(session.cognitive_surface or "navigation")
+    if surface_name not in {"navigation", "explore", "build"}:
+        raise ValueError("COGNITIVE_SURFACE_INVALID")
+
     available = available_internal(registry, config, provider_context)
     memory_enabled = memory_available(provider_context)
-    surface = ecc_catalog(registry, config, available, memory_enabled=memory_enabled)
-    # Only Main-explicit Memory activation is materialized automatically.
-    # Global/temporary Memory remains reachable through recall but no longer
-    # inflates every cognition merely because the Graph is large.
     active_memory = materialize_explicit_memory_view(
         session, registry=registry, config=config, provider_context=provider_context,
     )
+    active_task = materialize_active_task(session, provider_context)
     wire_retry = any(
         isinstance(item, dict) and item.get("code") == "ECC_WIRE_RETRY"
         for item in session.runtime_feedback
@@ -152,49 +195,87 @@ def _compile_prompt(
     if execution is not None:
         execution.history_messages_omitted = int(conversation.get("history_messages_omitted") or 0)
     latest = materialize_latest_observations(pending_results(session), config)
-    # Stable provider/body material is physically before all per-turn state so
-    # provider prefix caching can reuse it without provider-specific Core logic.
+
+    if surface_name == "navigation":
+        catalog_key = "ecc_navigation"
+        capability_surface = navigation_directory(
+            registry, config, available, memory_enabled=memory_enabled,
+        )
+        # Navigation only needs physical availability, not provider tool schemas.
+        runtime_environment = {
+            "capabilities_available": len(available),
+            "memory_available": bool(memory_enabled),
+        }
+        system_prompt = PROMPT_NAVIGATION
+    elif surface_name == "explore":
+        catalog_key = "explore_operations"
+        capability_surface = surface_catalog(
+            registry, config, available, "explore", memory_enabled=memory_enabled,
+        )
+        runtime_environment = registry.environment(
+            {"config": config or {}, "provider_context": provider_context or {}}
+        )
+        system_prompt = PROMPT_EXPLORE
+    else:
+        catalog_key = "build_operations"
+        capability_surface = surface_catalog(
+            registry, config, available, "build", memory_enabled=memory_enabled,
+        )
+        runtime_environment = registry.environment(
+            {"config": config or {}, "provider_context": provider_context or {}}
+        )
+        system_prompt = PROMPT_BUILD
+
     stable_packet = {
-        "ecc_operations": surface,
-        "runtime_environment": registry.environment({"config": config or {}, "provider_context": provider_context or {}}),
+        catalog_key: capability_surface,
+        "runtime_environment": runtime_environment,
     }
     dynamic_packet = {
         "current_request": session.request,
         "conversation": conversation,
+        "active_task": active_task,
         "memory_environment": memory_environment(provider_context),
         "memory_view": active_memory,
         "exploration_map": exploration_map(session, registry),
+        "mechanical_coverage": mechanical_coverage_state(session),
+        "execution_convergence": ExecutionProgress.from_dict(session.execution_progress).convergence_view(
+            execution.provider_total_tokens_actual if execution is not None else 0
+        ),
         "latest_observations": latest,
         "runtime_effects": effects_view(session),
         "turn": session.turn,
         "runtime_feedback": materialize_runtime_feedback(session.runtime_feedback, config),
+        "cognitive_surface": surface_name,
     }
     payload = {**stable_packet, **dynamic_packet}
 
     context_cfg = config.get("context_engine") or {}
     chars_per_token = max(1, int(context_cfg.get("chars_per_token_fallback", 3) or 3))
     calibration = execution.prompt_token_calibration if execution is not None else 1.0
-    full_system_prompt = PROMPT_ECC.rstrip()
     prompt_budget = available_user_prompt_tokens(
-        config, full_system_prompt, output_tokens=0, token_estimate_multiplier=calibration,
+        config, system_prompt.rstrip(), output_tokens=0, token_estimate_multiplier=calibration,
     )
     pre_tokens = estimate_tokens(payload, chars_per_token)
     fitted = _shrink_payload(payload, prompt_budget, chars_per_token)
-    fitted_stable = {name: fitted[name] for name in ("ecc_operations", "runtime_environment") if name in fitted}
-    fitted_dynamic = {name: fitted[name] for name in (
-         "current_request", "conversation", "memory_environment", "memory_view", "exploration_map",
-        "latest_observations", "runtime_effects", "turn", "runtime_feedback",
-    ) if name in fitted}
+    fitted_stable = {name: fitted[name] for name in stable_packet if name in fitted}
+    fitted_dynamic = {name: fitted[name] for name in dynamic_packet if name in fitted}
     prompt = CanonicalPrompt(stable=fitted_stable, dynamic=fitted_dynamic)
     post_tokens = estimate_tokens(prompt.wire_text, chars_per_token)
+
     if execution is not None:
-        components = component_metrics({
-            name: fitted.get(name) for name in (
-                "current_request", "conversation", "memory_view", "memory_environment", "exploration_map",
-                "latest_observations", "runtime_effects", "runtime_feedback", "runtime_environment", "ecc_operations",
-            )
-        }, config)
-        execution.begin_call(mode="ecc", turn=session.turn, prompt={
+        component_names = list(dynamic_packet) + list(stable_packet)
+        components = component_metrics(
+            {name: fitted.get(name) for name in component_names}, config
+        )
+        if surface_name == "navigation":
+            explore_count = len(capability_surface.get("explorar") or [])
+            build_count = len(capability_surface.get("construir") or [])
+        else:
+            ops = capability_surface.get("operations") if isinstance(capability_surface, dict) else []
+            explore_count = len(ops or []) if surface_name == "explore" else 0
+            build_count = len(ops or []) if surface_name == "build" else 0
+        execution.begin_call(mode=surface_name, turn=session.turn, prompt={
+            "surface": surface_name,
             "characters": len(prompt.wire_text),
             "stable_prefix_characters": len(prompt.stable_text),
             "stable_prefix_hash": prompt.stable_hash,
@@ -206,26 +287,31 @@ def _compile_prompt(
             "cognition_reason": "wire_retry" if wire_retry else ("continuation" if session.turn > 1 else "normal"),
             "conversation_messages_materialized": int((conversation or {}).get("history_messages_materialized") or 0),
             "conversation_messages_omitted": int((conversation or {}).get("history_messages_omitted") or 0),
-            "ecc_explore_operations": len(surface.get("explorar") or []),
-            "ecc_build_operations": len(surface.get("construir") or []),
+            "ecc_explore_operations": explore_count,
+            "ecc_build_operations": build_count,
+            "active_task_present": bool(active_task),
             "memory_nodes_projected": len((fitted.get("memory_view") or {}).get("nodes") or []) if isinstance(fitted.get("memory_view"), dict) else 0,
             "memory_edges_projected": len((fitted.get("memory_view") or {}).get("edges") or []) if isinstance(fitted.get("memory_view"), dict) else 0,
             "latest_observation_items": len(fitted.get("latest_observations") or []),
             "components_after": components,
-            "estimated_static_tokens": int(components.get("runtime_environment", {}).get("estimated_tokens", 0)) + int(components.get("ecc_operations", {}).get("estimated_tokens", 0)),
+            "estimated_static_tokens": int(components.get("runtime_environment", {}).get("estimated_tokens", 0)) + int(components.get(catalog_key, {}).get("estimated_tokens", 0)),
             "estimated_conversation_tokens": int(components.get("conversation", {}).get("estimated_tokens", 0)),
-            "estimated_memory_tokens": int(components.get("memory_view", {}).get("estimated_tokens", 0)) + int(components.get("memory_environment", {}).get("estimated_tokens", 0)),
+            "estimated_memory_tokens": int(components.get("memory_view", {}).get("estimated_tokens", 0)) + int(components.get("memory_environment", {}).get("estimated_tokens", 0)) + int(components.get("active_task", {}).get("estimated_tokens", 0)),
             "estimated_observation_tokens": int(components.get("latest_observations", {}).get("estimated_tokens", 0)),
             "estimated_feedback_tokens": int(components.get("runtime_feedback", {}).get("estimated_tokens", 0)),
-            "estimated_capability_tokens": int(components.get("ecc_operations", {}).get("estimated_tokens", 0)),
+            "estimated_capability_tokens": int(components.get(catalog_key, {}).get("estimated_tokens", 0)),
             "semantic_packet_fields": list(fitted.keys()),
         })
     return prompt, available
 
-
 def _structured_error(error: Exception) -> bool:
     code = str(getattr(error, "error_code", "") or "")
-    return code.startswith("STRUCTURED_RESPONSE_INVALID:ecc:") or code == "LLM_STRUCTURED_RESPONSE_UNSATISFIED"
+    return (
+        code.startswith("STRUCTURED_RESPONSE_INVALID:navigation:")
+        or code.startswith("STRUCTURED_RESPONSE_INVALID:explore:")
+        or code.startswith("STRUCTURED_RESPONSE_INVALID:build:")
+        or code == "LLM_STRUCTURED_RESPONSE_UNSATISFIED"
+    )
 
 
 def _feedback(session: AgentSession, code: str, **facts: Any) -> None:
@@ -235,7 +321,7 @@ def _feedback(session: AgentSession, code: str, **facts: Any) -> None:
     # in execution/job history.
     code = str(code)
     item = {"code": code, **{k: copy.deepcopy(v) for k, v in facts.items() if v is not None}}
-    replaceable = {"ECC_WIRE_RETRY", "MEMORY_DELTA_REJECTED", "NO_PROGRESS", "CONFIRMATION_EXECUTION_FAILED", "USER_CHOICE"}
+    replaceable = {"ECC_WIRE_RETRY", "MEMORY_DELTA_REJECTED", "TASK_BINDING_REJECTED", "NO_PROGRESS", "CONFIRMATION_EXECUTION_FAILED", "USER_CHOICE", "BUDGET_SALVAGE"}
     if code in replaceable:
         session.runtime_feedback = [v for v in session.runtime_feedback if not (isinstance(v, dict) and v.get("code") == code)]
     session.runtime_feedback.append(item)
@@ -249,6 +335,92 @@ def _resolve_feedback(session: AgentSession, *codes: str) -> None:
         item for item in session.runtime_feedback
         if not (isinstance(item, dict) and str(item.get("code") or "") in wanted)
     ]
+
+
+def _set_surface(session: AgentSession, surface: str, execution: Optional[ExecutionContext]) -> None:
+    """Transition protocol surface only from explicit Main/runtime protocol state."""
+    if surface not in {"navigation", "explore", "build"}:
+        raise ValueError("COGNITIVE_SURFACE_INVALID")
+    previous = str(session.cognitive_surface or "navigation")
+    if previous != surface:
+        session.cognitive_surface = surface
+        if execution is not None:
+            execution.surface_transitions += 1
+
+
+def _call_surface_llm(surface: str, prompt: CanonicalPrompt, config: Dict[str, Any]) -> Dict[str, Any]:
+    if surface == "navigation":
+        return executar_navigation_llm(prompt, config)
+    if surface == "explore":
+        return executar_explore_llm(prompt, config)
+    if surface == "build":
+        return executar_build_llm(prompt, config)
+    raise ValueError("COGNITIVE_SURFACE_INVALID")
+
+
+def _apply_semantic_sidecars(
+    session: AgentSession,
+    decision: Dict[str, Any],
+    *,
+    registry: CapabilityRegistry,
+    provider_context: Dict[str, Any],
+    execution: Optional[ExecutionContext],
+) -> tuple[bool, bool]:
+    """Apply Memory and exact Task binding without vetoing primary cognition."""
+    memory_parse_error = decision.get("memory_error") if isinstance(decision.get("memory_error"), dict) else None
+    if memory_parse_error is not None:
+        memory_outcome = {
+            "ok": False,
+            "changed": False,
+            "task_state_changed": False,
+            "aliases": {},
+            "error_code": memory_parse_error.get("code") or "MEMORY_DELTA_INVALID",
+            "detail": memory_parse_error.get("detail"),
+        }
+    else:
+        memory_outcome = apply_memory_sidecar(
+            session, decision.get("memory_delta"), registry=registry, provider_context=provider_context,
+        )
+
+    if memory_outcome.get("ok") is not True:
+        _feedback(
+            session, "MEMORY_DELTA_REJECTED", error_code=memory_outcome.get("error_code"),
+            detail=memory_outcome.get("detail"), state_unchanged=True,
+        )
+        memory_changed = False
+        task_state_progress = False
+        aliases = {}
+    else:
+        _resolve_feedback(session, "MEMORY_DELTA_REJECTED")
+        memory_changed = bool(memory_outcome.get("changed"))
+        # General Memory edits alone do not count as task progress.
+        task_state_progress = bool(memory_outcome.get("task_state_changed"))
+        aliases = dict(memory_outcome.get("aliases") or {})
+
+    binding_parse_error = decision.get("task_binding_error") if isinstance(decision.get("task_binding_error"), dict) else None
+    if binding_parse_error is not None:
+        binding_outcome = {
+            "ok": False,
+            "changed": False,
+            "error_code": binding_parse_error.get("code") or "TASK_BINDING_INVALID",
+            "detail": binding_parse_error.get("detail"),
+        }
+    else:
+        binding_outcome = apply_task_binding(
+            session, decision.get("task_binding"), aliases=aliases, provider_context=provider_context,
+        )
+    if binding_outcome.get("ok") is not True:
+        _feedback(
+            session, "TASK_BINDING_REJECTED",
+            error_code=binding_outcome.get("error_code"),
+            detail=binding_outcome.get("detail"),
+            state_unchanged=True,
+        )
+    else:
+        _resolve_feedback(session, "TASK_BINDING_REJECTED")
+        if binding_outcome.get("changed") and execution is not None:
+            execution.task_bind_count += 1
+    return memory_changed, task_state_progress
 
 
 def _details(
@@ -288,6 +460,8 @@ def _details(
         "status": status,
         "architecture": "ECC",
         "execution_id": session.execution_id,
+        "active_task_id": session.active_task_id,
+        "cognitive_surface": session.cognitive_surface,
         "turns": int(session.turn),
         "operations_used": used,
         "operation_history": events,
@@ -309,6 +483,10 @@ def _details(
         "memory_rejections": len(memory_feedback),
         "memory_rejection_reasons": rejection_reasons[:12],
         "exploration_map_items": len(exploration_map(session, registry)),
+        "mechanical_coverage": mechanical_coverage_state(session),
+        "execution_convergence": ExecutionProgress.from_dict(session.execution_progress).convergence_view(
+            execution.provider_total_tokens_actual if execution is not None else 0
+        ),
         "reality_epoch": int(session.reality_epoch),
         "limitations": list(limitations or []),
         "failure_code": failure_code,
@@ -333,28 +511,64 @@ def _run(
     registry: CapabilityRegistry,
 ) -> tuple:
     execution = current_execution()
-    progress_tracker = ExecutionProgress()
-    wire_retry_used = False
+    progress_tracker = ExecutionProgress.from_dict(session.execution_progress)
+    wire_retry_surface: Optional[str] = None
 
     while True:
+        if execution is not None:
+            remaining = int(execution.provider_tokens_remaining)
+            limit = max(1, int(execution.provider_token_limit or 1))
+            in_salvage_band = bool(
+                int(execution.provider_total_tokens_actual or 0) > 0
+                and remaining * 100 <= limit * 15
+            )
+            if in_salvage_band:
+                _feedback(
+                    session, "BUDGET_SALVAGE",
+                    provider_tokens_remaining=remaining,
+                    provider_token_limit=limit,
+                    fact=(
+                        "The logical execution is inside the final 15% of its provider token budget. "
+                        "Existing Session, Evidence and Observations remain valid."
+                    ),
+                    guidance=(
+                        "Interpret this budget fact together with the available Evidence. "
+                        "Main decides whether to consolidate, continue exploring, or conclude."
+                    ),
+                )
+            if (
+                in_salvage_band
+                and not execution.salvage_checkpoint_emitted
+                and bool(execution.execution_id)
+            ):
+                execution.salvage_checkpoint_emitted = True
+                session.execution_progress = progress_tracker.to_dict()
+                pending = _recoverable_pending(
+                    session, execution,
+                    reason="budget_salvage",
+                    resume_hint="Resume the same AgentSession, active Task, cognitive surface, Evidence, Frontiers and budget ledger.",
+                )
+                return _return(
+                    "recoverable_checkpoint", "Recoverable budget checkpoint persisted.", pending,
+                    _details(session, "recoverable_checkpoint", config, registry, provider_context), full,
+                )
+
         session.turn += 1
         if execution is not None:
             execution.agent_turns += 1
 
-        prompt, _available = _compile_prompt(session, config, provider_context, conversation_context, registry)
+        surface = str(session.cognitive_surface or "navigation")
+        prompt, _available = _compile_prompt(
+            session, config, provider_context, conversation_context, registry,
+        )
         try:
-            decision = executar_ecc_llm(prompt, config)
+            decision = _call_surface_llm(surface, prompt, config)
         except ErroLLM as error:
             if _structured_error(error):
-                # Adapter already performed the single mechanical format repair.
-                # Eyle preserves its Session/observations and may ask Main for one
-                # fresh current decision. This is Eyle recovery, not provider-wire
-                # normalization. The allowance only resets after real execution
-                # progress below.
                 detail = str(getattr(getattr(error, "structured_error", None), "detail", "") or str(error))[:900]
-                if wire_retry_used:
+                if wire_retry_surface == surface:
                     return _terminal_return(
-                        session, "failed", "A resposta permaneceu incompatível com o wire ECC atual.",
+                        session, "failed", "A resposta permaneceu incompatível com o wire cognitivo atual.",
                         _details(
                             session, "failed", config, registry, provider_context,
                             failure_code="ECC_WIRE_INVALID",
@@ -362,13 +576,14 @@ def _run(
                         ),
                         full, provider_context=provider_context,
                     )
-                wire_retry_used = True
+                wire_retry_surface = surface
                 _feedback(
                     session, "ECC_WIRE_RETRY",
                     rejected_code=error.error_code,
+                    surface=surface,
                     detail=detail,
                     state_unchanged=True,
-                    guidance="Emit a fresh decision using the current ECC wire. Preserve the task and existing observations.",
+                    guidance="Emit a fresh decision using the current cognitive-surface wire. Preserve Task and Runtime facts.",
                 )
                 continue
             code = error.error_code or "LLM_FAILED"
@@ -384,89 +599,120 @@ def _run(
                 provider_context=provider_context,
             )
 
-        # USER_CHOICE is one-turn input. A syntactically valid ECC does not
-        # replenish the one fresh-decision allowance; only real Eyle execution
-        # progress below does that.
         _resolve_feedback(session, "USER_CHOICE")
+        memory_changed, task_state_progress = _apply_semantic_sidecars(
+            session, decision, registry=registry, provider_context=provider_context, execution=execution,
+        )
 
-        # Persistent learning is transversal to the chosen ECC move, but it is
-        # a true sidecar in Rev3.7: parser/storage failure never vetoes a valid
-        # ECC decision and never causes another LLM call by itself.
-        memory_parse_error = decision.get("memory_error") if isinstance(decision.get("memory_error"), dict) else None
-        if memory_parse_error is not None:
-            memory_outcome = {
-                "ok": False,
-                "changed": False,
-                "task_state_changed": False,
-                "error_code": memory_parse_error.get("code") or "MEMORY_DELTA_INVALID",
-                "detail": memory_parse_error.get("detail"),
-            }
-        else:
-            memory_outcome = apply_memory_sidecar(
-                session, decision.get("memory_delta"), registry=registry, provider_context=provider_context,
-            )
-
-        if memory_outcome.get("ok") is not True:
-            _feedback(
-                session, "MEMORY_DELTA_REJECTED", error_code=memory_outcome.get("error_code"),
-                detail=memory_outcome.get("detail"), state_unchanged=True,
-            )
-            memory_changed = False
-            task_state_progress = False
-        else:
-            _resolve_feedback(session, "MEMORY_DELTA_REJECTED")
-            memory_changed = bool(memory_outcome.get("changed"))
-            task_state_progress = bool(memory_outcome.get("task_state_changed"))
-
-        kind = str(decision.get("type") or "")
-        if kind == "concluir":
-            response = str(decision.get("response") or "").strip()
-            choices = decision.get("choices")
-            if isinstance(choices, list) and len(choices) >= 2:
-                interaction_id = f"ecc-choice-{session.turn:04d}"
-                pending = {
-                    "pending_schema_version": PENDING_SCHEMA_VERSION,
-                    "continuation_kind": "semantic_choice",
-                    "question": response,
-                    "session": session.to_dict(),
-                    "execution_state": (execution.continuation_state() if execution is not None else None),
-                    "interaction_id": interaction_id,
-                    "options": [str(label) for label in choices],
-                    "allow_free_text": bool(decision.get("allow_free_text", True)),
-                }
-                validate_pending_continuation(pending)
-                return _return(
-                    "choice_required", response, pending,
-                    _details(session, "choice_required", config, registry, provider_context), full,
+        # Navigation owns the only semantic ECC choice. Selecting Explore/Build
+        # changes only the next physical protocol surface; no operation is
+        # executed until Main authors it under that family's schema.
+        if surface == "navigation":
+            kind = str(decision.get("type") or "")
+            if kind == "concluir":
+                response = str(decision.get("response") or "").strip()
+                choices = decision.get("choices")
+                if isinstance(choices, list) and len(choices) >= 2:
+                    interaction_id = f"ecc-choice-{session.turn:04d}"
+                    pending = {
+                        "pending_schema_version": PENDING_SCHEMA_VERSION,
+                        "continuation_kind": "semantic_choice",
+                        "question": response,
+                        "session": session.to_dict(),
+                        "execution_state": (execution.continuation_state() if execution is not None else None),
+                        "interaction_id": interaction_id,
+                        "options": [str(label) for label in choices],
+                        "allow_free_text": bool(decision.get("allow_free_text", True)),
+                    }
+                    validate_pending_continuation(pending)
+                    return _return(
+                        "choice_required", response, pending,
+                        _details(session, "choice_required", config, registry, provider_context), full,
+                    )
+                clear_pending_results(session)
+                return _terminal_return(
+                    session, "completed", response,
+                    _details(session, "completed", config, registry, provider_context), full,
+                    provider_context=provider_context,
                 )
-            clear_pending_results(session)
+            if kind == "explorar":
+                _set_surface(session, "explore", execution)
+                continue
+            if kind == "construir":
+                _set_surface(session, "build", execution)
+                continue
             return _terminal_return(
-                session, "completed", response,
-                _details(session, "completed", config, registry, provider_context), full,
+                session, "failed", "A Navigation Surface retornou uma decisão ECC inválida.",
+                _details(session, "failed", config, registry, provider_context, failure_code="ECC_NAVIGATION_INVALID"), full,
                 provider_context=provider_context,
             )
 
-        selected = decision.get("operations") if kind == "explorar" else [{
-            "operation": decision.get("operation"), "arguments": decision.get("arguments") or {},
-        }]
-        selected = [item for item in (selected or []) if isinstance(item, dict)]
-        signature = json.dumps({"type": kind, "operations": selected}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        if decision.get("return_to_ecc") is True:
+            _set_surface(session, "navigation", execution)
+            continue
+
+        if surface == "explore":
+            kind = "explorar"
+            selected = [item for item in (decision.get("operations") or []) if isinstance(item, dict)]
+        elif surface == "build":
+            kind = "construir"
+            selected = [{
+                "operation": decision.get("operation"),
+                "arguments": decision.get("arguments") or {},
+            }]
+        else:
+            raise RuntimeError("COGNITIVE_SURFACE_INVALID")
+
+        signature = json.dumps(
+            {"type": kind, "operations": selected},
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
+        )
         outcomes = []
-        for selected_op in selected:
-            operation = str(selected_op.get("operation") or "")
-            arguments = dict(selected_op.get("arguments") or {})
-            outcome = dispatch(
-                session, action_kind=kind, operation=operation, arguments=arguments,
-                config=config, provider_context=provider_context, registry=registry,
-                pending_schema_version=PENDING_SCHEMA_VERSION, validate_pending=validate_pending_continuation,
-                execution_state=(execution.continuation_state() if execution is not None else None),
-            )
-            outcomes.append(outcome)
-            if outcome.pending is not None:
-                return _return(
-                    "confirmation_required", str(outcome.pending.get("question") or ""), outcome.pending,
-                    _details(session, "confirmation_required", config, registry, provider_context), full,
+        action_blocked = progress_tracker.is_blocked(signature, session.reality_epoch)
+        if action_blocked:
+            recovery_frontiers = [
+                item for item in frontier_view(session.observation_ledger)
+                if isinstance(item, dict) and item.get("status") == "open"
+            ]
+            recovery_evidence = [str(v) for v in (session.evidence or {}).keys() if str(v)][-12:]
+            for selected_op in selected:
+                outcomes.append(DispatchOutcome({
+                    "operation": str(selected_op.get("operation") or ""),
+                    "status": "recovery_required",
+                    "ok": True,
+                    "executed": False,
+                    "changed": False,
+                    "error_code": "ECC_FIXED_POINT_BLOCKED",
+                    "evidence_ids": recovery_evidence,
+                    "frontiers": recovery_frontiers,
+                    "message": (
+                        "This exact action is blocked because it already reached a deterministic "
+                        "no-progress state in the current reality. Runtime exposes physical recovery "
+                        "coordinates; Main remains responsible for the next semantic path."
+                    ),
+                }, physical_progress=False))
+        else:
+            for selected_op in selected:
+                operation = str(selected_op.get("operation") or "")
+                arguments = dict(selected_op.get("arguments") or {})
+                outcome = dispatch(
+                    session, action_kind=kind, operation=operation, arguments=arguments,
+                    config=config, provider_context=provider_context, registry=registry,
+                    pending_schema_version=PENDING_SCHEMA_VERSION, validate_pending=validate_pending_continuation,
+                    execution_state=(execution.continuation_state() if execution is not None else None),
                 )
+                outcomes.append(outcome)
+                if outcome.pending is not None:
+                    # A Build selection has already left the Build Surface. After
+                    # confirmed physical execution Main returns to Navigation.
+                    if kind == "construir":
+                        _set_surface(session, "navigation", execution)
+                        outcome.pending["session"] = session.to_dict()
+                    return _return(
+                        "confirmation_required", str(outcome.pending.get("question") or ""), outcome.pending,
+                        _details(session, "confirmation_required", config, registry, provider_context), full,
+                    )
+
         set_pending_results(session, [outcome.result for outcome in outcomes])
 
         physical_progress = any(outcome.physical_progress for outcome in outcomes)
@@ -476,14 +722,34 @@ def _run(
             physical_progress=physical_progress,
             task_state_progress=task_state_progress,
             reality_epoch=session.reality_epoch,
+            operation_count=len(selected),
+            provider_tokens_total=(execution.provider_total_tokens_actual if execution is not None else 0),
+            coverage_advanced=any(
+                bool(outcome.result.get("executed") is True and isinstance(outcome.result.get("coverage"), dict) and outcome.result.get("coverage"))
+                for outcome in outcomes
+            ),
+            physical_mutations=sum(
+                1 for outcome in outcomes
+                if outcome.result.get("changed") is True
+                and isinstance(outcome.result.get("physical_effect"), dict)
+            ),
         )
+        session.execution_progress = progress_tracker.to_dict()
+
+        # Build is deliberately one mutation attempt per surface. Main must
+        # navigate again after the resulting physical facts.
+        if kind == "construir":
+            _set_surface(session, "navigation", execution)
+
         if progress.meaningful_progress:
-            wire_retry_used = False
+            wire_retry_surface = None
             _resolve_feedback(
                 session, "ECC_WIRE_RETRY", "NO_PROGRESS",
                 "CONFIRMATION_EXECUTION_FAILED",
             )
         else:
+            coverage = mechanical_coverage_state(session)
+            open_frontiers = list(coverage.get("open_frontiers") or [])
             _feedback(
                 session, "NO_PROGRESS",
                 repeated_operations=[str(item.get("operation") or "") for item in selected],
@@ -494,20 +760,36 @@ def _run(
                 task_state_transition=bool(task_state_progress),
                 reality_epoch=session.reality_epoch,
                 repeat_count=progress.no_progress_repeat_count,
-                fact="The same deterministic action/result state produced no new observable Runtime information. General Memory edits alone do not count as task progress.",
+                action_blocked=True,
+                blocked_action_count=progress_tracker.blocked_action_count(),
+                open_frontier_ids=[str(v.get("id")) for v in open_frontiers if isinstance(v, dict) and v.get("id")],
+                fact=(
+                    "This deterministic action/result state produced no new observable Runtime information. "
+                    "The exact action is blocked for the current reality epoch."
+                ),
+                guidance=(
+                    "Runtime exposes open Frontier/Evidence/coverage coordinates when available. "
+                    "Main alone decides whether to continue one, recall Evidence, choose another operation, return to ECC, or conclude."
+                ),
             )
-            if progress.terminal:
-                return _terminal_return(
-                    session, "failed",
-                    "A cognição entrou em um ciclo determinístico sem novo progresso observável.",
-                    _details(
-                        session, "failed", config, registry, provider_context,
-                        failure_code="ECC_NO_PROGRESS_UNRECOVERABLE",
-                        limitations=[
-                            "Repeated deterministic action/result state without new observation, physical progress, or Task-state transition."
-                        ],
-                    ),
-                    full, provider_context=provider_context,
+            session.execution_progress = progress_tracker.to_dict()
+            if (
+                execution is not None
+                and bool(execution.execution_id)
+                and progress_tracker.checkpoint_needed_for_block(signature, session.reality_epoch)
+            ):
+                # checkpoint_needed_for_block mutates deterministic progress
+                # state. Persist that mark before creating the checkpoint so a
+                # restart cannot emit the same fixed-point checkpoint again.
+                session.execution_progress = progress_tracker.to_dict()
+                pending = _recoverable_pending(
+                    session, execution,
+                    reason="stalled_recoverable",
+                    resume_hint="Resume the same Task-anchored cognitive surface with its Session, Evidence, Frontiers and execution-progress state.",
+                )
+                return _return(
+                    "recoverable_checkpoint", "Recoverable fixed-point checkpoint persisted.", pending,
+                    _details(session, "recoverable_checkpoint", config, registry, provider_context), full,
                 )
 
 
@@ -556,6 +838,18 @@ def _executar_agente_bound(
         if execution is not None:
             execution.bind_session_baseline(session, reset_agent_turns=False)
             execution.assert_canonical_request(session.request)
+        if retomar.get("continuation_kind") == "recoverable_execution":
+            registry.rehydrate_materials(
+                material_items(session.observation_ledger),
+                {"config": config or {}, "provider_context": provider_context or {}},
+            )
+            _feedback(
+                session, "RECOVERED_EXECUTION",
+                checkpoint_reason=str(retomar.get("checkpoint_reason") or ""),
+                fact="Runtime rehydrated the same logical AgentSession from a canonical recoverable checkpoint.",
+            )
+            return _run(session, config, provider_context, full, conversation_context=None, registry=registry)
+
         control = confirmation_control(resposta_usuario)
         # Cancellation is always safe to honor: it performs no deferred mutation
         # and releases logical-task navigation state immediately.

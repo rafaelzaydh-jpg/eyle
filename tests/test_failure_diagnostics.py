@@ -1,3 +1,4 @@
+from tests.canonical import adapt_legacy_ecc_script
 from tests.canonical import run_agent
 import json
 
@@ -35,7 +36,7 @@ def test_follow_up_receives_prior_runtime_failure_as_current_observation(monkeyp
         observation=payload["latest_observations"][0]
         assert observation["detail"]["source_type"] == "runtime_failure"
         return {"type":"concluir","response":"O roteador não respondeu.","memory_delta":[]}
-    monkeypatch.setattr(core_agent,"executar_ecc_llm",fake)
+    monkeypatch.setattr(core_agent, "_call_surface_llm", adapt_legacy_ecc_script(fake))
     context={"recent_messages":[{"role":"assistant","content":"falhou","execution_failure":{"capability":"router.restart","error_code":"OFFLINE","detail":"router did not answer"}}]}
     provider_context={"standard":{"caminho_origem":str(tmp_path)},"core_memory":{"storage_dir":str(tmp_path.parent/(tmp_path.name+"_memory")),"world_scope_id":f"workspace:{tmp_path.resolve()}"}}
     status,text,_,details=run_agent(core_agent,"Por que falhou?",base_config(),provider_context=provider_context,retornar_detalhes=True,conversation_context=context)
